@@ -40,7 +40,7 @@ impl Namespace for NamespaceImpl {
 
 impl Display for NamespaceImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.topic, self.region_id)
+        write!(f, "[topic: {}, region: {}]", self.topic, self.region_id)
     }
 }
 
@@ -48,11 +48,11 @@ impl Display for NamespaceImpl {
 #[derive(Debug, PartialEq, Clone)]
 pub struct EntryImpl {
     /// Entry payload.
-    data: Vec<u8>,
+    pub data: Vec<u8>,
     /// The logical entry id.
-    id: EntryId,
+    pub id: EntryId,
     /// The namespace used to identify and isolate log entries from different regions.
-    ns: NamespaceImpl,
+    pub ns: NamespaceImpl,
 }
 
 impl Entry for EntryImpl {
@@ -76,7 +76,7 @@ impl Display for EntryImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Entry (ns: {}, id: {}, data_len: {})",
+            "Entry [ns: {}, id: {}, data_len: {}]",
             self.ns,
             self.id,
             self.data.len()

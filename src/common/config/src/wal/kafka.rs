@@ -40,7 +40,6 @@ pub struct KafkaConfig {
     pub broker_endpoints: Vec<String>,
     /// The compression algorithm used to compress log entries.
     #[serde(skip)]
-    #[serde(default)]
     pub compression: RsKafkaCompression,
     /// The max size of a single producer batch.
     pub max_batch_size: ReadableSize,

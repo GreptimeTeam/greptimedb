@@ -12,8 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// Kafka wal topic.
-/// Publishers publish log entries to the topic while subscribers pull log entries from the topic.
-/// A topic is simply a string right now. But it may be more complex in the future.
-// TODO(niebayes): remove the Topic alias.
-pub type Topic = String;
+use common_telemetry::warn;
+use futures_util::future::BoxFuture;
+
+pub async fn run_test_with_kafka_wal<F>(test: F)
+where
+    F: FnOnce(Vec<String>) -> BoxFuture<'static, ()>,
+{
+    let Ok(endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
+        warn!("The endpoints is empty, skipping the test");
+        return;
+    };
+
+    let endpoints = endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
+
+    test(endpoints).await
+}

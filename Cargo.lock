@@ -1833,6 +1833,7 @@ dependencies = [
  "derive_builder 0.12.0",
  "etcd-client",
  "futures",
+ "futures-util",
  "humantime-serde",
  "hyper",
  "lazy_static",
@@ -1851,6 +1852,7 @@ dependencies = [
  "tokio",
  "toml 0.8.8",
  "tonic 0.10.2",
+ "uuid",
 ]
 
 [[package]]
@@ -4507,7 +4509,6 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
- "dashmap",
  "futures",
  "futures-util",
  "itertools 0.10.5",
@@ -4515,6 +4516,7 @@ dependencies = [
  "protobuf-build",
  "raft-engine",
  "rand",
+ "rand_distr",
  "rskafka",
  "serde",
  "serde_json",
