@@ -128,7 +128,7 @@ impl WriteCache {
         writer.close().await.context(error::OpenDalSnafu)?;
 
         debug!(
-            "Sucessfully upload file to remote, region: {}, file: {}, upload_path: {}, cost: {:?}s",
+            "Successfully upload file to remote, region: {}, file: {}, upload_path: {}, cost: {:?}s",
             region_id,
             file_id,
             upload_path,
