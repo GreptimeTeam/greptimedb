@@ -12,7 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod offset;
-pub mod record;
-#[cfg(test)]
-mod test_util;
+use std::env;
+
+use common_telemetry::warn;
+use futures_util::future::BoxFuture;
+
+pub async fn run_test_with_kafka_wal<F>(test: F)
+where
+    F: FnOnce(Vec<String>) -> BoxFuture<'static, ()>,
+{
+    let Ok(endpoints) = env::var("GT_KAFKA_ENDPOINTS") else {
+        warn!("The endpoints is empty, skipping the test");
+        return;
+    };
+
+    let endpoints = endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
+
+    test(endpoints).await
+}

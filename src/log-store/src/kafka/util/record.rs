@@ -296,10 +296,11 @@ mod tests {
 
     use common_base::readable_size::ReadableSize;
     use common_config::wal::KafkaConfig;
-    use rand::Rng;
+    use uuid::Uuid;
 
     use super::*;
     use crate::kafka::client_manager::ClientManager;
+    use crate::kafka::util::test_util::run_test_with_kafka_wal;
 
     // Implements some utility methods for testing.
     impl Default for Record {
@@ -545,21 +546,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_produce_large_entry() {
-        let topic = format!("greptimedb_wal_topic_{}", rand::thread_rng().gen::<usize>());
-        let ns = NamespaceImpl {
-            region_id: 1,
-            topic,
-        };
-        let entry = new_test_entry([b'1'; 2000000], 0, ns.clone());
-        let producer = RecordProducer::new(ns.clone()).with_entries(vec![entry]);
-
-        // TODO(niebayes): get broker endpoints from env vars.
-        let config = KafkaConfig {
-            broker_endpoints: vec!["localhost:9092".to_string()],
-            max_batch_size: ReadableSize::mb(1),
-            ..Default::default()
-        };
-        let manager = Arc::new(ClientManager::try_new(&config).await.unwrap());
-        producer.produce(&manager).await.unwrap();
+        run_test_with_kafka_wal(|broker_endpoints| {
+            Box::pin(async {
+                let topic = format!("greptimedb_wal_topic_{}", Uuid::new_v4());
+                let ns = NamespaceImpl {
+                    region_id: 1,
+                    topic,
+                };
+                let entry = new_test_entry([b'1'; 2000000], 0, ns.clone());
+                let producer = RecordProducer::new(ns.clone()).with_entries(vec![entry]);
+                let config = KafkaConfig {
+                    broker_endpoints,
+                    max_batch_size: ReadableSize::mb(1),
+                    ..Default::default()
+                };
+                let manager = Arc::new(ClientManager::try_new(&config).await.unwrap());
+                producer.produce(&manager).await.unwrap();
+            })
+        })
+        .await
     }
 }
