@@ -307,14 +307,17 @@ impl Database {
                         let flight_message = flight_message
                             .map_err(BoxedError::new)
                             .context(ExternalSnafu)?;
-                        let FlightMessage::Recordbatch(record_batch) = flight_message else {
-                            yield IllegalFlightMessagesSnafu {reason: "A Schema message must be succeeded exclusively by a set of RecordBatch messages"}
+                        match flight_message {
+                            FlightMessage::Recordbatch(record_batch) => yield Ok(record_batch),
+                            FlightMessage::Metrics(_) => {}
+                            FlightMessage::AffectedRows(_) | FlightMessage::Schema(_) => {
+                                yield IllegalFlightMessagesSnafu {reason: format!("A Schema message must be succeeded exclusively by a set of RecordBatch messages, flight_message: {:?}", flight_message)}
                                         .fail()
                                         .map_err(BoxedError::new)
                                         .context(ExternalSnafu);
-                            break;
-                        };
-                        yield Ok(record_batch);
+                                break;
+                            }
+                        }
                     }
                 }));
                 let record_batch_stream = RecordBatchStreamWrapper {
