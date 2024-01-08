@@ -17,7 +17,6 @@ use axum::extract::State;
 use axum::http::{self, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
@@ -30,11 +29,12 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use super::header::GreptimeDbName;
-use super::{JsonResponse, ResponseFormat, PUBLIC_APIS};
+use super::{ResponseFormat, PUBLIC_APIS};
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
+use crate::http::error_result::ErrorResponse;
 use crate::http::HTTP_API_PREFIX;
 
 /// AuthState is a holder state for [`UserProviderRef`]
@@ -118,14 +118,12 @@ pub async fn check_http_auth<B>(
 }
 
 fn err_response(is_influxdb: bool, err: impl ErrorExt) -> impl IntoResponse {
-    let format = if is_influxdb {
+    let ty = if is_influxdb {
         ResponseFormat::InfluxdbV1
     } else {
         ResponseFormat::GreptimedbV1
     };
-
-    let body = JsonResponse::with_error(err, format);
-    (StatusCode::UNAUTHORIZED, Json(body))
+    (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(ty, err))
 }
 
 fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {
