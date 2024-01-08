@@ -19,6 +19,7 @@ use std::time::UNIX_EPOCH;
 
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
+use common_query::prelude::GREPTIME_VALUE;
 use datafusion::common::{DFSchemaRef, OwnedTableReference, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction, ScalarUDF};
@@ -76,10 +77,6 @@ const DEFAULT_FIELD_COLUMN: &str = "value";
 
 /// Special modifier to project field columns under multi-field mode
 const FIELD_COLUMN_MATCHER: &str = "__field__";
-
-/// default value column name for prometheus metrics.
-/// This is the same with the constant defined in `servers`
-const GREPTIME_VALUE: &str = "greptime_value";
 
 #[derive(Default, Debug, Clone)]
 struct PromPlannerContext {

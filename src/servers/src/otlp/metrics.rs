@@ -14,11 +14,11 @@
 
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::writer::Precision;
+use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point, *};
 
-use super::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use crate::error::Result;
 use crate::row_writer::{self, MultiTableData, TableData};
 

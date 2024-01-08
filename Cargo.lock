@@ -6549,6 +6549,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-macro",
+ "common-query",
  "common-recordbatch",
  "common-telemetry",
  "datafusion",

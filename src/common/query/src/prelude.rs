@@ -18,3 +18,9 @@ pub use crate::columnar_value::ColumnarValue;
 pub use crate::function::*;
 pub use crate::logical_plan::{create_udf, AggregateFunction, Expr, ScalarUdf};
 pub use crate::signature::{Signature, TypeSignature, Volatility};
+
+/// default timestamp column name for prometheus metrics.
+pub const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
+/// default value column name for prometheus metrics.
+pub const GREPTIME_VALUE: &str = "greptime_value";
+pub const GREPTIME_COUNT: &str = "greptime_count";
