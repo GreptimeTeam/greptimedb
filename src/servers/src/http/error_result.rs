@@ -25,7 +25,8 @@ use crate::http::ResponseFormat;
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct ErrorResponse {
-    ty: &'static str,
+    #[serde(skip)]
+    ty: ResponseFormat,
     code: u32,
     error: String,
     execution_time_ms: u64,
@@ -46,7 +47,7 @@ impl ErrorResponse {
 
     pub fn from_error_message(ty: ResponseFormat, code: StatusCode, msg: String) -> Self {
         ErrorResponse {
-            ty: ty.as_str(),
+            ty,
             code: code as u32,
             error: msg,
             execution_time_ms: 0,
@@ -76,19 +77,7 @@ impl IntoResponse for ErrorResponse {
         let ty = format!("{:?}", self.ty);
         let code = self.code;
         let execution_time = self.execution_time_ms;
-
-        #[derive(Serialize, Deserialize, Debug, JsonSchema)]
-        struct Output {
-            code: u32,
-            error: String,
-            execution_time_ms: u64,
-        }
-        let mut resp = Json(Output {
-            code: self.code,
-            execution_time_ms: self.execution_time_ms,
-            error: self.error,
-        })
-        .into_response();
+        let mut resp = Json(self).into_response();
         resp.headers_mut()
             .insert("X-GreptimeDB-Error-Code", HeaderValue::from(code));
         resp.headers_mut().insert(

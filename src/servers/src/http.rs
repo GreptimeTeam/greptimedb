@@ -251,9 +251,10 @@ pub enum GreptimeQueryOutput {
 
 /// It allows the results of SQL queries to be presented in different formats.
 /// Currently, `greptimedb_v1` and `influxdb_v1` are supported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
     Csv,
+    #[default]
     GreptimedbV1,
     InfluxdbV1,
 }
@@ -322,7 +323,6 @@ impl Display for Epoch {
 }
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
-#[serde(bound(deserialize = "'de: 'static"))]
 pub enum HttpResponse {
     Csv(CsvResponse),
     Error(ErrorResponse),
