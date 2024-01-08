@@ -250,7 +250,6 @@ pub enum GreptimeQueryOutput {
 }
 
 /// It allows the results of SQL queries to be presented in different formats.
-/// Currently, `greptimedb_v1` and `influxdb_v1` are supported.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
     Csv,

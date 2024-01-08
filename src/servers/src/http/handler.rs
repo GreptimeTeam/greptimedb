@@ -44,7 +44,7 @@ use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 pub struct SqlQuery {
     pub db: Option<String>,
     pub sql: Option<String>,
-    // (Optional) result format: [`greptimedb_v1`, `influxdb_v1`],
+    // (Optional) result format: [`greptimedb_v1`, `influxdb_v1`, `csv`],
     // the default value is `greptimedb_v1`
     pub format: Option<String>,
     // Returns epoch timestamps with the specified precision.
