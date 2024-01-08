@@ -90,10 +90,6 @@ impl FileCache {
         }
     }
 
-    pub(crate) fn contains_key(&self, key: &IndexKey) -> bool {
-        self.memory_index.contains_key(key)
-    }
-
     /// Puts a file into the cache index.
     ///
     /// The `WriteCache` should ensure the file is in the correct path.
@@ -200,6 +196,12 @@ impl FileCache {
             Ok(None)
         }
     }
+
+    /// Checks if the key is in the file cache.
+    #[cfg(test)]
+    pub(crate) fn contains_key(&self, key: &IndexKey) -> bool {
+        self.memory_index.contains_key(key)
+    }
 }
 
 /// Key of file cache index.
@@ -211,17 +213,7 @@ pub(crate) type IndexKey = (RegionId, FileId);
 #[derive(Debug, Clone)]
 pub(crate) struct IndexValue {
     /// Size of the file in bytes.
-    file_size: u32,
-}
-
-impl IndexValue {
-    pub fn new(file_size: u32) -> IndexValue {
-        IndexValue { file_size }
-    }
-
-    pub fn file_size(&self) -> u32 {
-        self.file_size
-    }
+    pub file_size: u32,
 }
 
 /// Generates the path to the cached file.

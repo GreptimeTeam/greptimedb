@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::v1::region;
 use common_base::readable_size::ReadableSize;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
@@ -27,7 +27,7 @@ use store_api::metadata::RegionMetadataRef;
 use crate::access_layer::new_fs_object_store;
 use crate::cache::file_cache::{FileCache, FileCacheRef, IndexValue};
 use crate::error::{self, Result};
-use crate::metrics::{UPLOAD_BYTES_TOTAL, WRITE_AND_UPLOAD_ELAPSED_TOTAL};
+use crate::metrics::{FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
 use crate::read::Source;
 use crate::sst::file::FileId;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -81,7 +81,9 @@ impl WriteCache {
         request: SstUploadRequest,
         write_opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
-        let _timer = WRITE_AND_UPLOAD_ELAPSED_TOTAL.start_timer();
+        let timer = FLUSH_ELAPSED
+            .with_label_values(&["write_parquet"])
+            .start_timer();
 
         let region_id = request.metadata.region_id;
         let file_id = request.file_id;
@@ -96,8 +98,11 @@ impl WriteCache {
 
         let sst_info = writer.write_all(request.source, write_opts).await?;
 
+        timer.stop_and_record();
+
         // Upload sst file to remote object store.
-        let upload_path = request.upload_path.clone();
+        let timer = FLUSH_ELAPSED.with_label_values(&["upload"]).start_timer();
+
         let reader = self
             .file_cache
             .local_store()
@@ -105,6 +110,7 @@ impl WriteCache {
             .await
             .context(error::OpenDalSnafu)?;
 
+        let upload_path = request.upload_path;
         let mut writer = request
             .remote_store
             .writer_with(&upload_path)
@@ -112,25 +118,28 @@ impl WriteCache {
             .await
             .context(error::OpenDalSnafu)?;
 
-        let n = futures::io::copy(reader, &mut writer)
+        let bytes_written = futures::io::copy(reader, &mut writer)
             .await
             .context(error::UploadSstSnafu { region_id, file_id })?;
 
-        UPLOAD_BYTES_TOTAL.inc_by(n);
+        UPLOAD_BYTES_TOTAL.inc_by(bytes_written);
 
         // Must close to upload all data.
         writer.close().await.context(error::OpenDalSnafu)?;
 
-        info!(
-            "Upload file to remote, file: {}, upload_path: {}",
-            file_id, upload_path
+        debug!(
+            "Sucessfully upload file to remote, region: {}, file: {}, upload_path: {}, cost: {:?}s",
+            region_id,
+            file_id,
+            upload_path,
+            timer.stop_and_record()
         );
 
         // Register to file cache
         if let Some(sst_info) = &sst_info {
             let file_size = sst_info.file_size as u32;
             self.file_cache
-                .put((region_id, file_id), IndexValue::new(file_size))
+                .put((region_id, file_id), IndexValue { file_size })
                 .await;
         }
 
@@ -172,11 +181,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_and_upload_sst() {
-        // Create a local object store and FileCache.
+        // TODO(QuenKar): maybe find a way to create some object server for testing,
+        // and now just use local file system to mock.
+        let mut env = TestEnv::new();
+        let mock_store = env.init_object_store_manager();
+        let file_id = FileId::random();
+        let upload_path = sst_file_path("test", file_id);
+
+        // Create WriteCache
         let local_dir = create_temp_dir("");
         let local_store = new_fs_store(local_dir.path().to_str().unwrap());
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
-        let file_id = FileId::random();
+        let object_store_manager = env.get_object_store_manager().unwrap();
+        let write_cache = WriteCache::new(
+            local_store.clone(),
+            object_store_manager,
+            ReadableSize::mb(10),
+        );
 
         // Create Source
         let metadata = Arc::new(sst_region_metadata());
@@ -187,25 +207,11 @@ mod tests {
             new_batch_by_range(&["b", "h"], 100, 200),
         ]);
 
-        // TODO(QuenKar): maybe find a way to create some object server for testing,
-        // and now just use local file system to mock.
-        let mut env = TestEnv::new();
-        let mock_store = env.init_object_store_manager();
-        let upload_path = sst_file_path("test", file_id);
-
-        // Create WriteCache
-        let object_store_manager = Arc::new(ObjectStoreManager::new("mock", mock_store.clone()));
-        let write_cache = WriteCache::new(
-            local_store.clone(),
-            object_store_manager,
-            ReadableSize::mb(10),
-        );
-
         let request = SstUploadRequest {
             file_id,
             metadata,
             source,
-            storage: Some("mock".to_string()),
+            storage: None,
             upload_path: upload_path.clone(),
             remote_store: mock_store.clone(),
         };
@@ -228,15 +234,10 @@ mod tests {
 
         // Check file data
         let remote_data = mock_store.read(&upload_path).await.unwrap();
-        let cache_data = local_store.read(&cache.cache_file_path(key)).await.unwrap();
-        assert_eq!(remote_data.len(), 3434);
-        assert_eq!(remote_data, cache_data);
-
-        // Delete test files
-        mock_store
-            .delete(&upload_path)
+        let cache_data = local_store
+            .read(&write_cache.file_cache.cache_file_path(key))
             .await
-            .expect("delete must succeed");
-        write_cache.file_cache.remove(key);
+            .unwrap();
+        assert_eq!(remote_data, cache_data);
     }
 }

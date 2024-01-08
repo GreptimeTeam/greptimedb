@@ -23,5 +23,5 @@ pub mod location;
 pub mod parquet;
 pub(crate) mod version;
 
-/// Default write buffer size.
+/// Default write buffer size, it should be greater than the default minimum upload part of S3 (5mb).
 pub const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(8);
