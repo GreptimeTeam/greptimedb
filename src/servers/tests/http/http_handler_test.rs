@@ -269,7 +269,7 @@ async fn insert_script(
 ) {
     let body = RawBody(Body::from(script.clone()));
     let invalid_query = create_invalid_script_query();
-    let Json(json) = script_handler::scripts(
+    let json = script_handler::scripts(
         State(ApiState {
             sql_handler: sql_handler.clone(),
             script_handler: Some(script_handler.clone()),
@@ -286,7 +286,7 @@ async fn insert_script(
     let body = RawBody(Body::from(script.clone()));
     let exec = create_script_query();
     // Insert the script
-    let Json(json) = script_handler::scripts(
+    let json = script_handler::scripts(
         State(ApiState {
             sql_handler: sql_handler.clone(),
             script_handler: Some(script_handler.clone()),
@@ -317,7 +317,7 @@ def test(n) -> vector[i64]:
     insert_script(script.clone(), script_handler.clone(), sql_handler.clone()).await;
     // Run the script
     let exec = create_script_query();
-    let Json(json) = script_handler::run_script(
+    let json = script_handler::run_script(
         State(ApiState {
             sql_handler,
             script_handler: Some(script_handler),
@@ -384,7 +384,7 @@ def test(n, **params)  -> vector[i64]:
     // Run the script
     let mut exec = create_script_query();
     let _ = exec.0.params.insert("a".to_string(), "42".to_string());
-    let Json(json) = script_handler::run_script(
+    let json = script_handler::run_script(
         State(ApiState {
             sql_handler,
             script_handler: Some(script_handler),

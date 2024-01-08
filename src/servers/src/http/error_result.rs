@@ -74,16 +74,14 @@ impl ErrorResponse {
 
 impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
-        let ty = format!("{:?}", self.ty);
+        let ty = self.ty.as_str();
         let code = self.code;
         let execution_time = self.execution_time_ms;
         let mut resp = Json(self).into_response();
         resp.headers_mut()
             .insert("X-GreptimeDB-Error-Code", HeaderValue::from(code));
-        resp.headers_mut().insert(
-            "X-GreptimeDB-Format",
-            HeaderValue::from_str(&ty).expect("malformed ty {ty}"),
-        );
+        resp.headers_mut()
+            .insert("X-GreptimeDB-Format", HeaderValue::from_static(ty));
         resp.headers_mut().insert(
             "X-GreptimeDB-ExecutionTime",
             HeaderValue::from(execution_time),
