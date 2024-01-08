@@ -471,10 +471,10 @@ impl PromPlanner {
             }
             PromExpr::Call(Call { func, args }) => {
                 // some special functions that are not expression but a plan
-                if func.name == SPECIAL_HISTOGRAM_QUANTILE {
-                    return self.create_histogram_plan(args).await;
-                } else if func.name == SPECIAL_VECTOR_FUNCTION {
-                    return self.create_vector_plan(args).await;
+                match func.name {
+                    SPECIAL_HISTOGRAM_QUANTILE => return self.create_histogram_plan(args).await,
+                    SPECIAL_VECTOR_FUNCTION => return self.create_vector_plan(args).await,
+                    _ => {}
                 }
 
                 // transform function arguments
@@ -1652,6 +1652,8 @@ impl PromPlanner {
                 .build()
                 .context(DataFusionPlanningSnafu),
             token::T_LOR => {
+                // OR is handled at the beginning of this function, as it cannot
+                // be expressed using JOIN like AND and UNLESS.
                 unreachable!()
             }
             _ => UnexpectedTokenSnafu { token: op }.fail(),
