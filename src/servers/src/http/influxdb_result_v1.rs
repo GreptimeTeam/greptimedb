@@ -25,6 +25,7 @@ use snafu::ResultExt;
 
 use crate::error::{Error, ToJsonSnafu};
 use crate::http::error_result::ErrorResponse;
+use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::{Epoch, HttpResponse, ResponseFormat};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -216,11 +217,11 @@ impl IntoResponse for InfluxdbV1Response {
         let execution_time = self.execution_time_ms;
         let mut resp = Json(self).into_response();
         resp.headers_mut().insert(
-            "X-GreptimeDB-Format",
+            GREPTIME_DB_HEADER_FORMAT,
             HeaderValue::from_static("influxdb_v1"),
         );
         resp.headers_mut().insert(
-            "X-GreptimeDB-ExecutionTime",
+            GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),
         );
         resp

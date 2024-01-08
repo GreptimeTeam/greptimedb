@@ -24,6 +24,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::http::error_result::ErrorResponse;
+use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::{handler, GreptimeQueryOutput, HttpResponse, ResponseFormat};
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
@@ -100,9 +101,9 @@ impl IntoResponse for CsvResponse {
         )
             .into_response();
         resp.headers_mut()
-            .insert("X-GreptimeDB-Format", HeaderValue::from_static("CSV"));
+            .insert(GREPTIME_DB_HEADER_FORMAT, HeaderValue::from_static("CSV"));
         resp.headers_mut().insert(
-            "X-GreptimeDB-ExecutionTime",
+            GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),
         );
         resp

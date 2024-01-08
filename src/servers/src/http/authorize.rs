@@ -17,7 +17,6 @@ use axum::extract::State;
 use axum::http::{self, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
@@ -124,10 +123,7 @@ fn err_response(is_influxdb: bool, err: impl ErrorExt) -> impl IntoResponse {
     } else {
         ResponseFormat::GreptimedbV1
     };
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorResponse::from_error(ty, err)),
-    )
+    (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(ty, err))
 }
 
 fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {
