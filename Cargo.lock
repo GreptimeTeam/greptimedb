@@ -1976,15 +1976,9 @@ dependencies = [
 name = "common-test-util"
 version = "0.5.0"
 dependencies = [
- "chrono",
- "common-config",
- "futures",
  "once_cell",
  "rand",
- "rskafka",
- "store-api",
  "tempfile",
- "tokio",
 ]
 
 [[package]]

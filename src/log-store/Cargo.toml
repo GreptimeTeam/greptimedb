@@ -22,14 +22,10 @@ common-macro.workspace = true
 common-meta.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
-common-test-util.workspace = true
 futures-util.workspace = true
 futures.workspace = true
-itertools.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine.workspace = true
-rand.workspace = true
-rand_distr = "0.4"
 rskafka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,9 +33,11 @@ snafu.workspace = true
 store-api.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
+itertools.workspace = true
 rand.workspace = true
+rand_distr = "0.4"
+uuid.workspace = true

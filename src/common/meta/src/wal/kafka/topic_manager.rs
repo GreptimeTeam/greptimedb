@@ -241,7 +241,6 @@ impl TopicManager {
 mod tests {
     use std::env;
 
-    use chrono::format::Fixed;
     use common_telemetry::info;
 
     use super::*;
