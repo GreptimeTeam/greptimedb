@@ -16,9 +16,13 @@ use std::collections::HashMap;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Json, Query, RawBody, State};
+use axum::http::header;
+use axum::response::IntoResponse;
 use axum::Form;
+use headers::HeaderValue;
 use http_body::combinators::UnsyncBoxBody;
 use hyper::Response;
+use mime_guess::mime;
 use servers::http::{
     handler as http_handler, script as script_handler, ApiState, GreptimeOptionsConfigState,
     GreptimeQueryOutput, HttpResponse,
@@ -78,7 +82,7 @@ async fn test_sql_output_rows() {
         script_handler: None,
     };
 
-    for format in ["greptimedb_v1", "influxdb_v1"] {
+    for format in ["greptimedb_v1", "influxdb_v1", "csv"] {
         let query = create_query(format);
         let json = http_handler::sql(
             State(api_state.clone()),
@@ -138,6 +142,18 @@ async fn test_sql_output_rows() {
 ]"#
                 );
             }
+            HttpResponse::Csv(resp) => {
+                use http_body::Body as HttpBody;
+                let mut resp = resp.into_response();
+                assert_eq!(
+                    resp.headers().get(header::CONTENT_TYPE),
+                    Some(HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref())).as_ref(),
+                );
+                assert_eq!(
+                    resp.body_mut().data().await.unwrap().unwrap(),
+                    hyper::body::Bytes::from_static(b"4950\n"),
+                );
+            }
             _ => unreachable!(),
         }
     }
@@ -156,7 +172,7 @@ async fn test_sql_form() {
         script_handler: None,
     };
 
-    for format in ["greptimedb_v1", "influxdb_v1"] {
+    for format in ["greptimedb_v1", "influxdb_v1", "csv"] {
         let form = create_form(format);
         let json = http_handler::sql(
             State(api_state.clone()),
@@ -216,6 +232,18 @@ async fn test_sql_form() {
 ]"#
                 );
             }
+            HttpResponse::Csv(resp) => {
+                use http_body::Body as HttpBody;
+                let mut resp = resp.into_response();
+                assert_eq!(
+                    resp.headers().get(header::CONTENT_TYPE),
+                    Some(HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref())).as_ref(),
+                );
+                assert_eq!(
+                    resp.body_mut().data().await.unwrap().unwrap(),
+                    hyper::body::Bytes::from_static(b"4950\n"),
+                );
+            }
             _ => unreachable!(),
         }
     }
@@ -230,7 +258,7 @@ lazy_static::lazy_static! {
 async fn test_metrics() {
     TEST_METRIC.inc();
     let stats = MetricsHandler;
-    let text = http_handler::metrics(axum::extract::State(stats), Query(HashMap::default())).await;
+    let text = http_handler::metrics(State(stats), Query(HashMap::default())).await;
     assert!(text.contains("test_metrics counter"));
 }
 
