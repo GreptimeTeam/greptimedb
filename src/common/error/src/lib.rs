@@ -19,7 +19,7 @@ pub mod format;
 pub mod mock;
 pub mod status_code;
 
-pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = "X-GreptimeDB-Error-Code";
-pub const GREPTIME_DB_HEADER_ERROR_MSG: &str = "X-GreptimeDB-Error-Message";
+pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = "x-greptime-err-code";
+pub const GREPTIME_DB_HEADER_ERROR_MSG: &str = "x-greptime-err-msg";
 
 pub use snafu;

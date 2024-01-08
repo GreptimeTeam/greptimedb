@@ -14,10 +14,10 @@
 
 use headers::{Header, HeaderName, HeaderValue};
 
-pub const GREPTIME_DB_HEADER_FORMAT: &str = "X-GreptimeDB-Format";
-pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "X-GreptimeDB-ExecutionTime";
+pub const GREPTIME_DB_HEADER_FORMAT: &str = "x-greptime-format";
+pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
 
-pub static GREPTIME_DB_HEADER_NAME: HeaderName = HeaderName::from_static("X-GreptimeDB-Name");
+pub static GREPTIME_DB_HEADER_NAME: HeaderName = HeaderName::from_static("x-greptime-name");
 
 pub struct GreptimeDbName(Option<String>);
 
