@@ -137,6 +137,7 @@ impl ClientManager {
 #[cfg(test)]
 mod tests {
     use common_meta::wal::kafka::test_util::run_test_with_kafka_wal;
+    use tokio::sync::Barrier;
 
     use super::*;
     use crate::test_util::kafka::create_topics;
@@ -196,13 +197,22 @@ mod tests {
                 let (manager, topics) = prepare("test_parallel", 128, broker_endpoints).await;
                 // Assigns multiple regions to a topic.
                 let region_topic = (0..512)
-                    .map(|region_id| (region_id, &topics[region_id % topics.len()]))
+                    .map(|region_id| (region_id, topics[region_id % topics.len()].clone()))
                     .collect::<HashMap<_, _>>();
 
                 // Gets all clients in parallel.
+                let manager = Arc::new(manager);
+                let barrier = Arc::new(Barrier::new(region_topic.len()));
                 let tasks = region_topic
-                    .values()
-                    .map(|topic| manager.get_or_insert(topic))
+                    .into_values()
+                    .map(|topic| {
+                        let manager = manager.clone();
+                        let barrier = barrier.clone();
+                        tokio::spawn(async move {
+                            barrier.wait().await;
+                            assert!(manager.get_or_insert(&topic).await.is_ok());
+                        })
+                    })
                     .collect::<Vec<_>>();
                 futures::future::try_join_all(tasks).await.unwrap();
 
