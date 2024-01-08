@@ -43,13 +43,15 @@ index.workspace = true
 lazy_static = "1.4"
 log-store = { workspace = true, optional = true }
 memcomparable = "0.2"
-moka = { workspace = true, features = ["sync"] }
+moka = { workspace = true, features = ["sync", "future"] }
 num_cpus = "1.13"
 object-store.workspace = true
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
+pin-project.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+puffin.workspace = true
 regex = "1.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json.workspace = true

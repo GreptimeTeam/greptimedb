@@ -16,4 +16,4 @@ pub mod region_failover;
 pub mod region_migration;
 #[cfg(test)]
 mod tests;
-mod utils;
+pub mod utils;

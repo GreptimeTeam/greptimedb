@@ -116,22 +116,49 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum StringKey {
+    Share(String),
+    Exclusive(String),
+}
+
 /// Keys to identify required locks.
 ///
 /// [LockKey] always sorts keys lexicographically so that they can be acquired
 /// in the same order.
-// Most procedures should only acquire 1 ~ 2 locks so we use smallvec to hold keys.
+/// Most procedures should only acquire 1 ~ 2 locks so we use smallvec to hold keys.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LockKey(SmallVec<[String; 2]>);
+pub struct LockKey(SmallVec<[StringKey; 2]>);
+
+impl StringKey {
+    pub fn into_string(self) -> String {
+        match self {
+            StringKey::Share(s) => s,
+            StringKey::Exclusive(s) => s,
+        }
+    }
+
+    pub fn as_string(&self) -> &String {
+        match self {
+            StringKey::Share(s) => s,
+            StringKey::Exclusive(s) => s,
+        }
+    }
+}
 
 impl LockKey {
     /// Returns a new [LockKey] with only one key.
-    pub fn single(key: impl Into<String>) -> LockKey {
+    pub fn single(key: impl Into<StringKey>) -> LockKey {
         LockKey(smallvec![key.into()])
     }
 
+    /// Returns a new [LockKey] with only one key.
+    pub fn single_exclusive(key: impl Into<String>) -> LockKey {
+        LockKey(smallvec![StringKey::Exclusive(key.into())])
+    }
+
     /// Returns a new [LockKey] with keys from specific `iter`.
-    pub fn new(iter: impl IntoIterator<Item = String>) -> LockKey {
+    pub fn new(iter: impl IntoIterator<Item = StringKey>) -> LockKey {
         let mut vec: SmallVec<_> = iter.into_iter().collect();
         vec.sort();
         // Dedup keys to avoid acquiring the same key multiple times.
@@ -139,14 +166,14 @@ impl LockKey {
         LockKey(vec)
     }
 
-    /// Returns the keys to lock.
-    pub fn keys_to_lock(&self) -> impl Iterator<Item = &String> {
-        self.0.iter()
+    /// Returns a new [LockKey] with keys from specific `iter`.
+    pub fn new_exclusive(iter: impl IntoIterator<Item = String>) -> LockKey {
+        Self::new(iter.into_iter().map(StringKey::Exclusive))
     }
 
-    /// Returns the keys to unlock.
-    pub fn keys_to_unlock(&self) -> impl Iterator<Item = &String> {
-        self.0.iter().rev()
+    /// Returns the keys to lock.
+    pub fn keys_to_lock(&self) -> impl Iterator<Item = &StringKey> {
+        self.0.iter()
     }
 }
 
@@ -340,20 +367,25 @@ mod tests {
     #[test]
     fn test_lock_key() {
         let entity = "catalog.schema.my_table";
-        let key = LockKey::single(entity);
-        assert_eq!(vec![entity], key.keys_to_lock().collect::<Vec<_>>());
-        assert_eq!(vec![entity], key.keys_to_unlock().collect::<Vec<_>>());
+        let key = LockKey::single_exclusive(entity);
+        assert_eq!(
+            vec![&StringKey::Exclusive(entity.to_string())],
+            key.keys_to_lock().collect::<Vec<_>>()
+        );
 
-        let key = LockKey::new([
+        let key = LockKey::new_exclusive([
             "b".to_string(),
             "c".to_string(),
             "a".to_string(),
             "c".to_string(),
         ]);
-        assert_eq!(vec!["a", "b", "c"], key.keys_to_lock().collect::<Vec<_>>());
         assert_eq!(
-            vec!["c", "b", "a"],
-            key.keys_to_unlock().collect::<Vec<_>>()
+            vec![
+                &StringKey::Exclusive("a".to_string()),
+                &StringKey::Exclusive("b".to_string()),
+                &StringKey::Exclusive("c".to_string())
+            ],
+            key.keys_to_lock().collect::<Vec<_>>()
         );
     }
 

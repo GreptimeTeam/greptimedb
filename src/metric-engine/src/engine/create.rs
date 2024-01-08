@@ -108,7 +108,7 @@ impl MetricEngineInner {
         // remember this table
         self.state
             .write()
-            .await
+            .unwrap()
             .add_physical_region(data_region_id, physical_column_set);
 
         Ok(())
@@ -155,7 +155,7 @@ impl MetricEngineInner {
         // find new columns to add
         let mut new_columns = vec![];
         {
-            let state = &self.state.read().await;
+            let state = &self.state.read().unwrap();
             let physical_columns =
                 state
                     .physical_columns()
@@ -193,7 +193,7 @@ impl MetricEngineInner {
         // Safety: previous steps ensure the physical region exist
         self.state
             .write()
-            .await
+            .unwrap()
             .add_logical_region(physical_region_id, logical_region_id);
         info!("Created new logical region {logical_region_id} on physical region {data_region_id}");
         LOGICAL_REGION_COUNT.inc();
@@ -221,7 +221,7 @@ impl MetricEngineInner {
         }
 
         // safety: previous step has checked this
-        self.state.write().await.add_physical_columns(
+        self.state.write().unwrap().add_physical_columns(
             data_region_id,
             new_columns
                 .iter()

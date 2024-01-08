@@ -21,7 +21,8 @@ mod read;
 mod region_metadata;
 mod state;
 
-use std::sync::Arc;
+use std::any::Any;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
@@ -34,11 +35,12 @@ use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
-use tokio::sync::RwLock;
 
 use self::state::MetricEngineState;
 use crate::data_region::DataRegion;
+use crate::error::Result;
 use crate::metadata_region::MetadataRegion;
+use crate::utils;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Metric Engine
@@ -156,8 +158,14 @@ impl RegionEngine for MetricEngine {
     }
 
     /// Retrieves region's disk usage.
+    ///
+    /// Note: Returns `None` if it's a logical region.
     async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
-        todo!()
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.region_disk_usage(region_id).await
+        } else {
+            None
+        }
     }
 
     /// Stops the engine
@@ -168,12 +176,18 @@ impl RegionEngine for MetricEngine {
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
         // ignore the region not found error
-        let result = self.inner.mito.set_writable(region_id, writable);
-
-        match result {
-            Err(e) if e.status_code() == StatusCode::RegionNotFound => Ok(()),
-            _ => result,
+        for x in [
+            utils::to_metadata_region_id(region_id),
+            utils::to_data_region_id(region_id),
+            region_id,
+        ] {
+            if let Err(e) = self.inner.mito.set_writable(x, writable)
+                && e.status_code() != StatusCode::RegionNotFound
+            {
+                return Err(e);
+            }
         }
+        Ok(())
     }
 
     async fn set_readonly_gracefully(
@@ -183,8 +197,19 @@ impl RegionEngine for MetricEngine {
         self.inner.mito.set_readonly_gracefully(region_id).await
     }
 
+    /// Returns the physical region role.
+    ///
+    /// Note: Returns `None` if it's a logical region.
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
-        todo!()
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.role(region_id)
+        } else {
+            None
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -200,6 +225,13 @@ impl MetricEngine {
                 state: RwLock::default(),
             }),
         }
+    }
+
+    pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
+        self.inner
+            .metadata_region
+            .logical_regions(physical_region_id)
+            .await
     }
 }
 
@@ -275,5 +307,37 @@ mod test {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_role() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+
+        assert!(env.metric().role(logical_region_id).is_none());
+        assert!(env.metric().role(physical_region_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_region_disk_usage() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+
+        assert!(env
+            .metric()
+            .region_disk_usage(logical_region_id)
+            .await
+            .is_none());
+        assert!(env
+            .metric()
+            .region_disk_usage(physical_region_id)
+            .await
+            .is_some());
     }
 }

@@ -15,8 +15,13 @@
 //! Cache for the engine.
 
 mod cache_size;
+// TODO(yingwen): Remove this after the write cache is ready.
+#[allow(unused)]
+pub(crate) mod file_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
+#[allow(unused)]
+pub(crate) mod write_cache;
 
 use std::mem;
 use std::sync::Arc;
@@ -29,6 +34,7 @@ use parquet::file::metadata::ParquetMetaData;
 use store_api::storage::RegionId;
 
 use crate::cache::cache_size::parquet_meta_size;
+use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
 
@@ -38,6 +44,10 @@ const SST_META_TYPE: &str = "sst_meta";
 const VECTOR_TYPE: &str = "vector";
 // Metrics type key for pages.
 const PAGE_TYPE: &str = "page";
+// Metrics type key for files on the local store.
+const FILE_TYPE: &str = "file";
+
+// TODO(yingwen): Builder for cache manager.
 
 /// Manages cached data for the engine.
 pub struct CacheManager {
@@ -47,6 +57,10 @@ pub struct CacheManager {
     vector_cache: Option<VectorCache>,
     /// Cache for SST pages.
     page_cache: Option<PageCache>,
+    /// A Cache for writing files to object stores.
+    // TODO(yingwen): Remove this once the cache is ready.
+    #[allow(unused)]
+    write_cache: Option<WriteCacheRef>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -106,6 +120,7 @@ impl CacheManager {
             sst_meta_cache,
             vector_cache,
             page_cache,
+            write_cache: None,
         }
     }
 
@@ -178,6 +193,11 @@ impl CacheManager {
                 .add(page_cache_weight(&page_key, &pages).into());
             cache.insert(page_key, pages);
         }
+    }
+
+    /// Gets the the write cache.
+    pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
+        self.write_cache.as_ref()
     }
 }
 

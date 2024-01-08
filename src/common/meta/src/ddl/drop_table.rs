@@ -273,7 +273,7 @@ impl Procedure for DropTableProcedure {
             table_ref.table,
         );
 
-        LockKey::single(key)
+        LockKey::single_exclusive(key)
     }
 }
 

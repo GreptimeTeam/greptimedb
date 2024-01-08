@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::mem::size_of;
 
 use snafu::{ensure, ResultExt};
 
@@ -34,6 +35,11 @@ pub struct KeysFstApplier {
 impl FstApplier for KeysFstApplier {
     fn apply(&self, fst: &FstMap) -> Vec<u64> {
         self.keys.iter().filter_map(|k| fst.get(k)).collect()
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.keys.capacity() * size_of::<Bytes>()
+            + self.keys.iter().map(|k| k.capacity()).sum::<usize>()
     }
 }
 
@@ -301,5 +307,16 @@ mod tests {
         ];
         let result = KeysFstApplier::try_from(predicates);
         assert!(matches!(result, Err(Error::ParseRegex { .. })));
+    }
+
+    #[test]
+    fn test_keys_fst_applier_memory_usage() {
+        let applier = KeysFstApplier { keys: vec![] };
+        assert_eq!(applier.memory_usage(), 0);
+
+        let applier = KeysFstApplier {
+            keys: vec![b("foo"), b("bar")],
+        };
+        assert_eq!(applier.memory_usage(), 2 * size_of::<Bytes>() + 6);
     }
 }

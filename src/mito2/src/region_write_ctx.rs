@@ -27,8 +27,6 @@ use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;
 use crate::wal::{EntryId, WalWriter};
 
-/// Context to keep region metadata and buffer write requests.
-
 /// Notifier to notify write result on drop.
 struct WriteNotify {
     /// Error to send to the waiter.
@@ -167,6 +165,7 @@ impl RegionWriteCtx {
             &self.wal_entry,
             &self.wal_options,
         )?;
+        self.next_entry_id += 1;
         Ok(())
     }
 

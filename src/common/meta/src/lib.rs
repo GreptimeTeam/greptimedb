@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 #![feature(btree_extract_if)]
 #![feature(async_closure)]
+#![feature(let_chains)]
 
 pub mod cache_invalidator;
 pub mod datanode_manager;

@@ -37,7 +37,7 @@ pub struct RegionOptions {
     pub ttl: Option<Duration>,
     /// Compaction options.
     pub compaction: CompactionOptions,
-    /// Custom storage.
+    /// Custom storage. Uses default storage if it is `None`.
     pub storage: Option<String>,
     /// Wal options.
     pub wal_options: WalOptions,

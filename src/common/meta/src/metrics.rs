@@ -16,36 +16,43 @@ use lazy_static::lazy_static;
 use prometheus::*;
 
 lazy_static! {
-    pub static ref METRIC_META_TXN_REQUEST: HistogramVec =
-        register_histogram_vec!("meta_txn_request", "meta txn request", &["target", "op"]).unwrap();
+    pub static ref METRIC_META_TXN_REQUEST: HistogramVec = register_histogram_vec!(
+        "greptime_meta_txn_request",
+        "meta txn request",
+        &["target", "op"]
+    )
+    .unwrap();
     pub static ref METRIC_META_CREATE_CATALOG: Histogram =
-        register_histogram!("meta_create_catalog", "meta create catalog").unwrap();
-    pub static ref METRIC_META_CREATE_CATALOG_COUNTER: IntCounter =
-        register_int_counter!("meta_create_catalog_counter", "meta create catalog").unwrap();
+        register_histogram!("greptime_meta_create_catalog", "meta create catalog").unwrap();
+    pub static ref METRIC_META_CREATE_CATALOG_COUNTER: IntCounter = register_int_counter!(
+        "greptime_meta_create_catalog_counter",
+        "meta create catalog"
+    )
+    .unwrap();
     pub static ref METRIC_META_CREATE_SCHEMA: Histogram =
-        register_histogram!("meta_create_schema", "meta create schema").unwrap();
+        register_histogram!("greptime_meta_create_schema", "meta create schema").unwrap();
     pub static ref METRIC_META_CREATE_SCHEMA_COUNTER: IntCounter =
-        register_int_counter!("meta_create_schema_counter", "meta create schema").unwrap();
+        register_int_counter!("greptime_meta_create_schema_counter", "meta create schema").unwrap();
     pub static ref METRIC_META_PROCEDURE_CREATE_TABLE: HistogramVec = register_histogram_vec!(
-        "meta_procedure_create_table",
+        "greptime_meta_procedure_create_table",
         "meta procedure create table",
         &["step"]
     )
     .unwrap();
     pub static ref METRIC_META_PROCEDURE_DROP_TABLE: HistogramVec = register_histogram_vec!(
-        "meta_procedure_drop_table",
+        "greptime_meta_procedure_drop_table",
         "meta procedure drop table",
         &["step"]
     )
     .unwrap();
     pub static ref METRIC_META_PROCEDURE_ALTER_TABLE: HistogramVec = register_histogram_vec!(
-        "meta_procedure_alter_table",
+        "greptime_meta_procedure_alter_table",
         "meta procedure alter table",
         &["step"]
     )
     .unwrap();
     pub static ref METRIC_META_PROCEDURE_TRUNCATE_TABLE: HistogramVec = register_histogram_vec!(
-        "meta_procedure_truncate_table",
+        "greptime_meta_procedure_truncate_table",
         "meta procedure truncate table",
         &["step"]
     )

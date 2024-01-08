@@ -18,7 +18,7 @@ use common_telemetry::logging::debug;
 use futures::FutureExt;
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{Page, Read, ReadExt, Reader, WriteExt};
+use opendal::raw::oio::{ListExt, Read, ReadExt, Reader, WriteExt};
 use opendal::raw::{Accessor, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
 use opendal::{Error as OpendalError, ErrorKind, Result};
 
@@ -135,24 +135,22 @@ impl<C: Accessor + Clone> ReadCache<C> {
     pub(crate) async fn recover_cache(&self) -> Result<(u64, u64)> {
         let (_, mut pager) = self.file_cache.list("/", OpList::default()).await?;
 
-        while let Some(entries) = pager.next().await? {
-            for entry in entries {
-                let read_key = entry.path();
+        while let Some(entry) = pager.next().await? {
+            let read_key = entry.path();
 
-                // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
-                // because it's private field.
-                let size = {
-                    let stat = self.file_cache.stat(read_key, OpStat::default()).await?;
+            // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
+            // because it's private field.
+            let size = {
+                let stat = self.file_cache.stat(read_key, OpStat::default()).await?;
 
-                    stat.into_metadata().content_length()
-                };
+                stat.into_metadata().content_length()
+            };
 
-                OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
-                OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
-                self.mem_cache
-                    .insert(read_key.to_string(), ReadResult::Success(size as u32))
-                    .await;
-            }
+            OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
+            OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
+            self.mem_cache
+                .insert(read_key.to_string(), ReadResult::Success(size as u32))
+                .await;
         }
 
         Ok(self.stat().await)
@@ -224,6 +222,22 @@ impl<C: Accessor + Clone> ReadCache<C> {
         }
     }
 
+    async fn try_write_cache<I>(&self, mut reader: I::Reader, read_key: &str) -> Result<usize>
+    where
+        I: Accessor,
+    {
+        let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
+        let mut total = 0;
+        while let Some(bytes) = reader.next().await {
+            let bytes = &bytes?;
+            total += bytes.len();
+            writer.write(bytes).await?;
+        }
+        // Call `close` to ensure data is written.
+        writer.close().await?;
+        Ok(total)
+    }
+
     /// Read the file from remote storage. If success, write the content into local cache.
     async fn read_remote<I>(
         &self,
@@ -237,24 +251,15 @@ impl<C: Accessor + Clone> ReadCache<C> {
     {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
-        let inner_result = inner.read(path, args).await;
+        let (_, reader) = inner.read(path, args).await?;
+        let result = self.try_write_cache::<I>(reader, read_key).await;
 
-        match inner_result {
-            Ok((rp, mut reader)) => {
-                let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
-
-                while let Some(bytes) = reader.next().await {
-                    writer.write(&bytes?).await?;
-                }
-
-                // Call `close` to ensure data is written.
-                writer.close().await?;
-
-                let read_bytes = rp.metadata().content_length() as u32;
+        match result {
+            Ok(read_bytes) => {
                 OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
                 OBJECT_STORE_LRU_CACHE_BYTES.add(read_bytes as i64);
 
-                Ok(ReadResult::Success(read_bytes))
+                Ok(ReadResult::Success(read_bytes as u32))
             }
 
             Err(e) if e.kind() == ErrorKind::NotFound => {

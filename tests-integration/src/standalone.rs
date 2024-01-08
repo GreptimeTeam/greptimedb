@@ -65,6 +65,7 @@ impl GreptimeDbStandaloneBuilder {
         }
     }
 
+    #[must_use]
     pub fn with_default_store_type(self, store_type: StorageType) -> Self {
         Self {
             default_store: Some(store_type),
@@ -73,6 +74,7 @@ impl GreptimeDbStandaloneBuilder {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn with_store_providers(self, store_providers: Vec<StorageType>) -> Self {
         Self {
             store_providers: Some(store_providers),
@@ -81,6 +83,7 @@ impl GreptimeDbStandaloneBuilder {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn with_plugin(self, plugin: Plugins) -> Self {
         Self {
             plugin: Some(plugin),
@@ -88,11 +91,13 @@ impl GreptimeDbStandaloneBuilder {
         }
     }
 
+    #[must_use]
     pub fn with_wal_config(mut self, wal_config: WalConfig) -> Self {
         self.wal_config = wal_config;
         self
     }
 
+    #[must_use]
     pub fn with_meta_wal_config(mut self, wal_meta: MetaWalConfig) -> Self {
         self.meta_wal_config = wal_meta;
         self
@@ -144,8 +149,11 @@ impl GreptimeDbStandaloneBuilder {
             wal_meta.clone(),
             kv_backend.clone(),
         ));
-        let table_meta_allocator =
-            TableMetadataAllocator::new(table_id_sequence, wal_options_allocator.clone());
+        let table_meta_allocator = TableMetadataAllocator::new(
+            table_id_sequence,
+            wal_options_allocator.clone(),
+            table_metadata_manager.clone(),
+        );
 
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(

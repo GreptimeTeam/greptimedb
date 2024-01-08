@@ -96,6 +96,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             Some((_, Instruction::OpenRegion { .. }))
                 | Some((_, Instruction::CloseRegion { .. }))
                 | Some((_, Instruction::DowngradeRegion { .. }))
+                | Some((_, Instruction::UpgradeRegion { .. }))
         )
     }
 
@@ -134,7 +135,7 @@ mod tests {
     use common_meta::heartbeat::mailbox::{
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };
-    use common_meta::instruction::{DowngradeRegion, OpenRegion};
+    use common_meta::instruction::{DowngradeRegion, OpenRegion, UpgradeRegion};
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
@@ -173,6 +174,44 @@ mod tests {
                 incoming_message: Some(incoming_message),
             }
         }
+    }
+
+    #[test]
+    fn test_is_acceptable() {
+        common_telemetry::init_default_ut_logging();
+        let region_server = mock_region_server();
+        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let heartbeat_env = HeartbeatResponseTestEnv::new();
+        let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
+
+        // Open region
+        let region_id = RegionId::new(1024, 1);
+        let storage_path = "test";
+        let instruction = open_region_instruction(region_id, storage_path);
+        assert!(heartbeat_handler
+            .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
+
+        // Close region
+        let instruction = close_region_instruction(region_id);
+        assert!(heartbeat_handler
+            .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
+
+        // Downgrade region
+        let instruction = Instruction::DowngradeRegion(DowngradeRegion {
+            region_id: RegionId::new(2048, 1),
+        });
+        assert!(heartbeat_handler
+            .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
+
+        // Upgrade region
+        let instruction = Instruction::UpgradeRegion(UpgradeRegion {
+            region_id,
+            last_entry_id: None,
+            wait_for_replay_timeout: None,
+        });
+        assert!(
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))
+        );
     }
 
     fn close_region_instruction(region_id: RegionId) -> Instruction {

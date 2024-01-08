@@ -272,6 +272,16 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display(
+        "Failed to find logical regions in physical region {}",
+        physical_region_id
+    ))]
+    FindLogicalRegions {
+        physical_region_id: RegionId,
+        source: metric_engine::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -340,6 +350,8 @@ impl ErrorExt for Error {
             }
             HandleRegionRequest { source, .. } => source.status_code(),
             StopRegionEngine { source, .. } => source.status_code(),
+
+            FindLogicalRegions { source, .. } => source.status_code(),
         }
     }
 
