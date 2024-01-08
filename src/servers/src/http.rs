@@ -30,7 +30,6 @@ use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::status_code::StatusCode;
-use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_telemetry::logging::{error, info};
 use common_time::timestamp::TimeUnit;
@@ -40,7 +39,6 @@ use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
@@ -816,6 +814,7 @@ mod test {
     use axum::http::StatusCode;
     use axum::routing::get;
     use axum_test_helper::TestClient;
+    use common_query::Output;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -823,6 +822,7 @@ mod test {
     use query::parser::PromQuery;
     use query::plan::LogicalPlan;
     use query::query_engine::DescribeResult;
+    use session::context::QueryContextRef;
     use tokio::sync::mpsc;
 
     use super::*;
@@ -946,19 +946,23 @@ mod test {
         ];
         let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
 
-        for format in [ResponseFormat::GreptimedbV1, ResponseFormat::InfluxdbV1] {
+        for format in [
+            ResponseFormat::GreptimedbV1,
+            ResponseFormat::InfluxdbV1,
+            ResponseFormat::Csv,
+        ] {
             let recordbatches =
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
             let outputs = vec![Ok(Output::RecordBatches(recordbatches))];
             let json_resp = match format {
-                ResponseFormat::Csv => unreachable!(),
+                ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
                 ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
             };
 
             match json_resp {
-                HttpResponse::GreptimedbV1(json_resp) => {
-                    let json_output = &json_resp.output[0];
+                HttpResponse::GreptimedbV1(resp) => {
+                    let json_output = &resp.output[0];
                     if let GreptimeQueryOutput::Records(r) = json_output {
                         assert_eq!(r.num_rows(), 4);
                         assert_eq!(r.num_cols(), 2);
@@ -971,8 +975,8 @@ mod test {
                         panic!("invalid output type");
                     }
                 }
-                HttpResponse::InfluxdbV1(json_resp) => {
-                    let json_output = &json_resp.results()[0];
+                HttpResponse::InfluxdbV1(resp) => {
+                    let json_output = &resp.results()[0];
                     assert_eq!(json_output.num_rows(), 4);
                     assert_eq!(json_output.num_cols(), 2);
                     assert_eq!(json_output.series[0].columns.clone()[0], "numbers");
@@ -982,7 +986,21 @@ mod test {
                     );
                     assert_eq!(json_output.series[0].values[0][1], serde_json::Value::Null);
                 }
-                _ => unreachable!(),
+                HttpResponse::Csv(resp) => {
+                    let output = &resp.output()[0];
+                    if let GreptimeQueryOutput::Records(r) = output {
+                        assert_eq!(r.num_rows(), 4);
+                        assert_eq!(r.num_cols(), 2);
+                        let schema = r.schema.as_ref().unwrap();
+                        assert_eq!(schema.column_schemas[0].name, "numbers");
+                        assert_eq!(schema.column_schemas[0].data_type, "UInt32");
+                        assert_eq!(r.rows[0][0], serde_json::Value::from(1));
+                        assert_eq!(r.rows[0][1], serde_json::Value::Null);
+                    } else {
+                        panic!("invalid output type");
+                    }
+                }
+                HttpResponse::Error(err) => unreachable!("{err:?}"),
             }
         }
     }
