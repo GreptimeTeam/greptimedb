@@ -284,13 +284,13 @@ fn check_termination(
 mod tests {
     use common_base::readable_size::ReadableSize;
     use common_config::wal::KafkaWalTopic as Topic;
-    use common_test_util::get_broker_endpoints;
-    use common_test_util::wal::kafka::topic_decorator::{Affix, TopicDecorator};
-    use common_test_util::wal::kafka::{create_topics, BROKER_ENDPOINTS_KEY};
     use rand::seq::IteratorRandom;
 
     use super::*;
-    use crate::test_util::kafka::{entries_with_random_data, new_namespace, EntryBuilder};
+    use crate::get_broker_endpoints;
+    use crate::test_util::kafka::{
+        create_topics, entries_with_random_data, new_namespace, EntryBuilder,
+    };
 
     // Stores test context for a region.
     struct RegionContext {
@@ -302,11 +302,13 @@ mod tests {
 
     /// Prepares for a test in that a log store is constructed and a collection of topics is created.
     async fn prepare(test_name: &str, num_topics: usize) -> (KafkaLogStore, Vec<Topic>) {
-        let broker_endpoints = get_broker_endpoints!(BROKER_ENDPOINTS_KEY);
-        let decorator = TopicDecorator::default()
-            .with_prefix(Affix::Fixed(test_name.to_string()))
-            .with_suffix(Affix::TimeNow);
-        let topics = create_topics(num_topics, decorator, &broker_endpoints, None).await;
+        let broker_endpoints = get_broker_endpoints!();
+        let topics = create_topics(
+            num_topics,
+            |i| format!("{test_name}_{}_{}", i, uuid::Uuid::new_v4()),
+            &broker_endpoints,
+        )
+        .await;
 
         let config = KafkaConfig {
             broker_endpoints,
@@ -330,26 +332,6 @@ mod tests {
         }
 
         (logstore, topics)
-    }
-
-    /// Builds a context for each region.
-    fn build_contexts(num_regions: usize, topics: &[Topic]) -> HashMap<u64, RegionContext> {
-        (0..num_regions)
-            .map(|i| {
-                let topic = &topics[i % topics.len()];
-                let ns = new_namespace(topic, i as u64);
-                let entry_builder = EntryBuilder::new(ns.clone());
-                (
-                    i as u64,
-                    RegionContext {
-                        ns,
-                        entry_builder,
-                        expected: Vec::new(),
-                        flushed_entry_id: 0,
-                    },
-                )
-            })
-            .collect()
     }
 
     /// Creates a vector containing indexes of all regions if the `all` is true.
@@ -389,39 +371,6 @@ mod tests {
         aggregated.into_iter().flatten().collect()
     }
 
-    /// Reads entries for regions and checks for each region that the gotten entries are identical with the expected ones.
-    async fn check_entries(
-        region_contexts: &HashMap<u64, RegionContext>,
-        logstore: &KafkaLogStore,
-        which: &[u64],
-    ) {
-        for region_id in which {
-            let ctx = &region_contexts[region_id];
-            let stream = logstore
-                .read(&ctx.ns, ctx.flushed_entry_id + 1)
-                .await
-                .unwrap();
-            let got = stream
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .flat_map(|x| x.unwrap())
-                .collect::<Vec<_>>();
-            assert_eq!(ctx.expected, got);
-        }
-    }
-
-    /// Simulates a flush for regions.
-    fn flush(
-        region_contexts: &mut HashMap<u64, RegionContext>,
-        last_entry_ids: &HashMap<u64, EntryId>,
-    ) {
-        for (region_id, last_entry_id) in last_entry_ids {
-            let ctx = region_contexts.get_mut(region_id).unwrap();
-            ctx.flushed_entry_id = *last_entry_id;
-        }
-    }
-
     /// Starts a test with:
     /// * `test_name` - The name of the test.
     /// * `num_topics` - Number of topics to be created in the preparation phase.
@@ -439,13 +388,50 @@ mod tests {
         large: bool,
     ) {
         let (logstore, topics) = prepare(test_name, num_topics).await;
-        let mut region_contexts = build_contexts(num_regions, &topics);
+        let mut region_contexts = (0..num_regions)
+            .map(|i| {
+                let topic = &topics[i % topics.len()];
+                let ns = new_namespace(topic, i as u64);
+                let entry_builder = EntryBuilder::new(ns.clone());
+                (
+                    i as u64,
+                    RegionContext {
+                        ns,
+                        entry_builder,
+                        expected: Vec::new(),
+                        flushed_entry_id: 0,
+                    },
+                )
+            })
+            .collect();
+
         for _ in 0..num_appends {
+            // Appends entries for a subset of regions.
             let which = all_or_subset(all, num_regions);
             let entries = build_entries(&mut region_contexts, &which, large);
             let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;
-            check_entries(&region_contexts, &logstore, &which).await;
-            flush(&mut region_contexts, &last_entry_ids);
+
+            // Reads entries for regions and checks for each region that the gotten entries are identical with the expected ones.
+            for region_id in which {
+                let ctx = &region_contexts[&region_id];
+                let stream = logstore
+                    .read(&ctx.ns, ctx.flushed_entry_id + 1)
+                    .await
+                    .unwrap();
+                let got = stream
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .flat_map(|x| x.unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(ctx.expected, got);
+            }
+
+            // Simulates a flush for regions.
+            for (region_id, last_entry_id) in last_entry_ids {
+                let ctx = region_contexts.get_mut(&region_id).unwrap();
+                ctx.flushed_entry_id = last_entry_id;
+            }
         }
     }
 

@@ -15,12 +15,63 @@
 use std::sync::atomic::{AtomicU64 as AtomicEntryId, Ordering};
 use std::sync::Mutex;
 
+use common_meta::wal::KafkaWalTopic as Topic;
 use rand::distributions::Alphanumeric;
 use rand::rngs::ThreadRng;
 use rand::{thread_rng, Rng};
+use rskafka::client::ClientBuilder;
 use store_api::logstore::EntryId;
 
 use crate::kafka::{EntryImpl, NamespaceImpl};
+
+/// Gets broker endpoints from environment variables with the given key.
+/// Returns the default ["localhost:9092"] if no environment variables set for broker endpoints.
+#[macro_export]
+macro_rules! get_broker_endpoints {
+    () => {{
+        let broker_endpoints = std::env::var("GT_KAFKA_ENDPOINTS")
+            .unwrap_or("localhost:9092".to_string())
+            .split(',')
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(!broker_endpoints.is_empty());
+        broker_endpoints
+    }};
+}
+
+/// Creates `num_topiocs` number of topics each will be decorated by the given decorator.
+pub async fn create_topics<F>(
+    num_topics: usize,
+    decorator: F,
+    broker_endpoints: &[String],
+) -> Vec<Topic>
+where
+    F: Fn(usize) -> String,
+{
+    assert!(!broker_endpoints.is_empty());
+    let client = ClientBuilder::new(broker_endpoints.to_vec())
+        .build()
+        .await
+        .unwrap();
+    let ctrl_client = client.controller_client().unwrap();
+    let (topics, tasks): (Vec<_>, Vec<_>) = (0..num_topics)
+        .map(|i| {
+            let topic = decorator(i);
+            let task = ctrl_client.create_topic(topic.clone(), 1, 1, 500);
+            (topic, task)
+        })
+        .unzip();
+    futures::future::try_join_all(tasks).await.unwrap();
+    topics
+}
+
+/// Creates a new Kafka namespace with the given topic and region id.
+pub fn new_namespace(topic: &str, region_id: u64) -> NamespaceImpl {
+    NamespaceImpl {
+        topic: topic.to_string(),
+        region_id,
+    }
+}
 
 /// A builder for building entries for a namespace.
 pub struct EntryBuilder {
@@ -87,12 +138,4 @@ pub fn entries_with_random_data(batch_size: usize, builder: &EntryBuilder) -> Ve
     (0..batch_size)
         .map(|_| builder.with_random_data())
         .collect()
-}
-
-/// Creates a new Kafka namespace with the given topic and region id.
-pub fn new_namespace(topic: &str, region_id: u64) -> NamespaceImpl {
-    NamespaceImpl {
-        topic: topic.to_string(),
-        region_id,
-    }
 }

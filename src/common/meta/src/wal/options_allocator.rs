@@ -105,11 +105,8 @@ pub fn allocate_region_wal_options(
 
 #[cfg(test)]
 mod tests {
-    use common_test_util::get_broker_endpoints;
-    use common_test_util::wal::kafka::topic_decorator::{Affix, TopicDecorator};
-    use common_test_util::wal::kafka::BROKER_ENDPOINTS_KEY;
-
     use super::*;
+    use crate::get_broker_endpoints;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::wal::kafka::topic_selector::RoundRobinTopicSelector;
     use crate::wal::kafka::KafkaConfig;
@@ -137,13 +134,9 @@ mod tests {
     // Tests that the wal options allocator could successfully allocate Kafka wal options.
     #[tokio::test]
     async fn test_allocator_with_kafka() {
-        let broker_endpoints = get_broker_endpoints!(BROKER_ENDPOINTS_KEY);
-        // Constructs topics that should be created.
-        let decorator = TopicDecorator::default()
-            .with_prefix(Affix::Fixed("test_allocator_with_kafka".to_string()))
-            .with_suffix(Affix::TimeNow);
+        let broker_endpoints = get_broker_endpoints!();
         let topics = (0..256)
-            .map(|i| decorator.decorate(&format!("topic_{i}")))
+            .map(|i| format!("test_allocator_with_kafka_{}_{}", i, uuid::Uuid::new_v4()))
             .collect::<Vec<_>>();
 
         // Creates a topic manager.

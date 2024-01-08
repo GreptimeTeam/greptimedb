@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
+pub mod test_util;
 pub mod topic;
 pub mod topic_manager;
 pub mod topic_selector;

@@ -50,6 +50,6 @@ tonic.workspace = true
 [dev-dependencies]
 chrono.workspace = true
 common-procedure = { workspace = true, features = ["testing"] }
-common-test-util.workspace = true
 datatypes.workspace = true
 hyper = { version = "0.14", features = ["full"] }
+uuid.workspace = true

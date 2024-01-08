@@ -1828,7 +1828,6 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
- "common-test-util",
  "common-time",
  "datatypes",
  "derive_builder 0.12.0",
@@ -1852,6 +1851,7 @@ dependencies = [
  "tokio",
  "toml 0.8.8",
  "tonic 0.10.2",
+ "uuid",
 ]
 
 [[package]]
@@ -4529,6 +4529,7 @@ dependencies = [
  "store-api",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]

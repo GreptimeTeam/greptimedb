@@ -243,11 +243,9 @@ mod tests {
 
     use chrono::format::Fixed;
     use common_telemetry::info;
-    use common_test_util::get_broker_endpoints;
-    use common_test_util::wal::kafka::topic_decorator::{Affix, TopicDecorator};
-    use common_test_util::wal::kafka::{create_topics, BROKER_ENDPOINTS_KEY};
 
     use super::*;
+    use crate::get_broker_endpoints;
     use crate::kv_backend::memory::MemoryKvBackend;
 
     // Tests that topics can be successfully persisted into the kv backend and can be successfully restored from the kv backend.
@@ -278,13 +276,10 @@ mod tests {
     /// Tests that the topic manager could allocate topics correctly.
     #[tokio::test]
     async fn test_alloc_topics() {
-        let broker_endpoints = get_broker_endpoints!(BROKER_ENDPOINTS_KEY);
+        let broker_endpoints = get_broker_endpoints!();
         // Constructs topics that should be created.
-        let decorator = TopicDecorator::default()
-            .with_prefix(Affix::Fixed("test_alloc_topics".to_string()))
-            .with_suffix(Affix::TimeNow);
         let topics = (0..256)
-            .map(|i| decorator.decorate(&format!("topic_{i}")))
+            .map(|i| format!("test_alloc_topics_{}_{}", i, uuid::Uuid::new_v4()))
             .collect::<Vec<_>>();
 
         // Creates a topic manager.
