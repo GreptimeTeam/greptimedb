@@ -20,6 +20,7 @@ use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
+use store_api::storage::RegionId;
 
 use crate::kafka::NamespaceImpl as KafkaNamespace;
 
@@ -183,6 +184,18 @@ pub enum Error {
 
     #[snafu(display("The record sequence is not legal, error: {}", error))]
     IllegalSequence { location: Location, error: String },
+
+    #[snafu(display(
+        "Attempt to append discontinuous log entry, region: {}, last index: {}, attempt index: {}",
+        region_id,
+        last_index,
+        attempt_index
+    ))]
+    DiscontinuousLogIndex {
+        region_id: RegionId,
+        last_index: u64,
+        attempt_index: u64,
+    },
 }
 
 impl ErrorExt for Error {
