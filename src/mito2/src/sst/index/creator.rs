@@ -195,27 +195,26 @@ impl SstIndexCreator {
         Ok(())
     }
 
+    /// Data flow of finishing index:
+    ///
+    /// ```text
+    ///                               (In Memory Buffer)
+    ///                                    ┌──────┐
+    ///  ┌─────────────┐                   │ PIPE │
+    ///  │             │ write index data  │      │
+    ///  │ IndexWriter ├──────────────────►│ tx   │
+    ///  │             │                   │      │
+    ///  └─────────────┘                   │      │
+    ///                  ┌─────────────────┤ rx   │
+    ///  ┌─────────────┐ │ read as blob    └──────┘
+    ///  │             │ │
+    ///  │ PuffinWriter├─┤
+    ///  │             │ │ copy to file    ┌──────┐
+    ///  └─────────────┘ └────────────────►│ File │
+    ///                                    └──────┘
+    /// ```
     async fn do_finish(&mut self) -> Result<()> {
         let mut guard = self.stats.record_finish();
-
-        // Data flow of finishing index:
-        //
-        // ```text
-        //                               (In Memory Buffer)
-        //                                    ┌──────┐
-        //  ┌─────────────┐                   │ PIPE │
-        //  │             │ write index data  │      │
-        //  │ IndexWriter ├──────────────────►│ tx   │
-        //  │             │                   │      │
-        //  └─────────────┘                   │      │
-        //                  ┌─────────────────┤ rx   │
-        //  ┌─────────────┐ │ read as blob    └──────┘
-        //  │             │ │
-        //  │ PuffinWriter├─┤
-        //  │             │ │ copy to file    ┌──────┐
-        //  └─────────────┘ └────────────────►│ File │
-        //                                    └──────┘
-        // ```
 
         let file_path = location::index_file_path(&self.region_dir, self.sst_file_id);
         let file_writer = self
