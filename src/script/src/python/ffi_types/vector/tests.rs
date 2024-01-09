@@ -25,12 +25,12 @@ use datatypes::vectors::{BooleanVector, Float64Vector, Int64Vector, VectorRef};
 #[cfg(feature = "pyo3_backend")]
 use pyo3::{types::PyDict, Python};
 use rustpython_compiler::Mode;
-use rustpython_vm::class::PyClassImpl;
-use rustpython_vm::{vm, AsObject};
+use rustpython_vm::AsObject;
 
 use crate::python::ffi_types::PyVector;
 #[cfg(feature = "pyo3_backend")]
 use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
+use crate::python::rspython::init_interpreter;
 
 #[derive(Debug, Clone)]
 struct TestCase {
@@ -155,10 +155,7 @@ fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
 }
 
 fn eval_rspy(testcase: TestCase, locals: HashMap<String, PyVector>) {
-    vm::Interpreter::with_init(Default::default(), |vm| {
-        let _ = PyVector::make_class(&vm.ctx);
-    })
-    .enter(|vm| {
+    init_interpreter().enter(|vm| {
         let scope = vm.new_scope_with_builtins();
         locals.into_iter().for_each(|(k, v)| {
             scope
