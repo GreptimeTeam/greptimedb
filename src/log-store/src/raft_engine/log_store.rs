@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_stream::stream;
 use common_config::wal::{RaftEngineConfig, WalOptions};
@@ -217,14 +216,11 @@ impl LogStore for RaftEngineLogStore {
         }
 
         let mut sync = self.config.sync_write;
-        if let Some(sync_period) = self.config.sync_period.as_ref()
-            && let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH)
-        {
-            let now_millis = now.as_millis() as i64;
-            if now_millis - self.last_sync_time.load(Ordering::Relaxed)
-                >= sync_period.as_millis() as i64
-            {
-                self.last_sync_time.store(now_millis, Ordering::Relaxed);
+
+        if let Some(sync_period) = self.config.sync_period.as_ref() {
+            let now = common_time::util::current_time_millis();
+            if now - self.last_sync_time.load(Ordering::Relaxed) >= sync_period.as_millis() as i64 {
+                self.last_sync_time.store(now, Ordering::Relaxed);
                 sync = true;
             }
         }
