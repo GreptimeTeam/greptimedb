@@ -14,21 +14,28 @@
 
 use std::sync::Arc;
 
-use object_store::{util, ObjectStore};
+use object_store::services::Fs;
+use object_store::util::{join_dir, with_instrument_layers};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
-use crate::error::{DeleteSstSnafu, Result};
+use crate::cache::write_cache::SstUploadRequest;
+use crate::cache::CacheManagerRef;
+use crate::error::{CleanDirSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId};
+use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
+use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
     region_dir: String,
+    /// Target object store.
     object_store: ObjectStore,
 }
 
@@ -61,7 +68,7 @@ impl AccessLayer {
 
     /// Deletes a SST file with given file id.
     pub(crate) async fn delete_sst(&self, file_id: FileId) -> Result<()> {
-        let path = self.sst_file_path(&file_id.as_parquet());
+        let path = location::sst_file_path(&self.region_dir, file_id);
         self.object_store
             .delete(&path)
             .await
@@ -73,20 +80,72 @@ impl AccessLayer {
         ParquetReaderBuilder::new(self.region_dir.clone(), file, self.object_store.clone())
     }
 
-    /// Returns a new parquet writer to write the SST for specific `file_id`.
-    // TODO(hl): maybe rename to [sst_writer].
-    pub(crate) fn write_sst(
+    /// Writes a SST with specific `file_id` and `metadata` to the layer.
+    ///
+    /// Returns the info of the SST. If no data written, returns None.
+    pub(crate) async fn write_sst(
         &self,
-        file_id: FileId,
-        metadata: RegionMetadataRef,
-        source: Source,
-    ) -> ParquetWriter {
-        let path = self.sst_file_path(&file_id.as_parquet());
-        ParquetWriter::new(path, metadata, source, self.object_store.clone())
+        request: SstWriteRequest,
+        write_opts: &WriteOptions,
+    ) -> Result<Option<SstInfo>> {
+        let path = location::sst_file_path(&self.region_dir, request.file_id);
+
+        if let Some(write_cache) = request.cache_manager.write_cache() {
+            // Write to the write cache.
+            return write_cache
+                .write_and_upload_sst(
+                    SstUploadRequest {
+                        file_id: request.file_id,
+                        metadata: request.metadata,
+                        source: request.source,
+                        storage: request.storage,
+                        upload_path: path,
+                        remote_store: self.object_store.clone(),
+                    },
+                    write_opts,
+                )
+                .await;
+        }
+
+        // Write cache is disabled.
+        let mut writer = ParquetWriter::new(path, request.metadata, self.object_store.clone());
+        writer.write_all(request.source, write_opts).await
+    }
+}
+
+/// Contents to build a SST.
+pub(crate) struct SstWriteRequest {
+    pub(crate) file_id: FileId,
+    pub(crate) metadata: RegionMetadataRef,
+    pub(crate) source: Source,
+    pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) storage: Option<String>,
+}
+
+/// Creates a fs object store with atomic write dir.
+pub(crate) async fn new_fs_object_store(root: &str) -> Result<ObjectStore> {
+    let atomic_write_dir = join_dir(root, ".tmp/");
+    clean_dir(&atomic_write_dir).await?;
+
+    let mut builder = Fs::default();
+    builder.root(root).atomic_write_dir(&atomic_write_dir);
+    let object_store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();
+
+    // Add layers.
+    let object_store = with_instrument_layers(object_store);
+    Ok(object_store)
+}
+
+/// Clean the directory.
+async fn clean_dir(dir: &str) -> Result<()> {
+    if tokio::fs::try_exists(dir)
+        .await
+        .context(CleanDirSnafu { dir })?
+    {
+        tokio::fs::remove_dir_all(dir)
+            .await
+            .context(CleanDirSnafu { dir })?;
     }
 
-    /// Returns the `file_path` for the `file_name` in the object store.
-    fn sst_file_path(&self, file_name: &str) -> String {
-        util::join_path(&self.region_dir, file_name)
-    }
+    Ok(())
 }

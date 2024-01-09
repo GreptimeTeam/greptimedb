@@ -19,10 +19,12 @@ use axum::http::StatusCode;
 use axum_test_helper::TestClient;
 use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
+use servers::http::error_result::ErrorResponse;
+use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::handler::HealthResponse;
-use servers::http::influxdb_result_v1::InfluxdbOutput;
+use servers::http::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
-use servers::http::{JsonOutput, JsonResponse};
+use servers::http::GreptimeQueryOutput;
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
@@ -123,13 +125,9 @@ pub async fn test_sql_api(store_type: StorageType) {
     let res = client.get("/v1/sql").send().await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), 1004);
-    assert_eq!(body.error().unwrap(), "sql parameter is required.");
-    let _ = body.execution_time_ms().unwrap();
+    assert_eq!(body.error(), "sql parameter is required.");
 
     let res = client
         .get("/v1/sql?sql=select * from numbers limit 10")
@@ -137,18 +135,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     let output = body.output();
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records" :{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}
         })).unwrap()
     );
@@ -160,13 +152,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::InfluxdbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-
+    let body = serde_json::from_str::<InfluxdbV1Response>(&res.text().await).unwrap();
     let output = body.results();
     assert_eq!(output.len(), 1);
     assert_eq!(
@@ -190,18 +176,13 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     let output = body.output();
     assert_eq!(output.len(), 1);
 
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[["host",66.6,1024.0,0]]}
         })).unwrap()
     );
@@ -213,18 +194,13 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     let output = body.output();
     assert_eq!(output.len(), 1);
 
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -236,17 +212,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     let output = body.output();
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -258,23 +229,18 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     let outputs = body.output();
     assert_eq!(outputs.len(), 2);
     assert_eq!(
         outputs[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
     assert_eq!(
         outputs[1],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"rows":[]}
         }))
         .unwrap()
@@ -287,14 +253,9 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(!body.success());
-    let _ = body.execution_time_ms().unwrap();
+    let _body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     // TODO(shuiyisong): fix this when return source err msg to client side
-    // assert!(body.error().unwrap().contains("Table not found"));
+    // assert!(body.error().contains("Table not found"));
 
     // test database given
     let res = client
@@ -303,17 +264,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     let outputs = body.output();
     assert_eq!(outputs.len(), 1);
     assert_eq!(
         outputs[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -324,10 +280,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
     // test catalog-schema given
@@ -337,17 +290,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     let outputs = body.output();
     assert_eq!(outputs.len(), 1);
     assert_eq!(
         outputs[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -358,10 +306,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
     // test invalid schema
@@ -370,10 +315,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
     guard.remove_all().await;
@@ -389,13 +331,7 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-
+    let _body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     guard.remove_all().await;
 }
 
@@ -605,11 +541,7 @@ def test(n) -> vector[f64]:
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-    assert_eq!(body.code(), 0);
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     assert!(body.output().is_empty());
 
     // call script
@@ -618,18 +550,12 @@ def test(n) -> vector[f64]:
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    let JsonResponse::GreptimedbV1(body) = body else {
-        unreachable!()
-    };
-
-    assert_eq!(body.code(), 0);
-    let _ = body.execution_time_ms().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     let output = body.output();
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}
         })).unwrap()
     );
@@ -756,10 +682,7 @@ tcp_nodelay = true
 
 [frontend.export_metrics]
 enable = false
-db = ""
 write_interval = "30s"
-
-[frontend.export_metrics.headers]
 
 [datanode]
 mode = "standalone"
@@ -788,6 +711,8 @@ purge_threshold = "4GiB"
 purge_interval = "10m"
 read_batch_size = 128
 sync_write = false
+enable_log_recycle = true
+prefill_log_files = false
 
 [datanode.storage]
 type = "{}"
@@ -807,8 +732,12 @@ global_write_buffer_reject_size = "2GiB"
 sst_meta_cache_size = "128MiB"
 vector_cache_size = "512MiB"
 page_cache_size = "512MiB"
+enable_experimental_write_cache = false
+experimental_write_cache_path = ""
+experimental_write_cache_size = "512MiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
+allow_stale_entries = false
 
 [[datanode.region_engine]]
 
@@ -820,10 +749,7 @@ append_stdout = true
 
 [datanode.export_metrics]
 enable = false
-db = ""
 write_interval = "30s"
-
-[datanode.export_metrics.headers]
 
 [logging]
 enable_otlp_tracing = false

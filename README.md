@@ -29,21 +29,17 @@
 
 ## What is GreptimeDB
 
-GreptimeDB is an open-source time-series database with a special focus on
-scalability, analytical capabilities and efficiency. It's designed to work on
-infrastructure of the cloud era, and users benefit from its elasticity and commodity
-storage.
+GreptimeDB is an open-source time-series database focusing on efficiency, scalability, and analytical capabilities.
+It's designed to work on infrastructure of the cloud era, and users benefit from its elasticity and commodity storage.
 
-Our core developers have been building time-series data platform
-for years. Based on their best-practices, GreptimeDB is born to give you:
+Our core developers have been building time-series data platforms for years. Based on their best-practices, GreptimeDB is born to give you:
 
-- A standalone binary that scales to highly-available distributed cluster, providing a transparent experience for cluster users
-- Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends
-- Flexible indexes, tackling high cardinality issues down
-- Distributed, parallel query execution, leveraging elastic computing resource
-- Native SQL, and Python scripting for advanced analytical scenarios
-- Widely adopted database protocols and APIs, native PromQL supports
-- Extensible table engine architecture for extensive workloads
+- Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends, particularly cloud object storage with 50x cost efficiency.
+- Fully open-source distributed cluster architecture that harnesses the power of cloud-native elastic computing resources.
+- Seamless scalability from a standalone binary at edge to a robust, highly available distributed cluster in cloud, with a transparent experience for both developers and administrators.
+- Native SQL and PromQL for queries, and Python scripting to facilitate complex analytical tasks.
+- Flexible indexing capabilities and distributed, parallel-processing query engine, tackling high cardinality issues down.
+- Widely adopted database protocols and APIs, including MySQL, PostgreSQL, and Prometheus Remote Storage, etc.
 
 ## Quick Start
 

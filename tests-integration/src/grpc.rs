@@ -526,7 +526,6 @@ CREATE TABLE {table_name} (
                 .region_routes()
                 .expect("physical table route"),
         )
-        .unwrap()
         .iter()
         .map(|(k, v)| (v[0], *k))
         .collect::<HashMap<u32, u64>>();

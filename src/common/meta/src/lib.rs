@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 #![feature(btree_extract_if)]
 #![feature(async_closure)]
+#![feature(let_chains)]
 
 pub mod cache_invalidator;
 pub mod datanode_manager;
@@ -35,7 +36,6 @@ pub mod sequence;
 pub mod state_store;
 pub mod table_name;
 pub mod util;
-#[allow(unused)]
 pub mod wal;
 
 pub type ClusterId = u64;

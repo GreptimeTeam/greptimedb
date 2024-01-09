@@ -13,8 +13,13 @@
 // limitations under the License.
 
 use futures::TryStreamExt;
+use opendal::layers::{LoggingLayer, TracingLayer};
 use opendal::{Entry, Lister};
 
+use crate::layers::PrometheusMetricsLayer;
+use crate::ObjectStore;
+
+/// Collect all entries from the [Lister].
 pub async fn collect(stream: Lister) -> Result<Vec<Entry>, opendal::Error> {
     stream.try_collect::<Vec<_>>().await
 }
@@ -50,6 +55,20 @@ pub fn join_dir(parent: &str, child: &str) -> String {
 pub fn join_path(parent: &str, child: &str) -> String {
     let output = format!("{parent}/{child}");
     opendal::raw::normalize_path(&output)
+}
+
+/// Attaches instrument layers to the object store.
+pub fn with_instrument_layers(object_store: ObjectStore) -> ObjectStore {
+    object_store
+        .layer(
+            LoggingLayer::default()
+                // Print the expected error only in DEBUG level.
+                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
+                .with_error_level(Some("debug"))
+                .expect("input error level must be valid"),
+        )
+        .layer(TracingLayer)
+        .layer(PrometheusMetricsLayer)
 }
 
 #[cfg(test)]

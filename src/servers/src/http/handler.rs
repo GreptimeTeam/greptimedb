@@ -22,12 +22,21 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_query::Output;
+use common_recordbatch::util;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 
-use crate::http::{ApiState, Epoch, GreptimeOptionsConfigState, JsonResponse, ResponseFormat};
+use crate::http::csv_result::CsvResponse;
+use crate::http::error_result::ErrorResponse;
+use crate::http::greptime_result_v1::GreptimedbV1Response;
+use crate::http::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::{
+    ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, HttpRecordsOutput,
+    HttpResponse, ResponseFormat,
+};
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -35,7 +44,7 @@ use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 pub struct SqlQuery {
     pub db: Option<String>,
     pub sql: Option<String>,
-    // (Optional) result format: [`gerptimedb_v1`, `influxdb_v1`],
+    // (Optional) result format: [`greptimedb_v1`, `influxdb_v1`, `csv`],
     // the default value is `greptimedb_v1`
     pub format: Option<String>,
     // Returns epoch timestamps with the specified precision.
@@ -56,7 +65,7 @@ pub async fn sql(
     Query(query_params): Query<SqlQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SqlQuery>,
-) -> Json<JsonResponse> {
+) -> HttpResponse {
     let sql_handler = &state.sql_handler;
 
     let start = Instant::now();
@@ -78,21 +87,82 @@ pub async fn sql(
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    let resp = if let Some(sql) = &sql {
-        if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone(), format).await {
-            return Json(resp);
+    let result = if let Some(sql) = &sql {
+        if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
+            Err((status, msg))
+        } else {
+            Ok(sql_handler.do_query(sql, query_ctx).await)
         }
-
-        JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await, format, epoch).await
     } else {
-        JsonResponse::with_error_message(
-            "sql parameter is required.".to_string(),
+        Err((
             StatusCode::InvalidArguments,
-            format,
-        )
+            "sql parameter is required.".to_string(),
+        ))
     };
 
-    Json(resp.with_execution_time(start.elapsed().as_millis()))
+    let outputs = match result {
+        Err((status, msg)) => {
+            return HttpResponse::Error(
+                ErrorResponse::from_error_message(format, status, msg)
+                    .with_execution_time(start.elapsed().as_millis() as u64),
+            );
+        }
+        Ok(outputs) => outputs,
+    };
+
+    let resp = match format {
+        ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+        ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
+        ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
+    };
+
+    resp.with_execution_time(start.elapsed().as_millis() as u64)
+}
+
+/// Create a response from query result
+pub async fn from_output(
+    ty: ResponseFormat,
+    outputs: Vec<crate::error::Result<Output>>,
+) -> Result<Vec<GreptimeQueryOutput>, ErrorResponse> {
+    // TODO(sunng87): this api response structure cannot represent error well.
+    //  It hides successful execution results from error response
+    let mut results = Vec::with_capacity(outputs.len());
+    for out in outputs {
+        match out {
+            Ok(Output::AffectedRows(rows)) => {
+                results.push(GreptimeQueryOutput::AffectedRows(rows));
+            }
+            Ok(Output::Stream(stream)) => {
+                // TODO(sunng87): streaming response
+                match util::collect(stream).await {
+                    Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                        Ok(rows) => {
+                            results.push(GreptimeQueryOutput::Records(rows));
+                        }
+                        Err(err) => {
+                            return Err(ErrorResponse::from_error(ty, err));
+                        }
+                    },
+                    Err(err) => {
+                        return Err(ErrorResponse::from_error(ty, err));
+                    }
+                }
+            }
+            Ok(Output::RecordBatches(rbs)) => match HttpRecordsOutput::try_from(rbs.take()) {
+                Ok(rows) => {
+                    results.push(GreptimeQueryOutput::Records(rows));
+                }
+                Err(err) => {
+                    return Err(ErrorResponse::from_error(ty, err));
+                }
+            },
+            Err(err) => {
+                return Err(ErrorResponse::from_error(ty, err));
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -121,7 +191,7 @@ pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
-) -> Json<JsonResponse> {
+) -> Response {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
@@ -129,29 +199,23 @@ pub async fn promql(
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    if let Some(resp) = validate_schema(
-        sql_handler.clone(),
-        query_ctx.clone(),
-        ResponseFormat::GreptimedbV1,
-    )
-    .await
+    let resp = if let Some((status, msg)) =
+        validate_schema(sql_handler.clone(), query_ctx.clone()).await
     {
-        return Json(resp);
-    }
+        let resp = ErrorResponse::from_error_message(ResponseFormat::GreptimedbV1, status, msg);
+        HttpResponse::Error(resp)
+    } else {
+        let prom_query = params.into();
+        let outputs = sql_handler.do_promql_query(&prom_query, query_ctx).await;
+        GreptimedbV1Response::from_output(outputs).await
+    };
 
-    let prom_query = params.into();
-    let resp = JsonResponse::from_output(
-        sql_handler.do_promql_query(&prom_query, query_ctx).await,
-        ResponseFormat::GreptimedbV1,
-        None,
-    )
-    .await;
-
-    Json(resp.with_execution_time(exec_start.elapsed().as_millis()))
+    resp.with_execution_time(exec_start.elapsed().as_millis() as u64)
+        .into_response()
 }
 
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
-    op.response::<200, Json<JsonResponse>>()
+    op.response::<200, Json<HttpResponse>>()
 }
 
 /// Handler to export metrics
@@ -222,26 +286,23 @@ pub async fn config(State(state): State<GreptimeOptionsConfigState>) -> Response
 async fn validate_schema(
     sql_handler: ServerSqlQueryHandlerRef,
     query_ctx: QueryContextRef,
-    format: ResponseFormat,
-) -> Option<JsonResponse> {
+) -> Option<(StatusCode, String)> {
     match sql_handler
         .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
         .await
     {
-        Ok(false) => Some(JsonResponse::with_error_message(
-            format!("Database not found: {}", query_ctx.get_db_string()),
+        Ok(true) => None,
+        Ok(false) => Some((
             StatusCode::DatabaseNotFound,
-            format,
+            format!("Database not found: {}", query_ctx.get_db_string()),
         )),
-        Err(e) => Some(JsonResponse::with_error_message(
+        Err(e) => Some((
+            StatusCode::Internal,
             format!(
                 "Error checking database: {}, {}",
                 query_ctx.get_db_string(),
                 e.output_msg(),
             ),
-            StatusCode::Internal,
-            format,
         )),
-        _ => None,
     }
 }

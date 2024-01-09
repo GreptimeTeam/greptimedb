@@ -102,12 +102,13 @@ impl FilePurger for LocalFilePurger {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
-    use object_store::{util, ObjectStore};
+    use object_store::ObjectStore;
 
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange};
+    use crate::sst::location;
 
     #[tokio::test]
     async fn test_file_purge() {
@@ -119,7 +120,7 @@ mod tests {
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
-        let path = util::join_path(sst_dir, &sst_file_id.as_parquet());
+        let path = location::sst_file_path(sst_dir, sst_file_id);
 
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
@@ -145,9 +146,6 @@ mod tests {
 
         scheduler.stop(true).await.unwrap();
 
-        assert!(!object_store
-            .is_exist(&format!("{}/{}", sst_dir, sst_file_id.as_parquet()))
-            .await
-            .unwrap());
+        assert!(!object_store.is_exist(&path).await.unwrap());
     }
 }

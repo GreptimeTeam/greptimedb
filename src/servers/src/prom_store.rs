@@ -21,6 +21,7 @@ use std::hash::{Hash, Hasher};
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
 use datafusion::prelude::{col, lit, regexp_match, Expr};
@@ -35,8 +36,6 @@ use snap::raw::{Decoder, Encoder};
 use crate::error::{self, Result};
 use crate::row_writer::{self, MultiTableData};
 
-pub const TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
-pub const FIELD_COLUMN_NAME: &str = "greptime_value";
 pub const METRIC_NAME_LABEL: &str = "__name__";
 
 /// Metrics for push gateway protocol
@@ -73,9 +72,8 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
 
     let mut conditions = Vec::with_capacity(label_matches.len() + 1);
 
-    conditions
-        .push(col(TIMESTAMP_COLUMN_NAME).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
-    conditions.push(col(TIMESTAMP_COLUMN_NAME).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
+    conditions.push(col(GREPTIME_TIMESTAMP).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
+    conditions.push(col(GREPTIME_TIMESTAMP).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
 
     for m in label_matches {
         let name = &m.name;
@@ -204,9 +202,7 @@ fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<Ti
         ));
 
         for (i, column_schema) in recordbatch.schema.column_schemas().iter().enumerate() {
-            if column_schema.name == FIELD_COLUMN_NAME
-                || column_schema.name == TIMESTAMP_COLUMN_NAME
-            {
+            if column_schema.name == GREPTIME_VALUE || column_schema.name == GREPTIME_TIMESTAMP {
                 continue;
             }
 
@@ -239,7 +235,7 @@ pub fn recordbatches_to_timeseries(
 }
 
 fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Vec<TimeSeries>> {
-    let ts_column = recordbatch.column_by_name(TIMESTAMP_COLUMN_NAME).context(
+    let ts_column = recordbatch.column_by_name(GREPTIME_TIMESTAMP).context(
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_timestamp column in query result",
         },
@@ -254,7 +250,7 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
         }
     );
 
-    let field_column = recordbatch.column_by_name(FIELD_COLUMN_NAME).context(
+    let field_column = recordbatch.column_by_name(GREPTIME_VALUE).context(
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_value column in query result",
         },
@@ -341,11 +337,11 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
             });
             row_writer::write_tags(table_data, kvs, &mut one_row)?;
             // value
-            row_writer::write_f64(table_data, FIELD_COLUMN_NAME, *value, &mut one_row)?;
+            row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
             // timestamp
             row_writer::write_ts_millis(
                 table_data,
-                TIMESTAMP_COLUMN_NAME,
+                GREPTIME_TIMESTAMP,
                 Some(*timestamp),
                 &mut one_row,
             )?;
@@ -494,15 +490,11 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
-                TIMESTAMP_COLUMN_NAME,
+                GREPTIME_TIMESTAMP,
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(
-                FIELD_COLUMN_NAME,
-                ConcreteDataType::float64_datatype(),
-                true,
-            ),
+            ColumnSchema::new(GREPTIME_VALUE, ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
         ]));
@@ -701,15 +693,11 @@ mod tests {
     fn test_recordbatches_to_timeseries() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
-                TIMESTAMP_COLUMN_NAME,
+                GREPTIME_TIMESTAMP,
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(
-                FIELD_COLUMN_NAME,
-                ConcreteDataType::float64_datatype(),
-                true,
-            ),
+            ColumnSchema::new(GREPTIME_VALUE, ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
         ]));
 

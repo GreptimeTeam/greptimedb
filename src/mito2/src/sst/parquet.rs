@@ -114,8 +114,12 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer = ParquetWriter::new(file_path, metadata, source, object_store.clone());
-        let info = writer.write_all(&write_opts).await.unwrap().unwrap();
+        let mut writer = ParquetWriter::new(file_path, metadata, object_store.clone());
+        let info = writer
+            .write_all(source, &write_opts)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(200, info.num_rows);
         assert!(info.file_size > 0);
         assert_eq!(
@@ -159,11 +163,19 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer =
-            ParquetWriter::new(file_path, metadata.clone(), source, object_store.clone());
-        writer.write_all(&write_opts).await.unwrap().unwrap();
+        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        writer
+            .write_all(source, &write_opts)
+            .await
+            .unwrap()
+            .unwrap();
 
-        let cache = Some(Arc::new(CacheManager::new(0, 0, 64 * 1024 * 1024)));
+        // Enable page cache.
+        let cache = Some(Arc::new(
+            CacheManager::builder()
+                .page_cache_size(64 * 1024 * 1024)
+                .build(),
+        ));
         let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
             .cache(cache.clone());
         for _ in 0..3 {
@@ -220,10 +232,9 @@ mod tests {
 
         // write the sst file and get sst info
         // sst info contains the parquet metadata, which is converted from FileMetaData
-        let mut writer =
-            ParquetWriter::new(file_path, metadata.clone(), source, object_store.clone());
+        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
         let sst_info = writer
-            .write_all(&write_opts)
+            .write_all(source, &write_opts)
             .await
             .unwrap()
             .expect("write_all should return sst info");

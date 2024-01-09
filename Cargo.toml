@@ -58,7 +58,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -180,6 +180,7 @@ operator = { path = "src/operator" }
 partition = { path = "src/partition" }
 plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
+puffin = { path = "src/puffin" }
 query = { path = "src/query" }
 script = { path = "src/script" }
 servers = { path = "src/servers" }

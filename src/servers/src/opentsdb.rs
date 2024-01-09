@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
 use futures::StreamExt;
@@ -31,7 +32,6 @@ use self::codec::DataPoint;
 use crate::error::Result;
 use crate::opentsdb::connection::Connection;
 use crate::opentsdb::handler::Handler;
-use crate::prom_store::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
 use crate::query_handler::OpentsdbProtocolHandlerRef;
 use crate::row_writer::{self, MultiTableData};
 use crate::server::{AbortableStream, BaseTcpServer, Server};
@@ -151,11 +151,11 @@ pub fn data_point_to_grpc_row_insert_requests(
         row_writer::write_tags(table_data, tags.into_iter(), &mut one_row)?;
 
         // value
-        row_writer::write_f64(table_data, FIELD_COLUMN_NAME, value, &mut one_row)?;
+        row_writer::write_f64(table_data, GREPTIME_VALUE, value, &mut one_row)?;
         // timestamp
         row_writer::write_ts_millis(
             table_data,
-            TIMESTAMP_COLUMN_NAME,
+            GREPTIME_TIMESTAMP,
             Some(timestamp),
             &mut one_row,
         )?;

@@ -22,7 +22,7 @@ use prometheus::*;
 
 lazy_static! {
     pub static ref PANIC_COUNTER: IntCounter =
-        register_int_counter!("panic_counter", "panic_counter").unwrap();
+        register_int_counter!("greptime_panic_counter", "panic_counter").unwrap();
 }
 
 pub fn set_panic_hook() {

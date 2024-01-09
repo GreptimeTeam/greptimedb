@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::logging::info;
-use object_store::services::Azblob as AzureBuilder;
+use object_store::services::Azblob;
 use object_store::{util, ObjectStore};
 use secrecy::ExposeSecret;
 use snafu::prelude::*;
@@ -30,7 +30,7 @@ pub(crate) async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Res
         azblob_config.container, &root
     );
 
-    let mut builder = AzureBuilder::default();
+    let mut builder = Azblob::default();
     let _ = builder
         .root(&root)
         .container(&azblob_config.container)

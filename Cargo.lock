@@ -196,7 +196,7 @@ checksum = "8f1f8f5a6f3d50d89e3797d7593a50f96bb2aaa20ca0cc7be1fb673232c91d72"
 
 [[package]]
 name = "api"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "common-base",
  "common-decimal",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "async-trait",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "benchmarks"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "chrono",
@@ -1179,10 +1179,11 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "catalog"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "arc-swap",
+ "arrow",
  "arrow-schema",
  "async-stream",
  "async-trait",
@@ -1450,7 +1451,7 @@ checksum = "702fc72eb24e5a1e48ce58027a675bc24edd52096d5397d4aea7c6dd9eca0bd1"
 
 [[package]]
 name = "client"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "arrow-flight",
@@ -1483,7 +1484,7 @@ dependencies = [
  "session",
  "snafu",
  "substrait 0.17.1",
- "substrait 0.5.0",
+ "substrait 0.5.1",
  "tokio",
  "tokio-stream",
  "tonic 0.10.2",
@@ -1513,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "cmd"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anymap",
  "async-trait",
@@ -1564,7 +1565,7 @@ dependencies = [
  "session",
  "snafu",
  "store-api",
- "substrait 0.5.0",
+ "substrait 0.5.1",
  "table",
  "temp-env",
  "tikv-jemallocator",
@@ -1597,7 +1598,7 @@ checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 
 [[package]]
 name = "common-base"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anymap",
  "bitvec",
@@ -1612,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "common-catalog"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "common-error",
@@ -1623,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "common-config"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "common-base",
  "humantime-serde",
@@ -1636,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "common-datasource"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -1667,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "common-decimal"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "bigdecimal",
@@ -1681,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "common-error"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "snafu",
  "strum 0.25.0",
@@ -1689,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "common-function"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arc-swap",
  "build-data",
@@ -1713,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "common-greptimedb-telemetry"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "common-error",
@@ -1732,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "arrow-flight",
@@ -1762,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc-expr"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "async-trait",
@@ -1781,7 +1782,7 @@ dependencies = [
 
 [[package]]
 name = "common-macro"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arc-swap",
  "common-query",
@@ -1796,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "common-mem-prof"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "common-error",
  "common-macro",
@@ -1809,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "common-meta"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "async-recursion",
@@ -1832,6 +1833,7 @@ dependencies = [
  "derive_builder 0.12.0",
  "etcd-client",
  "futures",
+ "futures-util",
  "humantime-serde",
  "hyper",
  "lazy_static",
@@ -1850,11 +1852,12 @@ dependencies = [
  "tokio",
  "toml 0.8.8",
  "tonic 0.10.2",
+ "uuid",
 ]
 
 [[package]]
 name = "common-procedure"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1878,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure-test"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "common-procedure",
@@ -1886,7 +1889,7 @@ dependencies = [
 
 [[package]]
 name = "common-query"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "async-trait",
@@ -1909,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "common-recordbatch"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "common-error",
  "common-macro",
@@ -1926,7 +1929,7 @@ dependencies = [
 
 [[package]]
 name = "common-runtime"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "common-error",
@@ -1946,7 +1949,7 @@ dependencies = [
 
 [[package]]
 name = "common-telemetry"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "backtrace",
  "common-error",
@@ -1972,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "common-test-util"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "once_cell",
  "rand",
@@ -1981,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "common-time"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "chrono",
@@ -1997,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "common-version"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "build-data",
 ]
@@ -2627,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "datanode"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "arrow-flight",
@@ -2687,7 +2690,7 @@ dependencies = [
  "snafu",
  "sql",
  "store-api",
- "substrait 0.5.0",
+ "substrait 0.5.1",
  "table",
  "tokio",
  "tokio-stream",
@@ -2701,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "datatypes"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -3162,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "file-engine"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "async-trait",
@@ -3293,7 +3296,7 @@ checksum = "6c2141d6d6c8512188a7891b4b01590a45f6dac67afb4f255c4124dbb86d4eaa"
 
 [[package]]
 name = "frontend"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "arc-swap",
@@ -3357,7 +3360,7 @@ dependencies = [
  "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef)",
  "store-api",
  "strfmt",
- "substrait 0.5.0",
+ "substrait 0.5.1",
  "table",
  "tokio",
  "toml 0.8.8",
@@ -4011,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "index"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
@@ -4491,12 +4494,13 @@ checksum = "b5e6163cb8c49088c2c36f57875e58ccd8c87c7427f7fbd50ea6710b2f3f2e8f"
 
 [[package]]
 name = "log-store"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-stream",
  "async-trait",
  "byteorder",
  "bytes",
+ "chrono",
  "common-base",
  "common-config",
  "common-error",
@@ -4505,13 +4509,16 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
+ "common-time",
  "dashmap",
  "futures",
  "futures-util",
+ "itertools 0.10.5",
  "protobuf",
  "protobuf-build",
  "raft-engine",
  "rand",
+ "rand_distr",
  "rskafka",
  "serde",
  "serde_json",
@@ -4519,6 +4526,7 @@ dependencies = [
  "store-api",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -4765,7 +4773,7 @@ dependencies = [
 
 [[package]]
 name = "meta-client"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "async-trait",
@@ -4795,7 +4803,7 @@ dependencies = [
 
 [[package]]
 name = "meta-srv"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anymap",
  "api",
@@ -4873,7 +4881,7 @@ dependencies = [
 
 [[package]]
 name = "metric-engine"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "aquamarine",
@@ -4944,7 +4952,7 @@ dependencies = [
 
 [[package]]
 name = "mito2"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anymap",
  "api",
@@ -4987,8 +4995,10 @@ dependencies = [
  "object-store",
  "parquet",
  "paste",
+ "pin-project",
  "prometheus",
  "prost 0.12.3",
+ "puffin",
  "regex",
  "serde",
  "serde_json",
@@ -5444,7 +5454,7 @@ dependencies = [
 
 [[package]]
 name = "object-store"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5500,9 +5510,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.40.0"
+version = "0.44.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddba7299bab261d3ae2f37617fb7f45b19ed872752bb4e22cf93a69d979366c5"
+checksum = "bc0ad72f7b44ca4ae59d27ea151fdc6f37305cf6efe099bdaedbb30ec34579c0"
 dependencies = [
  "anyhow",
  "async-compat",
@@ -5513,15 +5523,15 @@ dependencies = [
  "chrono",
  "flagset",
  "futures",
+ "getrandom",
  "http",
- "hyper",
  "log",
  "md-5",
  "once_cell",
  "parking_lot 0.12.1",
  "percent-encoding",
  "pin-project",
- "quick-xml 0.29.0",
+ "quick-xml 0.30.0",
  "reqsign",
  "reqwest",
  "serde",
@@ -5689,7 +5699,7 @@ dependencies = [
 
 [[package]]
 name = "operator"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "async-trait",
@@ -5733,7 +5743,7 @@ dependencies = [
  "sql",
  "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef)",
  "store-api",
- "substrait 0.5.0",
+ "substrait 0.5.1",
  "table",
  "tokio",
  "tonic 0.10.2",
@@ -5964,7 +5974,7 @@ dependencies = [
 
 [[package]]
 name = "partition"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "async-trait",
@@ -6283,7 +6293,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "auth",
  "common-base",
@@ -6541,7 +6551,7 @@ dependencies = [
 
 [[package]]
 name = "promql"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ahash 0.8.6",
  "async-recursion",
@@ -6551,6 +6561,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-macro",
+ "common-query",
  "common-recordbatch",
  "common-telemetry",
  "datafusion",
@@ -6751,7 +6762,7 @@ dependencies = [
 
 [[package]]
 name = "puffin"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "bitflags 2.4.1",
@@ -6862,7 +6873,7 @@ dependencies = [
 
 [[package]]
 name = "query"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ahash 0.8.6",
  "api",
@@ -6920,7 +6931,7 @@ dependencies = [
  "stats-cli",
  "store-api",
  "streaming-stats",
- "substrait 0.5.0",
+ "substrait 0.5.1",
  "table",
  "tokio",
  "tokio-stream",
@@ -6937,9 +6948,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.29.0"
+version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81b9228215d82c7b61490fec1de287136b5de6f5700f6e58ea9ad61a7964ca51"
+checksum = "eff6510e86862b57b210fd8cbe8ed3f0d7d600b9c2863cd4549a2e033c66e956"
 dependencies = [
  "memchr",
  "serde",
@@ -8190,7 +8201,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "script"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "arc-swap",
@@ -8450,7 +8461,7 @@ dependencies = [
 
 [[package]]
 name = "servers"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "aide",
  "api",
@@ -8546,7 +8557,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "arc-swap",
@@ -8807,7 +8818,7 @@ dependencies = [
 
 [[package]]
 name = "sql"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "common-base",
@@ -8859,7 +8870,7 @@ dependencies = [
 
 [[package]]
 name = "sqlness-runner"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "clap 4.4.11",
@@ -9066,7 +9077,7 @@ dependencies = [
 
 [[package]]
 name = "store-api"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "aquamarine",
@@ -9206,7 +9217,7 @@ dependencies = [
 
 [[package]]
 name = "substrait"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -9354,7 +9365,7 @@ dependencies = [
 
 [[package]]
 name = "table"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anymap",
  "async-trait",
@@ -9466,7 +9477,7 @@ checksum = "3369f5ac52d5eb6ab48c6b4ffdc8efbcad6b89c765749064ba298f2c68a16a76"
 
 [[package]]
 name = "tests-integration"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "api",
  "async-trait",
@@ -9522,7 +9533,7 @@ dependencies = [
  "sql",
  "sqlx",
  "store-api",
- "substrait 0.5.0",
+ "substrait 0.5.1",
  "table",
  "tempfile",
  "time",

@@ -19,17 +19,17 @@ use prometheus::*;
 
 lazy_static! {
     pub static ref METRIC_CATALOG_MANAGER_CATALOG_COUNT: IntGauge =
-        register_int_gauge!("catalog_catalog_count", "catalog catalog count").unwrap();
+        register_int_gauge!("greptime_catalog_catalog_count", "catalog catalog count").unwrap();
     pub static ref METRIC_CATALOG_MANAGER_SCHEMA_COUNT: IntGauge =
-        register_int_gauge!("catalog_schema_count", "catalog schema count").unwrap();
+        register_int_gauge!("greptime_catalog_schema_count", "catalog schema count").unwrap();
     pub static ref METRIC_CATALOG_MANAGER_TABLE_COUNT: IntGaugeVec = register_int_gauge_vec!(
-        "catalog_table_count",
+        "greptime_catalog_table_count",
         "catalog table count",
         &[METRIC_DB_LABEL]
     )
     .unwrap();
     pub static ref METRIC_CATALOG_KV_REMOTE_GET: Histogram =
-        register_histogram!("catalog_kv_get_remote", "catalog kv get remote").unwrap();
+        register_histogram!("greptime_catalog_kv_get_remote", "catalog kv get remote").unwrap();
     pub static ref METRIC_CATALOG_KV_GET: Histogram =
-        register_histogram!("catalog_kv_get", "catalog kv get").unwrap();
+        register_histogram!("greptime_catalog_kv_get", "catalog kv get").unwrap();
 }

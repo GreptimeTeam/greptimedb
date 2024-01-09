@@ -305,7 +305,7 @@ impl HeartbeatTask {
     }
 
     async fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
-        let regions = region_server.opened_regions();
+        let regions = region_server.reportable_regions();
 
         let mut region_stats = Vec::new();
         for stat in regions {

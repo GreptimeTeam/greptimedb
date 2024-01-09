@@ -21,6 +21,7 @@ body:
         - Locking issue
         - Performance issue
         - Unexpected error
+        - User Experience
         - Other
     validations:
       required: true
@@ -33,9 +34,14 @@ body:
       multiple: true
       options:
         - Standalone mode
+        - Distributed Cluster
+        - Storage Engine
+        - Query Engine
+        - Table Engine
+        - Write Protocols
+        - MetaSrv
         - Frontend
         - Datanode
-        - Meta
         - Other
     validations:
       required: true
@@ -74,6 +80,17 @@ body:
         Windows 10 x64, Ubuntu 21.04 x64, Mac OS X 10.5 ARM, Rasperry
         Pi i386, etc.
       placeholder: "Ubuntu 21.04 x64"
+    validations:
+      required: true
+
+  - type: input
+    id: greptimedb
+    attributes:
+      label: What version of GreptimeDB did you use?
+      description: |
+        Please provide the version of GreptimeDB. For example:
+        0.5.1 etc. You can get it by executing command line `greptime --version`.
+      placeholder: "0.5.1"
     validations:
       required: true
 

@@ -29,14 +29,16 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::TableId;
+use store_api::storage::{ScanRequest, TableId};
 
 use super::{InformationTable, COLUMNS};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
+use crate::information_schema::Predicates;
 use crate::CatalogManager;
 
 pub(super) struct InformationSchemaColumns {
@@ -102,14 +104,14 @@ impl InformationTable for InformationSchemaColumns {
         self.schema.clone()
     }
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_columns()
+                    .make_columns(Some(request))
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)
@@ -165,12 +167,13 @@ impl InformationSchemaColumnsBuilder {
     }
 
     /// Construct the `information_schema.columns` virtual table
-    async fn make_columns(&mut self) -> Result<RecordBatch> {
+    async fn make_columns(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
             if !catalog_manager
@@ -201,6 +204,7 @@ impl InformationSchemaColumnsBuilder {
                         };
 
                         self.add_column(
+                            &predicates,
                             &catalog_name,
                             &schema_name,
                             &table_name,
@@ -219,6 +223,7 @@ impl InformationSchemaColumnsBuilder {
 
     fn add_column(
         &mut self,
+        predicates: &Predicates,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
@@ -226,6 +231,19 @@ impl InformationSchemaColumnsBuilder {
         column_schema: &ColumnSchema,
     ) {
         let data_type = &column_schema.data_type.name();
+
+        let row = [
+            (TABLE_CATALOG, &Value::from(catalog_name)),
+            (TABLE_SCHEMA, &Value::from(schema_name)),
+            (TABLE_NAME, &Value::from(table_name)),
+            (COLUMN_NAME, &Value::from(column_schema.name.as_str())),
+            (DATA_TYPE, &Value::from(data_type.as_str())),
+            (SEMANTIC_TYPE, &Value::from(semantic_type)),
+        ];
+
+        if !predicates.eval(&row) {
+            return;
+        }
 
         self.catalog_names.push(Some(catalog_name));
         self.schema_names.push(Some(schema_name));
@@ -279,7 +297,7 @@ impl DfPartitionStream for InformationSchemaColumns {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_columns()
+                    .make_columns(None)
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)

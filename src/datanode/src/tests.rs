@@ -207,4 +207,8 @@ impl RegionEngine for MockRegionEngine {
         }
         Some(RegionRole::Leader)
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }

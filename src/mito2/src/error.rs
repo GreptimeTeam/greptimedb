@@ -429,18 +429,61 @@ pub enum Error {
 
     #[snafu(display("Failed to build index applier"))]
     BuildIndexApplier {
-        #[snafu(source)]
         source: index::inverted_index::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to convert value"))]
     ConvertValue {
-        #[snafu(source)]
         source: datatypes::error::Error,
         location: Location,
     },
+    #[snafu(display("Failed to apply index"))]
+    ApplyIndex {
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
 
+    #[snafu(display("Failed to read puffin metadata"))]
+    PuffinReadMetadata {
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read puffin blob"))]
+    PuffinReadBlob {
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
+    PuffinBlobTypeNotFound {
+        blob_type: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to clean dir {dir}"))]
+    CleanDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid config, {reason}"))]
+    InvalidConfig { reason: String, location: Location },
+
+    #[snafu(display(
+        "Stale log entry found during replay, region: {}, flushed: {}, replayed: {}",
+        region_id,
+        flushed_entry_id,
+        unexpected_entry_id
+    ))]
+    StaleLogEntry {
+        region_id: RegionId,
+        flushed_entry_id: u64,
+        unexpected_entry_id: u64,
+    },
     #[snafu(display(
         "Verify checksum failed! calculated: {}, expected: {}",
         calculated,
@@ -484,6 +527,7 @@ impl ErrorExt for Error {
             | RegionCorrupted { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. }
+            | PuffinBlobTypeNotFound { .. }
             | UnexpectedReplay { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
@@ -529,8 +573,14 @@ impl ErrorExt for Error {
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
-            BuildIndexApplier { source, .. } => source.status_code(),
             ConvertValue { source, .. } => source.status_code(),
+            BuildIndexApplier { source, .. } | ApplyIndex { source, .. } => source.status_code(),
+            PuffinReadMetadata { source, .. } | PuffinReadBlob { source, .. } => {
+                source.status_code()
+            }
+            CleanDir { .. } => StatusCode::Unexpected,
+            InvalidConfig { .. } => StatusCode::InvalidArguments,
+            StaleLogEntry { .. } => StatusCode::Unexpected,
             VerifyChecksum { .. } => StatusCode::Unexpected,
         }
     }

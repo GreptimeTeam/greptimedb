@@ -11,6 +11,7 @@ testing = []
 api.workspace = true
 arc-swap = "1.0"
 arrow-schema.workspace = true
+arrow.workspace = true
 async-stream.workspace = true
 async-trait = "0.1"
 build-data = "0.1"
