@@ -14,9 +14,11 @@
 
 //! A cache for files.
 
+use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 use std::time::Instant;
 
+use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{info, warn};
 use futures::{FutureExt, TryStreamExt};
@@ -31,6 +33,7 @@ use crate::cache::FILE_TYPE;
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
+use crate::sst::parquet::helper::{fetch_ranges_concurrent, fetch_ranges_seq};
 
 /// Subdirectory of cached files.
 const FILE_DIR: &str = "files/";
@@ -127,6 +130,40 @@ impl FileCache {
         self.memory_index.remove(&key).await;
         CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
         None
+    }
+
+    /// Reads ranges from the cache.
+    pub(crate) async fn read_ranges(
+        &self,
+        key: IndexKey,
+        ranges: &[Range<u64>],
+    ) -> Option<Vec<Bytes>> {
+        if !self.memory_index.contains_key(&key) {
+            CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+            return None;
+        }
+
+        let file_path = self.cache_file_path(key);
+        // In most cases, it will enter `fetch_ranges_seq`,
+        // because FileCache is normally based on local file system, which supports blocking read.
+        let bytes_result = if self.local_store.info().full_capability().blocking {
+            fetch_ranges_seq(&file_path, self.local_store.clone(), ranges).await
+        } else {
+            fetch_ranges_concurrent(&file_path, self.local_store.clone(), ranges).await
+        };
+
+        match bytes_result {
+            Ok(bytes) => {
+                CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
+                Some(bytes)
+            }
+            Err(_) => {
+                // We removes the file from the index.
+                self.memory_index.remove(&key).await;
+                CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+                None
+            }
+        }
     }
 
     /// Removes a file from the cache explicitly.
