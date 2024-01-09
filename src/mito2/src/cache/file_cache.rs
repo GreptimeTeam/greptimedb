@@ -213,7 +213,7 @@ pub(crate) type IndexKey = (RegionId, FileId);
 #[derive(Debug, Clone)]
 pub(crate) struct IndexValue {
     /// Size of the file in bytes.
-    pub file_size: u32,
+    pub(crate) file_size: u32,
 }
 
 /// Generates the path to the cached file.

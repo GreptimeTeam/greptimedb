@@ -101,6 +101,11 @@ impl WriteCache {
         timer.stop_and_record();
 
         // Upload sst file to remote object store.
+        if sst_info.is_none() {
+            // No data need to upload.
+            return Ok(None);
+        }
+
         let timer = FLUSH_ELAPSED.with_label_values(&["upload"]).start_timer();
 
         let reader = self
@@ -122,10 +127,10 @@ impl WriteCache {
             .await
             .context(error::UploadSstSnafu { region_id, file_id })?;
 
-        UPLOAD_BYTES_TOTAL.inc_by(bytes_written);
-
         // Must close to upload all data.
         writer.close().await.context(error::OpenDalSnafu)?;
+
+        UPLOAD_BYTES_TOTAL.inc_by(bytes_written);
 
         debug!(
             "Successfully upload file to remote, region: {}, file: {}, upload_path: {}, cost: {:?}s",
