@@ -135,8 +135,9 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC),
         &ConcreteDataType::Duration(_)
         | &ConcreteDataType::List(_)
-        | &ConcreteDataType::Dictionary(_) => error::InternalSnafu {
-            err_msg: format!("not implemented for column datatype {origin:?}"),
+        | &ConcreteDataType::Dictionary(_) => error::UnsupportedDataTypeSnafu {
+            data_type: origin,
+            reason: "not implemented",
         }
         .fail(),
     }
