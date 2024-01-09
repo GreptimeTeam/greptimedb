@@ -14,7 +14,6 @@
 
 use std::any::Any;
 
-use common_config::wal::KafkaWalTopic;
 use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
@@ -119,7 +118,7 @@ pub enum Error {
         error
     ))]
     GetClient {
-        topic: KafkaWalTopic,
+        topic: String,
         location: Location,
         error: String,
     },
@@ -140,7 +139,7 @@ pub enum Error {
         limit,
     ))]
     ProduceRecord {
-        topic: KafkaWalTopic,
+        topic: String,
         size: usize,
         limit: usize,
         location: Location,

@@ -19,12 +19,11 @@ use rand::Rng;
 use snafu::ensure;
 
 use crate::error::{EmptyTopicPoolSnafu, Result};
-use crate::wal::kafka::topic::Topic;
 
 /// Controls topic selection.
 pub(crate) trait TopicSelector: Send + Sync {
     /// Selects a topic from the topic pool.
-    fn select<'a>(&self, topic_pool: &'a [Topic]) -> Result<&'a Topic>;
+    fn select<'a>(&self, topic_pool: &'a [String]) -> Result<&'a String>;
 }
 
 /// Arc wrapper of TopicSelector.
@@ -48,7 +47,7 @@ impl RoundRobinTopicSelector {
 }
 
 impl TopicSelector for RoundRobinTopicSelector {
-    fn select<'a>(&self, topic_pool: &'a [Topic]) -> Result<&'a Topic> {
+    fn select<'a>(&self, topic_pool: &'a [String]) -> Result<&'a String> {
         ensure!(!topic_pool.is_empty(), EmptyTopicPoolSnafu);
         let which = self.cursor.fetch_add(1, Ordering::Relaxed) % topic_pool.len();
         Ok(&topic_pool[which])

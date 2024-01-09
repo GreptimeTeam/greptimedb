@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::wal::kafka::KafkaConfig;
-pub use crate::wal::kafka::Topic as KafkaWalTopic;
 pub use crate::wal::options_allocator::{
     allocate_region_wal_options, WalOptionsAllocator, WalOptionsAllocatorRef,
 };

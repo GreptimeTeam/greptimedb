@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic};
+use common_config::wal::KafkaConfig;
 use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
 use rskafka::client::producer::aggregator::RecordAggregator;
 use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
@@ -67,7 +67,7 @@ pub(crate) struct ClientManager {
     client_factory: RsKafkaClient,
     /// A pool maintaining a collection of clients.
     /// Key: a topic. Value: the associated client of the topic.
-    client_pool: RwLock<HashMap<Topic, Client>>,
+    client_pool: RwLock<HashMap<String, Client>>,
 }
 
 impl ClientManager {
@@ -97,7 +97,7 @@ impl ClientManager {
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will
     /// be created and returned.
-    pub(crate) async fn get_or_insert(&self, topic: &Topic) -> Result<Client> {
+    pub(crate) async fn get_or_insert(&self, topic: &String) -> Result<Client> {
         {
             let client_pool = self.client_pool.read().await;
             if let Some(client) = client_pool.get(topic) {
@@ -116,7 +116,7 @@ impl ClientManager {
         }
     }
 
-    async fn try_create_client(&self, topic: &Topic) -> Result<Client> {
+    async fn try_create_client(&self, topic: &String) -> Result<Client> {
         // Sets to Retry to retry connecting if the kafka cluter replies with an UnknownTopic error.
         // That's because the topic is believed to exist as the metasrv is expected to create required topics upon start.
         // The reconnecting won't stop until succeed or a different error returns.
@@ -147,7 +147,7 @@ mod tests {
         test_name: &str,
         num_topics: usize,
         broker_endpoints: Vec<String>,
-    ) -> (ClientManager, Vec<Topic>) {
+    ) -> (ClientManager, Vec<String>) {
         let topics = create_topics(
             num_topics,
             |i| format!("{test_name}_{}_{}", i, uuid::Uuid::new_v4()),
