@@ -22,9 +22,11 @@ use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::Trac
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::QueryContextRef;
+use snafu::OptionExt;
 use tonic::{Request, Response, Status};
 
+use crate::error;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 pub struct OtlpService {
@@ -48,7 +50,7 @@ impl TraceService for OtlpService {
         let ctx = extensions
             .get::<QueryContextRef>()
             .cloned()
-            .unwrap_or_else(|| QueryContextBuilder::default().build());
+            .context(error::MissingQueryContextSnafu)?;
 
         let res = self.handler.traces(req, ctx).await?;
 
@@ -67,7 +69,7 @@ impl MetricsService for OtlpService {
         let ctx = extensions
             .get::<QueryContextRef>()
             .cloned()
-            .unwrap_or_else(|| QueryContextBuilder::default().build());
+            .context(error::MissingQueryContextSnafu)?;
 
         let res = self.handler.metrics(req, ctx).await?;
 
