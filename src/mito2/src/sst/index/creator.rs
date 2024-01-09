@@ -59,7 +59,7 @@ pub struct SstIndexCreator {
     /// ID of the SST file.
     sst_file_id: FileId,
 
-    /// The store to write intermediate files and index files.
+    /// The store to write index files.
     store: InstrumentedStore,
     /// The index creator.
     index_creator: Box<dyn InvertedIndexCreator>,
@@ -84,12 +84,11 @@ impl SstIndexCreator {
         region_dir: String,
         sst_file_id: FileId,
         metadata: &RegionMetadataRef,
-        object_store: ObjectStore,
+        index_store: ObjectStore,
+        intermediate_store: ObjectStore, // prefer to use local store
         memory_usage_threshold: Option<usize>,
         row_group_size: NonZeroUsize,
     ) -> Self {
-        let store = InstrumentedStore::new(object_store);
-
         // `memory_usage_threshold` is the total memory usage threshold of the index creation,
         // so we need to divide it by the number of columns
         let memory_threshold = memory_usage_threshold.map(|threshold| {
@@ -97,7 +96,7 @@ impl SstIndexCreator {
         });
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&region_dir, &sst_file_id),
-            store.clone(),
+            InstrumentedStore::new(intermediate_store),
         ));
         let sorter = ExternalSorter::factory(temp_file_provider.clone() as _, memory_threshold);
         let index_creator = Box::new(SortIndexCreator::new(sorter, row_group_size));
@@ -106,7 +105,7 @@ impl SstIndexCreator {
         Self {
             region_dir,
             sst_file_id,
-            store,
+            store: InstrumentedStore::new(index_store),
             codec,
             index_creator,
             temp_file_provider,
