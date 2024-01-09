@@ -38,6 +38,12 @@ pub enum Error {
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
 
+    #[snafu(display("Unsupported data type: {}, reason: {}", data_type, reason))]
+    UnsupportedDataType {
+        data_type: ConcreteDataType,
+        reason: String,
+    },
+
     #[snafu(display("Internal IO error"))]
     InternalIo {
         #[snafu(source)]
@@ -445,6 +451,8 @@ impl ErrorExt for Error {
             | CatalogError { .. }
             | GrpcReflectionService { .. }
             | BuildHttpResponse { .. } => StatusCode::Internal,
+
+            UnsupportedDataType { .. } => StatusCode::Unsupported,
 
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
