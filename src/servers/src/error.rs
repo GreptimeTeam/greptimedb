@@ -421,6 +421,9 @@ pub enum Error {
 
     #[snafu(display("Failed to convert Mysql value, error: {}", err_msg))]
     MysqlValueConversion { err_msg: String, location: Location },
+
+    #[snafu(display("Missing query context"))]
+    MissingQueryContext { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -476,6 +479,7 @@ impl ErrorExt for Error {
             | TimePrecision { .. }
             | UrlDecode { .. }
             | IncompatibleSchema { .. }
+            | MissingQueryContext { .. }
             | MysqlValueConversion { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
