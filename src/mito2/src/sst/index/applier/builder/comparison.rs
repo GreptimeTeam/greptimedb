@@ -114,7 +114,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(lit) = Self::nonnull_lit(literal) else {
             return Ok(());
         };
-        let Some(data_type) = self.tag_column_type(column_name)? else {
+        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
             return Ok(());
         };
 
@@ -122,7 +122,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             range: range_builder(Self::encode_lit(lit, data_type)?),
         });
 
-        self.add_predicate(column_name, predicate);
+        self.add_predicate(column_id, predicate);
         Ok(())
     }
 }
@@ -230,7 +230,7 @@ mod tests {
             builder.collect_comparison_expr(left, op, right).unwrap();
         }
 
-        let predicates = builder.output.get("a").unwrap();
+        let predicates = builder.output.get(&1).unwrap();
         assert_eq!(predicates.len(), cases.len());
         for ((_, expected), actual) in cases.into_iter().zip(predicates) {
             assert_eq!(

@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::io::Error as IoError;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -167,6 +167,12 @@ pub enum Error {
         total_row_count: usize,
         expected_row_count: usize,
     },
+
+    #[snafu(display("External error"))]
+    External {
+        source: BoxedError,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -197,6 +203,8 @@ impl ErrorExt for Error {
             | FstInsert { .. }
             | InconsistentRowCount { .. }
             | IndexNotFound { .. } => StatusCode::InvalidArguments,
+
+            External { source, .. } => source.status_code(),
         }
     }
 

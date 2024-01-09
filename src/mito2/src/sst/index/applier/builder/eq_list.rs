@@ -31,14 +31,14 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
             return Ok(());
         };
-        let Some(data_type) = self.tag_column_type(column_name)? else {
+        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
             return Ok(());
         };
 
         let predicate = Predicate::InList(InListPredicate {
             list: HashSet::from_iter([Self::encode_lit(lit, data_type)?]),
         });
-        self.add_predicate(column_name, predicate);
+        self.add_predicate(column_id, predicate);
         Ok(())
     }
 
@@ -59,7 +59,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
             return Ok(());
         };
-        let Some(data_type) = self.tag_column_type(column_name)? else {
+        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
             return Ok(());
         };
 
@@ -68,7 +68,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
         if Self::collect_eq_list_inner(column_name, &data_type, or_list, &mut inlist)? {
             let predicate = Predicate::InList(InListPredicate { list: inlist });
-            self.add_predicate(column_name, predicate);
+            self.add_predicate(column_id, predicate);
         }
 
         Ok(())
@@ -142,7 +142,7 @@ mod tests {
             .collect_eq(&string_lit("bar"), &tag_column())
             .unwrap();
 
-        let predicates = builder.output.get("a").unwrap();
+        let predicates = builder.output.get(&1).unwrap();
         assert_eq!(predicates.len(), 2);
         assert_eq!(
             predicates[0],
@@ -227,7 +227,7 @@ mod tests {
 
         builder.collect_or_eq_list(&eq_expr, &or_eq_list).unwrap();
 
-        let predicates = builder.output.get("a").unwrap();
+        let predicates = builder.output.get(&1).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

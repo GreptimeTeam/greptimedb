@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use object_store::util;
+use uuid::Uuid;
 
 use crate::sst::file::FileId;
 
@@ -29,8 +30,48 @@ pub fn index_file_path(region_dir: &str, sst_file_id: FileId) -> String {
     util::join_path(&dir, &sst_file_id.as_puffin())
 }
 
+/// `IntermediateLocation` produces paths for intermediate files
+/// during external sorting.
+#[derive(Debug, Clone)]
+pub struct IntermediateLocation {
+    root_path: String,
+}
+
+impl IntermediateLocation {
+    /// Create a new `IntermediateLocation`. Set the root directory to
+    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/`, incorporating
+    /// uuid to differentiate active sorting files from orphaned data due to unexpected
+    /// process termination.
+    pub fn new(region_dir: &str, sst_file_id: &FileId) -> Self {
+        let uuid = Uuid::new_v4();
+        let child = format!("index/__intermediate/{sst_file_id}/{uuid}/");
+        Self {
+            root_path: util::join_path(region_dir, &child),
+        }
+    }
+
+    /// Returns the root directory of the intermediate files
+    pub fn root_path(&self) -> &str {
+        &self.root_path
+    }
+
+    /// Returns the path of the directory for intermediate files associated with a column:
+    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/{column_id}/`
+    pub fn column_path(&self, column_id: &str) -> String {
+        util::join_path(&self.root_path, &format!("{column_id}/"))
+    }
+
+    /// Returns the path of the intermediate file with the given id for a column:
+    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/{column_id}/{im_file_id}.im`
+    pub fn file_path(&self, column_id: &str, im_file_id: &str) -> String {
+        util::join_path(&self.column_path(column_id), &format!("{im_file_id}.im"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
+
     use super::*;
 
     #[test]
@@ -48,6 +89,35 @@ mod tests {
         assert_eq!(
             index_file_path("region_dir", file_id),
             format!("region_dir/index/{file_id}.puffin")
+        );
+    }
+
+    #[test]
+    fn test_intermediate_location() {
+        let sst_file_id = FileId::random();
+        let location = IntermediateLocation::new("region_dir", &sst_file_id);
+
+        let re = Regex::new(&format!(
+            "region_dir/index/__intermediate/{sst_file_id}/{}/",
+            r"\w{8}-\w{4}-\w{4}-\w{4}-\w{12}"
+        ))
+        .unwrap();
+        assert!(re.is_match(location.root_path()));
+
+        let uuid = location.root_path().split('/').nth(4).unwrap();
+
+        let column_id = "1";
+        assert_eq!(
+            location.column_path(column_id),
+            format!("region_dir/index/__intermediate/{sst_file_id}/{uuid}/{column_id}/")
+        );
+
+        let im_file_id = "000000000010";
+        assert_eq!(
+            location.file_path(column_id, im_file_id),
+            format!(
+                "region_dir/index/__intermediate/{sst_file_id}/{uuid}/{column_id}/{im_file_id}.im"
+            )
         );
     }
 }
