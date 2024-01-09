@@ -18,9 +18,7 @@ pub mod raft_engine;
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 
-pub use crate::wal::kafka::{
-    KafkaConfig, KafkaOptions as KafkaWalOptions, StandaloneKafkaConfig, Topic as KafkaWalTopic,
-};
+pub use crate::wal::kafka::{KafkaConfig, KafkaOptions as KafkaWalOptions, StandaloneKafkaConfig};
 pub use crate::wal::raft_engine::RaftEngineConfig;
 
 /// An encoded wal options will be wrapped into a (WAL_OPTIONS_KEY, encoded wal options) key-value pair

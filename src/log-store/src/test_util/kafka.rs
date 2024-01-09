@@ -15,7 +15,6 @@
 use std::sync::atomic::{AtomicU64 as AtomicEntryId, Ordering};
 use std::sync::Mutex;
 
-use common_meta::wal::KafkaWalTopic as Topic;
 use rand::distributions::Alphanumeric;
 use rand::rngs::ThreadRng;
 use rand::{thread_rng, Rng};
@@ -29,7 +28,7 @@ pub async fn create_topics<F>(
     num_topics: usize,
     decorator: F,
     broker_endpoints: &[String],
-) -> Vec<Topic>
+) -> Vec<String>
 where
     F: Fn(usize) -> String,
 {
