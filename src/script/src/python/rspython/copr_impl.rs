@@ -221,7 +221,14 @@ pub(crate) fn init_interpreter() -> Rc<Interpreter> {
                     init_greptime_builtins("greptime", vm);
                     init_data_frame("data_frame", vm);
                 }));
-                info!("Initialized Python interpreter.");
+                interpreter
+                    .enter(|vm| {
+                        let sys = vm.sys_module.clone();
+                        let version = sys.get_attr("version", vm)?.str(vm)?;
+                        info!("Initialized RustPython interpreter {version}");
+                        Ok::<(), PyBaseExceptionRef>(())
+                    })
+                    .expect("fail to display RustPython interpreter version");
                 interpreter
             })
             .clone()
