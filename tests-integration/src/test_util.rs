@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod kafka_image;
+
 use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;

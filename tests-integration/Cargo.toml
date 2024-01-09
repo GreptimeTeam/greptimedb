@@ -62,6 +62,7 @@ sqlx = { version = "0.6", features = [
 substrait.workspace = true
 table.workspace = true
 tempfile.workspace = true
+testcontainers = "0.15.0"
 time = "0.3"
 tokio.workspace = true
 tonic.workspace = true
@@ -77,6 +78,7 @@ opentelemetry-proto.workspace = true
 partition.workspace = true
 paste.workspace = true
 prost.workspace = true
+rskafka.workspace = true
 script.workspace = true
 session = { workspace = true, features = ["testing"] }
 store-api.workspace = true

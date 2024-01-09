@@ -1986,10 +1986,7 @@ version = "0.5.0"
 dependencies = [
  "once_cell",
  "rand",
- "rskafka",
  "tempfile",
- "testcontainers",
- "tokio",
 ]
 
 [[package]]
@@ -9596,6 +9593,7 @@ dependencies = [
  "prost 0.12.3",
  "query",
  "rand",
+ "rskafka",
  "rstest",
  "rstest_reuse",
  "script",
@@ -9611,6 +9609,7 @@ dependencies = [
  "substrait 0.5.0",
  "table",
  "tempfile",
+ "testcontainers",
  "time",
  "tokio",
  "tokio-postgres",

@@ -20,7 +20,6 @@ use std::sync::LazyLock;
 
 pub mod ports;
 pub mod temp_dir;
-pub mod wal;
 
 // Rust is working on an env possibly named `CARGO_WORKSPACE_DIR` to find the root path to the
 // workspace, see https://github.com/rust-lang/cargo/issues/3946.
