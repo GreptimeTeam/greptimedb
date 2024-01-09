@@ -43,10 +43,10 @@ pub(crate) struct TempFileProvider {
 impl ExternalTempFileProvider for TempFileProvider {
     async fn create(
         &self,
-        column_name: &str,
+        column_id: &str,
         file_id: &str,
     ) -> IndexResult<Box<dyn AsyncWrite + Unpin + Send>> {
-        let path = self.location.file_path(column_name, file_id);
+        let path = self.location.file_path(column_id, file_id);
         let writer = self
             .store
             .writer(
@@ -63,9 +63,9 @@ impl ExternalTempFileProvider for TempFileProvider {
 
     async fn read_all(
         &self,
-        column_name: &str,
+        column_id: &str,
     ) -> IndexResult<Vec<Box<dyn AsyncRead + Unpin + Send>>> {
-        let column_path = self.location.column_path(column_name);
+        let column_path = self.location.column_path(column_id);
         let entries = self
             .store
             .list(&column_path)

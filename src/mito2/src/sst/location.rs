@@ -56,15 +56,15 @@ impl IntermediateLocation {
     }
 
     /// Returns the path of the directory for intermediate files associated with a column:
-    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/{column_name}/`
-    pub fn column_path(&self, column_name: &str) -> String {
-        util::join_path(&self.root_path, &format!("{column_name}/"))
+    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/{column_id}/`
+    pub fn column_path(&self, column_id: &str) -> String {
+        util::join_path(&self.root_path, &format!("{column_id}/"))
     }
 
     /// Returns the path of the intermediate file with the given id for a column:
-    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/{column_name}/{im_file_id}.im`
-    pub fn file_path(&self, column_name: &str, im_file_id: &str) -> String {
-        util::join_path(&self.column_path(column_name), &format!("{im_file_id}.im"))
+    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/{column_id}/{im_file_id}.im`
+    pub fn file_path(&self, column_id: &str, im_file_id: &str) -> String {
+        util::join_path(&self.column_path(column_id), &format!("{im_file_id}.im"))
     }
 }
 
@@ -106,17 +106,17 @@ mod tests {
 
         let uuid = location.root_path().split('/').nth(4).unwrap();
 
-        let column_name = "column_name";
+        let column_id = "1";
         assert_eq!(
-            location.column_path(column_name),
-            format!("region_dir/index/__intermediate/{sst_file_id}/{uuid}/{column_name}/")
+            location.column_path(column_id),
+            format!("region_dir/index/__intermediate/{sst_file_id}/{uuid}/{column_id}/")
         );
 
         let im_file_id = "000000000010";
         assert_eq!(
-            location.file_path(column_name, im_file_id),
+            location.file_path(column_id, im_file_id),
             format!(
-                "region_dir/index/__intermediate/{sst_file_id}/{uuid}/{column_name}/{im_file_id}.im"
+                "region_dir/index/__intermediate/{sst_file_id}/{uuid}/{column_id}/{im_file_id}.im"
             )
         );
     }

@@ -37,12 +37,12 @@ impl IndexValueCodec {
     }
 }
 
-type ColumnName = String;
+type ColumnId = String;
 
-/// Decodes primary key values into their corresponding column names, data types and values.
+/// Decodes primary key values into their corresponding column ids, data types and values.
 pub struct IndexValuesCodec {
-    /// The tag column names.
-    column_names: Vec<ColumnName>,
+    /// The tag column ids.
+    column_ids: Vec<ColumnId>,
     /// The data types of tag columns.
     fields: Vec<SortField>,
     /// The decoder for the primary key.
@@ -52,10 +52,10 @@ pub struct IndexValuesCodec {
 impl IndexValuesCodec {
     /// Creates a new `IndexValuesCodec` from a list of `ColumnMetadata` of tag columns.
     pub fn from_tag_columns<'a>(tag_columns: impl Iterator<Item = &'a ColumnMetadata>) -> Self {
-        let (column_names, fields): (Vec<_>, Vec<_>) = tag_columns
+        let (column_ids, fields): (Vec<_>, Vec<_>) = tag_columns
             .map(|column| {
                 (
-                    column.column_schema.name.clone(),
+                    column.column_id.to_string(),
                     SortField::new(column.column_schema.data_type.clone()),
                 )
             })
@@ -63,28 +63,28 @@ impl IndexValuesCodec {
 
         let decoder = McmpRowCodec::new(fields.clone());
         Self {
-            column_names,
+            column_ids,
             fields,
             decoder,
         }
     }
 
-    /// Decodes a primary key into its corresponding column names, data types and values.
+    /// Decodes a primary key into its corresponding column ids, data types and values.
     pub fn decode(
         &self,
         primary_key: &[u8],
-    ) -> Result<impl Iterator<Item = (&ColumnName, &SortField, Option<Value>)>> {
+    ) -> Result<impl Iterator<Item = (&ColumnId, &SortField, Option<Value>)>> {
         let values = self.decoder.decode(primary_key)?;
 
         let iter = values
             .into_iter()
-            .zip(&self.column_names)
+            .zip(&self.column_ids)
             .zip(&self.fields)
-            .map(|((value, column_name), encoder)| {
+            .map(|((value, column_id), encoder)| {
                 if value.is_null() {
-                    (column_name, encoder, None)
+                    (column_id, encoder, None)
                 } else {
-                    (column_name, encoder, Some(value))
+                    (column_id, encoder, Some(value))
                 }
             });
 
@@ -145,13 +145,13 @@ mod tests {
         let codec = IndexValuesCodec::from_tag_columns(tag_columns.iter());
         let mut iter = codec.decode(&primary_key).unwrap();
 
-        let (column_name, field, value) = iter.next().unwrap();
-        assert_eq!(column_name, "tag0");
+        let (column_id, field, value) = iter.next().unwrap();
+        assert_eq!(column_id, "1");
         assert_eq!(field, &SortField::new(ConcreteDataType::string_datatype()));
         assert_eq!(value, None);
 
-        let (column_name, field, value) = iter.next().unwrap();
-        assert_eq!(column_name, "tag1");
+        let (column_id, field, value) = iter.next().unwrap();
+        assert_eq!(column_id, "2");
         assert_eq!(field, &SortField::new(ConcreteDataType::int64_datatype()));
         assert_eq!(value, Some(Value::Int64(10)));
 
