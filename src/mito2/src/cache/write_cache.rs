@@ -201,7 +201,9 @@ mod tests {
             local_store.clone(),
             object_store_manager,
             ReadableSize::mb(10),
-        );
+        )
+        .await
+        .unwrap();
 
         // Create Source
         let metadata = Arc::new(sst_region_metadata());
