@@ -125,7 +125,7 @@ async fn test_query_validate() -> Result<()> {
     // set plugins
     let plugins = Plugins::new();
     plugins.insert(QueryOptions {
-        disallow_cross_schema_query: true,
+        disallow_cross_catalog_query: true,
     });
 
     let factory = QueryEngineFactory::new_with_plugins(catalog_list, None, None, false, plugins);
