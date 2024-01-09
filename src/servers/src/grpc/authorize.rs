@@ -136,10 +136,12 @@ mod tests {
     use auth::tests::MockUserProvider;
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    use headers::Header;
     use hyper::{Body, Request};
     use session::context::QueryContextRef;
 
     use crate::grpc::authorize::do_auth;
+    use crate::http::header::GreptimeDbName;
 
     #[tokio::test]
     async fn test_do_auth_with_user_provider() {
@@ -182,7 +184,7 @@ mod tests {
 
         let mut req = Request::new(Body::empty());
         req.headers_mut()
-            .insert("x-greptime-db-name", "catalog-schema".parse().unwrap());
+            .insert(GreptimeDbName::name(), "catalog-schema".parse().unwrap());
         let auth_result = do_auth(&mut req, None).await;
         assert!(auth_result.is_ok());
         check_req(&req, "catalog", "schema", "greptime");
