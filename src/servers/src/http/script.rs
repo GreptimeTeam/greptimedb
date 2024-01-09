@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use axum::extract::{Json, Query, RawBody, State};
+use axum::extract::{Query, RawBody, State};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -25,18 +25,19 @@ use session::context::QueryContext;
 use snafu::ResultExt;
 
 use crate::error::{HyperSnafu, InvalidUtf8ValueSnafu};
-use crate::http::{ApiState, GreptimedbV1Response, JsonResponse, ResponseFormat};
+use crate::http::error_result::ErrorResponse;
+use crate::http::{ApiState, GreptimedbV1Response, HttpResponse, ResponseFormat};
 
 macro_rules! json_err {
     ($e: expr) => {{
-        return Json(JsonResponse::with_error($e, ResponseFormat::GreptimedbV1));
+        return HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::GreptimedbV1, $e));
     }};
 
     ($msg: expr, $code: expr) => {{
-        return Json(JsonResponse::with_error_message(
-            $msg.to_string(),
-            $code,
+        return HttpResponse::Error(ErrorResponse::from_error_message(
             ResponseFormat::GreptimedbV1,
+            $code,
+            $msg.to_string(),
         ));
     }};
 }
@@ -56,7 +57,7 @@ pub async fn scripts(
     State(state): State<ApiState>,
     Query(params): Query<ScriptQuery>,
     RawBody(body): RawBody,
-) -> Json<JsonResponse> {
+) -> HttpResponse {
     if let Some(script_handler) = &state.script_handler {
         let catalog = params
             .catalog
@@ -80,18 +81,16 @@ pub async fn scripts(
 
         // Safety: schema and name are already checked above.
         let query_ctx = QueryContext::with(&catalog, schema.unwrap());
-        let body = match script_handler
+        match script_handler
             .insert_script(query_ctx, name.unwrap(), &script)
             .await
         {
-            Ok(()) => GreptimedbV1Response::with_output(vec![]).into(),
+            Ok(()) => GreptimedbV1Response::from_output(vec![]).await,
             Err(e) => json_err!(
                 format!("Insert script error: {}", e.output_msg()),
                 e.status_code()
             ),
-        };
-
-        Json(body)
+        }
     } else {
         json_err!(
             "Script execution not supported, missing script handler",
@@ -114,7 +113,7 @@ pub struct ScriptQuery {
 pub async fn run_script(
     State(state): State<ApiState>,
     Query(params): Query<ScriptQuery>,
-) -> Json<JsonResponse> {
+) -> HttpResponse {
     if let Some(script_handler) = &state.script_handler {
         let catalog = params
             .catalog
@@ -137,10 +136,8 @@ pub async fn run_script(
         let output = script_handler
             .execute_script(query_ctx, name.unwrap(), params.params)
             .await;
-        let resp =
-            JsonResponse::from_output(vec![output], ResponseFormat::GreptimedbV1, None).await;
-
-        Json(resp.with_execution_time(start.elapsed().as_millis()))
+        let resp = GreptimedbV1Response::from_output(vec![output]).await;
+        resp.with_execution_time(start.elapsed().as_millis() as u64)
     } else {
         json_err!(
             "Script execution not supported, missing script handler",

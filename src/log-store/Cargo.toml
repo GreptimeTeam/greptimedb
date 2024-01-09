@@ -14,6 +14,7 @@ async-stream.workspace = true
 async-trait.workspace = true
 byteorder = "1.4"
 bytes.workspace = true
+chrono.workspace = true
 common-base.workspace = true
 common-config.workspace = true
 common-error.workspace = true
@@ -21,7 +22,6 @@ common-macro.workspace = true
 common-meta.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
-dashmap.workspace = true
 futures-util.workspace = true
 futures.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
@@ -37,4 +37,7 @@ tokio.workspace = true
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
+itertools.workspace = true
 rand.workspace = true
+rand_distr = "0.4"
+uuid.workspace = true

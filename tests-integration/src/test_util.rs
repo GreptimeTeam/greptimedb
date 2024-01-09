@@ -42,6 +42,7 @@ use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use secrecy::ExposeSecret;
+use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::{HttpOptions, HttpServerBuilder};
@@ -508,15 +509,15 @@ pub async fn setup_grpc_server_with(
         runtime.clone(),
     ));
 
-    let fe_grpc_server = Arc::new(GrpcServer::new(
-        grpc_config,
-        Some(ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone())),
-        Some(fe_instance_ref.clone()),
-        Some(flight_handler),
-        None,
-        user_provider,
-        runtime,
-    ));
+    let fe_grpc_server = Arc::new(
+        GrpcServerBuilder::new(runtime)
+            .option_config(grpc_config)
+            .query_handler(ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone()))
+            .flight_handler(flight_handler)
+            .prometheus_handler(fe_instance_ref.clone())
+            .user_provider(user_provider)
+            .build(),
+    );
 
     let fe_grpc_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let fe_grpc_addr = fe_grpc_server

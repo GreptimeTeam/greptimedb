@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
 pub mod topic;
 pub mod topic_manager;
 pub mod topic_selector;
@@ -19,7 +21,6 @@ pub mod topic_selector;
 use std::time::Duration;
 
 use common_config::wal::kafka::{kafka_backoff, KafkaBackoffConfig, TopicSelectorType};
-use common_config::wal::StandaloneWalConfig;
 use serde::{Deserialize, Serialize};
 
 pub use crate::wal::kafka::topic::Topic;

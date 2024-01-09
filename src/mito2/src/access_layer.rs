@@ -14,13 +14,15 @@
 
 use std::sync::Arc;
 
+use object_store::services::Fs;
+use object_store::util::{join_dir, with_instrument_layers};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
-use crate::error::{DeleteSstSnafu, Result};
+use crate::error::{CleanDirSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::location;
@@ -118,4 +120,32 @@ pub(crate) struct SstWriteRequest {
     pub(crate) source: Source,
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) storage: Option<String>,
+}
+
+/// Creates a fs object store with atomic write dir.
+pub(crate) async fn new_fs_object_store(root: &str) -> Result<ObjectStore> {
+    let atomic_write_dir = join_dir(root, ".tmp/");
+    clean_dir(&atomic_write_dir).await?;
+
+    let mut builder = Fs::default();
+    builder.root(root).atomic_write_dir(&atomic_write_dir);
+    let object_store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();
+
+    // Add layers.
+    let object_store = with_instrument_layers(object_store);
+    Ok(object_store)
+}
+
+/// Clean the directory.
+async fn clean_dir(dir: &str) -> Result<()> {
+    if tokio::fs::try_exists(dir)
+        .await
+        .context(CleanDirSnafu { dir })?
+    {
+        tokio::fs::remove_dir_all(dir)
+            .await
+            .context(CleanDirSnafu { dir })?;
+    }
+
+    Ok(())
 }

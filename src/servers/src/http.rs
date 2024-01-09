@@ -12,43 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod authorize;
-pub mod handler;
-pub mod header;
-pub mod influxdb;
-pub mod mem_prof;
-pub mod opentsdb;
-pub mod otlp;
-pub mod pprof;
-pub mod prom_store;
-pub mod prometheus;
-pub mod script;
-
-#[cfg(feature = "dashboard")]
-mod dashboard;
-pub mod influxdb_result_v1;
-
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
+use aide::OperationOutput;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::Request;
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Json};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_query::Output;
-use common_recordbatch::{util, RecordBatch};
-use common_telemetry::logging::{debug, error, info};
+use common_recordbatch::RecordBatch;
+use common_telemetry::logging::{error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
@@ -66,6 +49,9 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSnafu};
+use crate::http::csv_result::CsvResponse;
+use crate::http::error_result::ErrorResponse;
+use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::prometheus::{
@@ -83,6 +69,25 @@ use crate::query_handler::{
     PromStoreProtocolHandlerRef, ScriptHandlerRef,
 };
 use crate::server::Server;
+
+pub mod authorize;
+pub mod handler;
+pub mod header;
+pub mod influxdb;
+pub mod mem_prof;
+pub mod opentsdb;
+pub mod otlp;
+pub mod pprof;
+pub mod prom_store;
+pub mod prometheus;
+pub mod script;
+
+pub mod csv_result;
+#[cfg(feature = "dashboard")]
+mod dashboard;
+pub mod error_result;
+pub mod greptime_result_v1;
+pub mod influxdb_result_v1;
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
@@ -239,129 +244,16 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum JsonOutput {
+pub enum GreptimeQueryOutput {
     AffectedRows(usize),
     Records(HttpRecordsOutput),
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
-pub struct GreptimedbV1Response {
-    code: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    output: Vec<JsonOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    execution_time_ms: Option<u64>,
-}
-
-impl GreptimedbV1Response {
-    pub fn with_error(error: impl ErrorExt) -> Self {
-        let code = error.status_code();
-        if code.should_log_error() {
-            error!(error; "Failed to handle HTTP request");
-        } else {
-            debug!("Failed to handle HTTP request, err: {:?}", error);
-        }
-
-        GreptimedbV1Response {
-            error: Some(error.output_msg()),
-            code: code as u32,
-            output: vec![],
-            execution_time_ms: None,
-        }
-    }
-
-    fn with_error_message(err_msg: String, error_code: StatusCode) -> Self {
-        GreptimedbV1Response {
-            error: Some(err_msg),
-            code: error_code as u32,
-            output: vec![],
-            execution_time_ms: None,
-        }
-    }
-
-    fn with_output(output: Vec<JsonOutput>) -> Self {
-        GreptimedbV1Response {
-            error: None,
-            code: StatusCode::Success as u32,
-            output,
-            execution_time_ms: None,
-        }
-    }
-
-    fn with_execution_time(&mut self, execution_time: u64) {
-        self.execution_time_ms = Some(execution_time);
-    }
-
-    /// Create a json response from query result
-    pub async fn from_output(outputs: Vec<Result<Output>>) -> Self {
-        // TODO(sunng87): this api response structure cannot represent error
-        // well. It hides successful execution results from error response
-        let mut results = Vec::with_capacity(outputs.len());
-        for out in outputs {
-            match out {
-                Ok(Output::AffectedRows(rows)) => {
-                    results.push(JsonOutput::AffectedRows(rows));
-                }
-                Ok(Output::Stream(stream)) => {
-                    // TODO(sunng87): streaming response
-                    match util::collect(stream).await {
-                        Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                            Ok(rows) => {
-                                results.push(JsonOutput::Records(rows));
-                            }
-                            Err(err) => {
-                                return Self::with_error(err);
-                            }
-                        },
-
-                        Err(e) => {
-                            return Self::with_error(e);
-                        }
-                    }
-                }
-                Ok(Output::RecordBatches(rbs)) => match HttpRecordsOutput::try_from(rbs.take()) {
-                    Ok(rows) => {
-                        results.push(JsonOutput::Records(rows));
-                    }
-                    Err(err) => {
-                        return Self::with_error(err);
-                    }
-                },
-                Err(e) => {
-                    return Self::with_error(e);
-                }
-            }
-        }
-        Self::with_output(results)
-    }
-
-    pub fn code(&self) -> u32 {
-        self.code
-    }
-
-    pub fn success(&self) -> bool {
-        self.code == (StatusCode::Success as u32)
-    }
-
-    pub fn error(&self) -> Option<&String> {
-        self.error.as_ref()
-    }
-
-    pub fn output(&self) -> &[JsonOutput] {
-        &self.output
-    }
-
-    pub fn execution_time_ms(&self) -> Option<u64> {
-        self.execution_time_ms
-    }
-}
-
 /// It allows the results of SQL queries to be presented in different formats.
-/// Currently, `greptimedb_v1` and `influxdb_v1` are supported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
+    Csv,
+    #[default]
     GreptimedbV1,
     InfluxdbV1,
 }
@@ -369,9 +261,18 @@ pub enum ResponseFormat {
 impl ResponseFormat {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "csv" => Some(ResponseFormat::Csv),
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
             _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ResponseFormat::Csv => "csv",
+            ResponseFormat::GreptimedbV1 => "greptimedb_v1",
+            ResponseFormat::InfluxdbV1 => "influxdb_v1",
         }
     }
 }
@@ -421,67 +322,60 @@ impl Display for Epoch {
 }
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
-#[serde(tag = "type")]
-pub enum JsonResponse {
+pub enum HttpResponse {
+    Csv(CsvResponse),
+    Error(ErrorResponse),
     GreptimedbV1(GreptimedbV1Response),
     InfluxdbV1(InfluxdbV1Response),
 }
 
-impl From<GreptimedbV1Response> for JsonResponse {
+impl HttpResponse {
+    pub fn with_execution_time(self, execution_time: u64) -> Self {
+        match self {
+            HttpResponse::Csv(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::GreptimedbV1(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::InfluxdbV1(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::Error(resp) => resp.with_execution_time(execution_time).into(),
+        }
+    }
+}
+
+impl IntoResponse for HttpResponse {
+    fn into_response(self) -> Response {
+        match self {
+            HttpResponse::Csv(resp) => resp.into_response(),
+            HttpResponse::GreptimedbV1(resp) => resp.into_response(),
+            HttpResponse::InfluxdbV1(resp) => resp.into_response(),
+            HttpResponse::Error(resp) => resp.into_response(),
+        }
+    }
+}
+
+impl OperationOutput for HttpResponse {
+    type Inner = Response;
+}
+
+impl From<CsvResponse> for HttpResponse {
+    fn from(value: CsvResponse) -> Self {
+        HttpResponse::Csv(value)
+    }
+}
+
+impl From<ErrorResponse> for HttpResponse {
+    fn from(value: ErrorResponse) -> Self {
+        HttpResponse::Error(value)
+    }
+}
+
+impl From<GreptimedbV1Response> for HttpResponse {
     fn from(value: GreptimedbV1Response) -> Self {
-        JsonResponse::GreptimedbV1(value)
+        HttpResponse::GreptimedbV1(value)
     }
 }
 
-impl From<InfluxdbV1Response> for JsonResponse {
+impl From<InfluxdbV1Response> for HttpResponse {
     fn from(value: InfluxdbV1Response) -> Self {
-        JsonResponse::InfluxdbV1(value)
-    }
-}
-
-impl JsonResponse {
-    pub fn with_error(error: impl ErrorExt, response_format: ResponseFormat) -> Self {
-        match response_format {
-            ResponseFormat::GreptimedbV1 => GreptimedbV1Response::with_error(error).into(),
-            ResponseFormat::InfluxdbV1 => InfluxdbV1Response::with_error(error).into(),
-        }
-    }
-
-    pub fn with_error_message(
-        err_msg: String,
-        error_code: StatusCode,
-        response_format: ResponseFormat,
-    ) -> Self {
-        match response_format {
-            ResponseFormat::GreptimedbV1 => {
-                GreptimedbV1Response::with_error_message(err_msg, error_code).into()
-            }
-            ResponseFormat::InfluxdbV1 => InfluxdbV1Response::with_error_message(err_msg).into(),
-        }
-    }
-    pub async fn from_output(
-        outputs: Vec<Result<Output>>,
-        response_format: ResponseFormat,
-        epoch: Option<Epoch>,
-    ) -> Self {
-        match response_format {
-            ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await.into(),
-            ResponseFormat::InfluxdbV1 => {
-                InfluxdbV1Response::from_output(outputs, epoch).await.into()
-            }
-        }
-    }
-
-    fn with_execution_time(mut self, execution_time: u128) -> Self {
-        match &mut self {
-            JsonResponse::GreptimedbV1(resp) => {
-                resp.with_execution_time(execution_time as u64);
-            }
-            JsonResponse::InfluxdbV1(resp) => {
-                resp.with_execution_time(execution_time as u64);
-            }
-        }
-        self
+        HttpResponse::InfluxdbV1(value)
     }
 }
 
@@ -900,14 +794,13 @@ impl Server for HttpServer {
 }
 
 /// handle error middleware
-async fn handle_error(err: BoxError) -> Json<JsonResponse> {
+async fn handle_error(err: BoxError) -> Json<HttpResponse> {
     error!(err; "Unhandled internal error");
-
-    Json(JsonResponse::with_error_message(
-        format!("Unhandled internal error: {err}"),
-        StatusCode::Unexpected,
+    Json(HttpResponse::Error(ErrorResponse::from_error_message(
         ResponseFormat::GreptimedbV1,
-    ))
+        StatusCode::Unexpected,
+        format!("Unhandled internal error: {err}"),
+    )))
 }
 
 #[cfg(test)]
@@ -920,6 +813,7 @@ mod test {
     use axum::http::StatusCode;
     use axum::routing::get;
     use axum_test_helper::TestClient;
+    use common_query::Output;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -1051,20 +945,24 @@ mod test {
         ];
         let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
 
-        for format in [ResponseFormat::GreptimedbV1, ResponseFormat::InfluxdbV1] {
+        for format in [
+            ResponseFormat::GreptimedbV1,
+            ResponseFormat::InfluxdbV1,
+            ResponseFormat::Csv,
+        ] {
             let recordbatches =
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
-            let json_resp = JsonResponse::from_output(
-                vec![Ok(Output::RecordBatches(recordbatches))],
-                format,
-                None,
-            )
-            .await;
+            let outputs = vec![Ok(Output::RecordBatches(recordbatches))];
+            let json_resp = match format {
+                ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+                ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
+                ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
+            };
 
             match json_resp {
-                JsonResponse::GreptimedbV1(json_resp) => {
-                    let json_output = &json_resp.output[0];
-                    if let JsonOutput::Records(r) = json_output {
+                HttpResponse::GreptimedbV1(resp) => {
+                    let json_output = &resp.output[0];
+                    if let GreptimeQueryOutput::Records(r) = json_output {
                         assert_eq!(r.num_rows(), 4);
                         assert_eq!(r.num_cols(), 2);
                         let schema = r.schema.as_ref().unwrap();
@@ -1076,8 +974,8 @@ mod test {
                         panic!("invalid output type");
                     }
                 }
-                JsonResponse::InfluxdbV1(json_resp) => {
-                    let json_output = &json_resp.results()[0];
+                HttpResponse::InfluxdbV1(resp) => {
+                    let json_output = &resp.results()[0];
                     assert_eq!(json_output.num_rows(), 4);
                     assert_eq!(json_output.num_cols(), 2);
                     assert_eq!(json_output.series[0].columns.clone()[0], "numbers");
@@ -1087,6 +985,21 @@ mod test {
                     );
                     assert_eq!(json_output.series[0].values[0][1], serde_json::Value::Null);
                 }
+                HttpResponse::Csv(resp) => {
+                    let output = &resp.output()[0];
+                    if let GreptimeQueryOutput::Records(r) = output {
+                        assert_eq!(r.num_rows(), 4);
+                        assert_eq!(r.num_cols(), 2);
+                        let schema = r.schema.as_ref().unwrap();
+                        assert_eq!(schema.column_schemas[0].name, "numbers");
+                        assert_eq!(schema.column_schemas[0].data_type, "UInt32");
+                        assert_eq!(r.rows[0][0], serde_json::Value::from(1));
+                        assert_eq!(r.rows[0][1], serde_json::Value::Null);
+                    } else {
+                        panic!("invalid output type");
+                    }
+                }
+                HttpResponse::Error(err) => unreachable!("{err:?}"),
             }
         }
     }

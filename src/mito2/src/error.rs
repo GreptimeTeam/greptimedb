@@ -429,21 +429,18 @@ pub enum Error {
 
     #[snafu(display("Failed to build index applier"))]
     BuildIndexApplier {
-        #[snafu(source)]
         source: index::inverted_index::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to convert value"))]
     ConvertValue {
-        #[snafu(source)]
         source: datatypes::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to apply index"))]
     ApplyIndex {
-        #[snafu(source)]
         source: index::inverted_index::error::Error,
         location: Location,
     },
@@ -465,14 +462,12 @@ pub enum Error {
 
     #[snafu(display("Failed to read puffin metadata"))]
     PuffinReadMetadata {
-        #[snafu(source)]
         source: puffin::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to read puffin blob"))]
     PuffinReadBlob {
-        #[snafu(source)]
         source: puffin::error::Error,
         location: Location,
     },
@@ -494,6 +489,17 @@ pub enum Error {
         source: puffin::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to clean dir {dir}"))]
+    CleanDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid config, {reason}"))]
+    InvalidConfig { reason: String, location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -587,6 +593,8 @@ impl ErrorExt for Error {
             | PuffinReadBlob { source, .. }
             | PuffinFinish { source, .. }
             | PuffinAddBlob { source, .. } => source.status_code(),
+            CleanDir { .. } => StatusCode::Unexpected,
+            InvalidConfig { .. } => StatusCode::InvalidArguments,
         }
     }
 

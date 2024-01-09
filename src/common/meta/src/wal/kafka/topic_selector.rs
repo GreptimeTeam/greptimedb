@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::error::{EmptyTopicPoolSnafu, Result};
@@ -59,6 +58,14 @@ impl TopicSelector for RoundRobinTopicSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests that a selector behaves as expected when the given topic pool is empty.
+    #[test]
+    fn test_empty_topic_pool() {
+        let topic_pool = vec![];
+        let selector = RoundRobinTopicSelector::default();
+        assert!(selector.select(&topic_pool).is_err());
+    }
 
     #[test]
     fn test_round_robin_topic_selector() {

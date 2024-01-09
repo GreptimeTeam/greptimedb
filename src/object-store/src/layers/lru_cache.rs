@@ -81,8 +81,8 @@ impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C
     type BlockingReader = I::BlockingReader;
     type Writer = I::Writer;
     type BlockingWriter = I::BlockingWriter;
-    type Pager = I::Pager;
-    type BlockingPager = I::BlockingPager;
+    type Lister = I::Lister;
+    type BlockingLister = I::BlockingLister;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -112,7 +112,7 @@ impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C
         result
     }
 
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Pager)> {
+    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
         self.inner.list(path, args).await
     }
 
@@ -130,7 +130,7 @@ impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C
         result
     }
 
-    fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingPager)> {
+    fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingLister)> {
         self.inner.blocking_list(path, args)
     }
 }

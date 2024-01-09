@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::logging::info;
-use object_store::services::S3 as S3Builder;
+use object_store::services::S3;
 use object_store::{util, ObjectStore};
 use secrecy::ExposeSecret;
 use snafu::prelude::*;
@@ -30,7 +30,7 @@ pub(crate) async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectSt
         s3_config.bucket, &root
     );
 
-    let mut builder = S3Builder::default();
+    let mut builder = S3::default();
     let _ = builder
         .root(&root)
         .bucket(&s3_config.bucket)

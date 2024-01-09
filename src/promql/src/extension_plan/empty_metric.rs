@@ -104,8 +104,8 @@ impl EmptyMetric {
             .map(|expr| {
                 physical_planner.create_physical_expr(
                     expr,
-                    &self.result_schema,
-                    &ArrowSchema::from(self.result_schema.as_ref()),
+                    &self.time_index_schema,
+                    &ArrowSchema::from(self.time_index_schema.as_ref()),
                     session_state,
                 )
             })

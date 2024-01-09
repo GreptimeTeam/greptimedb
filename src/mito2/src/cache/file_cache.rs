@@ -102,32 +102,37 @@ impl FileCache {
 
     /// Reads a file from the cache.
     pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
-        if !self.memory_index.contains_key(&key) {
+        // We must use `get()` to update the estimator of the cache.
+        // See https://docs.rs/moka/latest/moka/future/struct.Cache.html#method.contains_key
+        if self.memory_index.get(&key).await.is_none() {
             CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
             return None;
         }
 
         let file_path = self.cache_file_path(key);
-        match self.local_store.reader(&file_path).await {
-            Ok(reader) => {
+        match self.get_reader(&file_path).await {
+            Ok(Some(reader)) => {
                 CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
-                Some(reader)
+                return Some(reader);
             }
             Err(e) => {
                 if e.kind() != ErrorKind::NotFound {
                     warn!("Failed to get file for key {:?}, err: {}", key, e);
                 }
-                // We removes the file from the index.
-                self.memory_index.remove(&key).await;
-                CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
-                None
             }
+            Ok(None) => {}
         }
+
+        // We removes the file from the index.
+        self.memory_index.remove(&key).await;
+        CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+        None
     }
 
     /// Removes a file from the cache explicitly.
     pub(crate) async fn remove(&self, key: IndexKey) {
         let file_path = self.cache_file_path(key);
+        self.memory_index.remove(&key).await;
         if let Err(e) = self.local_store.delete(&file_path).await {
             warn!(e; "Failed to delete a cached file {}", file_path);
         }
@@ -182,6 +187,14 @@ impl FileCache {
     /// Returns the local store of the file cache.
     pub(crate) fn local_store(&self) -> ObjectStore {
         self.local_store.clone()
+    }
+
+    async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
+        if self.local_store.is_exist(file_path).await? {
+            Ok(Some(self.local_store.reader(file_path).await?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -260,6 +273,10 @@ mod tests {
         reader.read_to_string(&mut buf).await.unwrap();
         assert_eq!("hello", buf);
 
+        // Get weighted size.
+        cache.memory_index.run_pending_tasks().await;
+        assert_eq!(5, cache.memory_index.weighted_size());
+
         // Remove the file.
         cache.remove(key).await;
         assert!(cache.reader(key).await.is_none());
@@ -269,6 +286,7 @@ mod tests {
 
         // The file also not exists.
         assert!(!local_store.is_exist(&file_path).await.unwrap());
+        assert_eq!(0, cache.memory_index.weighted_size());
     }
 
     #[tokio::test]
@@ -310,6 +328,7 @@ mod tests {
         let region_id = RegionId::new(2000, 0);
         // Write N files.
         let file_ids: Vec<_> = (0..10).map(|_| FileId::random()).collect();
+        let mut total_size = 0;
         for (i, file_id) in file_ids.iter().enumerate() {
             let key = (region_id, *file_id);
             let file_path = cache.cache_file_path(key);
@@ -325,6 +344,7 @@ mod tests {
                     },
                 )
                 .await;
+            total_size += bytes.len();
         }
 
         // Recover the cache.
@@ -332,6 +352,10 @@ mod tests {
         // No entry before recovery.
         assert!(cache.reader((region_id, file_ids[0])).await.is_none());
         cache.recover().await.unwrap();
+
+        // Check size.
+        cache.memory_index.run_pending_tasks().await;
+        assert_eq!(total_size, cache.memory_index.weighted_size() as usize);
 
         for (i, file_id) in file_ids.iter().enumerate() {
             let key = (region_id, *file_id);
