@@ -217,7 +217,7 @@ impl LogStore for RaftEngineLogStore {
 
         let mut sync = self.config.sync_write;
 
-        if let Some(sync_period) = self.config.sync_period.as_ref() {
+        if let Some(sync_period) = &self.config.sync_period {
             let now = common_time::util::current_time_millis();
             if now - self.last_sync_time.load(Ordering::Relaxed) >= sync_period.as_millis() as i64 {
                 self.last_sync_time.store(now, Ordering::Relaxed);
