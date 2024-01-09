@@ -42,6 +42,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
@@ -111,20 +112,24 @@ impl WorkerGroup {
     /// Starts a worker group.
     ///
     /// The number of workers should be power of two.
-    pub(crate) fn start<S: LogStore>(
+    pub(crate) async fn start<S: LogStore>(
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-    ) -> WorkerGroup {
+    ) -> Result<WorkerGroup> {
         let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
             config.global_write_buffer_size.as_bytes() as usize,
         ));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = Arc::new(CacheManager::new(
-            config.sst_meta_cache_size.as_bytes(),
-            config.vector_cache_size.as_bytes(),
-            config.page_cache_size.as_bytes(),
-        ));
+        let write_cache = write_cache_from_config(&config, object_store_manager.clone()).await?;
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .vector_cache_size(config.vector_cache_size.as_bytes())
+                .page_cache_size(config.page_cache_size.as_bytes())
+                .write_cache(write_cache)
+                .build(),
+        );
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -142,11 +147,11 @@ impl WorkerGroup {
             })
             .collect();
 
-        WorkerGroup {
+        Ok(WorkerGroup {
             workers,
             scheduler,
             cache_manager,
-        }
+        })
     }
 
     /// Stops the worker group.
@@ -204,24 +209,28 @@ impl WorkerGroup {
     /// Starts a worker group with `write_buffer_manager` and `listener` for tests.
     ///
     /// The number of workers should be power of two.
-    pub(crate) fn start_for_test<S: LogStore>(
+    pub(crate) async fn start_for_test<S: LogStore>(
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
-    ) -> WorkerGroup {
+    ) -> Result<WorkerGroup> {
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
             Arc::new(WriteBufferManagerImpl::new(
                 config.global_write_buffer_size.as_bytes() as usize,
             ))
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = Arc::new(CacheManager::new(
-            config.sst_meta_cache_size.as_bytes(),
-            config.vector_cache_size.as_bytes(),
-            config.page_cache_size.as_bytes(),
-        ));
+        let write_cache = write_cache_from_config(&config, object_store_manager.clone()).await?;
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .vector_cache_size(config.vector_cache_size.as_bytes())
+                .page_cache_size(config.page_cache_size.as_bytes())
+                .write_cache(write_cache)
+                .build(),
+        );
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -239,16 +248,36 @@ impl WorkerGroup {
             })
             .collect();
 
-        WorkerGroup {
+        Ok(WorkerGroup {
             workers,
             scheduler,
             cache_manager,
-        }
+        })
     }
 }
 
 fn value_to_index(value: usize, num_workers: usize) -> usize {
     value % num_workers
+}
+
+async fn write_cache_from_config(
+    config: &MitoConfig,
+    object_store_manager: ObjectStoreManagerRef,
+) -> Result<Option<WriteCacheRef>> {
+    if !config.enable_experimental_write_cache {
+        return Ok(None);
+    }
+
+    // TODO(yingwen): Remove this and document the config once the write cache is ready.
+    warn!("Write cache is an experimental feature");
+
+    let cache = WriteCache::new_fs(
+        &config.experimental_write_cache_path,
+        object_store_manager,
+        config.experimental_write_cache_size,
+    )
+    .await?;
+    Ok(Some(Arc::new(cache)))
 }
 
 /// Worker start config.
