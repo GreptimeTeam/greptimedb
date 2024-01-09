@@ -34,6 +34,13 @@ pub struct RaftEngineConfig {
     pub read_batch_size: usize,
     // whether to sync log file after every write
     pub sync_write: bool,
+    // whether to reuse logically truncated log files.
+    pub enable_log_recycle: bool,
+    // whether to pre-create log files on start up
+    pub prefill_log_files: bool,
+    // duration for fsyncing log files.
+    #[serde(with = "humantime_serde")]
+    pub sync_period: Option<Duration>,
 }
 
 impl Default for RaftEngineConfig {
@@ -45,6 +52,9 @@ impl Default for RaftEngineConfig {
             purge_interval: Duration::from_secs(600),
             read_batch_size: 128,
             sync_write: false,
+            enable_log_recycle: true,
+            prefill_log_files: false,
+            sync_period: None,
         }
     }
 }

@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use async_stream::stream;
@@ -41,6 +42,7 @@ pub struct RaftEngineLogStore {
     config: RaftEngineConfig,
     engine: Arc<Engine>,
     gc_task: RepeatedTask<Error>,
+    last_sync_time: AtomicI64,
 }
 
 pub struct PurgeExpiredFilesFunction {
@@ -80,6 +82,8 @@ impl RaftEngineLogStore {
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             batch_compression_threshold: ReadableSize::kb(8),
             target_file_size: ReadableSize(config.file_size.0),
+            enable_log_recycle: config.enable_log_recycle,
+            prefill_for_recycle: config.prefill_log_files,
             ..Default::default()
         };
         let engine = Arc::new(Engine::open(raft_engine_config).context(RaftEngineSnafu)?);
@@ -94,6 +98,7 @@ impl RaftEngineLogStore {
             config,
             engine,
             gc_task,
+            last_sync_time: AtomicI64::new(0),
         };
         log_store.start()?;
         Ok(log_store)
@@ -210,9 +215,19 @@ impl LogStore for RaftEngineLogStore {
                 .context(AddEntryLogBatchSnafu)?;
         }
 
+        let mut sync = self.config.sync_write;
+
+        if let Some(sync_period) = &self.config.sync_period {
+            let now = common_time::util::current_time_millis();
+            if now - self.last_sync_time.load(Ordering::Relaxed) >= sync_period.as_millis() as i64 {
+                self.last_sync_time.store(now, Ordering::Relaxed);
+                sync = true;
+            }
+        }
+
         let _ = self
             .engine
-            .write(&mut batch, self.config.sync_write)
+            .write(&mut batch, sync)
             .context(RaftEngineSnafu)?;
 
         Ok(AppendBatchResponse { last_entry_ids })
