@@ -25,6 +25,7 @@ use common_datasource::file_format::{infer_schemas, FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
+use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::Timestamp;
@@ -56,8 +57,6 @@ const COLUMN_SEMANTIC_TYPE_COLUMN: &str = "Semantic Type";
 const NULLABLE_YES: &str = "YES";
 const NULLABLE_NO: &str = "NO";
 const PRI_KEY: &str = "PRI";
-
-const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 
 static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
