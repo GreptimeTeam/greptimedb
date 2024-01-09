@@ -22,6 +22,8 @@ pub mod row_group;
 mod stats;
 pub mod writer;
 
+use std::sync::Arc;
+
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
 
@@ -62,7 +64,7 @@ pub struct SstInfo {
     /// Number of rows.
     pub num_rows: usize,
     /// File Meta Data
-    pub file_metadata: Option<ParquetMetaData>,
+    pub file_metadata: Option<Arc<ParquetMetaData>>,
 }
 
 #[cfg(test)]

@@ -331,6 +331,7 @@ impl RegionFlushTask {
                 // No data written.
                 continue;
             };
+
             flushed_bytes += sst_info.file_size;
             let file_meta = FileMeta {
                 region_id: self.region_id,
