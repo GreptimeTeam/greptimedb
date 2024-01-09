@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_catalog::format_full_table_name;
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::provider_as_source;
@@ -30,7 +29,7 @@ use crate::CatalogManagerRef;
 pub struct DfTableSourceProvider {
     catalog_manager: CatalogManagerRef,
     resolved_tables: HashMap<String, Arc<dyn TableSource>>,
-    disallow_cross_schema_query: bool,
+    disallow_cross_catalog_query: bool,
     default_catalog: String,
     default_schema: String,
 }
@@ -38,12 +37,12 @@ pub struct DfTableSourceProvider {
 impl DfTableSourceProvider {
     pub fn new(
         catalog_manager: CatalogManagerRef,
-        disallow_cross_schema_query: bool,
+        disallow_cross_catalog_query: bool,
         query_ctx: &QueryContext,
     ) -> Self {
         Self {
             catalog_manager,
-            disallow_cross_schema_query,
+            disallow_cross_catalog_query,
             resolved_tables: HashMap::new(),
             default_catalog: query_ctx.current_catalog().to_owned(),
             default_schema: query_ctx.current_schema().to_owned(),
@@ -54,29 +53,18 @@ impl DfTableSourceProvider {
         &'a self,
         table_ref: TableReference<'a>,
     ) -> Result<ResolvedTableReference<'a>> {
-        if self.disallow_cross_schema_query {
+        if self.disallow_cross_catalog_query {
             match &table_ref {
                 TableReference::Bare { .. } => (),
-                TableReference::Partial { schema, .. } => {
-                    ensure!(
-                        schema.as_ref() == self.default_schema
-                            || schema.as_ref() == INFORMATION_SCHEMA_NAME,
-                        QueryAccessDeniedSnafu {
-                            catalog: &self.default_catalog,
-                            schema: schema.as_ref(),
-                        }
-                    );
-                }
+                TableReference::Partial { .. } => {}
                 TableReference::Full {
                     catalog, schema, ..
                 } => {
                     ensure!(
-                        catalog.as_ref() == self.default_catalog
-                            && (schema.as_ref() == self.default_schema
-                                || schema.as_ref() == INFORMATION_SCHEMA_NAME),
+                        catalog.as_ref() == self.default_catalog,
                         QueryAccessDeniedSnafu {
                             catalog: catalog.as_ref(),
-                            schema: schema.as_ref()
+                            schema: schema.as_ref(),
                         }
                     );
                 }
@@ -136,21 +124,21 @@ mod tests {
             table: Cow::Borrowed("table_name"),
         };
         let result = table_provider.resolve_table_ref(table_ref);
-        let _ = result.unwrap();
+        assert!(result.is_ok());
 
         let table_ref = TableReference::Partial {
             schema: Cow::Borrowed("public"),
             table: Cow::Borrowed("table_name"),
         };
         let result = table_provider.resolve_table_ref(table_ref);
-        let _ = result.unwrap();
+        assert!(result.is_ok());
 
         let table_ref = TableReference::Partial {
             schema: Cow::Borrowed("wrong_schema"),
             table: Cow::Borrowed("table_name"),
         };
         let result = table_provider.resolve_table_ref(table_ref);
-        assert!(result.is_err());
+        assert!(result.is_ok());
 
         let table_ref = TableReference::Full {
             catalog: Cow::Borrowed("greptime"),
@@ -158,7 +146,7 @@ mod tests {
             table: Cow::Borrowed("table_name"),
         };
         let result = table_provider.resolve_table_ref(table_ref);
-        let _ = result.unwrap();
+        assert!(result.is_ok());
 
         let table_ref = TableReference::Full {
             catalog: Cow::Borrowed("wrong_catalog"),
@@ -172,14 +160,15 @@ mod tests {
             schema: Cow::Borrowed("information_schema"),
             table: Cow::Borrowed("columns"),
         };
-        let _ = table_provider.resolve_table_ref(table_ref).unwrap();
+        let result = table_provider.resolve_table_ref(table_ref);
+        assert!(result.is_ok());
 
         let table_ref = TableReference::Full {
             catalog: Cow::Borrowed("greptime"),
             schema: Cow::Borrowed("information_schema"),
             table: Cow::Borrowed("columns"),
         };
-        let _ = table_provider.resolve_table_ref(table_ref).unwrap();
+        assert!(table_provider.resolve_table_ref(table_ref).is_ok());
 
         let table_ref = TableReference::Full {
             catalog: Cow::Borrowed("dummy"),
@@ -187,5 +176,12 @@ mod tests {
             table: Cow::Borrowed("columns"),
         };
         assert!(table_provider.resolve_table_ref(table_ref).is_err());
+
+        let table_ref = TableReference::Full {
+            catalog: Cow::Borrowed("greptime"),
+            schema: Cow::Borrowed("greptime_private"),
+            table: Cow::Borrowed("columns"),
+        };
+        assert!(table_provider.resolve_table_ref(table_ref).is_ok());
     }
 }
