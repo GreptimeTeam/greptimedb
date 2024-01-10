@@ -341,14 +341,20 @@ impl AlterTableProcedure {
 
         if let Some((physical_table_id, physical_table_name)) = self.data.physical_table_info() {
             lock_key.push(CatalogLock::Read(&physical_table_name.catalog_name).into());
-            lock_key.push(SchemaLock::Read(&physical_table_name.schema_name).into());
+            lock_key.push(
+                SchemaLock::read(
+                    &physical_table_name.catalog_name,
+                    &physical_table_name.schema_name,
+                )
+                .into(),
+            );
             lock_key.push(TableLock::Read(*physical_table_id).into())
         }
 
         let table_ref = self.data.table_ref();
         let table_id = self.data.table_id();
         lock_key.push(CatalogLock::Read(table_ref.catalog).into());
-        lock_key.push(SchemaLock::Read(table_ref.schema).into());
+        lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());
         lock_key.push(TableLock::Write(table_id).into());
 
         if let Ok(Kind::RenameTable(RenameTable { new_table_name })) = self.alter_kind() {

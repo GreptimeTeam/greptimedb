@@ -17,6 +17,11 @@ use consts::DEFAULT_CATALOG_NAME;
 pub mod consts;
 pub mod error;
 
+#[inline]
+pub fn format_schema_name(catalog: &str, schema: &str) -> String {
+    format!("{catalog}.{schema}")
+}
+
 /// Formats table fully-qualified name
 #[inline]
 pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {

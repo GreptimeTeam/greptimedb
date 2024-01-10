@@ -271,7 +271,7 @@ impl Procedure for DropTableProcedure {
         let table_id = self.data.table_id();
         let lock_key = vec![
             CatalogLock::Read(table_ref.catalog).into(),
-            SchemaLock::Read(table_ref.schema).into(),
+            SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
             TableLock::Write(table_id).into(),
         ];
 

@@ -14,6 +14,7 @@
 
 use std::fmt::Display;
 
+use common_catalog::{format_full_table_name, format_schema_name};
 use common_procedure::StringKey;
 use store_api::storage::{RegionId, TableId};
 
@@ -49,12 +50,22 @@ impl<'a> From<CatalogLock<'a>> for StringKey {
 }
 
 /// [SchemaLock] acquires the lock on the database level.
-pub enum SchemaLock<'a> {
-    Read(&'a str),
-    Write(&'a str),
+pub enum SchemaLock {
+    Read(String),
+    Write(String),
 }
 
-impl<'a> Display for SchemaLock<'a> {
+impl SchemaLock {
+    pub fn read(catalog: &str, schema: &str) -> Self {
+        Self::Read(format_schema_name(catalog, schema))
+    }
+
+    pub fn write(catalog: &str, schema: &str) -> Self {
+        Self::Write(format_schema_name(catalog, schema))
+    }
+}
+
+impl Display for SchemaLock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let key = match self {
             SchemaLock::Read(s) => s,
@@ -64,8 +75,8 @@ impl<'a> Display for SchemaLock<'a> {
     }
 }
 
-impl<'a> From<SchemaLock<'a>> for StringKey {
-    fn from(value: SchemaLock<'a>) -> Self {
+impl From<SchemaLock> for StringKey {
+    fn from(value: SchemaLock) -> Self {
         match value {
             SchemaLock::Write(_) => StringKey::Exclusive(value.to_string()),
             SchemaLock::Read(_) => StringKey::Share(value.to_string()),
@@ -73,44 +84,26 @@ impl<'a> From<SchemaLock<'a>> for StringKey {
     }
 }
 
-pub struct TableReference<'a> {
-    pub catalog: &'a str,
-    pub schema: &'a str,
-    pub table: &'a str,
-}
-
 /// [TableNameLock] prevents any procedures trying to create a table named it.
-pub enum TableNameLock<'a> {
-    Write(TableReference<'a>),
+pub enum TableNameLock {
+    Write(String),
 }
 
-impl<'a> TableNameLock<'a> {
-    pub fn new(catalog: &'a str, schema: &'a str, table: &'a str) -> Self {
-        Self::Write(TableReference {
-            catalog,
-            schema,
-            table,
-        })
+impl TableNameLock {
+    pub fn new(catalog: &str, schema: &str, table: &str) -> Self {
+        Self::Write(format_full_table_name(catalog, schema, table))
     }
 }
 
-impl<'a> Display for TableNameLock<'a> {
+impl Display for TableNameLock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let TableNameLock::Write(TableReference {
-            catalog,
-            schema,
-            table,
-        }) = self;
-        write!(
-            f,
-            "{}/{}.{}.{}",
-            TABLE_NAME_LOCK_PREFIX, catalog, schema, table
-        )
+        let TableNameLock::Write(name) = self;
+        write!(f, "{}/{}", TABLE_NAME_LOCK_PREFIX, name)
     }
 }
 
-impl<'a> From<TableNameLock<'a>> for StringKey {
-    fn from(value: TableNameLock<'a>) -> Self {
+impl From<TableNameLock> for StringKey {
+    fn from(value: TableNameLock) -> Self {
         match value {
             TableNameLock::Write(_) => StringKey::Exclusive(value.to_string()),
         }
@@ -199,15 +192,15 @@ mod tests {
             StringKey::Exclusive(format!("{}/{}", CATALOG_LOCK_PREFIX, "foo"))
         );
         // The schema lock
-        let string_key: StringKey = SchemaLock::Read("foo").into();
+        let string_key: StringKey = SchemaLock::read("foo", "bar").into();
         assert_eq!(
             string_key,
-            StringKey::Share(format!("{}/{}", SCHEMA_LOCK_PREFIX, "foo"))
+            StringKey::Share(format!("{}/{}", SCHEMA_LOCK_PREFIX, "foo.bar"))
         );
-        let string_key: StringKey = SchemaLock::Write("foo").into();
+        let string_key: StringKey = SchemaLock::write("foo", "bar").into();
         assert_eq!(
             string_key,
-            StringKey::Exclusive(format!("{}/{}", SCHEMA_LOCK_PREFIX, "foo"))
+            StringKey::Exclusive(format!("{}/{}", SCHEMA_LOCK_PREFIX, "foo.bar"))
         );
         // The table lock
         let string_key: StringKey = TableLock::Read(1024).into();
