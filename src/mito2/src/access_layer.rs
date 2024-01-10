@@ -66,7 +66,7 @@ impl AccessLayer {
         &self.object_store
     }
 
-    /// Deletes a SST file with given file id.
+    /// Deletes a SST file (and its index file if it has one) with given file id.
     pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
         let path = location::sst_file_path(&self.region_dir, file_meta.file_id);
         self.object_store
