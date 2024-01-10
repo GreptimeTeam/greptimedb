@@ -68,6 +68,9 @@ pub struct PersistentContext {
     to_peer: Peer,
     /// The [RegionId] of migration region.
     region_id: RegionId,
+    /// The timeout of waiting for a candidate to replay the WAL.
+    #[serde(with = "humantime_serde")]
+    replay_timeout: Duration,
 }
 
 impl PersistentContext {

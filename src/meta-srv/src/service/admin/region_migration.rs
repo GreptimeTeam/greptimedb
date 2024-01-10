@@ -15,9 +15,11 @@
 use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::str::FromStr;
+use std::time::Duration;
 
 use common_meta::peer::Peer;
 use common_meta::{distributed_time_constants, ClusterId};
+use humantime::parse_duration;
 use serde::Serialize;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -43,6 +45,7 @@ struct SubmitRegionMigrationTaskRequest {
     region_id: RegionId,
     from_peer_id: u64,
     to_peer_id: u64,
+    replay_timeout: Duration,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,6 +74,8 @@ where
     Ok(parse_result)
 }
 
+const DEFAULT_REPLAY_TIMEOUT: Duration = Duration::from_millis(1000);
+
 impl TryFrom<&HashMap<String, String>> for SubmitRegionMigrationTaskRequest {
     type Error = Error;
 
@@ -89,11 +94,18 @@ impl TryFrom<&HashMap<String, String>> for SubmitRegionMigrationTaskRequest {
             error::MissingRequiredParameterSnafu { param: key }.fail()
         })?;
 
+        let replay_timeout = if let Some(duration) = params.get("replay_timeout") {
+            parse_duration(duration).context(error::ParseDurationSnafu { duration })?
+        } else {
+            DEFAULT_REPLAY_TIMEOUT
+        };
+
         Ok(SubmitRegionMigrationTaskRequest {
             cluster_id,
             region_id: RegionId::from_u64(region_id),
             from_peer_id,
             to_peer_id,
+            replay_timeout,
         })
     }
 }
@@ -131,6 +143,7 @@ impl SubmitRegionMigrationTaskHandler {
             region_id,
             from_peer_id,
             to_peer_id,
+            replay_timeout,
         } = task;
 
         let from_peer = self.lookup_peer(cluster_id, from_peer_id).await?.context(
@@ -150,6 +163,7 @@ impl SubmitRegionMigrationTaskHandler {
                 region_id,
                 from_peer,
                 to_peer,
+                replay_timeout,
             })
             .await?;
 
@@ -187,6 +201,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::error;
+    use crate::service::admin::region_migration::DEFAULT_REPLAY_TIMEOUT;
 
     #[test]
     fn test_parse_migration_task_req() {
@@ -212,6 +227,7 @@ mod tests {
                 region_id: RegionId::new(1024, 1),
                 from_peer_id: 1,
                 to_peer_id: 2,
+                replay_timeout: DEFAULT_REPLAY_TIMEOUT
             },
             task_req
         );
@@ -233,6 +249,7 @@ mod tests {
                 region_id: RegionId::new(1024, 1),
                 from_peer_id: 1,
                 to_peer_id: 2,
+                replay_timeout: DEFAULT_REPLAY_TIMEOUT
             },
             task_req
         );

@@ -55,6 +55,7 @@ impl Default for DowngradeLeaderRegion {
 #[typetag::serde]
 impl State for DowngradeLeaderRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+        let replay_timeout = ctx.persistent_ctx.replay_timeout;
         // Ensures the `leader_region_lease_deadline` must exist after recovering.
         ctx.volatile_ctx
             .set_leader_region_lease_deadline(Duration::from_secs(REGION_LEASE_SECS));
@@ -69,7 +70,10 @@ impl State for DowngradeLeaderRegion {
         }
 
         Ok((
-            Box::<UpgradeCandidateRegion>::default(),
+            Box::new(UpgradeCandidateRegion {
+                replay_timeout,
+                ..Default::default()
+            }),
             Status::executing(false),
         ))
     }
@@ -226,6 +230,7 @@ mod tests {
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
             cluster_id: 0,
+            replay_timeout: Duration::from_millis(1000),
         }
     }
 
