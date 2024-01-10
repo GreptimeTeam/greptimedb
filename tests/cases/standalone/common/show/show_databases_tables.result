@@ -20,7 +20,6 @@ show tables;
 +---------------------------------------+
 | Tables                                |
 +---------------------------------------+
-| build_info                            |
 | character_sets                        |
 | check_constraints                     |
 | collation_character_set_applicability |
@@ -38,7 +37,6 @@ show tables;
 | profiling                             |
 | referential_constraints               |
 | routines                              |
-| runtime_metrics                       |
 | schema_privileges                     |
 | schemata                              |
 | session_status                        |

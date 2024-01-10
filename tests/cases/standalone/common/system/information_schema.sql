@@ -7,7 +7,7 @@ from information_schema.tables
 where table_name != 'scripts'
 order by table_schema, table_name;
 
-select * from information_schema.columns order by table_schema, table_name;
+select * from information_schema.columns order by table_schema, table_name, column_name;
 
 create
 database my_db;

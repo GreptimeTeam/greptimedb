@@ -24,7 +24,7 @@ mod tables;
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use common_catalog::consts::{self, INFORMATION_SCHEMA_NAME};
+use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
@@ -58,7 +58,6 @@ lazy_static! {
         ENGINES,
         COLUMN_PRIVILEGES,
         COLUMN_STATISTICS,
-        BUILD_INFO,
         CHARACTER_SETS,
         COLLATIONS,
         COLLATION_CHARACTER_SET_APPLICABILITY,
@@ -144,13 +143,24 @@ impl InformationSchemaProvider {
 
     fn build_tables(&mut self) {
         let mut tables = HashMap::new();
+
+        // Carefully consider the tables that may expose sensitive cluster configurations,
+        // authentication details, and other critical information.
+        // Only put these tables under `greptime` catalog to prevent info leak.
+        if self.catalog_name == DEFAULT_CATALOG_NAME {
+            tables.insert(
+                RUNTIME_METRICS.to_string(),
+                self.build_table(RUNTIME_METRICS).unwrap(),
+            );
+            tables.insert(
+                BUILD_INFO.to_string(),
+                self.build_table(BUILD_INFO).unwrap(),
+            );
+        }
+
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
         tables.insert(SCHEMATA.to_string(), self.build_table(SCHEMATA).unwrap());
         tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
-        tables.insert(
-            RUNTIME_METRICS.to_string(),
-            self.build_table(RUNTIME_METRICS).unwrap(),
-        );
         tables.insert(
             KEY_COLUMN_USAGE.to_string(),
             self.build_table(KEY_COLUMN_USAGE).unwrap(),
