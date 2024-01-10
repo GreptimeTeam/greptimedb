@@ -82,7 +82,7 @@ impl WriteCache {
         write_opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
         let timer = FLUSH_ELAPSED
-            .with_label_values(&["write_parquet"])
+            .with_label_values(&["write_sst"])
             .start_timer();
 
         let region_id = request.metadata.region_id;
@@ -106,7 +106,7 @@ impl WriteCache {
             return Ok(None);
         }
 
-        let timer = FLUSH_ELAPSED.with_label_values(&["upload"]).start_timer();
+        let timer = FLUSH_ELAPSED.with_label_values(&["upload_sst"]).start_timer();
 
         let reader = self
             .file_cache
