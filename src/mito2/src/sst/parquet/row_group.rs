@@ -184,7 +184,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 .map(|(idx, (_chunk, _cached_pages))| {
                     let column = self.metadata.column(idx);
                     let (start, length) = column.byte_range();
-                    start as u64..(start + length) as u64
+                    start..(start + length)
                 })
                 .collect::<Vec<_>>();
 
