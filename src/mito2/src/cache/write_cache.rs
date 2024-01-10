@@ -101,10 +101,10 @@ impl WriteCache {
         timer.stop_and_record();
 
         // Upload sst file to remote object store.
-        if sst_info.is_none() {
+        let Some(sst_info) = sst_info else {
             // No data need to upload.
             return Ok(None);
-        }
+        };
 
         let timer = FLUSH_ELAPSED
             .with_label_values(&["upload_sst"])
@@ -143,14 +143,12 @@ impl WriteCache {
         );
 
         // Register to file cache
-        if let Some(sst_info) = &sst_info {
-            let file_size = sst_info.file_size as u32;
-            self.file_cache
-                .put((region_id, file_id), IndexValue { file_size })
-                .await;
-        }
+        let file_size = sst_info.file_size as u32;
+        self.file_cache
+            .put((region_id, file_id), IndexValue { file_size })
+            .await;
 
-        Ok(sst_info)
+        Ok(Some(sst_info))
     }
 }
 
