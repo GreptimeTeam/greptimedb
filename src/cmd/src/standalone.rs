@@ -118,6 +118,12 @@ pub struct StandaloneOptions {
     pub export_metrics: ExportMetricsOption,
 }
 
+impl StandaloneOptions {
+    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["wal.broker_endpoints"])
+    }
+}
+
 impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
@@ -267,7 +273,7 @@ impl StartCommand {
         let opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            None,
+            StandaloneOptions::env_list_keys(),
         )?;
 
         self.convert_options(cli_options, opts)

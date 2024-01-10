@@ -128,7 +128,7 @@ impl StartCommand {
         let mut opts: MetaSrvOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            None,
+            MetaSrvOptions::env_list_keys(),
         )?;
 
         if let Some(dir) = &cli_options.log_dir {
