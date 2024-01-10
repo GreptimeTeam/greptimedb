@@ -102,9 +102,8 @@ provider = "raft_engine"
 # selector_type = "round_robin"
 # The prefix of topic name.
 # topic_name_prefix = "greptimedb_wal_topic"
-# Number of partitions per topic.
-# num_partitions = 1
 # The number of replicas of each partition.
+# Warning: the replication factor must be positive and must not be greater than the number of broker endpoints.
 # replication_factor = 1
 
 # The max size of a single producer batch.
