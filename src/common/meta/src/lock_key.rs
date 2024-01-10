@@ -1,0 +1,242 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::fmt::Display;
+
+use common_procedure::StringKey;
+use store_api::storage::{RegionId, TableId};
+
+const CATALOG_LOCK_PREFIX: &str = "__catalog_lock";
+const SCHEMA_LOCK_PREFIX: &str = "__schema_lock";
+const TABLE_LOCK_PREFIX: &str = "__table_lock";
+const TABLE_NAME_LOCK_PREFIX: &str = "__table_name_lock";
+const REGION_LOCK_PREFIX: &str = "__region_lock";
+
+/// [CatalogLock] acquires the lock on the tenant level.
+pub enum CatalogLock<'a> {
+    Read(&'a str),
+    Write(&'a str),
+}
+
+impl<'a> Display for CatalogLock<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = match self {
+            CatalogLock::Read(s) => s,
+            CatalogLock::Write(s) => s,
+        };
+        write!(f, "{}/{}", CATALOG_LOCK_PREFIX, key)
+    }
+}
+
+impl<'a> From<CatalogLock<'a>> for StringKey {
+    fn from(value: CatalogLock) -> Self {
+        match value {
+            CatalogLock::Write(_) => StringKey::Exclusive(value.to_string()),
+            CatalogLock::Read(_) => StringKey::Share(value.to_string()),
+        }
+    }
+}
+
+/// [SchemaLock] acquires the lock on the database level.
+pub enum SchemaLock<'a> {
+    Read(&'a str),
+    Write(&'a str),
+}
+
+impl<'a> Display for SchemaLock<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = match self {
+            SchemaLock::Read(s) => s,
+            SchemaLock::Write(s) => s,
+        };
+        write!(f, "{}/{}", SCHEMA_LOCK_PREFIX, key)
+    }
+}
+
+impl<'a> From<SchemaLock<'a>> for StringKey {
+    fn from(value: SchemaLock<'a>) -> Self {
+        match value {
+            SchemaLock::Write(_) => StringKey::Exclusive(value.to_string()),
+            SchemaLock::Read(_) => StringKey::Share(value.to_string()),
+        }
+    }
+}
+
+pub struct TableReference<'a> {
+    pub catalog: &'a str,
+    pub schema: &'a str,
+    pub table: &'a str,
+}
+
+/// [TableNameLock] prevents any procedures trying to create a table named it.
+pub enum TableNameLock<'a> {
+    Write(TableReference<'a>),
+}
+
+impl<'a> TableNameLock<'a> {
+    pub fn new(catalog: &'a str, schema: &'a str, table: &'a str) -> Self {
+        Self::Write(TableReference {
+            catalog,
+            schema,
+            table,
+        })
+    }
+}
+
+impl<'a> Display for TableNameLock<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let TableNameLock::Write(TableReference {
+            catalog,
+            schema,
+            table,
+        }) = self;
+        write!(
+            f,
+            "{}/{}.{}.{}",
+            TABLE_NAME_LOCK_PREFIX, catalog, schema, table
+        )
+    }
+}
+
+impl<'a> From<TableNameLock<'a>> for StringKey {
+    fn from(value: TableNameLock<'a>) -> Self {
+        match value {
+            TableNameLock::Write(_) => StringKey::Exclusive(value.to_string()),
+        }
+    }
+}
+
+/// [TableLock] acquires the lock on the table level.
+///
+/// Note: Allows to read/modify the corresponding table's [TableInfoValue](crate::key::table_info::TableInfoValue),
+/// [TableRouteValue](crate::key::table_route::TableRouteValue), [TableDatanodeValue](crate::key::datanode_table::DatanodeTableValue).
+pub enum TableLock {
+    Read(TableId),
+    Write(TableId),
+}
+
+impl Display for TableLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = match self {
+            TableLock::Read(s) => s,
+            TableLock::Write(s) => s,
+        };
+        write!(f, "{}/{}", TABLE_LOCK_PREFIX, key)
+    }
+}
+
+impl From<TableLock> for StringKey {
+    fn from(value: TableLock) -> Self {
+        match value {
+            TableLock::Write(_) => StringKey::Exclusive(value.to_string()),
+            TableLock::Read(_) => StringKey::Share(value.to_string()),
+        }
+    }
+}
+
+/// [RegionLock] acquires the lock on the region level.
+///
+/// Note:
+/// - Allows modification the corresponding region's [TableRouteValue](crate::key::table_route::TableRouteValue),
+/// [TableDatanodeValue](crate::key::datanode_table::DatanodeTableValue) even if
+/// it acquires the [RegionLock::Write] only without acquiring the [TableLock::Write].
+///
+/// - Should acquire [TableLock] of the table at same procedure.
+///
+/// TODO(weny): we should consider separating TableRouteValue into finer keys.
+pub enum RegionLock {
+    Read(RegionId),
+    Write(RegionId),
+}
+
+impl Display for RegionLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = match self {
+            RegionLock::Read(s) => s.as_u64(),
+            RegionLock::Write(s) => s.as_u64(),
+        };
+        write!(f, "{}/{}", REGION_LOCK_PREFIX, key)
+    }
+}
+
+impl From<RegionLock> for StringKey {
+    fn from(value: RegionLock) -> Self {
+        match value {
+            RegionLock::Write(_) => StringKey::Exclusive(value.to_string()),
+            RegionLock::Read(_) => StringKey::Share(value.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_procedure::StringKey;
+
+    use crate::lock_key::*;
+
+    #[test]
+    fn test_lock_key() {
+        // The catalog lock
+        let string_key: StringKey = CatalogLock::Read("foo").into();
+        assert_eq!(
+            string_key,
+            StringKey::Share(format!("{}/{}", CATALOG_LOCK_PREFIX, "foo"))
+        );
+        let string_key: StringKey = CatalogLock::Write("foo").into();
+        assert_eq!(
+            string_key,
+            StringKey::Exclusive(format!("{}/{}", CATALOG_LOCK_PREFIX, "foo"))
+        );
+        // The schema lock
+        let string_key: StringKey = SchemaLock::Read("foo").into();
+        assert_eq!(
+            string_key,
+            StringKey::Share(format!("{}/{}", SCHEMA_LOCK_PREFIX, "foo"))
+        );
+        let string_key: StringKey = SchemaLock::Write("foo").into();
+        assert_eq!(
+            string_key,
+            StringKey::Exclusive(format!("{}/{}", SCHEMA_LOCK_PREFIX, "foo"))
+        );
+        // The table lock
+        let string_key: StringKey = TableLock::Read(1024).into();
+        assert_eq!(
+            string_key,
+            StringKey::Share(format!("{}/{}", TABLE_LOCK_PREFIX, 1024))
+        );
+        let string_key: StringKey = TableLock::Write(1024).into();
+        assert_eq!(
+            string_key,
+            StringKey::Exclusive(format!("{}/{}", TABLE_LOCK_PREFIX, 1024))
+        );
+        // The table name lock
+        let string_key: StringKey = TableNameLock::new("foo", "bar", "baz").into();
+        assert_eq!(
+            string_key,
+            StringKey::Exclusive(format!("{}/{}", TABLE_NAME_LOCK_PREFIX, "foo.bar.baz"))
+        );
+        // The region lock
+        let region_id = RegionId::new(1024, 1);
+        let string_key: StringKey = RegionLock::Read(region_id).into();
+        assert_eq!(
+            string_key,
+            StringKey::Share(format!("{}/{}", REGION_LOCK_PREFIX, region_id.as_u64()))
+        );
+        let string_key: StringKey = RegionLock::Write(region_id).into();
+        assert_eq!(
+            string_key,
+            StringKey::Exclusive(format!("{}/{}", REGION_LOCK_PREFIX, region_id.as_u64()))
+        );
+    }
+}
