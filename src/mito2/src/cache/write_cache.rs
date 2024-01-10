@@ -80,7 +80,7 @@ impl WriteCache {
         // TODO(yingwen): Write to the local store and then upload.
         // Now we write to the remote and ignore local cache.
         let mut writer = ParquetWriter::new(
-            request.region_dir.clone(),
+            request.region_dir,
             request.file_id,
             request.metadata,
             request.remote_store,

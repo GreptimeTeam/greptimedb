@@ -96,7 +96,6 @@ impl AccessLayer {
         request: SstWriteRequest,
         write_opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
-        let file_id = request.file_id;
         let region_id = request.metadata.region_id;
 
         let sst_info = if let Some(write_cache) = request.cache_manager.write_cache() {
@@ -118,7 +117,7 @@ impl AccessLayer {
             // Write cache is disabled.
             let mut writer = ParquetWriter::new(
                 self.region_dir.clone(),
-                file_id,
+                request.file_id,
                 request.metadata,
                 self.object_store.clone(),
             );
