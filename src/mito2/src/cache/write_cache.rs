@@ -106,7 +106,9 @@ impl WriteCache {
             return Ok(None);
         }
 
-        let timer = FLUSH_ELAPSED.with_label_values(&["upload_sst"]).start_timer();
+        let timer = FLUSH_ELAPSED
+            .with_label_values(&["upload_sst"])
+            .start_timer();
 
         let reader = self
             .file_cache
