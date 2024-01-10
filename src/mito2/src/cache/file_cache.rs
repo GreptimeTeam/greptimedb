@@ -33,7 +33,7 @@ use crate::cache::FILE_TYPE;
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
-use crate::sst::parquet::helper::{fetch_ranges_concurrent, fetch_ranges_seq};
+use crate::sst::parquet::helper::fetch_byte_ranges;
 
 /// Subdirectory of cached files.
 const FILE_DIR: &str = "files/";
@@ -138,19 +138,15 @@ impl FileCache {
         key: IndexKey,
         ranges: &[Range<u64>],
     ) -> Option<Vec<Bytes>> {
-        if !self.memory_index.contains_key(&key) {
+        if self.memory_index.get(&key).await.is_none() {
             CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
             return None;
         }
 
         let file_path = self.cache_file_path(key);
-        // In most cases, it will enter `fetch_ranges_seq`,
+        // In most cases, it will use blocking read,
         // because FileCache is normally based on local file system, which supports blocking read.
-        let bytes_result = if self.local_store.info().full_capability().blocking {
-            fetch_ranges_seq(&file_path, self.local_store.clone(), ranges).await
-        } else {
-            fetch_ranges_concurrent(&file_path, self.local_store.clone(), ranges).await
-        };
+        let bytes_result = fetch_byte_ranges(&file_path, self.local_store.clone(), ranges).await;
 
         match bytes_result {
             Ok(bytes) => {
@@ -419,8 +415,9 @@ mod tests {
         let key = (region_id, file_id);
         let file_path = file_cache.cache_file_path(key);
         // Write a file.
+        let data = b"hello greptime database";
         local_store
-            .write(&file_path, b"hello greptime database".as_slice())
+            .write(&file_path, data.as_slice())
             .await
             .unwrap();
         // Add to the cache.
@@ -428,13 +425,14 @@ mod tests {
             .put((region_id, file_id), IndexValue { file_size: 5 })
             .await;
         // Ranges
-        let ranges = vec![0..5, 6..10, 15..19];
+        let ranges = vec![0..5, 6..10, 15..19, 0..data.len() as u64];
         let bytes = file_cache.read_ranges(key, &ranges).await.unwrap();
 
-        assert_eq!(3, bytes.len());
+        assert_eq!(4, bytes.len());
         assert_eq!(b"hello", bytes[0].as_ref());
         assert_eq!(b"grep", bytes[1].as_ref());
         assert_eq!(b"data", bytes[2].as_ref());
+        assert_eq!(data, bytes[3].as_ref());
     }
 
     #[test]

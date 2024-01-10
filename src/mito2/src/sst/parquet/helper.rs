@@ -104,7 +104,7 @@ pub async fn fetch_byte_ranges(
 }
 
 /// Fetches data from object store sequentially
-pub async fn fetch_ranges_seq(
+async fn fetch_ranges_seq(
     file_path: &str,
     object_store: ObjectStore,
     ranges: &[Range<u64>],
@@ -131,7 +131,7 @@ pub async fn fetch_ranges_seq(
 }
 
 /// Fetches data from object store concurrently.
-pub async fn fetch_ranges_concurrent(
+async fn fetch_ranges_concurrent(
     file_path: &str,
     object_store: ObjectStore,
     ranges: &[Range<u64>],
@@ -154,7 +154,7 @@ pub async fn fetch_ranges_concurrent(
 
 //  Port from https://github.com/apache/arrow-rs/blob/802ed428f87051fdca31180430ddb0ecb2f60e8b/object_store/src/util.rs#L74-L83
 /// Takes a function and spawns it to a tokio blocking pool if available
-pub async fn maybe_spawn_blocking<F, T>(f: F) -> Result<T>
+async fn maybe_spawn_blocking<F, T>(f: F) -> Result<T>
 where
     F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
