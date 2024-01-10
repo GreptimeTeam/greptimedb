@@ -28,6 +28,7 @@ use common_datasource::util::find_dir_and_filename;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
+use common_time::timezone::get_timezone;
 use common_time::Timestamp;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
@@ -38,12 +39,12 @@ use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
-use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
+use sql::statements::show::{ShowDatabases, ShowKind, ShowTables, ShowVariables};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
 use crate::datafusion::execute_show_with_filter;
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnsupportedVariableSnafu};
 
 const SCHEMAS_COLUMN: &str = "Schemas";
 const TABLES_COLUMN: &str = "Tables";
@@ -227,6 +228,26 @@ pub async fn show_tables(
             Ok(Output::RecordBatches(records))
         }
     }
+}
+
+pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<Output> {
+    let variable = stmt.variable.to_string().to_uppercase();
+    let value = match variable.as_str() {
+        "SYSTEM_TIME_ZONE" => get_timezone(None).to_string(),
+        "TIME_ZONE" => query_ctx.timezone().to_string(),
+        _ => return UnsupportedVariableSnafu { name: variable }.fail(),
+    };
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        variable,
+        ConcreteDataType::string_datatype(),
+        false,
+    )]));
+    let records = RecordBatches::try_from_columns(
+        schema,
+        vec![Arc::new(StringVector::from(vec![value])) as _],
+    )
+    .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::RecordBatches(records))
 }
 
 pub fn show_create_table(

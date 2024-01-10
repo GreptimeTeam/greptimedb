@@ -26,6 +26,8 @@ use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
+use crate::SessionRef;
+
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
@@ -36,7 +38,7 @@ pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
     current_user: ArcSwap<Option<UserInfoRef>>,
-    timezone: Timezone,
+    timezone: ArcSwap<Timezone>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
 }
 
@@ -58,7 +60,8 @@ impl From<&RegionRequestHeader> for QueryContext {
             current_catalog: catalog.to_string(),
             current_schema: schema.to_string(),
             current_user: Default::default(),
-            timezone: get_timezone(None),
+            // for request send to datanode, all timestamp have converted to UTC, so timezone is not important
+            timezone: ArcSwap::new(Arc::new(get_timezone(None))),
             sql_dialect: Box::new(GreptimeDbDialect {}),
         }
     }
@@ -117,7 +120,7 @@ impl QueryContext {
 
     #[inline]
     pub fn timezone(&self) -> Timezone {
-        self.timezone.clone()
+        self.timezone.load().as_ref().clone()
     }
 
     #[inline]
@@ -128,6 +131,20 @@ impl QueryContext {
     #[inline]
     pub fn set_current_user(&self, user: Option<UserInfoRef>) {
         let _ = self.current_user.swap(Arc::new(user));
+    }
+
+    #[inline]
+    pub fn set_timezone(&self, timezone: Timezone) {
+        let _ = self.timezone.swap(Arc::new(timezone));
+    }
+
+    /// SQL like `set variable` may change timezone or other info in `QueryContext`.
+    /// We need persist these change in `Session`.
+    pub fn update_session(&self, session: &SessionRef) {
+        let tz = self.timezone();
+        if session.timezone() != tz {
+            session.set_timezone(tz)
+        }
     }
 }
 
@@ -143,7 +160,9 @@ impl QueryContextBuilder {
             current_user: self
                 .current_user
                 .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
-            timezone: self.timezone.unwrap_or(get_timezone(None)),
+            timezone: self
+                .timezone
+                .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None)))),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),

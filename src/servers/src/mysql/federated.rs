@@ -22,7 +22,6 @@ use std::sync::Arc;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_time::timezone::system_timezone_name;
-use common_time::Timezone;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -54,10 +53,6 @@ static SELECT_TIME_DIFF_FUNC_PATTERN: Lazy<Regex> =
 // sqlalchemy < 1.4.30
 static SHOW_SQL_MODE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'sql_mode'(.*))").unwrap());
-
-// Timezone settings
-static SET_TIME_ZONE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^SET TIME_ZONE\s*=\s*'(\S+)'").unwrap());
 
 static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
     RegexSet::new([
@@ -263,20 +258,6 @@ fn check_show_variables(query: &str) -> Option<Output> {
     recordbatches.map(Output::RecordBatches)
 }
 
-// TODO(sunng87): extract this to use sqlparser for more variables
-fn check_set_variables(query: &str, session: SessionRef) -> Option<Output> {
-    if let Some(captures) = SET_TIME_ZONE_PATTERN.captures(query) {
-        // get the capture
-        let tz = captures.get(1).unwrap();
-        if let Ok(timezone) = Timezone::from_tz_string(tz.as_str()) {
-            session.set_timezone(timezone);
-            return Some(Output::AffectedRows(0));
-        }
-    }
-
-    None
-}
-
 // Check for SET or others query, this is the final check of the federated query.
 fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
@@ -304,7 +285,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
 pub(crate) fn check(
     query: &str,
     query_ctx: QueryContextRef,
-    session: SessionRef,
+    _session: SessionRef,
 ) -> Option<Output> {
     // INSERT don't need MySQL federated check. We assume the query doesn't contain
     // federated or driver setup command if it starts with a 'INSERT' statement.
@@ -316,7 +297,6 @@ pub(crate) fn check(
     check_select_variable(query, query_ctx.clone())
         // Then to check "show variables like ...".
         .or_else(|| check_show_variables(query))
-        .or_else(|| check_set_variables(query, session.clone()))
         // Last check
         .or_else(|| check_others(query, query_ctx))
 }
@@ -432,46 +412,5 @@ mod test {
 | 00:00:00                         |
 +----------------------------------+";
         test(query, expected);
-    }
-
-    #[test]
-    fn test_set_timezone() {
-        // test default is UTC when no config in greptimedb
-        {
-            let session = Arc::new(Session::new(None, Channel::Mysql));
-            let query_context = session.new_query_context();
-            assert_eq!("UTC", query_context.timezone().to_string());
-        }
-        set_default_timezone(Some("Asia/Shanghai")).unwrap();
-        let session = Arc::new(Session::new(None, Channel::Mysql));
-        let query_context = session.new_query_context();
-        assert_eq!("Asia/Shanghai", query_context.timezone().to_string());
-        let output = check(
-            "set time_zone = 'UTC'",
-            QueryContext::arc(),
-            session.clone(),
-        );
-        match output.unwrap() {
-            Output::AffectedRows(rows) => {
-                assert_eq!(rows, 0)
-            }
-            _ => unreachable!(),
-        }
-        let query_context = session.new_query_context();
-        assert_eq!("UTC", query_context.timezone().to_string());
-
-        let output = check("select @@time_zone", query_context.clone(), session.clone());
-        match output.unwrap() {
-            Output::RecordBatches(r) => {
-                let expected = "\
-+-------------+
-| @@time_zone |
-+-------------+
-| UTC         |
-+-------------+";
-                assert_eq!(r.pretty_print().unwrap(), expected);
-            }
-            _ => unreachable!(),
-        }
     }
 }

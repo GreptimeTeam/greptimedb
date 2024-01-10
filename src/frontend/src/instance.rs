@@ -457,6 +457,8 @@ pub fn check_permission(
         // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
         }
+        // set/show variable now only alter/show variable in session
+        Statement::SetVariables(_) | Statement::ShowVariables(_) => {}
 
         Statement::Insert(insert) => {
             validate_param(insert.table_name(), query_ctx)?;

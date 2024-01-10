@@ -52,6 +52,16 @@ pub fn get_timezone(tz: Option<Timezone>) -> Timezone {
     })
 }
 
+#[inline(always)]
+/// If the `tz = Some("") || None || Some(Invalid timezone)`, return system timezone,
+/// or return parsed `tz` as timezone.
+pub fn parse_timezone(tz: Option<&str>) -> Timezone {
+    match tz {
+        None | Some("") => Timezone::Named(Tz::UTC),
+        Some(tz) => Timezone::from_tz_string(tz).unwrap_or(Timezone::Named(Tz::UTC)),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Timezone {
     Offset(FixedOffset),

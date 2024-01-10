@@ -21,7 +21,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::ast::{Ident, Value as SqlValue};
 use sql::statements::create::{PartitionEntry, Partitions};
-use sql::statements::show::{ShowDatabases, ShowTables};
+use sql::statements::show::{ShowDatabases, ShowTables, ShowVariables};
 use sql::{statements, MAXVALUE};
 use table::TableRef;
 
@@ -70,6 +70,11 @@ impl StatementExecutor {
 
         query::sql::show_create_table(table, partitions, query_ctx)
             .context(error::ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn show_variable(&self, stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<Output> {
+        query::sql::show_variable(stmt, query_ctx).context(error::ExecuteStatementSnafu)
     }
 }
 

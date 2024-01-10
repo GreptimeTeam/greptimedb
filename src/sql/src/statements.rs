@@ -22,6 +22,7 @@ pub mod explain;
 pub mod insert;
 mod option_map;
 pub mod query;
+pub mod set_variables;
 pub mod show;
 pub mod statement;
 pub mod tql;

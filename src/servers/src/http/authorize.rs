@@ -23,12 +23,14 @@ use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_telemetry::warn;
+use common_time::timezone::parse_timezone;
+use common_time::Timezone;
 use headers::Header;
 use secrecy::SecretString;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::header::GreptimeDbName;
+use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
 use super::{ResponseFormat, PUBLIC_APIS};
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
@@ -56,7 +58,12 @@ pub async fn inner_auth<B>(
 ) -> std::result::Result<Request<B>, Response> {
     // 1. prepare
     let (catalog, schema) = extract_catalog_and_schema(&req);
-    let query_ctx = QueryContext::with(catalog, schema);
+    let timezone = extract_timezone(&req);
+    let query_ctx = QueryContextBuilder::default()
+        .current_catalog(catalog.to_string())
+        .current_schema(schema.to_string())
+        .build();
+    query_ctx.set_timezone(timezone);
     let need_auth = need_auth(&req);
     let is_influxdb = req.uri().path().contains("influxdb");
 
@@ -140,6 +147,17 @@ pub fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {
         .unwrap_or(DEFAULT_SCHEMA_NAME);
 
     parse_catalog_and_schema_from_db_string(dbname)
+}
+
+fn extract_timezone<B>(request: &Request<B>) -> Timezone {
+    // parse timezone from header
+    let timezone = request
+        .headers()
+        .get(&GREPTIME_TIMEZONE_HEADER_NAME)
+        // eat this invalid ascii error and give user the final IllegalParam error
+        .and_then(|header| header.to_str().ok())
+        .unwrap_or("");
+    parse_timezone(Some(timezone))
 }
 
 fn get_influxdb_credentials<B>(request: &Request<B>) -> Result<Option<(Username, Password)>> {
