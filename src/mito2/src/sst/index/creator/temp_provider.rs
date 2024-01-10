@@ -30,8 +30,12 @@ use crate::metrics::{
 use crate::sst::index::store::InstrumentedStore;
 use crate::sst::location::IntermediateLocation;
 
+/// `TempFileProvider` implements `ExternalTempFileProvider`.
+/// It uses `InstrumentedStore` to create and read intermediate files.
 pub(crate) struct TempFileProvider {
+    /// Provides the location of intermediate files.
     location: IntermediateLocation,
+    /// Provides access to files in the object store.
     store: InstrumentedStore,
 }
 
@@ -39,10 +43,10 @@ pub(crate) struct TempFileProvider {
 impl ExternalTempFileProvider for TempFileProvider {
     async fn create(
         &self,
-        column_name: &str,
+        column_id: &str,
         file_id: &str,
     ) -> IndexResult<Box<dyn AsyncWrite + Unpin + Send>> {
-        let path = self.location.file_path(column_name, file_id);
+        let path = self.location.file_path(column_id, file_id);
         let writer = self
             .store
             .writer(
@@ -59,12 +63,12 @@ impl ExternalTempFileProvider for TempFileProvider {
 
     async fn read_all(
         &self,
-        column_name: &str,
+        column_id: &str,
     ) -> IndexResult<Vec<Box<dyn AsyncRead + Unpin + Send>>> {
-        let dir = self.location.column_dir(column_name);
+        let column_path = self.location.column_path(column_id);
         let entries = self
             .store
-            .list(&dir)
+            .list(&column_path)
             .await
             .map_err(BoxedError::new)
             .context(index_error::ExternalSnafu)?;
@@ -72,7 +76,7 @@ impl ExternalTempFileProvider for TempFileProvider {
 
         for entry in entries {
             if entry.metadata().is_dir() {
-                warn!("Unexpected entry in index temp dir: {:?}", entry.path());
+                warn!("Unexpected entry in index creation dir: {:?}", entry.path());
                 continue;
             }
 
@@ -95,11 +99,74 @@ impl ExternalTempFileProvider for TempFileProvider {
 }
 
 impl TempFileProvider {
+    /// Creates a new `TempFileProvider`.
     pub fn new(location: IntermediateLocation, store: InstrumentedStore) -> Self {
         Self { location, store }
     }
 
+    /// Removes all intermediate files.
     pub async fn cleanup(&self) -> Result<()> {
-        self.store.remove_all(self.location.root_dir()).await
+        self.store.remove_all(self.location.root_path()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::{AsyncReadExt, AsyncWriteExt};
+    use object_store::services::Memory;
+    use object_store::ObjectStore;
+
+    use super::*;
+    use crate::sst::file::FileId;
+
+    #[tokio::test]
+    async fn test_temp_file_provider_basic() {
+        let location = IntermediateLocation::new("region_dir", &FileId::random());
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let store = InstrumentedStore::new(object_store);
+        let provider = TempFileProvider::new(location.clone(), store);
+
+        let column_name = "tag0";
+        let file_id = "0000000010";
+        let mut writer = provider.create(column_name, file_id).await.unwrap();
+        writer.write_all(b"hello").await.unwrap();
+        writer.flush().await.unwrap();
+        writer.close().await.unwrap();
+
+        let file_id = "0000000100";
+        let mut writer = provider.create(column_name, file_id).await.unwrap();
+        writer.write_all(b"world").await.unwrap();
+        writer.flush().await.unwrap();
+        writer.close().await.unwrap();
+
+        let column_name = "tag1";
+        let file_id = "0000000010";
+        let mut writer = provider.create(column_name, file_id).await.unwrap();
+        writer.write_all(b"foo").await.unwrap();
+        writer.flush().await.unwrap();
+        writer.close().await.unwrap();
+
+        let readers = provider.read_all("tag0").await.unwrap();
+        assert_eq!(readers.len(), 2);
+        for mut reader in readers {
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).await.unwrap();
+            assert!(matches!(buf.as_slice(), b"hello" | b"world"));
+        }
+        let readers = provider.read_all("tag1").await.unwrap();
+        assert_eq!(readers.len(), 1);
+        let mut reader = readers.into_iter().next().unwrap();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"foo");
+
+        provider.cleanup().await.unwrap();
+
+        assert!(provider
+            .store
+            .list(location.root_path())
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

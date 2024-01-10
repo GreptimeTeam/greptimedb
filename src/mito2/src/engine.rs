@@ -77,16 +77,16 @@ pub struct MitoEngine {
 
 impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
-    pub fn new<S: LogStore>(
+    pub async fn new<S: LogStore>(
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-    ) -> MitoEngine {
-        config.sanitize();
+    ) -> Result<MitoEngine> {
+        config.sanitize()?;
 
-        MitoEngine {
-            inner: Arc::new(EngineInner::new(config, log_store, object_store_manager)),
-        }
+        Ok(MitoEngine {
+            inner: Arc::new(EngineInner::new(config, log_store, object_store_manager).await?),
+        })
     }
 
     /// Returns true if the specific region exists.
@@ -126,16 +126,16 @@ struct EngineInner {
 
 impl EngineInner {
     /// Returns a new [EngineInner] with specific `config`, `log_store` and `object_store`.
-    fn new<S: LogStore>(
+    async fn new<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-    ) -> EngineInner {
+    ) -> Result<EngineInner> {
         let config = Arc::new(config);
-        EngineInner {
-            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager),
+        Ok(EngineInner {
+            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager).await?,
             config,
-        }
+        })
     }
 
     /// Stop the inner engine.
@@ -314,17 +314,17 @@ impl RegionEngine for MitoEngine {
 #[cfg(any(test, feature = "test"))]
 impl MitoEngine {
     /// Returns a new [MitoEngine] for tests.
-    pub fn new_for_test<S: LogStore>(
+    pub async fn new_for_test<S: LogStore>(
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
-    ) -> MitoEngine {
-        config.sanitize();
+    ) -> Result<MitoEngine> {
+        config.sanitize()?;
 
         let config = Arc::new(config);
-        MitoEngine {
+        Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
                     config.clone(),
@@ -332,9 +332,10 @@ impl MitoEngine {
                     object_store_manager,
                     write_buffer_manager,
                     listener,
-                ),
+                )
+                .await?,
                 config,
             }),
-        }
+        })
     }
 }

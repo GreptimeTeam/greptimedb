@@ -108,7 +108,8 @@ provider = "raft_engine"
 # replication_factor = 1
 
 # The max size of a single producer batch.
-# max_batch_size = "4MB"
+# Warning: Kafka has a default limit of 1MB per message in a topic.
+# max_batch_size = "1MB"
 # The linger duration.
 # linger = "200ms"
 # The consumer wait timeout.
@@ -137,6 +138,12 @@ purge_interval = "10m"
 read_batch_size = 128
 # Whether to sync log file after every write.
 sync_write = false
+# Whether to reuse logically truncated log files.
+enable_log_recycle = true
+# Whether to pre-create log files on start up
+prefill_log_files = false
+# Duration for fsyncing log files.
+sync_period = "1000ms"
 
 # Metadata storage options.
 [metadata_store]
@@ -207,6 +214,8 @@ sst_write_buffer_size = "8MB"
 scan_parallelism = 0
 # Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
 parallel_scan_channel_size = 32
+# Whether to allow stale WAL entries read during replay.
+allow_stale_entries = false
 
 # Log options
 # [logging]

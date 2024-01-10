@@ -16,43 +16,60 @@ use std::time::{Duration, Instant};
 
 use crate::metrics::{INDEX_CREATE_BYTES_TOTAL, INDEX_CREATE_ELAPSED, INDEX_CREATE_ROWS_TOTAL};
 
+/// Stage of the index creation process.
 enum Stage {
     Update,
     Finish,
     Cleanup,
 }
 
+/// Statistics for index creation. Flush metrics when dropped.
 #[derive(Default)]
 pub(crate) struct Statistics {
+    /// Accumulated elapsed time for the index update stage.
     update_elapsed: Duration,
+    /// Accumulated elapsed time for the index finish stage.
     finish_elapsed: Duration,
+    /// Accumulated elapsed time for the cleanup stage.
     cleanup_eplased: Duration,
+    /// Number of rows in the index.
     row_count: usize,
+    /// Number of bytes in the index.
     byte_count: usize,
 }
 
 impl Statistics {
+    /// Starts timing the update stage, returning a `TimerGuard` to automatically record duration.
+    #[must_use]
     pub fn record_update(&mut self) -> TimerGuard<'_> {
         TimerGuard::new(self, Stage::Update)
     }
 
+    /// Starts timing the finish stage, returning a `TimerGuard` to automatically record duration.
+    #[must_use]
     pub fn record_finish(&mut self) -> TimerGuard<'_> {
         TimerGuard::new(self, Stage::Finish)
     }
 
+    /// Starts timing the cleanup stage, returning a `TimerGuard` to automatically record duration.
+    #[must_use]
     pub fn record_cleanup(&mut self) -> TimerGuard<'_> {
         TimerGuard::new(self, Stage::Cleanup)
     }
 
+    /// Returns row count.
     pub fn row_count(&self) -> usize {
         self.row_count
     }
 
+    /// Returns byte count.
     pub fn byte_count(&self) -> usize {
         self.byte_count
     }
+}
 
-    fn flush(&self) {
+impl Drop for Statistics {
+    fn drop(&mut self) {
         INDEX_CREATE_ELAPSED
             .with_label_values(&["update"])
             .observe(self.update_elapsed.as_secs_f64());
@@ -71,12 +88,8 @@ impl Statistics {
     }
 }
 
-impl Drop for Statistics {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
-
+/// `TimerGuard` is a RAII struct that ensures elapsed time
+/// is recorded when it goes out of scope.
 pub(crate) struct TimerGuard<'a> {
     stats: &'a mut Statistics,
     stage: Stage,
@@ -84,6 +97,7 @@ pub(crate) struct TimerGuard<'a> {
 }
 
 impl<'a> TimerGuard<'a> {
+    /// Creates a new `TimerGuard`,
     fn new(stats: &'a mut Statistics, stage: Stage) -> Self {
         Self {
             stats,
@@ -92,10 +106,12 @@ impl<'a> TimerGuard<'a> {
         }
     }
 
+    /// Increases the row count of the index creation statistics.
     pub fn inc_row_count(&mut self, n: usize) {
         self.stats.row_count += n;
     }
 
+    /// Increases the byte count of the index creation statistics.
     pub fn inc_byte_count(&mut self, n: usize) {
         self.stats.byte_count += n;
     }
@@ -114,5 +130,31 @@ impl Drop for TimerGuard<'_> {
                 self.stats.cleanup_eplased += self.timer.elapsed();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_statistics_basic() {
+        let mut stats = Statistics::default();
+        {
+            let mut guard = stats.record_update();
+            guard.inc_byte_count(100);
+            guard.inc_row_count(10);
+        }
+        {
+            let _guard = stats.record_finish();
+        }
+        {
+            let _guard = stats.record_cleanup();
+        }
+        assert_eq!(stats.row_count(), 10);
+        assert_eq!(stats.byte_count(), 100);
+        assert!(stats.update_elapsed > Duration::default());
+        assert!(stats.finish_elapsed > Duration::default());
+        assert!(stats.cleanup_eplased > Duration::default());
     }
 }

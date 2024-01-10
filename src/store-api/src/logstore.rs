@@ -19,9 +19,11 @@ use std::collections::HashMap;
 use common_config::wal::WalOptions;
 use common_error::ext::ErrorExt;
 
-use crate::logstore::entry::{Entry, Id as EntryId};
+use crate::logstore::entry::Entry;
+pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::entry_stream::SendableEntryStream;
-use crate::logstore::namespace::{Id as NamespaceId, Namespace};
+pub use crate::logstore::namespace::Id as NamespaceId;
+use crate::logstore::namespace::Namespace;
 
 pub mod entry;
 pub mod entry_stream;

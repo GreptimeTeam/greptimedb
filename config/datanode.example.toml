@@ -51,7 +51,8 @@ sync_write = false
 
 # Kafka wal options, see `standalone.example.toml`.
 # broker_endpoints = ["127.0.0.1:9092"]
-# max_batch_size = "4MB"
+# Warning: Kafka has a default limit of 1MB per message in a topic.
+# max_batch_size = "1MB"
 # linger = "200ms"
 # consumer_wait_timeout = "100ms"
 # backoff_init = "500ms"
@@ -116,6 +117,8 @@ sst_write_buffer_size = "8MB"
 scan_parallelism = 0
 # Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
 parallel_scan_channel_size = 32
+# Whether to allow stale WAL entries read during replay.
+allow_stale_entries = false
 
 # Log options, see `standalone.example.toml`
 # [logging]

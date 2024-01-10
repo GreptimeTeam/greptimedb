@@ -442,7 +442,7 @@ pub fn check_permission(
 ) -> Result<()> {
     let need_validate = plugins
         .get::<QueryOptions>()
-        .map(|opts| opts.disallow_cross_schema_query)
+        .map(|opts| opts.disallow_cross_catalog_query)
         .unwrap_or_default();
 
     if !need_validate {
@@ -520,7 +520,7 @@ mod tests {
         let query_ctx = QueryContext::arc();
         let plugins: Plugins = Plugins::new();
         plugins.insert(QueryOptions {
-            disallow_cross_schema_query: true,
+            disallow_cross_catalog_query: true,
         });
 
         let sql = r#"
@@ -556,8 +556,6 @@ mod tests {
             }
 
             let wrong = vec![
-                ("", "wrongschema."),
-                ("greptime.", "wrongschema."),
                 ("wrongcatalog.", "public."),
                 ("wrongcatalog.", "wrongschema."),
             ];
@@ -607,10 +605,10 @@ mod tests {
         let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         check_permission(plugins.clone(), &stmt[0], &query_ctx).unwrap();
 
-        let sql = "SHOW TABLES FROM wrongschema";
+        let sql = "SHOW TABLES FROM private";
         let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
-        assert!(re.is_err());
+        assert!(re.is_ok());
 
         // test describe table
         let sql = "DESC TABLE {catalog}{schema}demo;";

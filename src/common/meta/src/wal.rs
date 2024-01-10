@@ -19,14 +19,10 @@ use std::collections::HashMap;
 
 use common_config::wal::StandaloneWalConfig;
 use common_config::WAL_OPTIONS_KEY;
-use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
-use serde_with::with_prefix;
 use store_api::storage::{RegionId, RegionNumber};
 
-use crate::error::Result;
 use crate::wal::kafka::KafkaConfig;
-pub use crate::wal::kafka::Topic as KafkaWalTopic;
 pub use crate::wal::options_allocator::{
     allocate_region_wal_options, WalOptionsAllocator, WalOptionsAllocatorRef,
 };
@@ -43,7 +39,7 @@ pub enum WalConfig {
 impl From<StandaloneWalConfig> for WalConfig {
     fn from(value: StandaloneWalConfig) -> Self {
         match value {
-            StandaloneWalConfig::RaftEngine(config) => WalConfig::RaftEngine,
+            StandaloneWalConfig::RaftEngine(_) => WalConfig::RaftEngine,
             StandaloneWalConfig::Kafka(config) => WalConfig::Kafka(KafkaConfig {
                 broker_endpoints: config.base.broker_endpoints,
                 num_topics: config.num_topics,

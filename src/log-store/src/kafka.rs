@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod client_manager;
+pub(crate) mod client_manager;
 pub mod log_store;
-mod offset;
-mod record_utils;
+pub(crate) mod util;
 
 use std::fmt::Display;
 
-use common_meta::wal::KafkaWalTopic as Topic;
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::{Entry, Id as EntryId};
 use store_api::logstore::namespace::Namespace;
@@ -29,8 +27,8 @@ use crate::error::Error;
 /// Kafka Namespace implementation.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub struct NamespaceImpl {
-    region_id: u64,
-    topic: Topic,
+    pub region_id: u64,
+    pub topic: String,
 }
 
 impl Namespace for NamespaceImpl {
@@ -41,7 +39,7 @@ impl Namespace for NamespaceImpl {
 
 impl Display for NamespaceImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.topic, self.region_id)
+        write!(f, "[topic: {}, region: {}]", self.topic, self.region_id)
     }
 }
 
@@ -49,11 +47,11 @@ impl Display for NamespaceImpl {
 #[derive(Debug, PartialEq, Clone)]
 pub struct EntryImpl {
     /// Entry payload.
-    data: Vec<u8>,
+    pub data: Vec<u8>,
     /// The logical entry id.
-    id: EntryId,
+    pub id: EntryId,
     /// The namespace used to identify and isolate log entries from different regions.
-    ns: NamespaceImpl,
+    pub ns: NamespaceImpl,
 }
 
 impl Entry for EntryImpl {
@@ -77,7 +75,7 @@ impl Display for EntryImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Entry (ns: {}, id: {}, data_len: {})",
+            "Entry [ns: {}, id: {}, data_len: {}]",
             self.ns,
             self.id,
             self.data.len()

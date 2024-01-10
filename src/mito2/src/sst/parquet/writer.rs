@@ -15,6 +15,7 @@
 //! Parquet writer.
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use common_datasource::file_format::parquet::BufferedWriter;
 use common_telemetry::{debug, warn};
@@ -142,7 +143,7 @@ impl ParquetWriter {
             time_range,
             file_size,
             num_rows: stats.num_rows,
-            file_metadata: Some(parquet_metadata),
+            file_metadata: Some(Arc::new(parquet_metadata)),
             inverted_index_available,
         }))
     }
@@ -257,6 +258,7 @@ impl Indexer {
             region_dir.clone(),
             file_id,
             metadata,
+            object_store.clone(),
             object_store,
             option.creation_memory_usage_threshold,
             row_group_size,

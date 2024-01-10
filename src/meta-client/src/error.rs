@@ -14,7 +14,7 @@
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
+use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 use tonic::Status;
@@ -117,7 +117,7 @@ impl From<Status> for Error {
                 .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
         }
 
-        let code = get_metadata_value(&e, GREPTIME_ERROR_CODE)
+        let code = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_CODE)
             .and_then(|s| {
                 if let Ok(code) = s.parse::<u32>() {
                     StatusCode::from_u32(code)
@@ -127,8 +127,8 @@ impl From<Status> for Error {
             })
             .unwrap_or(StatusCode::Internal);
 
-        let msg =
-            get_metadata_value(&e, GREPTIME_ERROR_MSG).unwrap_or_else(|| e.message().to_string());
+        let msg = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_MSG)
+            .unwrap_or_else(|| e.message().to_string());
 
         Self::MetaServer { code, msg }
     }

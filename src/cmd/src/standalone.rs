@@ -464,7 +464,7 @@ impl StartCommand {
         Ok(ddl_task_executor)
     }
 
-    async fn create_table_metadata_manager(
+    pub async fn create_table_metadata_manager(
         kv_backend: KvBackendRef,
     ) -> Result<TableMetadataManagerRef> {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend));

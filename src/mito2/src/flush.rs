@@ -340,6 +340,7 @@ impl RegionFlushTask {
                 // No data written.
                 continue;
             };
+
             flushed_bytes += sst_info.file_size;
             let file_meta = FileMeta {
                 region_id: self.region_id,
@@ -753,7 +754,7 @@ mod tests {
             listener: WorkerListener::default(),
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
-            cache_manager: Arc::new(CacheManager::new(0, 0, 0)),
+            cache_manager: Arc::new(CacheManager::default()),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler

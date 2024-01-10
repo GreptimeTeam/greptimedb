@@ -14,13 +14,16 @@
 
 use headers::{Header, HeaderName, HeaderValue};
 
-pub static GREPTIME_DB_NAME_HEADER_NAME: HeaderName = HeaderName::from_static("x-greptime-db-name");
+pub const GREPTIME_DB_HEADER_FORMAT: &str = "x-greptime-format";
+pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
+
+pub static GREPTIME_DB_HEADER_NAME: HeaderName = HeaderName::from_static("x-greptime-name");
 
 pub struct GreptimeDbName(Option<String>);
 
 impl Header for GreptimeDbName {
     fn name() -> &'static HeaderName {
-        &GREPTIME_DB_NAME_HEADER_NAME
+        &GREPTIME_DB_HEADER_NAME
     }
 
     fn decode<'i, I>(values: &mut I) -> Result<Self, headers::Error>

@@ -22,6 +22,7 @@ use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
@@ -43,7 +44,7 @@ use snafu::{Location, OptionExt, ResultExt};
 use crate::error::{
     CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedResultSnafu,
 };
-use crate::prom_store::{FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME};
+use crate::prom_store::METRIC_NAME_LABEL;
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -499,8 +500,8 @@ pub async fn labels_query(
         }
     }
 
-    let _ = labels.remove(TIMESTAMP_COLUMN_NAME);
-    let _ = labels.remove(FIELD_COLUMN_NAME);
+    let _ = labels.remove(GREPTIME_TIMESTAMP);
+    let _ = labels.remove(GREPTIME_VALUE);
 
     let mut sorted_labels: Vec<String> = labels.into_iter().collect();
     sorted_labels.sort();

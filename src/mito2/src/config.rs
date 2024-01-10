@@ -19,6 +19,9 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
+
+use crate::error::{InvalidConfigSnafu, Result};
 
 /// Default max running background job.
 const DEFAULT_MAX_BG_JOB: usize = 4;
@@ -67,6 +70,12 @@ pub struct MitoConfig {
     pub vector_cache_size: ReadableSize,
     /// Cache size for pages of SST row groups (default 512MB). Setting it to 0 to disable the cache.
     pub page_cache_size: ReadableSize,
+    /// Whether to enable the experimental write cache.
+    pub enable_experimental_write_cache: bool,
+    /// Path for write cache.
+    pub experimental_write_cache_path: String,
+    /// Capacity for write cache.
+    pub experimental_write_cache_size: ReadableSize,
 
     // Other configs:
     /// Buffer size for SST writing.
@@ -78,6 +87,8 @@ pub struct MitoConfig {
     pub scan_parallelism: usize,
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
+    /// Whether to allow stale entries read during replay.
+    pub allow_stale_entries: bool,
 
     pub inverted_index: InvertedIndexConfig,
 }
@@ -97,9 +108,13 @@ impl Default for MitoConfig {
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
+            enable_experimental_write_cache: false,
+            experimental_write_cache_path: String::new(),
+            experimental_write_cache_size: ReadableSize::mb(512),
             sst_write_buffer_size: ReadableSize::mb(8),
             scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
+            allow_stale_entries: false,
             inverted_index: InvertedIndexConfig::default(),
         }
     }
@@ -107,7 +122,9 @@ impl Default for MitoConfig {
 
 impl MitoConfig {
     /// Sanitize incorrect configurations.
-    pub(crate) fn sanitize(&mut self) {
+    ///
+    /// Returns an error if there is a configuration that unable to sanitize.
+    pub(crate) fn sanitize(&mut self) -> Result<()> {
         // Use default value if `num_workers` is 0.
         if self.num_workers == 0 {
             self.num_workers = divide_num_cpus(2);
@@ -152,6 +169,17 @@ impl MitoConfig {
                 self.parallel_scan_channel_size
             );
         }
+
+        if self.enable_experimental_write_cache {
+            ensure!(
+                !self.experimental_write_cache_path.is_empty(),
+                InvalidConfigSnafu {
+                    reason: "experimental_write_cache_path should not be empty",
+                }
+            );
+        }
+
+        Ok(())
     }
 }
 

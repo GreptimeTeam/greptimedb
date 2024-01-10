@@ -76,11 +76,13 @@ impl InstrumentedStore {
         ))
     }
 
+    /// Proxies to [`ObjectStore::list`].
     pub async fn list(&self, path: &str) -> Result<Vec<object_store::Entry>> {
         let list = self.object_store.list(path).await.context(OpenDalSnafu)?;
         Ok(list)
     }
 
+    /// Proxies to [`ObjectStore::remove_all`].
     pub async fn remove_all(&self, path: &str) -> Result<()> {
         self.object_store
             .remove_all(path)

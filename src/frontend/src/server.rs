@@ -19,7 +19,8 @@ use auth::UserProviderRef;
 use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use servers::error::InternalIoSnafu;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::builder::GrpcServerBuilder;
+use servers::grpc::GrpcServerConfig;
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -68,15 +69,14 @@ impl Services {
                 max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
                 max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
             };
-            let grpc_server = GrpcServer::new(
-                Some(grpc_config),
-                Some(ServerGrpcQueryHandlerAdapter::arc(instance.clone())),
-                Some(instance.clone()),
-                None,
-                None,
-                user_provider.clone(),
-                grpc_runtime,
-            );
+
+            let grpc_server = GrpcServerBuilder::new(grpc_runtime)
+                .config(grpc_config)
+                .query_handler(ServerGrpcQueryHandlerAdapter::arc(instance.clone()))
+                .prometheus_handler(instance.clone())
+                .otlp_handler(instance.clone())
+                .user_provider(user_provider.clone())
+                .build();
 
             result.push((Box::new(grpc_server), grpc_addr));
         }

@@ -16,16 +16,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::error::{EmptyTopicPoolSnafu, Result};
-use crate::wal::kafka::topic::Topic;
 
 /// Controls topic selection.
 pub(crate) trait TopicSelector: Send + Sync {
     /// Selects a topic from the topic pool.
-    fn select<'a>(&self, topic_pool: &'a [Topic]) -> Result<&'a Topic>;
+    fn select<'a>(&self, topic_pool: &'a [String]) -> Result<&'a String>;
 }
 
 /// Arc wrapper of TopicSelector.
@@ -49,7 +47,7 @@ impl RoundRobinTopicSelector {
 }
 
 impl TopicSelector for RoundRobinTopicSelector {
-    fn select<'a>(&self, topic_pool: &'a [Topic]) -> Result<&'a Topic> {
+    fn select<'a>(&self, topic_pool: &'a [String]) -> Result<&'a String> {
         ensure!(!topic_pool.is_empty(), EmptyTopicPoolSnafu);
         let which = self.cursor.fetch_add(1, Ordering::Relaxed) % topic_pool.len();
         Ok(&topic_pool[which])
@@ -59,6 +57,14 @@ impl TopicSelector for RoundRobinTopicSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests that a selector behaves as expected when the given topic pool is empty.
+    #[test]
+    fn test_empty_topic_pool() {
+        let topic_pool = vec![];
+        let selector = RoundRobinTopicSelector::default();
+        assert!(selector.select(&topic_pool).is_err());
+    }
 
     #[test]
     fn test_round_robin_topic_selector() {

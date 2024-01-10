@@ -22,6 +22,8 @@ mod store;
 const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
 
 // TODO(zhongzc): how to determine this value?
+/// The minimum memory usage threshold for a column to qualify for external sorting during index creation.
 const MIN_MEMORY_USAGE_THRESHOLD: usize = 8192;
 
+/// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;

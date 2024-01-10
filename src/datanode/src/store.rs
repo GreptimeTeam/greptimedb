@@ -26,10 +26,10 @@ use std::{env, path};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging::info;
-use object_store::layers::{LoggingLayer, LruCacheLayer, RetryLayer, TracingLayer};
-use object_store::services::Fs as FsBuilder;
-use object_store::util::normalize_dir;
-use object_store::{util, HttpClient, ObjectStore, ObjectStoreBuilder};
+use object_store::layers::{LruCacheLayer, RetryLayer};
+use object_store::services::Fs;
+use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
+use object_store::{HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
 use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
@@ -60,16 +60,7 @@ pub(crate) async fn new_object_store(
         object_store
     };
 
-    let store = object_store
-        .layer(
-            LoggingLayer::default()
-                // Print the expected error only in DEBUG level.
-                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
-                .with_error_level(Some("debug"))
-                .expect("input error level must be valid"),
-        )
-        .layer(TracingLayer)
-        .layer(object_store::layers::PrometheusMetricsLayer);
+    let store = with_instrument_layers(object_store);
     Ok(store)
 }
 
@@ -114,11 +105,10 @@ async fn create_object_store_with_cache(
     };
 
     if let Some(path) = cache_path {
-        let path = util::normalize_dir(path);
-        let atomic_temp_dir = format!("{path}.tmp/");
+        let atomic_temp_dir = join_dir(path, ".tmp/");
         clean_temp_dir(&atomic_temp_dir)?;
-        let cache_store = FsBuilder::default()
-            .root(&path)
+        let cache_store = Fs::default()
+            .root(path)
             .atomic_write_dir(&atomic_temp_dir)
             .build()
             .context(error::InitBackendSnafu)?;

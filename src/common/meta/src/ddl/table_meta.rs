@@ -33,6 +33,7 @@ use crate::rpc::router::{Region, RegionRoute};
 use crate::sequence::SequenceRef;
 use crate::wal::{allocate_region_wal_options, WalOptionsAllocatorRef};
 
+#[derive(Clone)]
 pub struct TableMetadataAllocator {
     table_id_sequence: SequenceRef,
     wal_options_allocator: WalOptionsAllocatorRef,

@@ -78,6 +78,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id,
             flushed_entry_id,
             &region.version_control,
+            self.config.allow_stale_entries,
         )
         .await?;
         info!(

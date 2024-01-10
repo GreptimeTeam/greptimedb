@@ -32,13 +32,12 @@ use index::inverted_index::search::predicate::Predicate;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
+use store_api::storage::ColumnId;
 
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::applier::SstIndexApplier;
 use crate::sst::index::codec::IndexValueCodec;
-
-type ColumnName = String;
 
 /// Constructs an [`SstIndexApplier`] which applies predicates to SST files during scan.
 pub struct SstIndexApplierBuilder<'a> {
@@ -52,7 +51,7 @@ pub struct SstIndexApplierBuilder<'a> {
     metadata: &'a RegionMetadata,
 
     /// Stores predicates during traversal on the Expr tree.
-    output: HashMap<ColumnName, Vec<Predicate>>,
+    output: HashMap<ColumnId, Vec<Predicate>>,
 }
 
 impl<'a> SstIndexApplierBuilder<'a> {
@@ -81,7 +80,11 @@ impl<'a> SstIndexApplierBuilder<'a> {
             return Ok(None);
         }
 
-        let predicates = self.output.into_iter().collect();
+        let predicates = self
+            .output
+            .into_iter()
+            .map(|(column_id, predicates)| (column_id.to_string(), predicates))
+            .collect();
         let applier = PredicatesIndexApplier::try_from(predicates);
         Ok(Some(SstIndexApplier::new(
             self.region_dir,
@@ -122,18 +125,16 @@ impl<'a> SstIndexApplierBuilder<'a> {
     }
 
     /// Helper function to add a predicate to the output.
-    fn add_predicate(&mut self, column_name: &str, predicate: Predicate) {
-        match self.output.get_mut(column_name) {
-            Some(predicates) => predicates.push(predicate),
-            None => {
-                self.output.insert(column_name.to_string(), vec![predicate]);
-            }
-        }
+    fn add_predicate(&mut self, column_id: ColumnId, predicate: Predicate) {
+        self.output.entry(column_id).or_default().push(predicate);
     }
 
-    /// Helper function to get the column type of a tag column.
+    /// Helper function to get the column id and the column type of a tag column.
     /// Returns `None` if the column is not a tag column.
-    fn tag_column_type(&self, column_name: &str) -> Result<Option<ConcreteDataType>> {
+    fn tag_column_id_and_type(
+        &self,
+        column_name: &str,
+    ) -> Result<Option<(ColumnId, ConcreteDataType)>> {
         let column = self
             .metadata
             .column_by_name(column_name)
@@ -142,7 +143,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             })?;
 
         Ok((column.semantic_type == SemanticType::Tag)
-            .then(|| column.column_schema.data_type.clone()))
+            .then(|| (column.column_id, column.column_schema.data_type.clone())))
     }
 
     /// Helper function to get a non-null literal.
@@ -303,7 +304,7 @@ mod tests {
         });
 
         builder.traverse_and_collect(&expr);
-        let predicates = builder.output.get("a").unwrap();
+        let predicates = builder.output.get(&1).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
@@ -311,7 +312,7 @@ mod tests {
                 pattern: "bar".to_string()
             })
         );
-        let predicates = builder.output.get("b").unwrap();
+        let predicates = builder.output.get(&2).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

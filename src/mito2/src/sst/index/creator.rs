@@ -52,57 +52,73 @@ use crate::sst::location::{self, IntermediateLocation};
 type ByteCount = usize;
 type RowCount = usize;
 
+/// Creates SST index.
 pub struct SstIndexCreator {
+    /// Directory of the region.
     region_dir: String,
+    /// ID of the SST file.
     sst_file_id: FileId,
+
+    /// The store to write index files.
     store: InstrumentedStore,
-
-    codec: IndexValuesCodec,
+    /// The index creator.
     index_creator: Box<dyn InvertedIndexCreator>,
-
+    /// The provider of intermediate files.
     temp_file_provider: Arc<TempFileProvider>,
+
+    /// Codec for decoding primary keys.
+    codec: IndexValuesCodec,
+    /// Reusable buffer for encoding index values.
     value_buf: Vec<u8>,
 
-    aborted: bool,
+    /// Statistics of index creation.
     stats: Statistics,
+    /// Whether the index creation is aborted.
+    aborted: bool,
 }
 
 impl SstIndexCreator {
+    /// Creates a new `SstIndexCreator`.
+    /// Should ensure that the number of tag columns is greater than 0.
     pub fn new(
         region_dir: String,
         sst_file_id: FileId,
         metadata: &RegionMetadataRef,
-        object_store: ObjectStore,
+        index_store: ObjectStore,
+        intermediate_store: ObjectStore, // prefer to use local store
         memory_usage_threshold: Option<usize>,
         row_group_size: NonZeroUsize,
     ) -> Self {
-        let store = InstrumentedStore::new(object_store);
-
-        let temp_file_provider = Arc::new(TempFileProvider::new(
-            IntermediateLocation::new(&region_dir, &sst_file_id),
-            store.clone(),
-        ));
-        let memory_usage_threshold = memory_usage_threshold.map(|threshold| {
+        // `memory_usage_threshold` is the total memory usage threshold of the index creation,
+        // so we need to divide it by the number of columns
+        let memory_threshold = memory_usage_threshold.map(|threshold| {
             (threshold / metadata.primary_key.len()).max(MIN_MEMORY_USAGE_THRESHOLD)
         });
-        let sorter =
-            ExternalSorter::factory(temp_file_provider.clone() as _, memory_usage_threshold);
+        let temp_file_provider = Arc::new(TempFileProvider::new(
+            IntermediateLocation::new(&region_dir, &sst_file_id),
+            InstrumentedStore::new(intermediate_store),
+        ));
+        let sorter = ExternalSorter::factory(temp_file_provider.clone() as _, memory_threshold);
         let index_creator = Box::new(SortIndexCreator::new(sorter, row_group_size));
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
         Self {
             region_dir,
             sst_file_id,
-            store,
+            store: InstrumentedStore::new(index_store),
             codec,
             index_creator,
             temp_file_provider,
+
             value_buf: vec![],
-            aborted: false,
+
             stats: Statistics::default(),
+            aborted: false,
         }
     }
 
+    /// Updates index with a batch of rows.
+    /// Garbage will be cleaned up if failed to update.
     pub async fn update(&mut self, batch: &Batch) -> Result<()> {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
@@ -110,7 +126,7 @@ impl SstIndexCreator {
             return Ok(());
         }
 
-        if let Err(err) = self.do_update(batch).await {
+        if let Err(update_err) = self.do_update(batch).await {
             // clean up garbage if failed to update
             if let Err(err) = self.do_cleanup().await {
                 warn!(
@@ -118,12 +134,14 @@ impl SstIndexCreator {
                     self.region_dir, self.sst_file_id,
                 );
             }
-            return Err(err);
+            return Err(update_err);
         }
 
         Ok(())
     }
 
+    /// Finishes index creation and cleans up garbage.
+    /// Returns the number of rows and bytes written.
     pub async fn finish(&mut self) -> Result<(RowCount, ByteCount)> {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
@@ -144,6 +162,7 @@ impl SstIndexCreator {
         finish_res.map(|_| (self.stats.row_count(), self.stats.byte_count()))
     }
 
+    /// Aborts index creation and clean up garbage.
     pub async fn abort(&mut self) -> Result<()> {
         if self.aborted {
             return Ok(());
@@ -159,16 +178,16 @@ impl SstIndexCreator {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for (column_name, field, value) in self.codec.decode(batch.primary_key())? {
+        for (column_id, field, value) in self.codec.decode(batch.primary_key())? {
             if let Some(value) = value.as_ref() {
                 self.value_buf.clear();
                 IndexValueCodec::encode_value(value.as_value_ref(), field, &mut self.value_buf)?;
             }
 
             // non-null value -> Some(encoded_bytes), null value -> None
-            let v = value.is_some().then_some(self.value_buf.as_slice());
+            let value = value.is_some().then_some(self.value_buf.as_slice());
             self.index_creator
-                .push_with_name_n(column_name, v, n)
+                .push_with_name_n(column_id, value, n)
                 .await
                 .context(PushIndexValueSnafu)?;
         }
@@ -176,27 +195,26 @@ impl SstIndexCreator {
         Ok(())
     }
 
+    /// Data flow of finishing index:
+    ///
+    /// ```text
+    ///                               (In Memory Buffer)
+    ///                                    ┌──────┐
+    ///  ┌─────────────┐                   │ PIPE │
+    ///  │             │ write index data  │      │
+    ///  │ IndexWriter ├──────────────────►│ tx   │
+    ///  │             │                   │      │
+    ///  └─────────────┘                   │      │
+    ///                  ┌─────────────────┤ rx   │
+    ///  ┌─────────────┐ │ read as blob    └──────┘
+    ///  │             │ │
+    ///  │ PuffinWriter├─┤
+    ///  │             │ │ copy to file    ┌──────┐
+    ///  └─────────────┘ └────────────────►│ File │
+    ///                                    └──────┘
+    /// ```
     async fn do_finish(&mut self) -> Result<()> {
         let mut guard = self.stats.record_finish();
-
-        // Data flow of finishing index:
-        //
-        // ```text
-        //                               (In Memory Buffer)
-        //                                    ┌──────┐
-        //  ┌─────────────┐                   │ PIPE │
-        //  │             │ write index data  │      │
-        //  │ IndexWriter ├──────────────────►│ tx   │
-        //  │             │                   │      │
-        //  └─────────────┘                   │      │
-        //                  ┌─────────────────┤ rx   │
-        //  ┌─────────────┐ │ read as blob    └──────┘
-        //  │             │ │
-        //  │ PuffinWriter├─┤
-        //  │             │ │ copy to file    ┌──────┐
-        //  └─────────────┘ └────────────────►│ File │
-        //                                    └──────┘
-        // ```
 
         let file_path = location::index_file_path(&self.region_dir, self.sst_file_id);
         let file_writer = self
@@ -211,19 +229,17 @@ impl SstIndexCreator {
         let mut puffin_writer = PuffinFileWriter::new(file_writer);
 
         let (tx, rx) = duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
-
         let blob = Blob {
             blob_type: INDEX_BLOB_TYPE.to_string(),
             data: rx.compat(),
             properties: HashMap::default(),
         };
-
         let mut index_writer = InvertedIndexBlobWriter::new(tx.compat_write());
+
         let (index_finish, puffin_add_blob) = futures::join!(
             self.index_creator.finish(&mut index_writer),
             puffin_writer.add_blob(blob)
         );
-
         index_finish.context(IndexFinishSnafu)?;
         puffin_add_blob.context(PuffinAddBlobSnafu)?;
 
@@ -237,4 +253,11 @@ impl SstIndexCreator {
 
         self.temp_file_provider.cleanup().await
     }
+}
+
+#[cfg(test)]
+mod tests {
+    // TODO(zhongzc): This PR has grown quite large, and the SstIndexCreator deserves
+    // a significant number of unit tests. These unit tests are substantial enough to
+    // make up a large PR on their own. I will bring them in with the next PR.
 }

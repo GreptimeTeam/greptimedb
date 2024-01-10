@@ -107,14 +107,16 @@ pub fn allocate_region_wal_options(
 mod tests {
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::wal::kafka::test_util::run_test_with_kafka_wal;
+    use crate::wal::kafka::topic_selector::RoundRobinTopicSelector;
+    use crate::wal::kafka::KafkaConfig;
 
     // Tests the wal options allocator could successfully allocate raft-engine wal options.
-    // Note: tests for allocator with kafka are integration tests.
     #[tokio::test]
     async fn test_allocator_with_raft_engine() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let wal_config = WalConfig::RaftEngine;
-        let mut allocator = WalOptionsAllocator::new(wal_config, kv_backend);
+        let allocator = WalOptionsAllocator::new(wal_config, kv_backend);
         allocator.start().await.unwrap();
 
         let num_regions = 32;
@@ -127,5 +129,50 @@ mod tests {
             .zip(vec![encoded_wal_options; num_regions as usize])
             .collect();
         assert_eq!(got, expected);
+    }
+
+    // Tests that the wal options allocator could successfully allocate Kafka wal options.
+    #[tokio::test]
+    async fn test_allocator_with_kafka() {
+        run_test_with_kafka_wal(|broker_endpoints| {
+            Box::pin(async {
+                let topics = (0..256)
+                    .map(|i| format!("test_allocator_with_kafka_{}_{}", i, uuid::Uuid::new_v4()))
+                    .collect::<Vec<_>>();
+
+                // Creates a topic manager.
+                let config = KafkaConfig {
+                    replication_factor: broker_endpoints.len() as i16,
+                    broker_endpoints,
+                    ..Default::default()
+                };
+                let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+                let mut topic_manager = KafkaTopicManager::new(config.clone(), kv_backend);
+                // Replaces the default topic pool with the constructed topics.
+                topic_manager.topic_pool = topics.clone();
+                // Replaces the default selector with a round-robin selector without shuffled.
+                topic_manager.topic_selector = Arc::new(RoundRobinTopicSelector::default());
+
+                // Creates an options allocator.
+                let allocator = WalOptionsAllocator::Kafka(topic_manager);
+                allocator.start().await.unwrap();
+
+                let num_regions = 32;
+                let regions = (0..num_regions).collect::<Vec<_>>();
+                let got = allocate_region_wal_options(regions.clone(), &allocator).unwrap();
+
+                // Check the allocated wal options contain the expected topics.
+                let expected = (0..num_regions)
+                    .map(|i| {
+                        let options = WalOptions::Kafka(KafkaWalOptions {
+                            topic: topics[i as usize].clone(),
+                        });
+                        (i, serde_json::to_string(&options).unwrap())
+                    })
+                    .collect::<HashMap<_, _>>();
+                assert_eq!(got, expected);
+            })
+        })
+        .await;
     }
 }

@@ -25,7 +25,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(column_name) = Self::column_name(column) else {
             return Ok(());
         };
-        let Some(data_type) = self.tag_column_type(column_name)? else {
+        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
             return Ok(());
         };
         if !data_type.is_string() {
@@ -38,7 +38,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let predicate = Predicate::RegexMatch(RegexMatchPredicate {
             pattern: pattern.clone(),
         });
-        self.add_predicate(column_name, predicate);
+        self.add_predicate(column_id, predicate);
         Ok(())
     }
 }
@@ -62,7 +62,7 @@ mod tests {
             .collect_regex_match(&tag_column(), &string_lit("abc"))
             .unwrap();
 
-        let predicates = builder.output.get("a").unwrap();
+        let predicates = builder.output.get(&1).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

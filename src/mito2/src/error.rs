@@ -429,35 +429,30 @@ pub enum Error {
 
     #[snafu(display("Failed to build index applier"))]
     BuildIndexApplier {
-        #[snafu(source)]
         source: index::inverted_index::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to convert value"))]
     ConvertValue {
-        #[snafu(source)]
         source: datatypes::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to push index value"))]
-    PushIndexValue {
-        #[snafu(source)]
-        source: index::inverted_index::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to apply index"))]
     ApplyIndex {
-        #[snafu(source)]
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to push index value"))]
+    PushIndexValue {
         source: index::inverted_index::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to write index completely"))]
     IndexFinish {
-        #[snafu(source)]
         source: index::inverted_index::error::Error,
         location: Location,
     },
@@ -467,14 +462,12 @@ pub enum Error {
 
     #[snafu(display("Failed to read puffin metadata"))]
     PuffinReadMetadata {
-        #[snafu(source)]
         source: puffin::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to read puffin blob"))]
     PuffinReadBlob {
-        #[snafu(source)]
         source: puffin::error::Error,
         location: Location,
     },
@@ -487,16 +480,37 @@ pub enum Error {
 
     #[snafu(display("Failed to write puffin completely"))]
     PuffinFinish {
-        #[snafu(source)]
         source: puffin::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to add blob to puffin file"))]
     PuffinAddBlob {
-        #[snafu(source)]
         source: puffin::error::Error,
         location: Location,
+    },
+
+    #[snafu(display("Failed to clean dir {dir}"))]
+    CleanDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid config, {reason}"))]
+    InvalidConfig { reason: String, location: Location },
+
+    #[snafu(display(
+        "Stale log entry found during replay, region: {}, flushed: {}, replayed: {}",
+        region_id,
+        flushed_entry_id,
+        unexpected_entry_id
+    ))]
+    StaleLogEntry {
+        region_id: RegionId,
+        flushed_entry_id: u64,
+        unexpected_entry_id: u64,
     },
 }
 
@@ -535,8 +549,8 @@ impl ErrorExt for Error {
             | RegionCorrupted { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. }
-            | PuffinBlobTypeNotFound { .. }
             | OperateAbortedIndex { .. }
+            | PuffinBlobTypeNotFound { .. }
             | UnexpectedReplay { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
@@ -591,6 +605,9 @@ impl ErrorExt for Error {
             | PuffinReadBlob { source, .. }
             | PuffinFinish { source, .. }
             | PuffinAddBlob { source, .. } => source.status_code(),
+            CleanDir { .. } => StatusCode::Unexpected,
+            InvalidConfig { .. } => StatusCode::InvalidArguments,
+            StaleLogEntry { .. } => StatusCode::Unexpected,
         }
     }
 

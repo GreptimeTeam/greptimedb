@@ -42,10 +42,11 @@ use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
-use object_store::util::normalize_dir;
+use object_store::util::{join_dir, normalize_dir};
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::builder::GrpcServerBuilder;
+use servers::grpc::GrpcServerConfig;
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{start_server, ServerHandler, ServerHandlers};
@@ -60,9 +61,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
-    CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu,
-    ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu, ShutdownServerSnafu,
-    StartServerSnafu,
+    BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
+    MissingNodeIdSnafu, OpenLogStoreSnafu, ParseAddrSnafu, Result, RuntimeResourceSnafu,
+    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -328,15 +329,13 @@ impl DatanodeBuilder {
             max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
         };
 
-        let server = Box::new(GrpcServer::new(
-            Some(config),
-            None,
-            None,
-            Some(Arc::new(region_server.clone()) as _),
-            Some(Arc::new(region_server.clone()) as _),
-            None,
-            region_server.runtime(),
-        ));
+        let server = Box::new(
+            GrpcServerBuilder::new(region_server.runtime())
+                .config(config)
+                .flight_handler(Arc::new(region_server.clone()))
+                .region_server_handler(Arc::new(region_server.clone()))
+                .build(),
+        );
 
         let addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
             addr: &opts.rpc_addr,
@@ -458,20 +457,33 @@ impl DatanodeBuilder {
     async fn build_mito_engine(
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
-        config: MitoConfig,
+        mut config: MitoConfig,
     ) -> Result<MitoEngine> {
+        // Sets write cache path if it is empty.
+        if config.experimental_write_cache_path.is_empty() {
+            config.experimental_write_cache_path = join_dir(&opts.storage.data_home, "write_cache");
+            info!(
+                "Sets write cache path to {}",
+                config.experimental_write_cache_path
+            );
+        }
+
         let mito_engine = match &opts.wal {
             WalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
                 config,
                 Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
                     .await?,
                 object_store_manager,
-            ),
+            )
+            .await
+            .context(BuildMitoEngineSnafu)?,
             WalConfig::Kafka(kafka_config) => MitoEngine::new(
                 config,
                 Self::build_kafka_log_store(kafka_config).await?,
                 object_store_manager,
-            ),
+            )
+            .await
+            .context(BuildMitoEngineSnafu)?,
         };
         Ok(mito_engine)
     }

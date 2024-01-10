@@ -45,8 +45,12 @@ pub(crate) fn init_cpython_interpreter() -> PyResult<()> {
     if !*start {
         pyo3::append_to_inittab!(greptime_builtins);
         pyo3::prepare_freethreaded_python();
+        let version = Python::with_gil(|py| -> PyResult<String> {
+            let builtins = PyModule::import(py, "sys")?;
+            builtins.getattr("version")?.extract()
+        })?;
         *start = true;
-        info!("Started CPython Interpreter");
+        info!("Started CPython Interpreter {version}");
     }
     Ok(())
 }

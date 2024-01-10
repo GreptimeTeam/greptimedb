@@ -22,6 +22,8 @@ pub mod row_group;
 mod stats;
 pub mod writer;
 
+use std::sync::Arc;
+
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
 
@@ -72,7 +74,7 @@ pub struct SstInfo {
     /// Number of rows.
     pub num_rows: usize,
     /// File Meta Data
-    pub file_metadata: Option<ParquetMetaData>,
+    pub file_metadata: Option<Arc<ParquetMetaData>>,
     /// Whether inverted index is available.
     pub inverted_index_available: bool,
 }
@@ -190,7 +192,12 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let cache = Some(Arc::new(CacheManager::new(0, 0, 64 * 1024 * 1024)));
+        // Enable page cache.
+        let cache = Some(Arc::new(
+            CacheManager::builder()
+                .page_cache_size(64 * 1024 * 1024)
+                .build(),
+        ));
         let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
             .cache(cache.clone());
         for _ in 0..3 {

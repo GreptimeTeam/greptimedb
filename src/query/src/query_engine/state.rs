@@ -163,9 +163,9 @@ impl QueryEngineState {
         self.table_mutation_handler.as_ref()
     }
 
-    pub(crate) fn disallow_cross_schema_query(&self) -> bool {
+    pub(crate) fn disallow_cross_catalog_query(&self) -> bool {
         self.plugins
-            .map::<QueryOptions, _, _>(|x| x.disallow_cross_schema_query)
+            .map::<QueryOptions, _, _>(|x| x.disallow_cross_catalog_query)
             .unwrap_or(false)
     }
 

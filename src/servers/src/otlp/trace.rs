@@ -15,10 +15,10 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use common_grpc::writer::Precision;
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
 use self::span::{parse_span, TraceSpan, TraceSpans};
-use super::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use crate::error::Result;
 use crate::row_writer::{self, MultiTableData, TableData};
 
