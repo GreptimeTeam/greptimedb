@@ -651,8 +651,7 @@ impl OnFailure for FlushFinished {
         // Clean flushed files.
         for file in &self.file_metas {
             self.file_purger.send_request(PurgeRequest {
-                region_id: file.region_id,
-                file_id: file.file_id,
+                file_meta: file.clone(),
             });
         }
     }
@@ -707,14 +706,12 @@ impl OnFailure for CompactionFinished {
             }));
         }
         for file in &self.compacted_files {
-            let file_id = file.file_id;
             warn!(
                 "Cleaning region {} compaction output file: {}",
-                self.region_id, file_id
+                self.region_id, file.file_id
             );
             self.file_purger.send_request(PurgeRequest {
-                region_id: self.region_id,
-                file_id,
+                file_meta: file.clone(),
             });
         }
     }
