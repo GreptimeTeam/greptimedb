@@ -29,7 +29,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{
     ConstantVector, Float64VectorBuilder, StringVector, StringVectorBuilder, VectorRef,
 };
-use prometheus::proto::{LabelPair, MetricType};
+use itertools::Itertools;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
@@ -131,84 +131,38 @@ impl InformationSchemaMetricsBuilder {
     async fn make_metrics(&mut self, _request: Option<ScanRequest>) -> Result<RecordBatch> {
         let metric_families = prometheus::gather();
 
-        for mf in metric_families {
-            let mf_type = mf.get_field_type();
-            let mf_name = mf.get_name();
+        let write_request =
+            common_telemetry::metric::convert_metric_to_write_request(metric_families, None, 0);
 
-            for m in mf.get_metric() {
-                match mf_type {
-                    MetricType::COUNTER => self.add_metric(
-                        mf_name,
-                        join_labels(m.get_label(), None),
-                        m.get_counter().get_value(),
-                    ),
-                    MetricType::GAUGE => self.add_metric(
-                        mf_name,
-                        join_labels(m.get_label(), None),
-                        m.get_gauge().get_value(),
-                    ),
-                    MetricType::HISTOGRAM => {
-                        let h = m.get_histogram();
-                        let mut inf_seen = false;
-                        let metric_name = format!("{}_bucket", mf_name);
-                        for b in h.get_bucket() {
-                            let upper_bound = b.get_upper_bound();
-                            self.add_metric(
-                                &metric_name,
-                                join_labels(m.get_label(), Some(("le", upper_bound.to_string()))),
-                                b.get_cumulative_count() as f64,
-                            );
-                            if upper_bound.is_sign_positive() && upper_bound.is_infinite() {
-                                inf_seen = true;
-                            }
-                        }
-                        if !inf_seen {
-                            self.add_metric(
-                                &metric_name,
-                                join_labels(m.get_label(), Some(("le", "+Inf".to_string()))),
-                                h.get_sample_count() as f64,
-                            );
-                        }
-                        self.add_metric(
-                            format!("{}_sum", mf_name).as_str(),
-                            join_labels(m.get_label(), None),
-                            h.get_sample_sum(),
-                        );
-                        self.add_metric(
-                            format!("{}_count", mf_name).as_str(),
-                            join_labels(m.get_label(), None),
-                            h.get_sample_count() as f64,
-                        );
+        for ts in write_request.timeseries {
+            //Safety: always has `__name__` label
+            let metric_name = ts
+                .labels
+                .iter()
+                .find_map(|label| {
+                    if label.name == "__name__" {
+                        Some(label.value.clone())
+                    } else {
+                        None
                     }
-                    MetricType::SUMMARY => {
-                        let s = m.get_summary();
-                        for q in s.get_quantile() {
-                            self.add_metric(
-                                mf_name,
-                                join_labels(
-                                    m.get_label(),
-                                    Some(("quantile", q.get_quantile().to_string())),
-                                ),
-                                q.get_value(),
-                            );
+                })
+                .unwrap();
+
+            self.add_metric(
+                &metric_name,
+                ts.labels
+                    .into_iter()
+                    .filter_map(|label| {
+                        if label.name == "__name__" {
+                            None
+                        } else {
+                            Some(format!("{}={}", label.name, label.value))
                         }
-                        self.add_metric(
-                            format!("{}_sum", mf_name).as_str(),
-                            join_labels(m.get_label(), None),
-                            s.get_sample_sum(),
-                        );
-                        self.add_metric(
-                            format!("{}_count", mf_name).as_str(),
-                            join_labels(m.get_label(), None),
-                            s.get_sample_count() as f64,
-                        );
-                    }
-                    MetricType::UNTYPED => {
-                        // `TextEncoder` `MetricType::UNTYPED` unimplemented
-                        // To keep the implementation consistent and not cause unexpected panics, we do nothing here.
-                    }
-                };
-            }
+                    })
+                    .join(", "),
+                // Safety: always has a sample
+                ts.samples[0].value,
+            );
         }
 
         self.finish()
@@ -252,41 +206,11 @@ impl DfPartitionStream for InformationSchemaMetrics {
     }
 }
 
-fn join_labels(pairs: &[LabelPair], addon: Option<(&'static str, String)>) -> String {
-    let mut labels = Vec::with_capacity(pairs.len() + 1 + if addon.is_some() { 1 } else { 0 });
-    for label in pairs {
-        labels.push(format!("{}={}", label.get_name(), label.get_value(),));
-    }
-    if let Some(addon) = addon {
-        labels.push(format!("{}={}", addon.0, addon.1));
-    }
-    labels.sort_unstable();
-    labels.join(", ")
-}
-
 #[cfg(test)]
 mod tests {
     use common_recordbatch::RecordBatches;
 
     use super::*;
-
-    fn new_pair(name: &str, value: &str) -> LabelPair {
-        let mut pair = LabelPair::new();
-        pair.set_name(name.to_string());
-        pair.set_value(value.to_string());
-        pair
-    }
-
-    #[test]
-    fn test_join_labels() {
-        let pairs = vec![new_pair("le", "0.999"), new_pair("host", "host1")];
-
-        assert_eq!("host=host1, le=0.999", join_labels(&pairs, None));
-        assert_eq!(
-            "a=a_value, host=host1, le=0.999",
-            join_labels(&pairs, Some(("a", "a_value".to_string())))
-        );
-    }
 
     #[tokio::test]
     async fn test_make_metrics() {
@@ -300,5 +224,8 @@ mod tests {
 
         assert!(result_literal.contains(METRIC_NAME));
         assert!(result_literal.contains(METRIC_VALUE));
+        assert!(result_literal.contains(METRIC_LABELS));
+        assert!(result_literal.contains(NODE));
+        assert!(result_literal.contains(NODE_TYPE));
     }
 }
