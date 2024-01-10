@@ -20,6 +20,7 @@ use common_error::ext::BoxedError;
 use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_time::util::current_time_millis;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
@@ -27,7 +28,8 @@ use datatypes::prelude::{ConcreteDataType, MutableVector};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{
-    ConstantVector, Float64VectorBuilder, StringVector, StringVectorBuilder, VectorRef,
+    ConstantVector, Float64VectorBuilder, StringVector, StringVectorBuilder,
+    TimestampMillisecondVector, VectorRef,
 };
 use itertools::Itertools;
 use snafu::ResultExt;
@@ -45,6 +47,7 @@ const METRIC_VALUE: &str = "value";
 const METRIC_LABELS: &str = "labels";
 const NODE: &str = "node";
 const NODE_TYPE: &str = "node_type";
+const TIMESTAMP: &str = "timestamp";
 
 /// The `information_schema.runtime_metrics` virtual table.
 /// It provides the GreptimeDB runtime metrics for the users by SQL.
@@ -62,6 +65,11 @@ impl InformationSchemaMetrics {
             ColumnSchema::new(METRIC_LABELS, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(NODE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(NODE_TYPE, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                TIMESTAMP,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
         ]))
     }
 
@@ -169,8 +177,17 @@ impl InformationSchemaMetricsBuilder {
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
-        let unknowns = Arc::new(StringVector::from(vec!["unknown"]));
-        let unknowns = Arc::new(ConstantVector::new(unknowns, self.metric_names.len()));
+        let rows_num = self.metric_names.len();
+        let unknowns = Arc::new(ConstantVector::new(
+            Arc::new(StringVector::from(vec!["unknown"])),
+            rows_num,
+        ));
+        let timestamps = Arc::new(ConstantVector::new(
+            Arc::new(TimestampMillisecondVector::from_slice([
+                current_time_millis(),
+            ])),
+            rows_num,
+        ));
 
         let columns: Vec<VectorRef> = vec![
             Arc::new(self.metric_names.finish()),
@@ -179,6 +196,7 @@ impl InformationSchemaMetricsBuilder {
             // TODO(dennis): supports node and node_type for cluster
             unknowns.clone(),
             unknowns,
+            timestamps,
         ];
 
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
@@ -227,5 +245,6 @@ mod tests {
         assert!(result_literal.contains(METRIC_LABELS));
         assert!(result_literal.contains(NODE));
         assert!(result_literal.contains(NODE_TYPE));
+        assert!(result_literal.contains(TIMESTAMP));
     }
 }

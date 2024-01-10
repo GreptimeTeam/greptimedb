@@ -611,15 +611,16 @@ select * from CHECK_CONSTRAINTS;
 
 desc table RUNTIME_METRICS;
 
-+-------------+---------+-----+------+---------+---------------+
-| Column      | Type    | Key | Null | Default | Semantic Type |
-+-------------+---------+-----+------+---------+---------------+
-| metric_name | String  |     | NO   |         | FIELD         |
-| value       | Float64 |     | NO   |         | FIELD         |
-| labels      | String  |     | YES  |         | FIELD         |
-| node        | String  |     | NO   |         | FIELD         |
-| node_type   | String  |     | NO   |         | FIELD         |
-+-------------+---------+-----+------+---------+---------------+
++-------------+----------------------+-----+------+---------+---------------+
+| Column      | Type                 | Key | Null | Default | Semantic Type |
++-------------+----------------------+-----+------+---------+---------------+
+| metric_name | String               |     | NO   |         | FIELD         |
+| value       | Float64              |     | NO   |         | FIELD         |
+| labels      | String               |     | YES  |         | FIELD         |
+| node        | String               |     | NO   |         | FIELD         |
+| node_type   | String               |     | NO   |         | FIELD         |
+| timestamp   | TimestampMillisecond |     | NO   |         | FIELD         |
++-------------+----------------------+-----+------+---------+---------------+
 
 use public;
 
