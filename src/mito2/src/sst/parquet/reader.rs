@@ -258,7 +258,9 @@ impl ParquetReaderBuilder {
 
         // Applies index to prune row groups.
         //
-        // TODO(zhongzc): Devise a mechanism to enforce the non-use of indices as an escape route in case of index issues.
+        // TODO(zhongzc): Devise a mechanism to enforce the non-use of indices
+        // as an escape route in case of index issues, and it can be used to test
+        // the correctness of the index.
         if let Some(index_applier) = &self.index_applier {
             if self.file_handle.meta().inverted_index_available {
                 match index_applier.apply(self.file_handle.file_id()).await {
