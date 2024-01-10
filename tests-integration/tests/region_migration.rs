@@ -24,6 +24,7 @@ use common_meta::wal::kafka::KafkaConfig as MetaKafkaConfig;
 use common_meta::wal::WalConfig as MetaWalConfig;
 use common_query::Output;
 use common_telemetry::info;
+use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::create_temp_dir;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
@@ -37,9 +38,7 @@ use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{
-    check_output_stream, get_test_store_config, StorageType, PEER_PLACEHOLDER_ADDR,
-};
+use tests_integration::test_util::{get_test_store_config, StorageType, PEER_PLACEHOLDER_ADDR};
 use uuid::Uuid;
 
 const TEST_TABLE_NAME: &str = "migration_target";

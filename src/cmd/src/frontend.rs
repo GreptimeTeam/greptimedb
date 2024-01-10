@@ -28,6 +28,7 @@ use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHa
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use frontend::server::Services;
 use meta_client::MetaClientOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
@@ -246,14 +247,18 @@ impl StartCommand {
             meta_client,
         )
         .with_cache_invalidator(meta_backend)
-        .with_plugin(plugins)
+        .with_plugin(plugins.clone())
         .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await
         .context(StartFrontendSnafu)?;
 
+        let servers = Services::new(plugins)
+            .build(opts.clone(), Arc::new(instance.clone()))
+            .await
+            .context(StartFrontendSnafu)?;
         instance
-            .build_servers(opts)
+            .build_servers(opts, servers)
             .await
             .context(StartFrontendSnafu)?;
 
