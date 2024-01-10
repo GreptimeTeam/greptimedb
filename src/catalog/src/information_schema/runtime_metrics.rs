@@ -46,6 +46,8 @@ const METRIC_LABELS: &str = "labels";
 const NODE: &str = "node";
 const NODE_TYPE: &str = "node_type";
 
+/// The `information_schema.runtime_metrics` virtual table.
+/// It provides the GreptimeDB runtime metrics for the users by SQL.
 impl InformationSchemaMetrics {
     pub(super) fn new() -> Self {
         Self {
@@ -126,7 +128,6 @@ impl InformationSchemaMetricsBuilder {
         self.metric_labels.push(Some(&labels));
     }
 
-    /// Construct the `information_schema.metrics` virtual table
     async fn make_metrics(&mut self, _request: Option<ScanRequest>) -> Result<RecordBatch> {
         let metric_families = prometheus::gather();
 
