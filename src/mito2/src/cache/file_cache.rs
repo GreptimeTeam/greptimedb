@@ -409,6 +409,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_file_cache_read_ranges() {
+        let dir = create_temp_dir("");
+        let local_store = new_fs_store(dir.path().to_str().unwrap());
+        let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let region_id = RegionId::new(2000, 0);
+        let file_id = FileId::random();
+        let key = (region_id, file_id);
+        let file_path = file_cache.cache_file_path(key);
+        // Write a file.
+        local_store
+            .write(&file_path, b"hello greptime database".as_slice())
+            .await
+            .unwrap();
+        // Add to the cache.
+        file_cache
+            .put((region_id, file_id), IndexValue { file_size: 5 })
+            .await;
+        // Ranges
+        let ranges = vec![0..5, 6..10, 15..19];
+        let bytes = file_cache.read_ranges(key, &ranges).await.unwrap();
+
+        assert_eq!(3, bytes.len());
+        assert_eq!(b"hello", bytes[0].as_ref());
+        assert_eq!(b"grep", bytes[1].as_ref());
+        assert_eq!(b"data", bytes[2].as_ref());
+    }
+
     #[test]
     fn test_cache_file_path() {
         let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095").unwrap();

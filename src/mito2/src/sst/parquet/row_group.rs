@@ -136,7 +136,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 .collect::<Vec<_>>();
 
             // Try fetch data from WriteCache.
-            // If not in WriteCache, fetch data from Object Store.
+            // If not in WriteCache, fetch data from object store.
             let key = (self.region_id, self.file_id);
             let mut chunk_data =
                 if let Some(data) = self.fetch_ranges_from_write_cache(key, &fetch_ranges).await {
@@ -194,7 +194,7 @@ impl<'a> InMemoryRowGroup<'a> {
             }
 
             // Try fetch data from WriteCache.
-            // If not in WriteCache, fetch data from Object Store.
+            // If not in WriteCache, fetch data from object store.
             let key = (self.region_id, self.file_id);
             let mut chunk_data =
                 if let Some(data) = self.fetch_ranges_from_write_cache(key, &fetch_ranges).await {
