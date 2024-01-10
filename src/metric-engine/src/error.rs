@@ -146,6 +146,9 @@ pub enum Error {
         source: store_api::metadata::MetadataError,
         location: Location,
     },
+
+    #[snafu(display("Physical region is busy, there are still some logical regions using it"))]
+    PhysicalRegionBusy { location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -158,7 +161,8 @@ impl ErrorExt for Error {
             InternalColumnOccupied { .. }
             | MissingRegionOption { .. }
             | ConflictRegionOption { .. }
-            | ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
+            | ColumnTypeMismatch { .. }
+            | PhysicalRegionBusy { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } => StatusCode::Unsupported,
 
