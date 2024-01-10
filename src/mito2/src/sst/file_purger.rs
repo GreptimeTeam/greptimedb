@@ -137,6 +137,7 @@ mod tests {
                     time_range: FileTimeRange::default(),
                     level: 0,
                     file_size: 4096,
+                    inverted_index_available: false,
                 },
                 file_purger,
             );

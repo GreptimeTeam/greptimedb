@@ -65,6 +65,8 @@ pub struct SstInfo {
     pub num_rows: usize,
     /// File Meta Data
     pub file_metadata: Option<Arc<ParquetMetaData>>,
+    /// Whether inverted index is available.
+    pub inverted_index_available: bool,
 }
 
 #[cfg(test)]

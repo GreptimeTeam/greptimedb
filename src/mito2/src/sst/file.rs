@@ -95,6 +95,8 @@ pub struct FileMeta {
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
+    /// Whether inverted index is available.
+    pub inverted_index_available: bool,
 }
 
 /// Handle to a SST file.
@@ -236,6 +238,7 @@ mod tests {
             time_range: FileTimeRange::default(),
             level,
             file_size: 0,
+            inverted_index_available: false,
         }
     }
 

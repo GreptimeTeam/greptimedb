@@ -330,6 +330,7 @@ impl TwcsCompactionTask {
                         time_range: sst_info.time_range,
                         level: output.output_level,
                         file_size: sst_info.file_size,
+                        inverted_index_available: sst_info.inverted_index_available,
                     });
                 Ok(file_meta_opt)
             });

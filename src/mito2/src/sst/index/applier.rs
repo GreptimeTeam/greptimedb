@@ -15,6 +15,7 @@
 pub mod builder;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use futures::{AsyncRead, AsyncSeek};
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
@@ -51,6 +52,8 @@ pub struct SstIndexApplier {
     /// and return the relevant row group ids for further scan.
     index_applier: Box<dyn IndexApplier>,
 }
+
+pub type SstIndexApplierRef = Arc<SstIndexApplier>;
 
 impl SstIndexApplier {
     /// Creates a new [`SstIndexApplier`].

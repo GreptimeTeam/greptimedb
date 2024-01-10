@@ -96,6 +96,7 @@ impl VersionControlBuilder {
                 ),
                 level: 0,
                 file_size: 0, // We don't care file size.
+                inverted_index_available: false,
             },
         );
         self
@@ -136,6 +137,7 @@ pub(crate) fn apply_edit(
                 ),
                 level: 0,
                 file_size: 0, // We don't care file size.
+                inverted_index_available: false,
             }
         })
         .collect();
