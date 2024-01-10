@@ -257,6 +257,8 @@ impl ParquetReaderBuilder {
         metrics.num_row_groups_unfiltered += row_group_ids.len();
 
         // Applies index to prune row groups.
+        //
+        // TODO(zhongzc): Devise a mechanism to enforce the non-use of indices as an escape route in case of index issues.
         if let Some(index_applier) = &self.index_applier {
             if self.file_handle.meta().inverted_index_available {
                 match index_applier.apply(self.file_handle.file_id()).await {
