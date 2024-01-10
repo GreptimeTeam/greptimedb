@@ -115,6 +115,7 @@ impl ParquetReaderBuilder {
     }
 
     /// Attaches the index applier to the builder.
+    #[must_use]
     pub fn index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
         self.index_applier = index_applier;
         self
