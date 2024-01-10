@@ -16,6 +16,7 @@ mod columns;
 mod key_column_usage;
 mod memory_table;
 mod predicate;
+mod runtime_metrics;
 mod schemata;
 mod table_names;
 mod tables;
@@ -46,6 +47,7 @@ use self::columns::InformationSchemaColumns;
 use crate::error::Result;
 use crate::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
+use crate::information_schema::runtime_metrics::InformationSchemaMetrics;
 use crate::information_schema::schemata::InformationSchemaSchemata;
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
@@ -146,6 +148,10 @@ impl InformationSchemaProvider {
         tables.insert(SCHEMATA.to_string(), self.build_table(SCHEMATA).unwrap());
         tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
         tables.insert(
+            RUNTIME_METRICS.to_string(),
+            self.build_table(RUNTIME_METRICS).unwrap(),
+        );
+        tables.insert(
             KEY_COLUMN_USAGE.to_string(),
             self.build_table(KEY_COLUMN_USAGE).unwrap(),
         );
@@ -209,6 +215,7 @@ impl InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
+            RUNTIME_METRICS => Some(Arc::new(InformationSchemaMetrics::new())),
             _ => None,
         }
     }

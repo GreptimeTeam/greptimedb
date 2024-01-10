@@ -115,4 +115,6 @@ desc table CHECK_CONSTRAINTS;
 
 select * from CHECK_CONSTRAINTS;
 
+desc table RUNTIME_METRICS;
+
 use public;

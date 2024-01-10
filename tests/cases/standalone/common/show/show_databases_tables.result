@@ -38,6 +38,7 @@ show tables;
 | profiling                             |
 | referential_constraints               |
 | routines                              |
+| runtime_metrics                       |
 | schema_privileges                     |
 | schemata                              |
 | session_status                        |
