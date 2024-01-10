@@ -276,7 +276,7 @@ impl Default for DatanodeOptions {
 
 impl DatanodeOptions {
     pub fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["meta_client.metasrv_addrs"])
+        Some(&["meta_client.metasrv_addrs", "wal.broker_endpoints"])
     }
 
     pub fn to_toml_string(&self) -> String {
