@@ -161,6 +161,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
+            Duration::from_millis(1000),
         ))
         .await
         .unwrap();
@@ -207,6 +208,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
+            Duration::from_millis(1000),
         ))
         .await
         .unwrap();
@@ -299,6 +301,7 @@ pub async fn test_region_migration_multiple_regions(
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
+            Duration::from_millis(1000),
         ))
         .await
         .unwrap();
@@ -345,6 +348,7 @@ pub async fn test_region_migration_multiple_regions(
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
+            Duration::from_millis(1000),
         ))
         .await
         .unwrap();
@@ -426,6 +430,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
+            Duration::from_millis(1000),
         ))
         .await
         .unwrap();
@@ -473,6 +478,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
+            Duration::from_millis(1000),
         ))
         .await
         .unwrap();
@@ -543,6 +549,7 @@ pub async fn test_region_migration_incorrect_from_peer(
             region_id,
             peer_factory(5),
             peer_factory(1),
+            Duration::from_millis(1000),
         ))
         .await
         .unwrap_err();
@@ -617,6 +624,7 @@ pub async fn test_region_migration_incorrect_region_id(
             region_id,
             peer_factory(2),
             peer_factory(1),
+            Duration::from_millis(1000),
         ))
         .await
         .unwrap_err();

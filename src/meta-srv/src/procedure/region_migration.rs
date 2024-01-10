@@ -68,6 +68,13 @@ pub struct PersistentContext {
     to_peer: Peer,
     /// The [RegionId] of migration region.
     region_id: RegionId,
+    /// The timeout of waiting for a candidate to replay the WAL.
+    #[serde(with = "humantime_serde", default = "default_replay_timeout")]
+    replay_timeout: Duration,
+}
+
+fn default_replay_timeout() -> Duration {
+    Duration::from_secs(1)
 }
 
 impl PersistentContext {
@@ -479,7 +486,7 @@ mod tests {
 
         let serialized = procedure.dump().unwrap();
 
-        let expected = r#"{"persistent_ctx":{"cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"persistent_ctx":{"cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"replay_timeout":"1s"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 

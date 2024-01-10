@@ -33,14 +33,14 @@ use crate::service::mailbox::Channel;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpgradeCandidateRegion {
     // The optimistic retry times.
-    optimistic_retry: usize,
+    pub(crate) optimistic_retry: usize,
     // The retry initial interval.
-    retry_initial_interval: Duration,
+    pub(crate) retry_initial_interval: Duration,
     // The replay timeout of a instruction.
-    replay_timeout: Duration,
+    pub(crate) replay_timeout: Duration,
     // If it's true it requires the candidate region MUST replay the WAL to the latest entry id.
     // Otherwise, it will rollback to the old leader region.
-    require_ready: bool,
+    pub(crate) require_ready: bool,
 }
 
 impl Default for UpgradeCandidateRegion {
@@ -236,6 +236,7 @@ mod tests {
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
             cluster_id: 0,
+            replay_timeout: Duration::from_millis(1000),
         }
     }
 
