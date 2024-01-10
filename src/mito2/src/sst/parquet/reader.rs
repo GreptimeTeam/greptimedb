@@ -274,7 +274,11 @@ impl ParquetReaderBuilder {
         }
         metrics.num_row_groups_inverted_index_selected += row_group_ids.len();
 
-        // Prunes row groups by metadata.
+        if row_group_ids.is_empty() {
+            return row_group_ids;
+        }
+
+        // Prunes row groups by min-max index.
         if let Some(predicate) = &self.predicate {
             let region_meta = read_format.metadata();
             let column_ids = match &self.projection {
@@ -286,17 +290,16 @@ impl ParquetReaderBuilder {
                     .collect(),
             };
 
-            let row_groups = parquet_meta.row_groups();
-            let stats = RowGroupPruningStats::new(row_groups, read_format, column_ids);
-            let row_groups_to_prune = predicate
+            let row_groups = row_group_ids
+                .iter()
+                .map(|id| parquet_meta.row_group(*id))
+                .collect::<Vec<_>>();
+            let stats = RowGroupPruningStats::new(&row_groups, read_format, column_ids);
+            let mut mask = predicate
                 .prune_with_stats(&stats, region_meta.schema.arrow_schema())
-                .into_iter()
-                .enumerate()
-                .filter_map(|(id, remain)| (!remain).then_some(id));
+                .into_iter();
 
-            for row_group_to_prune in row_groups_to_prune {
-                row_group_ids.remove(&row_group_to_prune);
-            }
+            row_group_ids.retain(|_| mask.next().unwrap_or(false));
         };
         metrics.num_row_groups_min_max_selected += row_group_ids.len();
 
