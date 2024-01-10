@@ -1206,6 +1206,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "itertools 0.10.5",
  "lazy_static",
  "log-store",
  "meta-client",
