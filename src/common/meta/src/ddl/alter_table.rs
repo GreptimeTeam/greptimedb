@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use common_grpc_expr::alter_expr_to_request;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
 };
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, info};
@@ -44,6 +44,7 @@ use crate::error::{self, ConvertAlterTableRequestSnafu, InvalidProtoMsgSnafu, Re
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::DeserializedValueWithBytes;
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders};
@@ -63,7 +64,7 @@ impl AlterTableProcedure {
         cluster_id: u64,
         task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        physical_table_name: Option<TableName>,
+        physical_table_info: Option<(TableId, TableName)>,
         context: DdlContext,
     ) -> Result<Self> {
         let alter_kind = task
@@ -86,7 +87,7 @@ impl AlterTableProcedure {
             data: AlterTableData::new(
                 task,
                 table_info_value,
-                physical_table_name,
+                physical_table_info,
                 cluster_id,
                 next_column_id,
             ),
@@ -335,32 +336,25 @@ impl AlterTableProcedure {
         Ok(Status::Done)
     }
 
-    fn lock_key_inner(&self) -> Vec<String> {
+    fn lock_key_inner(&self) -> Vec<StringKey> {
         let mut lock_key = vec![];
 
-        if let Some(physical_table_name) = self.data.physical_table_name() {
-            let physical_table_key = common_catalog::format_full_table_name(
-                &physical_table_name.catalog_name,
-                &physical_table_name.schema_name,
-                &physical_table_name.table_name,
-            );
-            lock_key.push(physical_table_key);
+        if let Some((physical_table_id, physical_table_name)) = self.data.physical_table_info() {
+            lock_key.push(CatalogLock::Read(&physical_table_name.catalog_name).into());
+            lock_key.push(SchemaLock::Read(&physical_table_name.schema_name).into());
+            lock_key.push(TableLock::Read(*physical_table_id).into())
         }
 
         let table_ref = self.data.table_ref();
-        let table_key = common_catalog::format_full_table_name(
-            table_ref.catalog,
-            table_ref.schema,
-            table_ref.table,
-        );
-        lock_key.push(table_key);
+        let table_id = self.data.table_id();
+        lock_key.push(CatalogLock::Read(table_ref.catalog).into());
+        lock_key.push(SchemaLock::Read(table_ref.schema).into());
+        lock_key.push(TableLock::Write(table_id).into());
 
         if let Ok(Kind::RenameTable(RenameTable { new_table_name })) = self.alter_kind() {
-            lock_key.push(common_catalog::format_full_table_name(
-                table_ref.catalog,
-                table_ref.schema,
-                new_table_name,
-            ))
+            lock_key.push(
+                TableNameLock::new(table_ref.catalog, table_ref.schema, new_table_name).into(),
+            )
         }
 
         lock_key
@@ -406,7 +400,7 @@ impl Procedure for AlterTableProcedure {
     fn lock_key(&self) -> LockKey {
         let key = self.lock_key_inner();
 
-        LockKey::new_exclusive(key)
+        LockKey::new(key)
     }
 }
 
@@ -423,13 +417,13 @@ enum AlterTableState {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlterTableData {
+    cluster_id: u64,
     state: AlterTableState,
     task: AlterTableTask,
     /// Table info value before alteration.
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     /// Physical table name, if the table to alter is a logical table.
-    physical_table_name: Option<TableName>,
-    cluster_id: u64,
+    physical_table_info: Option<(TableId, TableName)>,
     /// Next column id of the table if the task adds columns to the table.
     next_column_id: Option<ColumnId>,
 }
@@ -438,7 +432,7 @@ impl AlterTableData {
     pub fn new(
         task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        physical_table_name: Option<TableName>,
+        physical_table_info: Option<(TableId, TableName)>,
         cluster_id: u64,
         next_column_id: Option<ColumnId>,
     ) -> Self {
@@ -446,7 +440,7 @@ impl AlterTableData {
             state: AlterTableState::Prepare,
             task,
             table_info_value,
-            physical_table_name,
+            physical_table_info,
             cluster_id,
             next_column_id,
         }
@@ -464,8 +458,8 @@ impl AlterTableData {
         &self.table_info_value.table_info
     }
 
-    fn physical_table_name(&self) -> Option<&TableName> {
-        self.physical_table_name.as_ref()
+    fn physical_table_info(&self) -> Option<&(TableId, TableName)> {
+        self.physical_table_info.as_ref()
     }
 }
 
