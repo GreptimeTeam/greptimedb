@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use common_meta::key::datanode_table::DatanodeTableKey;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::ResettableKvBackendRef;
+use common_meta::lock_key::{RegionLock, TableLock};
 use common_meta::{ClusterId, RegionIdent};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -40,13 +41,12 @@ use common_telemetry::{error, info, warn};
 use failover_start::RegionFailoverStart;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{Error, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
-use crate::procedure::utils::region_lock_key;
 use crate::service::mailbox::MailboxRef;
 
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -372,8 +372,17 @@ impl Procedure for RegionFailoverProcedure {
 
     fn lock_key(&self) -> LockKey {
         let region_ident = &self.node.failed_region;
-        let region_key = region_lock_key(region_ident.table_id, region_ident.region_number);
-        LockKey::single_exclusive(region_key)
+        // TODO(weny): acquires the catalog, schema read locks.
+        let lock_key = vec![
+            TableLock::Read(region_ident.table_id).into(),
+            RegionLock::Write(RegionId::new(
+                region_ident.table_id,
+                region_ident.region_number,
+            ))
+            .into(),
+        ];
+
+        LockKey::new(lock_key)
     }
 }
 

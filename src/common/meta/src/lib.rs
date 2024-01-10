@@ -27,6 +27,7 @@ pub mod heartbeat;
 pub mod instruction;
 pub mod key;
 pub mod kv_backend;
+pub mod lock_key;
 pub mod metrics;
 pub mod peer;
 pub mod range_stream;

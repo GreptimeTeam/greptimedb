@@ -35,13 +35,14 @@ use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use common_meta::lock_key::{RegionLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::ClusterId;
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status, StringKey};
 pub use manager::RegionMigrationProcedureTask;
 use serde::{Deserialize, Serialize};
 use snafu::{location, Location, OptionExt, ResultExt};
@@ -50,7 +51,6 @@ use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Error, Result};
-use crate::procedure::utils::region_lock_key;
 use crate::service::mailbox::{BroadcastChannel, MailboxRef};
 
 /// It's shared in each step and available even after recovering.
@@ -71,8 +71,15 @@ pub struct PersistentContext {
 }
 
 impl PersistentContext {
-    pub fn lock_key(&self) -> String {
-        region_lock_key(self.region_id.table_id(), self.region_id.region_number())
+    pub fn lock_key(&self) -> Vec<StringKey> {
+        let region_id = self.region_id;
+        // TODO(weny): acquires the catalog, schema read locks.
+        let lock_key = vec![
+            TableLock::Read(region_id.table_id()).into(),
+            RegionLock::Write(region_id).into(),
+        ];
+
+        lock_key
     }
 }
 
@@ -418,8 +425,7 @@ impl Procedure for RegionMigrationProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        let key = self.context.persistent_ctx.lock_key();
-        LockKey::single_exclusive(key)
+        LockKey::new(self.context.persistent_ctx.lock_key())
     }
 }
 
@@ -447,7 +453,7 @@ mod tests {
     #[test]
     fn test_lock_key() {
         let persistent_context = new_persistent_context();
-        let expected_key = persistent_context.lock_key();
+        let expected_keys = persistent_context.lock_key();
 
         let env = TestingEnv::new();
         let context = env.context_factory();
@@ -455,13 +461,11 @@ mod tests {
         let procedure = RegionMigrationProcedure::new(persistent_context, context);
 
         let key = procedure.lock_key();
-        let keys = key
-            .keys_to_lock()
-            .cloned()
-            .map(|s| s.into_string())
-            .collect::<Vec<_>>();
+        let keys = key.keys_to_lock().cloned().collect::<Vec<_>>();
 
-        assert!(keys.contains(&expected_key));
+        for key in expected_keys {
+            assert!(keys.contains(&key));
+        }
     }
 
     #[test]
