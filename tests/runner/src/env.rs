@@ -44,7 +44,12 @@ const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafus
 #[derive(Clone)]
 pub enum WalConfig {
     RaftEngine,
-    Kafka { broker_endpoints: Vec<String> },
+    Kafka {
+        /// Indicates whether the runner needs to start a kafka cluster
+        /// (it might be available in the external system environment).
+        needs_kafka_cluster: bool,
+        broker_endpoints: Vec<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -88,6 +93,7 @@ impl Env {
             self.connect_db(&server_addr)
         } else {
             Self::build_db().await;
+            self.setup_wal();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone());
 
@@ -113,6 +119,7 @@ impl Env {
             self.connect_db(&server_addr)
         } else {
             Self::build_db().await;
+            self.setup_wal();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone());
 
@@ -317,13 +324,18 @@ impl Env {
         }
     }
 
+    /// Setup kafka wal cluster if needed. The conterpart is in [GreptimeDB::stop].
+    fn setup_wal(&self) {
+        if matches!(self.wal, WalConfig::Kafka { needs_kafka_cluster, .. } if needs_kafka_cluster) {
+            util::setup_wal();
+        }
+    }
+
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
     fn generate_config_file(&self, subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
         let mut tt = TinyTemplate::new();
 
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.pop();
-        path.push("conf");
+        let mut path = util::sqlness_conf_path();
         path.push(format!("{subcommand}-test.toml.template"));
         let template = std::fs::read_to_string(path).unwrap();
         tt.add_template(subcommand, &template).unwrap();
@@ -447,6 +459,10 @@ impl GreptimeDB {
         if let Some(mut datanode) = self.frontend_process.take() {
             Env::stop_server(&mut datanode);
         }
+        if matches!(self.ctx.wal, WalConfig::Kafka { needs_kafka_cluster, .. } if needs_kafka_cluster)
+        {
+            util::teardown_wal();
+        }
         println!("Stopped DB.");
     }
 }
@@ -482,9 +498,9 @@ impl GreptimeDBContext {
     fn kafka_wal_broker_endpoints(&self) -> String {
         match &self.wal {
             WalConfig::RaftEngine => String::new(),
-            WalConfig::Kafka { broker_endpoints } => {
-                serde_json::to_string(&broker_endpoints).unwrap()
-            }
+            WalConfig::Kafka {
+                broker_endpoints, ..
+            } => serde_json::to_string(&broker_endpoints).unwrap(),
         }
     }
 

@@ -56,9 +56,10 @@ struct Args {
     #[clap(short, long, default_value = "raft_engine")]
     wal: Wal,
 
-    /// The kafka wal broker endpoints.
-    #[clap(short, long, default_value = "127.0.0.1:9092")]
-    kafka_wal_broker_endpoints: String,
+    /// The kafka wal broker endpoints. This config will suppress sqlness runner
+    /// from starting a kafka cluster, and use the given endpoint as kafka backend.
+    #[clap(short, long)]
+    kafka_wal_broker_endpoints: Option<String>,
 }
 
 #[tokio::main]
@@ -82,11 +83,12 @@ async fn main() {
     let wal = match args.wal {
         Wal::RaftEngine => WalConfig::RaftEngine,
         Wal::Kafka => WalConfig::Kafka {
+            needs_kafka_cluster: args.kafka_wal_broker_endpoints.is_none(),
             broker_endpoints: args
                 .kafka_wal_broker_endpoints
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect(),
+                .map(|s| s.split(',').map(|s| s.to_string()).collect())
+                // otherwise default to the same port in `kafka-cluster.yml`
+                .unwrap_or(vec!["127.0.0.1:9092".to_string()]),
         },
     };
 
