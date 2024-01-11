@@ -14,9 +14,11 @@
 
 //! A write-through cache for remote object stores.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use api::v1::region;
+use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
 use object_store::manager::ObjectStoreManagerRef;
@@ -25,6 +27,7 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
+use super::file_cache::IndexKey;
 use crate::access_layer::new_fs_object_store;
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
@@ -186,6 +189,11 @@ impl WriteCache {
         self.file_cache.put(index_key, index_value).await;
 
         Ok(())
+    }
+
+    /// Returns the file cache of the write cache.
+    pub(crate) fn file_cache(&self) -> FileCacheRef {
+        self.file_cache.clone()
     }
 }
 

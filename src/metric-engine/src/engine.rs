@@ -15,6 +15,7 @@
 mod alter;
 mod close;
 mod create;
+mod drop;
 mod open;
 mod put;
 mod read;
@@ -83,12 +84,14 @@ use crate::utils;
 /// | Operations | Logical Region | Physical Region |
 /// | ---------- | -------------- | --------------- |
 /// |   Create   |       ✅        |        ✅        |
-/// |    Drop    |       ✅        |        ❌        |
+/// |    Drop    |       ✅        |        ❓*       |
 /// |   Write    |       ✅        |        ❌        |
 /// |    Read    |       ✅        |        ✅        |
 /// |   Close    |       ✅        |        ✅        |
 /// |    Open    |       ✅        |        ✅        |
 /// |   Alter    |       ✅        |        ❌        |
+///
+/// *: Physical region can be dropped only when all related logical regions are dropped.
 ///
 /// ## Internal Columns
 ///
@@ -123,7 +126,7 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Delete(_) => todo!(),
             RegionRequest::Create(create) => self.inner.create_region(region_id, create).await,
-            RegionRequest::Drop(_) => todo!(),
+            RegionRequest::Drop(drop) => self.inner.drop_region(region_id, drop).await,
             RegionRequest::Open(open) => self.inner.open_region(region_id, open).await,
             RegionRequest::Close(close) => self.inner.close_region(region_id, close).await,
             RegionRequest::Alter(alter) => self.inner.alter_region(region_id, alter).await,

@@ -73,8 +73,7 @@ impl MetricEngineInner {
         let (data_region_id, metadata_region_id) = Self::transform_region_id(region_id);
 
         // create metadata region
-        let create_metadata_region_request =
-            self.create_request_for_metadata_region(&request.region_dir);
+        let create_metadata_region_request = self.create_request_for_metadata_region(&request);
         self.mito
             .handle_request(
                 metadata_region_id,
@@ -287,7 +286,10 @@ impl MetricEngineInner {
     /// Build [RegionCreateRequest] for metadata region
     ///
     /// This method will append [METADATA_REGION_SUBDIR] to the given `region_dir`.
-    pub fn create_request_for_metadata_region(&self, region_dir: &str) -> RegionCreateRequest {
+    pub fn create_request_for_metadata_region(
+        &self,
+        request: &RegionCreateRequest,
+    ) -> RegionCreateRequest {
         // ts TIME INDEX DEFAULT 0
         let timestamp_column_metadata = ColumnMetadata {
             column_id: METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX as _,
@@ -324,7 +326,7 @@ impl MetricEngineInner {
         };
 
         // concat region dir
-        let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
+        let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
 
         RegionCreateRequest {
             engine: MITO_ENGINE_NAME.to_string(),
@@ -334,7 +336,7 @@ impl MetricEngineInner {
                 value_column_metadata,
             ],
             primary_key: vec![METADATA_SCHEMA_KEY_COLUMN_INDEX as _],
-            options: HashMap::new(),
+            options: request.options.clone(),
             region_dir: metadata_region_dir,
         }
     }

@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Range;
 use std::sync::Arc;
 
+use bytes::Bytes;
+use object_store::{ErrorKind, ObjectStore};
 use parquet::basic::ColumnOrder;
 use parquet::file::metadata::{FileMetaData, ParquetMetaData, RowGroupMetaData};
 use parquet::format;
@@ -83,4 +86,86 @@ fn parse_column_orders(
         }
         None => None,
     }
+}
+
+/// Fetches data from object store.
+/// If the object store supports blocking, use sequence blocking read.
+/// Otherwise, use concurrent read.
+pub async fn fetch_byte_ranges(
+    file_path: &str,
+    object_store: ObjectStore,
+    ranges: &[Range<u64>],
+) -> object_store::Result<Vec<Bytes>> {
+    if object_store.info().full_capability().blocking {
+        fetch_ranges_seq(file_path, object_store, ranges).await
+    } else {
+        fetch_ranges_concurrent(file_path, object_store, ranges).await
+    }
+}
+
+/// Fetches data from object store sequentially
+async fn fetch_ranges_seq(
+    file_path: &str,
+    object_store: ObjectStore,
+    ranges: &[Range<u64>],
+) -> object_store::Result<Vec<Bytes>> {
+    let block_object_store = object_store.blocking();
+    let file_path = file_path.to_string();
+    let ranges = ranges.to_vec();
+
+    let f = move || -> object_store::Result<Vec<Bytes>> {
+        ranges
+            .into_iter()
+            .map(|range| {
+                let data = block_object_store
+                    .read_with(&file_path)
+                    .range(range.start..range.end)
+                    .call()?;
+                Ok::<_, object_store::Error>(Bytes::from(data))
+            })
+            .collect::<object_store::Result<Vec<_>>>()
+    };
+
+    maybe_spawn_blocking(f).await
+}
+
+/// Fetches data from object store concurrently.
+async fn fetch_ranges_concurrent(
+    file_path: &str,
+    object_store: ObjectStore,
+    ranges: &[Range<u64>],
+) -> object_store::Result<Vec<Bytes>> {
+    // TODO(QuenKar): may merge small ranges to a bigger range to optimize.
+    let mut handles = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        let future_read = object_store.read_with(file_path);
+        handles.push(async move {
+            let data = future_read.range(range.start..range.end).await?;
+            Ok::<_, object_store::Error>(Bytes::from(data))
+        });
+    }
+    let results = futures::future::try_join_all(handles).await?;
+    Ok(results)
+}
+
+//  Port from https://github.com/apache/arrow-rs/blob/802ed428f87051fdca31180430ddb0ecb2f60e8b/object_store/src/util.rs#L74-L83
+/// Takes a function and spawns it to a tokio blocking pool if available
+async fn maybe_spawn_blocking<F, T>(f: F) -> object_store::Result<T>
+where
+    F: FnOnce() -> object_store::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => runtime
+            .spawn_blocking(f)
+            .await
+            .map_err(new_task_join_error)?,
+        Err(_) => f(),
+    }
+}
+
+//  https://github.com/apache/incubator-opendal/blob/7144ab1ca2409dff0c324bfed062ce985997f8ce/core/src/raw/tokio_util.rs#L21-L23
+/// Parse tokio error into opendal::Error.
+fn new_task_join_error(e: tokio::task::JoinError) -> object_store::Error {
+    object_store::Error::new(ErrorKind::Unexpected, "tokio task join failed").set_source(e)
 }
