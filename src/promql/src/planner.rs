@@ -46,10 +46,11 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
     CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultiFieldsNotSupportedSnafu,
+    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, Result,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
@@ -1669,6 +1670,23 @@ impl PromPlanner {
         right_context: PromPlannerContext,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
+        // checks
+        ensure!(
+            left_context.field_columns.len() == right_context.field_columns.len(),
+            CombineTableColumnMismatchSnafu {
+                left: left_context.field_columns.clone(),
+                right: right_context.field_columns.clone()
+            }
+        );
+        ensure!(
+            left_context.field_columns.len() == 1,
+            MultiFieldsNotSupportedSnafu {
+                operator: "OR operator"
+            }
+        );
+
+        common_telemetry::info!("[DEBUG] left field col: {:?}", left_context.field_columns);
+
         // prepare hash sets
         let all_tags = left_tag_cols_set
             .union(&right_tag_cols_set)
@@ -1706,6 +1724,9 @@ impl PromPlanner {
                 .with_context(|| TimeIndexNotFoundSnafu {
                     table: right_qualifier_string.clone(),
                 })?;
+        // Take the name of first field column. The length is checked above.
+        let left_field_col = left_context.field_columns.first().unwrap();
+        let right_field_col = right_context.field_columns.first().unwrap();
 
         // step 0: fill all columns in output schema
         let mut all_columns_set = left
@@ -1718,6 +1739,10 @@ impl PromPlanner {
         // remove time index column
         all_columns_set.remove(&left_time_index_column);
         all_columns_set.remove(&right_time_index_column);
+        // remove field column in the right
+        if left_field_col != right_field_col {
+            all_columns_set.remove(right_field_col);
+        }
         let mut all_columns = all_columns_set.into_iter().collect::<Vec<_>>();
         // sort to ensure the generated schema is not volatile
         all_columns.sort_unstable();
@@ -1729,7 +1754,7 @@ impl PromPlanner {
             if tags_not_in_left.contains(col) {
                 DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
             } else {
-                DfExpr::Column(Column::new(left_qualifier.clone(), col))
+                DfExpr::Column(Column::new(None::<String>, col))
             }
         });
         let right_time_index_expr = DfExpr::Column(Column::new(
@@ -1737,11 +1762,16 @@ impl PromPlanner {
             right_time_index_column,
         ))
         .alias(left_time_index_column.clone());
+        // `skip（1)` to skip the time index column
         let right_proj_exprs_without_time_index = all_columns.iter().skip(1).map(|col| {
-            if tags_not_in_right.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
+            // expr
+            if col == left_field_col && left_field_col != right_field_col {
+                // alias field in right side if necessary to handle different field name
+                DfExpr::Column(Column::new(right_qualifier.clone(), right_field_col))
+            } else if tags_not_in_right.contains(col) {
+                DfExpr::Literal(ScalarValue::Utf8(None))
             } else {
-                DfExpr::Column(Column::new(right_qualifier.clone(), col))
+                DfExpr::Column(Column::new(None::<String>, col))
             }
         });
         let right_proj_exprs = [right_time_index_expr]
