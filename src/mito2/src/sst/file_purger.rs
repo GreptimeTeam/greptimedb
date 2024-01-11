@@ -102,7 +102,7 @@ mod tests {
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
-    use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange};
+    use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType};
     use crate::sst::location;
 
     #[tokio::test]
@@ -178,7 +178,7 @@ mod tests {
                     time_range: FileTimeRange::default(),
                     level: 0,
                     file_size: 4096,
-                    available_indexes: vec![],
+                    available_indexes: vec![IndexType::InvertedIndex],
                 },
                 file_purger,
             );
