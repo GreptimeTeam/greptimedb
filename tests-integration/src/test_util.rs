@@ -24,8 +24,6 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use common_config::WalConfig;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
-use common_query::Output;
-use common_recordbatch::util;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::warn;
 use common_test_util::ports;
@@ -503,16 +501,19 @@ pub async fn setup_grpc_server_with(
     );
 
     let fe_instance_ref = instance.instance.clone();
-    let flight_handler = Arc::new(GreptimeRequestHandler::new(
+
+    let greptime_request_handler = GreptimeRequestHandler::new(
         ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone()),
         user_provider.clone(),
         runtime.clone(),
-    ));
+    );
+
+    let flight_handler = Arc::new(greptime_request_handler.clone());
 
     let fe_grpc_server = Arc::new(
         GrpcServerBuilder::new(runtime)
             .option_config(grpc_config)
-            .query_handler(ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone()))
+            .database_handler(greptime_request_handler)
             .flight_handler(flight_handler)
             .prometheus_handler(fe_instance_ref.clone())
             .user_provider(user_provider)
@@ -530,16 +531,6 @@ pub async fn setup_grpc_server_with(
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     (fe_grpc_addr, instance.guard, fe_grpc_server)
-}
-
-pub async fn check_output_stream(output: Output, expected: &str) {
-    let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
-        Output::RecordBatches(recordbatches) => recordbatches,
-        _ => unreachable!(),
-    };
-    let pretty_print = recordbatches.pretty_print().unwrap();
-    assert_eq!(pretty_print, expected, "actual: \n{}", pretty_print);
 }
 
 pub async fn setup_mysql_server(

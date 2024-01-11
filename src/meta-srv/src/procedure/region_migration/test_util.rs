@@ -16,6 +16,7 @@ use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
@@ -281,6 +282,7 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         to_peer: Peer::empty(to),
         region_id,
         cluster_id: 0,
+        replay_timeout: Duration::from_millis(1000),
     }
 }
 

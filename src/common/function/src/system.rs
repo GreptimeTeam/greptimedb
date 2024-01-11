@@ -13,10 +13,12 @@
 // limitations under the License.
 
 pub mod build;
+pub mod version;
 
 use std::sync::Arc;
 
 use build::BuildFunction;
+use version::VersionFunction;
 
 use crate::function_registry::FunctionRegistry;
 
@@ -25,5 +27,6 @@ pub(crate) struct SystemFunction;
 impl SystemFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(BuildFunction));
+        registry.register(Arc::new(VersionFunction));
     }
 }

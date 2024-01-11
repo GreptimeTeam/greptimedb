@@ -1206,6 +1206,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "itertools 0.10.5",
  "lazy_static",
  "log-store",
  "meta-client",
@@ -1977,6 +1978,9 @@ dependencies = [
 name = "common-test-util"
 version = "0.5.1"
 dependencies = [
+ "client",
+ "common-query",
+ "common-recordbatch",
  "once_cell",
  "rand",
  "tempfile",
@@ -4832,6 +4836,7 @@ dependencies = [
  "futures",
  "h2",
  "http-body",
+ "humantime",
  "humantime-serde",
  "itertools 0.10.5",
  "lazy_static",

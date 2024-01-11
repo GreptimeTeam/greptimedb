@@ -16,7 +16,6 @@
 //! Inspired by Databend's "[mysql_federated.rs](https://github.com/datafuselabs/databend/blob/ac706bf65845e6895141c96c0a10bad6fdc2d367/src/query/service/src/servers/mysql/mysql_federated.rs)".
 
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 
 use common_query::Output;
@@ -42,8 +41,6 @@ static SHOW_COLLATION_PATTERN: Lazy<Regex> =
 static SHOW_VARIABLES_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES(.*))").unwrap());
 
-static SELECT_VERSION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(SELECT VERSION\(\s*\))").unwrap());
 static SELECT_DATABASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(SELECT DATABASE\(\s*\))").unwrap());
 
@@ -283,9 +280,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
         return Some(Output::RecordBatches(RecordBatches::empty()));
     }
 
-    let recordbatches = if SELECT_VERSION_PATTERN.is_match(query) {
-        Some(select_function("version()", &get_version()))
-    } else if SELECT_DATABASE_PATTERN.is_match(query) {
+    let recordbatches = if SELECT_DATABASE_PATTERN.is_match(query) {
         let schema = query_ctx.current_schema();
         Some(select_function("database()", schema))
     } else if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
@@ -321,10 +316,6 @@ pub(crate) fn check(
         .or_else(|| check_others(query, query_ctx))
 }
 
-// get GreptimeDB's version.
-fn get_version() -> String {
-    format!("{}-greptime", env!("CARGO_PKG_VERSION"))
-}
 #[cfg(test)]
 mod test {
 
@@ -354,19 +345,6 @@ mod test {
                 }
                 _ => unreachable!(),
             }
-        }
-
-        let query = "select version()";
-        let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
-        let output = check(query, QueryContext::arc(), session.clone());
-        match output.unwrap() {
-            Output::RecordBatches(r) => {
-                assert!(&r
-                    .pretty_print()
-                    .unwrap()
-                    .contains(&format!("{version}-greptime")));
-            }
-            _ => unreachable!(),
         }
 
         let query = "SELECT @@version_comment LIMIT 1";

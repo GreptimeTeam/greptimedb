@@ -16,6 +16,7 @@ mod columns;
 mod key_column_usage;
 mod memory_table;
 mod predicate;
+mod runtime_metrics;
 mod schemata;
 mod table_names;
 mod tables;
@@ -23,7 +24,7 @@ mod tables;
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use common_catalog::consts::{self, INFORMATION_SCHEMA_NAME};
+use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
@@ -46,6 +47,7 @@ use self::columns::InformationSchemaColumns;
 use crate::error::Result;
 use crate::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
+use crate::information_schema::runtime_metrics::InformationSchemaMetrics;
 use crate::information_schema::schemata::InformationSchemaSchemata;
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
@@ -56,7 +58,6 @@ lazy_static! {
         ENGINES,
         COLUMN_PRIVILEGES,
         COLUMN_STATISTICS,
-        BUILD_INFO,
         CHARACTER_SETS,
         COLLATIONS,
         COLLATION_CHARACTER_SET_APPLICABILITY,
@@ -142,6 +143,21 @@ impl InformationSchemaProvider {
 
     fn build_tables(&mut self) {
         let mut tables = HashMap::new();
+
+        // Carefully consider the tables that may expose sensitive cluster configurations,
+        // authentication details, and other critical information.
+        // Only put these tables under `greptime` catalog to prevent info leak.
+        if self.catalog_name == DEFAULT_CATALOG_NAME {
+            tables.insert(
+                RUNTIME_METRICS.to_string(),
+                self.build_table(RUNTIME_METRICS).unwrap(),
+            );
+            tables.insert(
+                BUILD_INFO.to_string(),
+                self.build_table(BUILD_INFO).unwrap(),
+            );
+        }
+
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
         tables.insert(SCHEMATA.to_string(), self.build_table(SCHEMATA).unwrap());
         tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
@@ -209,6 +225,7 @@ impl InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
+            RUNTIME_METRICS => Some(Arc::new(InformationSchemaMetrics::new())),
             _ => None,
         }
     }

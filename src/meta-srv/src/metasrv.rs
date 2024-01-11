@@ -79,6 +79,12 @@ pub struct MetaSrvOptions {
     pub store_key_prefix: String,
 }
 
+impl MetaSrvOptions {
+    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["wal.broker_endpoints"])
+    }
+}
+
 impl Default for MetaSrvOptions {
     fn default() -> Self {
         Self {

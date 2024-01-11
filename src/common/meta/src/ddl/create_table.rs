@@ -41,6 +41,7 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result, TableRouteNotFoundSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::lock_key::TableNameLock;
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::CreateTableTask;
@@ -343,13 +344,12 @@ impl Procedure for CreateTableProcedure {
 
     fn lock_key(&self) -> LockKey {
         let table_ref = &self.creator.data.table_ref();
-        let key = common_catalog::format_full_table_name(
+
+        LockKey::single(TableNameLock::new(
             table_ref.catalog,
             table_ref.schema,
             table_ref.table,
-        );
-
-        LockKey::single_exclusive(key)
+        ))
     }
 }
 

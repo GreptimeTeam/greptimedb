@@ -148,6 +148,12 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
+    /// Upload bytes counter.
+    pub static ref UPLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
+        "mito_upload_bytes_total",
+        "mito upload bytes total",
+    )
+    .unwrap();
     // ------- End of cache metrics.
 
     // Index metrics.

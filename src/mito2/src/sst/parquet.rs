@@ -27,11 +27,12 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
 
+use super::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
 
 /// Key of metadata in parquet SST.
 pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
-const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(8);
+
 /// Default batch size to read parquet files.
 pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 1024;
 /// Default row group size for parquet files.
@@ -73,32 +74,18 @@ pub struct SstInfo {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::OpType;
     use common_time::Timestamp;
 
     use super::*;
     use crate::cache::{CacheManager, PageKey};
-    use crate::read::Batch;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::test_util::sst_util::{
-        new_primary_key, new_source, sst_file_handle, sst_region_metadata,
+        new_batch_by_range, new_source, sst_file_handle, sst_region_metadata,
     };
-    use crate::test_util::{check_reader_result, new_batch_builder, TestEnv};
+    use crate::test_util::{check_reader_result, TestEnv};
 
     const FILE_DIR: &str = "/";
-
-    fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
-        assert!(end > start);
-        let pk = new_primary_key(tags);
-        let timestamps: Vec<_> = (start..end).map(|v| v as i64).collect();
-        let sequences = vec![1000; end - start];
-        let op_types = vec![OpType::Put; end - start];
-        let field: Vec<_> = (start..end).map(|v| v as u64).collect();
-        new_batch_builder(&pk, &timestamps, &sequences, &op_types, 2, &field)
-            .build()
-            .unwrap()
-    }
 
     #[tokio::test]
     async fn test_write_read() {

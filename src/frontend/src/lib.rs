@@ -20,5 +20,5 @@ pub mod heartbeat;
 pub mod instance;
 pub(crate) mod metrics;
 mod script;
-mod server;
+pub mod server;
 pub mod service_config;

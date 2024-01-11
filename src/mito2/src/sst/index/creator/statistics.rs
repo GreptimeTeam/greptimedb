@@ -144,12 +144,25 @@ mod tests {
             let mut guard = stats.record_update();
             guard.inc_byte_count(100);
             guard.inc_row_count(10);
+
+            let now = Instant::now();
+            while now.elapsed().is_zero() {
+                // busy loop
+            }
         }
         {
             let _guard = stats.record_finish();
+            let now = Instant::now();
+            while now.elapsed().is_zero() {
+                // busy loop
+            }
         }
         {
             let _guard = stats.record_cleanup();
+            let now = Instant::now();
+            while now.elapsed().is_zero() {
+                // busy loop
+            }
         }
         assert_eq!(stats.row_count(), 10);
         assert_eq!(stats.byte_count(), 100);

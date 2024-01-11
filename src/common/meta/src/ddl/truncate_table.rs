@@ -37,6 +37,7 @@ use crate::error::{Result, TableNotFoundSnafu};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::DeserializedValueWithBytes;
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::rpc::ddl::TruncateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
@@ -75,13 +76,14 @@ impl Procedure for TruncateTableProcedure {
 
     fn lock_key(&self) -> LockKey {
         let table_ref = &self.data.table_ref();
-        let key = common_catalog::format_full_table_name(
-            table_ref.catalog,
-            table_ref.schema,
-            table_ref.table,
-        );
+        let table_id = self.data.table_id();
+        let lock_key = vec![
+            CatalogLock::Read(table_ref.catalog).into(),
+            SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
+            TableLock::Write(table_id).into(),
+        ];
 
-        LockKey::single_exclusive(key)
+        LockKey::new(lock_key)
     }
 }
 

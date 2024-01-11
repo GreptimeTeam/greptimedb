@@ -86,7 +86,6 @@ use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics;
 use crate::script::ScriptExecutor;
-use crate::server::Services;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -190,12 +189,13 @@ impl Instance {
     pub async fn build_servers(
         &mut self,
         opts: impl Into<FrontendOptions> + TomlSerializable,
+        servers: ServerHandlers,
     ) -> Result<()> {
         let opts: FrontendOptions = opts.into();
         self.export_metrics_task =
             ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
                 .context(StartServerSnafu)?;
-        let servers = Services::build(opts, Arc::new(self.clone()), self.plugins.clone()).await?;
+
         self.servers = Arc::new(servers);
 
         Ok(())

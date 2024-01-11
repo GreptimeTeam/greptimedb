@@ -24,6 +24,7 @@ use common_meta::{distributed_time_constants, RegionIdent};
 use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::info;
+use common_test_util::recordbatch::check_output_stream;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
 use futures::TryStreamExt;
@@ -35,7 +36,7 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{check_output_stream, get_test_store_config, StorageType};
+use tests_integration::test_util::{get_test_store_config, StorageType};
 use tokio::time;
 
 #[macro_export]

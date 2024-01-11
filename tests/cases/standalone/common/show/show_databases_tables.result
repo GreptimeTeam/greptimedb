@@ -20,7 +20,6 @@ show tables;
 +---------------------------------------+
 | Tables                                |
 +---------------------------------------+
-| build_info                            |
 | character_sets                        |
 | check_constraints                     |
 | collation_character_set_applicability |
