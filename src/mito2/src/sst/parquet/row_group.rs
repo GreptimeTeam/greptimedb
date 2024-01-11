@@ -32,6 +32,7 @@ use store_api::storage::RegionId;
 use super::helper::fetch_byte_ranges;
 use crate::cache::file_cache::IndexKey;
 use crate::cache::{CacheManagerRef, PageKey, PageValue};
+use crate::metrics::READ_STAGE_ELAPSED;
 use crate::sst::file::FileId;
 use crate::sst::parquet::page_reader::CachedPageReader;
 
@@ -126,7 +127,7 @@ impl<'a> InMemoryRowGroup<'a> {
                         selection
                             .scan_ranges(&page_locations[idx])
                             .iter()
-                            .map(|r| r.start as u64..r.end as u64),
+                            .map(|range| range.start as u64..range.end as u64),
                     );
                     page_start_offsets
                         .push(ranges.iter().map(|range| range.start as usize).collect());
@@ -135,19 +136,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 })
                 .collect::<Vec<_>>();
 
-            // Try to fetch data from WriteCache,
-            // If not in WriteCache, fetch data from object store.
-            let key = (self.region_id, self.file_id);
-            let mut chunk_data =
-                if let Some(data) = self.fetch_ranges_from_write_cache(key, &fetch_ranges).await {
-                    data.into_iter()
-                } else {
-                    // Fetch data from object store directly.
-                    fetch_byte_ranges(self.file_path, self.object_store.clone(), &fetch_ranges)
-                        .await
-                        .map_err(|e| ParquetError::External(Box::new(e)))?
-                        .into_iter()
-                };
+            let mut chunk_data = self.fetch_bytes(&fetch_ranges).await?.into_iter();
 
             let mut page_start_offsets = page_start_offsets.into_iter();
 
@@ -193,19 +182,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 return Ok(());
             }
 
-            // Try to fetch data from WriteCache,
-            // If not in WriteCache, fetch data from object store.
-            let key = (self.region_id, self.file_id);
-            let mut chunk_data =
-                if let Some(data) = self.fetch_ranges_from_write_cache(key, &fetch_ranges).await {
-                    data.into_iter()
-                } else {
-                    // Fetch data from object store directly.
-                    fetch_byte_ranges(self.file_path, self.object_store.clone(), &fetch_ranges)
-                        .await
-                        .map_err(|e| ParquetError::External(Box::new(e)))?
-                        .into_iter()
-                };
+            let mut chunk_data = self.fetch_bytes(&fetch_ranges).await?.into_iter();
 
             for (idx, (chunk, cached_pages)) in self
                 .column_chunks
@@ -246,6 +223,25 @@ impl<'a> InMemoryRowGroup<'a> {
                     self.column_cached_pages[idx] = cache.get_pages(&page_key);
                 }
             });
+    }
+
+    /// Try to fetch data from WriteCache,
+    /// if not in WriteCache, fetch data from object store directly.
+    async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let key = (self.region_id, self.file_id);
+        match self.fetch_ranges_from_write_cache(key, ranges).await {
+            Some(data) => Ok(data),
+            None => {
+                // Fetch data from object store.
+                let _timer = READ_STAGE_ELAPSED
+                    .with_label_values(&["read", "cache_miss"])
+                    .start_timer();
+                let data = fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
+                    .await
+                    .map_err(|e| ParquetError::External(Box::new(e)))?;
+                Ok(data)
+            }
+        }
     }
 
     /// Fetches data from write cache.

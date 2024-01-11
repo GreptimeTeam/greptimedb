@@ -147,13 +147,16 @@ impl FileCache {
         // In most cases, it will use blocking read,
         // because FileCache is normally based on local file system, which supports blocking read.
         let bytes_result = fetch_byte_ranges(&file_path, self.local_store.clone(), ranges).await;
-
         match bytes_result {
             Ok(bytes) => {
                 CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
                 Some(bytes)
             }
-            Err(_) => {
+            Err(e) => {
+                if e.kind() != ErrorKind::NotFound {
+                    warn!("Failed to get file for key {:?}, err: {}", key, e);
+                }
+
                 // We removes the file from the index.
                 self.memory_index.remove(&key).await;
                 CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
