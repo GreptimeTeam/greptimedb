@@ -35,6 +35,8 @@ pub fn new_file_handle(
             ),
             level,
             file_size: 0,
+            available_indexes: Default::default(),
+            index_file_size: 0,
         },
         file_purger,
     )

@@ -14,7 +14,6 @@
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
-pub mod topic;
 pub mod topic_manager;
 pub mod topic_selector;
 
@@ -23,7 +22,6 @@ use std::time::Duration;
 use common_config::wal::kafka::{kafka_backoff, KafkaBackoffConfig, TopicSelectorType};
 use serde::{Deserialize, Serialize};
 
-pub use crate::wal::kafka::topic::Topic;
 pub use crate::wal::kafka::topic_manager::TopicManager;
 
 /// Configurations for kafka wal.

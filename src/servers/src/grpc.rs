@@ -249,15 +249,6 @@ impl Server for GrpcServer {
                     .max_decoding_message_size(max_recv_message_size)
                     .max_encoding_message_size(max_send_message_size),
             )
-        } else {
-            // TODO(ruihang): this is a temporary workaround before region server is ready.
-            builder = builder.add_service(
-                FlightServiceServer::new(FlightCraftWrapper(
-                    self.database_handler.clone().unwrap(),
-                ))
-                .max_decoding_message_size(max_recv_message_size)
-                .max_encoding_message_size(max_send_message_size),
-            )
         }
         if let Some(region_server_handler) = &self.region_server_handler {
             builder = builder.add_service(

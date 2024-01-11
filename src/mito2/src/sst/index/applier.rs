@@ -15,6 +15,7 @@
 pub mod builder;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use futures::{AsyncRead, AsyncSeek};
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
@@ -52,8 +53,12 @@ pub struct SstIndexApplier {
     index_applier: Box<dyn IndexApplier>,
 }
 
+pub type SstIndexApplierRef = Arc<SstIndexApplier>;
+
 impl SstIndexApplier {
     /// Creates a new [`SstIndexApplier`].
+    ///
+    /// TODO(zhongzc): leverage `WriteCache`
     pub fn new(
         region_dir: String,
         object_store: ObjectStore,

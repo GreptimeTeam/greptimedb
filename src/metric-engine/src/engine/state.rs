@@ -115,4 +115,20 @@ impl MetricEngineState {
         self.physical_columns.remove(&physical_region_id);
         Ok(())
     }
+
+    /// Remove all data that are related to the logical region id.
+    pub fn remove_logical_region(&mut self, logical_region_id: RegionId) -> Result<()> {
+        let physical_region_id = self.logical_regions.remove(&logical_region_id).context(
+            PhysicalRegionNotFoundSnafu {
+                region_id: logical_region_id,
+            },
+        )?;
+
+        self.physical_regions
+            .get_mut(&physical_region_id)
+            .unwrap() // Safety: physical_region_id is got from physical_regions
+            .remove(&logical_region_id);
+
+        Ok(())
+    }
 }

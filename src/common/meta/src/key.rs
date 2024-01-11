@@ -354,6 +354,7 @@ impl TableMetadataManager {
         &self.kv_backend
     }
 
+    // TODO(ruihang): deprecate this
     pub async fn get_full_table_info(
         &self,
         table_id: TableId,

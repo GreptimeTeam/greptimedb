@@ -321,6 +321,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to delete index file, file id: {}", file_id))]
+    DeleteIndex {
+        file_id: FileId,
+        #[snafu(source)]
+        error: object_store::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to flush region {}", region_id))]
     FlushRegion {
         region_id: RegionId,
@@ -445,6 +453,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to push index value"))]
+    PushIndexValue {
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write index completely"))]
+    IndexFinish {
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Operate on aborted index"))]
+    OperateAbortedIndex { location: Location },
+
     #[snafu(display("Failed to read puffin metadata"))]
     PuffinReadMetadata {
         source: puffin::error::Error,
@@ -460,6 +483,18 @@ pub enum Error {
     #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
     PuffinBlobTypeNotFound {
         blob_type: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write puffin completely"))]
+    PuffinFinish {
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to add blob to puffin file"))]
+    PuffinAddBlob {
+        source: puffin::error::Error,
         location: Location,
     },
 
@@ -542,6 +577,7 @@ impl ErrorExt for Error {
             | RegionCorrupted { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. }
+            | OperateAbortedIndex { .. }
             | PuffinBlobTypeNotFound { .. }
             | UnexpectedReplay { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
@@ -575,7 +611,7 @@ impl ErrorExt for Error {
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             StopScheduler { .. } => StatusCode::Internal,
-            DeleteSst { .. } => StatusCode::StorageUnavailable,
+            DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
@@ -589,10 +625,14 @@ impl ErrorExt for Error {
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
             ConvertValue { source, .. } => source.status_code(),
-            BuildIndexApplier { source, .. } | ApplyIndex { source, .. } => source.status_code(),
-            PuffinReadMetadata { source, .. } | PuffinReadBlob { source, .. } => {
-                source.status_code()
-            }
+            BuildIndexApplier { source, .. }
+            | PushIndexValue { source, .. }
+            | ApplyIndex { source, .. }
+            | IndexFinish { source, .. } => source.status_code(),
+            PuffinReadMetadata { source, .. }
+            | PuffinReadBlob { source, .. }
+            | PuffinFinish { source, .. }
+            | PuffinAddBlob { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,

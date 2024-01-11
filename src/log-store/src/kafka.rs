@@ -18,7 +18,6 @@ pub(crate) mod util;
 
 use std::fmt::Display;
 
-use common_meta::wal::KafkaWalTopic as Topic;
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::{Entry, Id as EntryId};
 use store_api::logstore::namespace::Namespace;
@@ -29,7 +28,7 @@ use crate::error::Error;
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub struct NamespaceImpl {
     pub region_id: u64,
-    pub topic: Topic,
+    pub topic: String,
 }
 
 impl Namespace for NamespaceImpl {

@@ -1206,6 +1206,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "itertools 0.10.5",
  "lazy_static",
  "log-store",
  "meta-client",
@@ -1977,6 +1978,9 @@ dependencies = [
 name = "common-test-util"
 version = "0.5.1"
 dependencies = [
+ "client",
+ "common-query",
+ "common-recordbatch",
  "once_cell",
  "rand",
  "tempfile",
@@ -4832,6 +4836,7 @@ dependencies = [
  "futures",
  "h2",
  "http-body",
+ "humantime",
  "humantime-serde",
  "itertools 0.10.5",
  "lazy_static",
@@ -8712,6 +8717,9 @@ name = "smallvec"
 version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4dccd0940a2dcdf68d092b8cbab7dc0ad8fa938bf95787e1b916b0e3d0e8e970"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smartstring"

@@ -48,7 +48,7 @@ pub trait RowCodec {
     fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SortField {
     data_type: ConcreteDataType,
 }

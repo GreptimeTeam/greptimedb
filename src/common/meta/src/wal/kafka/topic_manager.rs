@@ -33,7 +33,6 @@ use crate::error::{
 };
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::PutRequest;
-use crate::wal::kafka::topic::Topic;
 use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, TopicSelectorRef};
 use crate::wal::kafka::KafkaConfig;
 
@@ -46,7 +45,7 @@ const DEFAULT_PARTITION: i32 = 0;
 /// Manages topic initialization and selection.
 pub struct TopicManager {
     config: KafkaConfig,
-    pub(crate) topic_pool: Vec<Topic>,
+    pub(crate) topic_pool: Vec<String>,
     pub(crate) topic_selector: TopicSelectorRef,
     kv_backend: KvBackendRef,
 }
@@ -86,7 +85,7 @@ impl TopicManager {
         let created_topics = Self::restore_created_topics(&self.kv_backend)
             .await?
             .into_iter()
-            .collect::<HashSet<Topic>>();
+            .collect::<HashSet<String>>();
 
         // Creates missing topics.
         let to_be_created = topics
@@ -108,7 +107,7 @@ impl TopicManager {
     }
 
     /// Tries to create topics specified by indexes in `to_be_created`.
-    async fn try_create_topics(&self, topics: &[Topic], to_be_created: &[usize]) -> Result<()> {
+    async fn try_create_topics(&self, topics: &[String], to_be_created: &[usize]) -> Result<()> {
         // Builds an kafka controller client for creating topics.
         let backoff_config = BackoffConfig {
             init_backoff: self.config.backoff.init,
@@ -141,18 +140,18 @@ impl TopicManager {
     }
 
     /// Selects one topic from the topic pool through the topic selector.
-    pub fn select(&self) -> Result<&Topic> {
+    pub fn select(&self) -> Result<&String> {
         self.topic_selector.select(&self.topic_pool)
     }
 
     /// Selects a batch of topics from the topic pool through the topic selector.
-    pub fn select_batch(&self, num_topics: usize) -> Result<Vec<&Topic>> {
+    pub fn select_batch(&self, num_topics: usize) -> Result<Vec<&String>> {
         (0..num_topics)
             .map(|_| self.topic_selector.select(&self.topic_pool))
             .collect()
     }
 
-    async fn try_append_noop_record(&self, topic: &Topic, client: &Client) -> Result<()> {
+    async fn try_append_noop_record(&self, topic: &String, client: &Client) -> Result<()> {
         let partition_client = client
             .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)
             .await
@@ -177,7 +176,7 @@ impl TopicManager {
         Ok(())
     }
 
-    async fn try_create_topic(&self, topic: &Topic, client: &ControllerClient) -> Result<()> {
+    async fn try_create_topic(&self, topic: &String, client: &ControllerClient) -> Result<()> {
         match client
             .create_topic(
                 topic.clone(),
@@ -203,7 +202,7 @@ impl TopicManager {
         }
     }
 
-    async fn restore_created_topics(kv_backend: &KvBackendRef) -> Result<Vec<Topic>> {
+    async fn restore_created_topics(kv_backend: &KvBackendRef) -> Result<Vec<String>> {
         kv_backend
             .get(CREATED_TOPICS_KEY.as_bytes())
             .await?
@@ -213,7 +212,7 @@ impl TopicManager {
             )
     }
 
-    async fn persist_created_topics(topics: &[Topic], kv_backend: &KvBackendRef) -> Result<()> {
+    async fn persist_created_topics(topics: &[String], kv_backend: &KvBackendRef) -> Result<()> {
         let raw_topics = serde_json::to_vec(topics).context(EncodeJsonSnafu)?;
         kv_backend
             .put(PutRequest {

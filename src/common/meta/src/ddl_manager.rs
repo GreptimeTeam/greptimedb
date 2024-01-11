@@ -19,7 +19,7 @@ use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithI
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, tracing};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, TableId};
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
@@ -162,7 +162,7 @@ impl DdlManager {
         cluster_id: u64,
         alter_table_task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        physical_table_name: Option<TableName>,
+        physical_table_info: Option<(TableId, TableName)>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
@@ -170,7 +170,7 @@ impl DdlManager {
             cluster_id,
             alter_table_task,
             table_info_value,
-            physical_table_name,
+            physical_table_info,
             context,
         )?;
 
@@ -341,7 +341,7 @@ async fn handle_alter_table_task(
         .get_physical_table_id(table_id)
         .await?;
 
-    let physical_table_name = if physical_table_id == table_id {
+    let physical_table_info = if physical_table_id == table_id {
         None
     } else {
         let physical_table_info = &ddl_manager
@@ -353,11 +353,14 @@ async fn handle_alter_table_task(
                 table_name: table_ref.to_string(),
             })?
             .table_info;
-        Some(TableName {
-            catalog_name: physical_table_info.catalog_name.clone(),
-            schema_name: physical_table_info.schema_name.clone(),
-            table_name: physical_table_info.name.clone(),
-        })
+        Some((
+            physical_table_id,
+            TableName {
+                catalog_name: physical_table_info.catalog_name.clone(),
+                schema_name: physical_table_info.schema_name.clone(),
+                table_name: physical_table_info.name.clone(),
+            },
+        ))
     };
 
     let id = ddl_manager
@@ -365,7 +368,7 @@ async fn handle_alter_table_task(
             cluster_id,
             alter_table_task,
             table_info_value,
-            physical_table_name,
+            physical_table_info,
         )
         .await?;
 
@@ -386,15 +389,21 @@ async fn handle_drop_table_task(
     let table_metadata_manager = &ddl_manager.table_metadata_manager();
     let table_ref = drop_table_task.table_ref();
 
-    let (table_info_value, table_route_value) =
-        table_metadata_manager.get_full_table_info(table_id).await?;
+    let table_info_value = table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await?;
+    let (_, table_route_value) = table_metadata_manager
+        .table_route_manager()
+        .get_physical_table_route(table_id)
+        .await?;
 
     let table_info_value = table_info_value.with_context(|| error::TableInfoNotFoundSnafu {
         table_name: table_ref.to_string(),
     })?;
 
     let table_route_value =
-        table_route_value.context(error::TableRouteNotFoundSnafu { table_id })?;
+        DeserializedValueWithBytes::from_inner(TableRouteValue::Physical(table_route_value));
 
     let id = ddl_manager
         .submit_drop_table_task(

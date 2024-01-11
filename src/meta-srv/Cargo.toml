@@ -33,6 +33,7 @@ etcd-client.workspace = true
 futures.workspace = true
 h2 = "0.3"
 http-body = "0.4"
+humantime = "2.1"
 humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true

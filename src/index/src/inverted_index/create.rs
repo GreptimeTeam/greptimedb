@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod sort;
-mod sort_create;
+pub mod sort;
+pub mod sort_create;
 
 use async_trait::async_trait;
 

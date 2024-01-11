@@ -22,9 +22,9 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
-use crate::error::{CleanDirSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
+use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
-use crate::sst::file::{FileHandle, FileId};
+use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -66,13 +66,27 @@ impl AccessLayer {
         &self.object_store
     }
 
-    /// Deletes a SST file with given file id.
-    pub(crate) async fn delete_sst(&self, file_id: FileId) -> Result<()> {
-        let path = location::sst_file_path(&self.region_dir, file_id);
+    /// Deletes a SST file (and its index file if it has one) with given file id.
+    pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
+        let path = location::sst_file_path(&self.region_dir, file_meta.file_id);
         self.object_store
             .delete(&path)
             .await
-            .context(DeleteSstSnafu { file_id })
+            .context(DeleteSstSnafu {
+                file_id: file_meta.file_id,
+            })?;
+
+        if file_meta.inverted_index_available() {
+            let path = location::index_file_path(&self.region_dir, file_meta.file_id);
+            self.object_store
+                .delete(&path)
+                .await
+                .context(DeleteIndexSnafu {
+                    file_id: file_meta.file_id,
+                })?;
+        }
+
+        Ok(())
     }
 
     /// Returns a reader builder for specific `file`.
@@ -89,10 +103,11 @@ impl AccessLayer {
         write_opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
         let path = location::sst_file_path(&self.region_dir, request.file_id);
+        let region_id = request.metadata.region_id;
 
-        if let Some(write_cache) = request.cache_manager.write_cache() {
+        let sst_info = if let Some(write_cache) = request.cache_manager.write_cache() {
             // Write to the write cache.
-            return write_cache
+            write_cache
                 .write_and_upload_sst(
                     SstUploadRequest {
                         file_id: request.file_id,
@@ -104,12 +119,25 @@ impl AccessLayer {
                     },
                     write_opts,
                 )
-                .await;
+                .await?
+        } else {
+            // Write cache is disabled.
+            let mut writer = ParquetWriter::new(path, request.metadata, self.object_store.clone());
+            writer.write_all(request.source, write_opts).await?
+        };
+
+        // Put parquet metadata to cache manager.
+        if let Some(sst_info) = &sst_info {
+            if let Some(parquet_metadata) = &sst_info.file_metadata {
+                request.cache_manager.put_parquet_meta_data(
+                    region_id,
+                    request.file_id,
+                    parquet_metadata.clone(),
+                )
+            }
         }
 
-        // Write cache is disabled.
-        let mut writer = ParquetWriter::new(path, request.metadata, self.object_store.clone());
-        writer.write_all(request.source, write_opts).await
+        Ok(sst_info)
     }
 }
 

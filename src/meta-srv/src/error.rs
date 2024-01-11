@@ -210,6 +210,12 @@ pub enum Error {
         location: Location,
         source: servers::error::Error,
     },
+    #[snafu(display("Failed to parse duration {}", duration))]
+    ParseDuration {
+        duration: String,
+        #[snafu(source)]
+        error: humantime::DurationError,
+    },
     #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
@@ -652,7 +658,6 @@ impl ErrorExt for Error {
             | Error::LockNotConfig { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
-            | Error::ParseAddr { .. }
             | Error::SchemaAlreadyExists { .. }
             | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
@@ -678,6 +683,8 @@ impl ErrorExt for Error {
             | Error::InvalidStatKey { .. }
             | Error::InvalidInactiveRegionKey { .. }
             | Error::ParseNum { .. }
+            | Error::ParseAddr { .. }
+            | Error::ParseDuration { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InitExportMetricsTask { .. }

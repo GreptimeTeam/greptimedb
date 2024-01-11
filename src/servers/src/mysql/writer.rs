@@ -265,8 +265,9 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Interval(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         ConcreteDataType::Duration(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Decimal128(_) => Ok(ColumnType::MYSQL_TYPE_DECIMAL),
-        _ => error::InternalSnafu {
-            err_msg: format!("not implemented for column datatype {:?}", data_type),
+        _ => error::UnsupportedDataTypeSnafu {
+            data_type,
+            reason: "not implemented",
         }
         .fail(),
     };

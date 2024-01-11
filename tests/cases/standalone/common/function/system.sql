@@ -5,3 +5,6 @@
 -- SQLNESS REPLACE version:\s+.+ version: VERSION
 -- SQLNESS REPLACE [\s\-]+
 SELECT build();
+
+-- SQLNESS REPLACE greptimedb-[\d\.]+ greptimedb-VERSION
+SELECT version();

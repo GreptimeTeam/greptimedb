@@ -29,7 +29,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(column_name) = Self::column_name(&inlist.expr) else {
             return Ok(());
         };
-        let Some(data_type) = self.tag_column_type(column_name)? else {
+        let Some((column_id, data_type)) = self.tag_column_id_and_type(column_name)? else {
             return Ok(());
         };
 
@@ -46,7 +46,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
                 .insert(Self::encode_lit(lit, data_type.clone())?);
         }
 
-        self.add_predicate(column_name, Predicate::InList(predicate));
+        self.add_predicate(column_id, Predicate::InList(predicate));
         Ok(())
     }
 }
@@ -74,7 +74,7 @@ mod tests {
 
         builder.collect_inlist(&in_list).unwrap();
 
-        let predicates = builder.output.get("a").unwrap();
+        let predicates = builder.output.get(&1).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

@@ -19,11 +19,6 @@ use rskafka::client::partition::Compression as RsKafkaCompression;
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 
-/// Topic name prefix.
-pub const TOPIC_NAME_PREFIX: &str = "greptimedb_wal_topic";
-/// Kafka wal topic.
-pub type Topic = String;
-
 /// The type of the topic selector, i.e. with which strategy to select a topic.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -138,5 +133,5 @@ impl Default for StandaloneKafkaConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KafkaOptions {
     /// Kafka wal topic.
-    pub topic: Topic,
+    pub topic: String,
 }

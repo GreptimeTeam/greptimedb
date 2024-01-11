@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::wal::kafka::KafkaConfig;
-pub use crate::wal::kafka::Topic as KafkaWalTopic;
 pub use crate::wal::options_allocator::{
     allocate_region_wal_options, WalOptionsAllocator, WalOptionsAllocatorRef,
 };
@@ -98,7 +97,6 @@ mod tests {
             num_topics = 32
             selector_type = "round_robin"
             topic_name_prefix = "greptimedb_wal_topic"
-            num_partitions = 1
             replication_factor = 1
             create_topic_timeout = "30s"
             backoff_init = "500ms"

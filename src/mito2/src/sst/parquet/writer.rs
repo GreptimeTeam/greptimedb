@@ -14,6 +14,8 @@
 
 //! Parquet writer.
 
+use std::sync::Arc;
+
 use common_datasource::file_format::parquet::BufferedWriter;
 use common_telemetry::debug;
 use common_time::Timestamp;
@@ -121,7 +123,9 @@ impl ParquetWriter {
             time_range,
             file_size,
             num_rows: stats.num_rows,
-            file_metadata: Some(parquet_metadata),
+            file_metadata: Some(Arc::new(parquet_metadata)),
+            inverted_index_available: false,
+            index_file_size: 0,
         }))
     }
 

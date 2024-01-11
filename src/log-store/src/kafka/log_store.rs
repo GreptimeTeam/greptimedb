@@ -283,7 +283,6 @@ fn check_termination(
 #[cfg(test)]
 mod tests {
     use common_base::readable_size::ReadableSize;
-    use common_config::wal::KafkaWalTopic as Topic;
     use rand::seq::IteratorRandom;
 
     use super::*;
@@ -304,7 +303,7 @@ mod tests {
         test_name: &str,
         num_topics: usize,
         broker_endpoints: Vec<String>,
-    ) -> (KafkaLogStore, Vec<Topic>) {
+    ) -> (KafkaLogStore, Vec<String>) {
         let topics = create_topics(
             num_topics,
             |i| format!("{test_name}_{}_{}", i, uuid::Uuid::new_v4()),

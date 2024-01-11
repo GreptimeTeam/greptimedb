@@ -40,6 +40,7 @@ use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
+use frontend::server::Services;
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
@@ -116,6 +117,12 @@ pub struct StandaloneOptions {
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
     pub export_metrics: ExportMetricsOption,
+}
+
+impl StandaloneOptions {
+    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["wal.broker_endpoints"])
+    }
 }
 
 impl Default for StandaloneOptions {
@@ -267,7 +274,7 @@ impl StartCommand {
         let opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            None,
+            StandaloneOptions::env_list_keys(),
         )?;
 
         self.convert_options(cli_options, opts)
@@ -425,13 +432,17 @@ impl StartCommand {
         .await?;
 
         let mut frontend = FrontendBuilder::new(kv_backend, datanode_manager, ddl_task_executor)
-            .with_plugin(fe_plugins)
+            .with_plugin(fe_plugins.clone())
             .try_build()
             .await
             .context(StartFrontendSnafu)?;
 
+        let servers = Services::new(fe_plugins)
+            .build(opts.clone(), Arc::new(frontend.clone()))
+            .await
+            .context(StartFrontendSnafu)?;
         frontend
-            .build_servers(opts)
+            .build_servers(opts, servers)
             .await
             .context(StartFrontendSnafu)?;
 

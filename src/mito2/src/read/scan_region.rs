@@ -14,8 +14,10 @@
 
 //! Scans a region according to the scan request.
 
+use std::sync::Arc;
+
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use common_time::range::TimestampRange;
 use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
@@ -27,6 +29,8 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
+use crate::sst::index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::applier::SstIndexApplierRef;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -194,6 +198,7 @@ impl ScanRegion {
             total_ssts
         );
 
+        let index_applier = self.build_index_applier();
         let predicate = Predicate::new(self.request.filters.clone());
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
@@ -207,6 +212,7 @@ impl ScanRegion {
             .with_memtables(memtables)
             .with_files(files)
             .with_cache(self.cache_manager)
+            .with_index_applier(index_applier)
             .with_parallelism(self.parallelism);
 
         Ok(seq_scan)
@@ -223,6 +229,20 @@ impl ScanRegion {
             .unit();
         TimeRangePredicateBuilder::new(&time_index.column_schema.name, unit, &self.request.filters)
             .build()
+    }
+
+    /// Use the latest schema to build the index applier.
+    fn build_index_applier(&self) -> Option<SstIndexApplierRef> {
+        SstIndexApplierBuilder::new(
+            self.access_layer.region_dir().to_string(),
+            self.access_layer.object_store().clone(),
+            self.version.metadata.as_ref(),
+        )
+        .build(&self.request.filters)
+        .inspect_err(|err| warn!(err; "Failed to build index applier"))
+        .ok()
+        .flatten()
+        .map(Arc::new)
     }
 }
 
