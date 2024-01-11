@@ -44,13 +44,13 @@ impl UpdateMetadata {
             .await
             .context(error::TableMetadataManagerSnafu)
         {
-            debug_assert!(ctx.remove_table_route_value());
+            ctx.remove_table_route_value();
             return error::RetryLaterSnafu {
                 reason: format!("Failed to update the table route during the rollback downgraded leader region, error: {err}")
             }.fail();
         }
 
-        debug_assert!(ctx.remove_table_route_value());
+        ctx.remove_table_route_value();
 
         Ok(())
     }
