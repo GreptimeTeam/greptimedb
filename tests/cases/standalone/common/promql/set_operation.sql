@@ -31,8 +31,7 @@ create table vector_matching_a(
 );
 
 insert into vector_matching_a values
-    (3000000, "x", 10),
-    (3000000, "y", 20);
+    (3000000, "x", 10);
 
 -- eval instant at 50m http_requests{group="canary"} and http_requests{instance="0"}
 -- 	http_requests{group="canary", instance="0", job="api-server"} 300

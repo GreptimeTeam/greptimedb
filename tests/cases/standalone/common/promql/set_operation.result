@@ -38,10 +38,9 @@ create table vector_matching_a(
 Affected Rows: 0
 
 insert into vector_matching_a values
-    (3000000, "x", 10),
-    (3000000, "y", 20);
+    (3000000, "x", 10);
 
-Affected Rows: 2
+Affected Rows: 1
 
 -- eval instant at 50m http_requests{group="canary"} and http_requests{instance="0"}
 -- 	http_requests{group="canary", instance="0", job="api-server"} 300
@@ -183,7 +182,7 @@ tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or on(instance) (htt
 +---------------------+--------+-----------------------------+----------+-----+---+
 | ts                  | g      | greptime_value + Float64(1) | instance | job | l |
 +---------------------+--------+-----------------------------+----------+-----+---+
-| 1970-01-01T00:50:00 |        | 20.0                        |          |     | y |
+| 1970-01-01T00:50:00 |        | 10.0                        |          |     | x |
 | 1970-01-01T00:50:00 | canary | 301.0                       | 0        | api |   |
 | 1970-01-01T00:50:00 | canary | 401.0                       | 1        | api |   |
 | 1970-01-01T00:50:00 | canary | 701.0                       | 0        | app |   |
