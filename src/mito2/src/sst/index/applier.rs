@@ -57,6 +57,8 @@ pub type SstIndexApplierRef = Arc<SstIndexApplier>;
 
 impl SstIndexApplier {
     /// Creates a new [`SstIndexApplier`].
+    /// 
+    /// TODO(zhongzc): leverage `WriteCache` 
     pub fn new(
         region_dir: String,
         object_store: ObjectStore,
