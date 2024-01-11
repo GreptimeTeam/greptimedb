@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
+use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
@@ -341,7 +342,7 @@ impl RegionFlushTask {
                 file_size: sst_info.file_size,
                 available_indexes: sst_info
                     .inverted_index_available
-                    .then(|| vec![IndexType::InvertedIndex])
+                    .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
                     .unwrap_or_default(),
                 index_file_size: sst_info.index_file_size,
             };

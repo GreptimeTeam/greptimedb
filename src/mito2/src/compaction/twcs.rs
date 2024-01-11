@@ -22,6 +22,7 @@ use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
+use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -332,7 +333,7 @@ impl TwcsCompactionTask {
                         file_size: sst_info.file_size,
                         available_indexes: sst_info
                             .inverted_index_available
-                            .then(|| vec![IndexType::InvertedIndex])
+                            .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
                             .unwrap_or_default(),
                         index_file_size: sst_info.index_file_size,
                     });

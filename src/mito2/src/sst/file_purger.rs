@@ -98,6 +98,7 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
     use object_store::ObjectStore;
+    use smallvec::SmallVec;
 
     use super::*;
     use crate::access_layer::AccessLayer;
@@ -132,7 +133,7 @@ mod tests {
                     time_range: FileTimeRange::default(),
                     level: 0,
                     file_size: 4096,
-                    available_indexes: vec![],
+                    available_indexes: Default::default(),
                     index_file_size: 0,
                 },
                 file_purger,
@@ -179,7 +180,7 @@ mod tests {
                     time_range: FileTimeRange::default(),
                     level: 0,
                     file_size: 4096,
-                    available_indexes: vec![IndexType::InvertedIndex],
+                    available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
                     index_file_size: 4096,
                 },
                 file_purger,

@@ -171,7 +171,7 @@ async fn checkpoint_with_different_compression_types() {
             time_range: (0.into(), 10000000.into()),
             level: 0,
             file_size: 1024000,
-            available_indexes: vec![],
+            available_indexes: Default::default(),
             index_file_size: 0,
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
