@@ -105,6 +105,14 @@ pub fn is_checkpoint_file(file_name: &str) -> bool {
     CHECKPOINT_RE.is_match(file_name)
 }
 
+#[inline]
+pub fn get_checksum(byte: &[u8]) -> u32 {
+    let mut hasher = Hasher::new();
+    hasher.update(byte);
+    let checksum = hasher.finalize();
+    checksum
+}
+
 /// Key to identify a manifest file.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 enum FileKey {
@@ -369,9 +377,7 @@ impl ManifestObjectStore {
                 path: &path,
             })?;
 
-        let mut hasher = Hasher::new();
-        hasher.update(&data);
-        let checksum = hasher.finalize();
+        let checksum = get_checksum(&data);
 
         let checkpoint_size = data.len();
         self.object_store
@@ -423,11 +429,30 @@ impl ManifestObjectStore {
 
         let checkpoint_data = match self.object_store.read(&path).await {
             Ok(checkpoint) => {
-                let mut hasher = Hasher::new();
-                hasher.update(&checkpoint);
-                let calculated_checksum = hasher.finalize();
+                // if the checksum exists, examine it.
+                if metadata.checksum != None {
+                    let calculated_checksum = get_checksum(&checkpoint);
 
-                if Some(format!("{}", calculated_checksum)) == metadata.checksum {
+                    // verification process : succeed or not.
+                    if Some(format!("{}", calculated_checksum)) == metadata.checksum {
+                        let checkpoint_size = checkpoint.len();
+                        let decompress_data = self.compress_type.decode(checkpoint).await.context(
+                            DecompressObjectSnafu {
+                                compress_type: self.compress_type,
+                                path,
+                            },
+                        )?;
+                        self.set_checkpoint_file_size(version, checkpoint_size as u64);
+                        Ok(Some(decompress_data))
+                    } else {
+                        Err(VerifyChecksumSnafu {
+                            calculated: format!("{}", calculated_checksum),
+                            expect: metadata.checksum.unwrap(),
+                        }
+                        .build())
+                    }
+                } else {
+                    // Allow 'no checksum' checkpoint.
                     let checkpoint_size = checkpoint.len();
                     let decompress_data = self.compress_type.decode(checkpoint).await.context(
                         DecompressObjectSnafu {
@@ -438,12 +463,6 @@ impl ManifestObjectStore {
                     // set the checkpoint size
                     self.set_checkpoint_file_size(version, checkpoint_size as u64);
                     Ok(Some(decompress_data))
-                } else {
-                    Err(VerifyChecksumSnafu {
-                        calculated: format!("{}", calculated_checksum),
-                        expect: metadata.checksum.unwrap(),
-                    }
-                    .build())
                 }
             }
             Err(e) => {
@@ -512,6 +531,54 @@ impl ManifestObjectStore {
     #[cfg(test)]
     pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         self.object_store.read(path).await.context(OpenDalSnafu)
+    }
+
+    #[cfg(test)]
+    pub async fn write_last_checkpoint(
+        &mut self,
+        version: ManifestVersion,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let path = self.checkpoint_file_path(version);
+        let data = self
+            .compress_type
+            .encode(bytes)
+            .await
+            .context(CompressObjectSnafu {
+                compress_type: self.compress_type,
+                path: &path,
+            })?;
+
+        let checkpoint_size = data.len();
+
+        self.object_store
+            .write(&path, data)
+            .await
+            .context(OpenDalSnafu)?;
+
+        self.set_checkpoint_file_size(version, checkpoint_size as u64);
+
+        let last_checkpoint_path = self.last_checkpoint_path();
+        let checkpoint_metadata = CheckpointMetadata {
+            size: bytes.len(),
+            version,
+            checksum: Some(format!("{}", "1218259706")),
+            extend_metadata: HashMap::new(),
+        };
+
+        debug!(
+            "Rewrite checkpoint in path: {},  metadata: {:?}",
+            last_checkpoint_path, checkpoint_metadata
+        );
+
+        let bytes = checkpoint_metadata.encode()?;
+
+        // Overwrite the last checkpoint with the modified content
+        self.object_store
+            .write(&last_checkpoint_path, bytes.to_vec())
+            .await
+            .context(OpenDalSnafu)?;
+        Ok(())
     }
 
     /// Compute the size(Byte) in manifest size map.

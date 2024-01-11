@@ -438,6 +438,7 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
+
     #[snafu(display("Failed to apply index"))]
     ApplyIndex {
         source: index::inverted_index::error::Error,
@@ -484,6 +485,7 @@ pub enum Error {
         flushed_entry_id: u64,
         unexpected_entry_id: u64,
     },
+
     #[snafu(display(
         "Verify checksum failed! calculated: {}, expected: {}",
         calculated,
