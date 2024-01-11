@@ -34,11 +34,7 @@ connect_timeout = "1s"
 tcp_nodelay = true
 
 # WAL options.
-# Currently, users are expected to choose the wal through the provider field. 
-# When a wal provider is chose, the user should comment out all other wal config 
-# except those corresponding to the chosen one.
 [wal]
-# WAL data directory
 provider = "raft_engine"
 
 # Raft-engine wal options, see `standalone.example.toml`.
