@@ -43,7 +43,7 @@ impl MetricEngineInner {
         let data_region_id = utils::to_data_region_id(region_id);
 
         // enclose the guard in a block to prevent the guard from polluting the async context
-        let (is_physical_region_exist, is_physical_region_busy) = {
+        let (is_physical_region, is_physical_region_busy) = {
             if let Some(logical_regions) = self
                 .state
                 .read()
@@ -58,7 +58,7 @@ impl MetricEngineInner {
             }
         };
 
-        if is_physical_region_exist {
+        if is_physical_region {
             // check if there is no logical region relates to this physical region
             if is_physical_region_busy {
                 // reject if there is any present logical region
