@@ -35,7 +35,7 @@ pub fn new_file_handle(
             ),
             level,
             file_size: 0,
-            inverted_index_available: false,
+            available_indexes: vec![],
         },
         file_purger,
     )

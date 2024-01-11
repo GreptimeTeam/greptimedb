@@ -39,7 +39,7 @@ use crate::read::{BoxedBatchReader, Source};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
-use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
+use crate::sst::file::{FileHandle, FileId, FileMeta, IndexType, Level};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::LevelMeta;
@@ -330,7 +330,10 @@ impl TwcsCompactionTask {
                         time_range: sst_info.time_range,
                         level: output.output_level,
                         file_size: sst_info.file_size,
-                        inverted_index_available: sst_info.inverted_index_available,
+                        available_indexes: sst_info
+                            .inverted_index_available
+                            .then(|| vec![IndexType::InvertedIndex])
+                            .unwrap_or_default(),
                     });
                 Ok(file_meta_opt)
             });

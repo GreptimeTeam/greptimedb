@@ -263,7 +263,7 @@ impl ParquetReaderBuilder {
         // as an escape route in case of index issues, and it can be used to test
         // the correctness of the index.
         if let Some(index_applier) = &self.index_applier {
-            if self.file_handle.meta().inverted_index_available {
+            if self.file_handle.meta().inverted_index_available() {
                 match index_applier.apply(self.file_handle.file_id()).await {
                     Ok(row_groups) => row_group_ids = row_groups,
                     Err(err) => warn!(

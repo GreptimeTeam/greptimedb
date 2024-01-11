@@ -76,7 +76,7 @@ impl AccessLayer {
                 file_id: file_meta.file_id,
             })?;
 
-        if file_meta.inverted_index_available {
+        if file_meta.inverted_index_available() {
             let path = location::index_file_path(&self.region_dir, file_meta.file_id);
             self.object_store
                 .delete(&path)

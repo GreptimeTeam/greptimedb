@@ -39,7 +39,7 @@ use crate::request::{
     SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::{FileId, FileMeta, IndexType};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
@@ -339,7 +339,10 @@ impl RegionFlushTask {
                 time_range: sst_info.time_range,
                 level: 0,
                 file_size: sst_info.file_size,
-                inverted_index_available: sst_info.inverted_index_available,
+                available_indexes: sst_info
+                    .inverted_index_available
+                    .then(|| vec![IndexType::InvertedIndex])
+                    .unwrap_or_default(),
             };
             file_metas.push(file_meta);
         }
