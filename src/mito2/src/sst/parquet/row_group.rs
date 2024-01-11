@@ -234,7 +234,7 @@ impl<'a> InMemoryRowGroup<'a> {
             None => {
                 // Fetch data from object store.
                 let _timer = READ_STAGE_ELAPSED
-                    .with_label_values(&["read", "cache_miss"])
+                    .with_label_values(&["cache_miss_read"])
                     .start_timer();
                 let data = fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
                     .await
