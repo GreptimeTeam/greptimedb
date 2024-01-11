@@ -533,6 +533,19 @@ pub enum Error {
         error: std::io::Error,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to upload index file, region_id: {}, file_id: {}",
+        region_id,
+        file_id
+    ))]
+    UploadIndex {
+        region_id: RegionId,
+        file_id: FileId,
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -629,7 +642,7 @@ impl ErrorExt for Error {
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
-            UploadSst { .. } => StatusCode::StorageUnavailable,
+            UploadSst { .. } | UploadIndex { .. } => StatusCode::StorageUnavailable,
         }
     }
 

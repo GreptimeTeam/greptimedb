@@ -56,7 +56,7 @@ mod tests {
     fn test_regex_match_basic() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         builder
             .collect_regex_match(&tag_column(), &string_lit("abc"))
@@ -76,7 +76,7 @@ mod tests {
     fn test_regex_match_field_column() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         builder
             .collect_regex_match(&field_column(), &string_lit("abc"))
@@ -89,7 +89,7 @@ mod tests {
     fn test_regex_match_type_mismatch() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         builder
             .collect_regex_match(&tag_column(), &int64_lit(123))
@@ -102,7 +102,7 @@ mod tests {
     fn test_regex_match_type_nonexist_column() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         let res = builder.collect_regex_match(&nonexistent_column(), &string_lit("abc"));
         assert!(matches!(res, Err(Error::ColumnNotFound { .. })));

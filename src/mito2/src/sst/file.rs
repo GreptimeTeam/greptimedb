@@ -157,6 +157,11 @@ impl FileHandle {
         location::sst_file_path(file_dir, self.file_id())
     }
 
+    /// Returns the complete file path of the index file.
+    pub fn index_file_path(&self, file_dir: &str) -> String {
+        location::index_file_path(file_dir, self.file_id())
+    }
+
     /// Returns the time range of the file.
     pub fn time_range(&self) -> FileTimeRange {
         self.inner.meta.time_range
