@@ -25,7 +25,7 @@ insert into http_requests values
 Affected Rows: 8
 
 -- empty metric
-create table cpu_count(ts timestamp time index);
+create table cpu_count(ts timestamp time index, greptime_value double);
 
 Affected Rows: 0
 
@@ -157,7 +157,16 @@ tql eval (3000, 3000, '1s') http_requests{g="canary"} or http_requests{g="produc
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or http_requests{instance="1"};
 
-Error: 1004(InvalidArguments), Internal error during building DataFusion plan: No field named http_requests.greptime_value. Valid fields are http_requests.job, http_requests.instance, http_requests.g, http_requests.ts, "greptime_value + Float64(1)".
++---------------------+------------+-----------------------------+----------+-----+
+| ts                  | g          | greptime_value + Float64(1) | instance | job |
++---------------------+------------+-----------------------------+----------+-----+
+| 1970-01-01T00:50:00 | canary     | 301.0                       | 0        | api |
+| 1970-01-01T00:50:00 | canary     | 401.0                       | 1        | api |
+| 1970-01-01T00:50:00 | canary     | 701.0                       | 0        | app |
+| 1970-01-01T00:50:00 | canary     | 801.0                       | 1        | app |
+| 1970-01-01T00:50:00 | production | 200.0                       | 1        | api |
+| 1970-01-01T00:50:00 | production | 600.0                       | 1        | app |
++---------------------+------------+-----------------------------+----------+-----+
 
 -- # Matching only on instance excludes everything that has instance=0/1 but includes
 -- # entries without the instance label.
@@ -168,11 +177,18 @@ Error: 1004(InvalidArguments), Internal error during building DataFusion plan: N
 -- 	{group="canary", instance="1", job="app-server"} 801
 -- 	vector_matching_a{l="x"} 10
 -- 	vector_matching_a{l="y"} 20
--- NOT SUPPORTED: union on different schemas
--- NOT SUPPORTED: `or`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or on(instance) (http_requests or cpu_count or vector_matching_a);
 
-Error: 1004(InvalidArguments), Internal error during building DataFusion plan: No field named cpu_count.greptime_value. Valid fields are cpu_count.ts.
++---------------------+--------+-----------------------------+----------+-----+---+
+| ts                  | g      | greptime_value + Float64(1) | instance | job | l |
++---------------------+--------+-----------------------------+----------+-----+---+
+| 1970-01-01T00:50:00 |        | 20.0                        |          |     | y |
+| 1970-01-01T00:50:00 | canary | 301.0                       | 0        | api |   |
+| 1970-01-01T00:50:00 | canary | 401.0                       | 1        | api |   |
+| 1970-01-01T00:50:00 | canary | 701.0                       | 0        | app |   |
+| 1970-01-01T00:50:00 | canary | 801.0                       | 1        | app |   |
++---------------------+--------+-----------------------------+----------+-----+---+
 
 -- eval instant at 50m (http_requests{group="canary"} + 1) or ignoring(l, group, job) (http_requests or cpu_count or vector_matching_a)
 -- 	{group="canary", instance="0", job="api-server"} 301
@@ -181,11 +197,18 @@ Error: 1004(InvalidArguments), Internal error during building DataFusion plan: N
 -- 	{group="canary", instance="1", job="app-server"} 801
 -- 	vector_matching_a{l="x"} 10
 -- 	vector_matching_a{l="y"} 20
--- NOT SUPPORTED: union on different schemas
--- NOT SUPPORTED: `or`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or ignoring(l, g, job) (http_requests or cpu_count or vector_matching_a);
 
-Error: 1004(InvalidArguments), Internal error during building DataFusion plan: No field named cpu_count.greptime_value. Valid fields are cpu_count.ts.
++---------------------+--------+-----------------------------+----------+-----+---+
+| ts                  | g      | greptime_value + Float64(1) | instance | job | l |
++---------------------+--------+-----------------------------+----------+-----+---+
+| 1970-01-01T00:50:00 |        | 10.0                        |          |     | x |
+| 1970-01-01T00:50:00 | canary | 301.0                       | 0        | api |   |
+| 1970-01-01T00:50:00 | canary | 401.0                       | 1        | api |   |
+| 1970-01-01T00:50:00 | canary | 701.0                       | 0        | app |   |
+| 1970-01-01T00:50:00 | canary | 801.0                       | 1        | app |   |
++---------------------+--------+-----------------------------+----------+-----+---+
 
 -- eval instant at 50m http_requests{group="canary"} unless http_requests{instance="0"}
 -- 	http_requests{group="canary", instance="1", job="api-server"} 400
@@ -248,10 +271,21 @@ tql eval (3000, 3000, '1s') http_requests{g="canary"} unless ignoring(g) http_re
 -- 	http_requests{group="production", instance="0", job="app-server"} 500
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- NOT SUPPORTED: `vector()`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') http_requests AND ON (dummy) vector(1);
 
-Error: 1004(InvalidArguments), Internal error during building DataFusion plan: No field named time. Valid fields are http_requests.ts, http_requests.job, http_requests.instance, http_requests.g, http_requests.greptime_value.
++---------------------+-----+----------+------------+----------------+
+| ts                  | job | instance | g          | greptime_value |
++---------------------+-----+----------+------------+----------------+
+| 1970-01-01T00:50:00 | api | 0        | canary     | 300.0          |
+| 1970-01-01T00:50:00 | api | 0        | production | 100.0          |
+| 1970-01-01T00:50:00 | api | 1        | canary     | 400.0          |
+| 1970-01-01T00:50:00 | api | 1        | production | 200.0          |
+| 1970-01-01T00:50:00 | app | 0        | canary     | 700.0          |
+| 1970-01-01T00:50:00 | app | 0        | production | 500.0          |
+| 1970-01-01T00:50:00 | app | 1        | canary     | 800.0          |
+| 1970-01-01T00:50:00 | app | 1        | production | 600.0          |
++---------------------+-----+----------+------------+----------------+
 
 -- eval instant at 50m http_requests AND IGNORING (group, instance, job) vector(1)
 -- 	http_requests{group="canary", instance="0", job="api-server"} 300
@@ -262,10 +296,21 @@ Error: 1004(InvalidArguments), Internal error during building DataFusion plan: N
 -- 	http_requests{group="production", instance="0", job="app-server"} 500
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- NOT SUPPORTED: `vector()`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') http_requests AND IGNORING (g, instance, job) vector(1);
 
-Error: 1004(InvalidArguments), Internal error during building DataFusion plan: No field named time. Valid fields are http_requests.ts, http_requests.job, http_requests.instance, http_requests.g, http_requests.greptime_value.
++---------------------+-----+----------+------------+----------------+
+| ts                  | job | instance | g          | greptime_value |
++---------------------+-----+----------+------------+----------------+
+| 1970-01-01T00:50:00 | api | 0        | canary     | 300.0          |
+| 1970-01-01T00:50:00 | api | 0        | production | 100.0          |
+| 1970-01-01T00:50:00 | api | 1        | canary     | 400.0          |
+| 1970-01-01T00:50:00 | api | 1        | production | 200.0          |
+| 1970-01-01T00:50:00 | app | 0        | canary     | 700.0          |
+| 1970-01-01T00:50:00 | app | 0        | production | 500.0          |
+| 1970-01-01T00:50:00 | app | 1        | canary     | 800.0          |
+| 1970-01-01T00:50:00 | app | 1        | production | 600.0          |
++---------------------+-----+----------+------------+----------------+
 
 drop table http_requests;
 

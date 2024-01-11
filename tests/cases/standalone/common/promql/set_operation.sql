@@ -22,7 +22,7 @@ insert into http_requests values
     (3000000, "app", "1", "canary", 800);
 
 -- empty metric
-create table cpu_count(ts timestamp time index);
+create table cpu_count(ts timestamp time index, greptime_value double);
 
 create table vector_matching_a(
     ts timestamp time index,
@@ -103,8 +103,7 @@ tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or http_requests{ins
 -- 	{group="canary", instance="1", job="app-server"} 801
 -- 	vector_matching_a{l="x"} 10
 -- 	vector_matching_a{l="y"} 20
--- NOT SUPPORTED: union on different schemas
--- NOT SUPPORTED: `or`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or on(instance) (http_requests or cpu_count or vector_matching_a);
 
 -- eval instant at 50m (http_requests{group="canary"} + 1) or ignoring(l, group, job) (http_requests or cpu_count or vector_matching_a)
@@ -114,8 +113,7 @@ tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or on(instance) (htt
 -- 	{group="canary", instance="1", job="app-server"} 801
 -- 	vector_matching_a{l="x"} 10
 -- 	vector_matching_a{l="y"} 20
--- NOT SUPPORTED: union on different schemas
--- NOT SUPPORTED: `or`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or ignoring(l, g, job) (http_requests or cpu_count or vector_matching_a);
 
 -- eval instant at 50m http_requests{group="canary"} unless http_requests{instance="0"}
@@ -153,7 +151,7 @@ tql eval (3000, 3000, '1s') http_requests{g="canary"} unless ignoring(g) http_re
 -- 	http_requests{group="production", instance="0", job="app-server"} 500
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- NOT SUPPORTED: `vector()`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') http_requests AND ON (dummy) vector(1);
 
 -- eval instant at 50m http_requests AND IGNORING (group, instance, job) vector(1)
@@ -165,7 +163,7 @@ tql eval (3000, 3000, '1s') http_requests AND ON (dummy) vector(1);
 -- 	http_requests{group="production", instance="0", job="app-server"} 500
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- NOT SUPPORTED: `vector()`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') http_requests AND IGNORING (g, instance, job) vector(1);
 
 drop table http_requests;

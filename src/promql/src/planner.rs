@@ -1542,7 +1542,7 @@ impl PromPlanner {
     fn set_op_on_non_field_columns(
         &mut self,
         left: LogicalPlan,
-        right: LogicalPlan,
+        mut right: LogicalPlan,
         left_context: PromPlannerContext,
         right_context: PromPlannerContext,
         op: TokenType,
@@ -1614,11 +1614,36 @@ impl PromPlanner {
                 }
             )
         };
+        let left_time_index = left_context.time_index_column.clone().unwrap();
+        let right_time_index = right_context.time_index_column.clone().unwrap();
         let join_keys = left_tag_col_set
             .iter()
             .cloned()
-            .chain([self.ctx.time_index_column.clone().unwrap()])
+            .chain([left_time_index.clone()])
             .collect::<Vec<_>>();
+        self.ctx.time_index_column = Some(left_time_index.clone());
+
+        // alias right time index column if necessary
+        if left_context.time_index_column != right_context.time_index_column {
+            let right_project_exprs = right
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| {
+                    if field.name() == &right_time_index {
+                        DfExpr::Column(Column::from_name(&right_time_index)).alias(&left_time_index)
+                    } else {
+                        DfExpr::Column(Column::from_name(field.name()))
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            right = LogicalPlanBuilder::from(right)
+                .project(right_project_exprs)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
 
         // Generate join plan.
         // All set operations in PromQL are "distinct"
@@ -1684,8 +1709,6 @@ impl PromPlanner {
                 operator: "OR operator"
             }
         );
-
-        common_telemetry::info!("[DEBUG] left field col: {:?}", left_context.field_columns);
 
         // prepare hash sets
         let all_tags = left_tag_cols_set
@@ -1769,7 +1792,7 @@ impl PromPlanner {
                 // alias field in right side if necessary to handle different field name
                 DfExpr::Column(Column::new(right_qualifier.clone(), right_field_col))
             } else if tags_not_in_right.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None))
+                DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
