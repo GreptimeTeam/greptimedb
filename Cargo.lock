@@ -1978,6 +1978,9 @@ dependencies = [
 name = "common-test-util"
 version = "0.5.1"
 dependencies = [
+ "client",
+ "common-query",
+ "common-recordbatch",
  "once_cell",
  "rand",
  "tempfile",
