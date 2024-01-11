@@ -97,6 +97,7 @@ impl VersionControlBuilder {
                 level: 0,
                 file_size: 0, // We don't care file size.
                 available_indexes: vec![],
+                index_file_size: 0,
             },
         );
         self
@@ -138,6 +139,7 @@ pub(crate) fn apply_edit(
                 level: 0,
                 file_size: 0, // We don't care file size.
                 available_indexes: vec![],
+                index_file_size: 0,
             }
         })
         .collect();

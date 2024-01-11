@@ -125,6 +125,7 @@ impl ParquetWriter {
             num_rows: stats.num_rows,
             file_metadata: Some(Arc::new(parquet_metadata)),
             inverted_index_available: false,
+            index_file_size: 0,
         }))
     }
 

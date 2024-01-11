@@ -133,6 +133,7 @@ mod tests {
                     level: 0,
                     file_size: 4096,
                     available_indexes: vec![],
+                    index_file_size: 0,
                 },
                 file_purger,
             );
@@ -179,6 +180,7 @@ mod tests {
                     level: 0,
                     file_size: 4096,
                     available_indexes: vec![IndexType::InvertedIndex],
+                    index_file_size: 4096,
                 },
                 file_purger,
             );

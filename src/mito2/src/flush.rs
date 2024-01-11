@@ -343,6 +343,7 @@ impl RegionFlushTask {
                     .inverted_index_available
                     .then(|| vec![IndexType::InvertedIndex])
                     .unwrap_or_default(),
+                index_file_size: sst_info.index_file_size,
             };
             file_metas.push(file_meta);
         }

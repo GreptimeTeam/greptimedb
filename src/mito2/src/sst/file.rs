@@ -97,6 +97,8 @@ pub struct FileMeta {
     pub file_size: u64,
     /// Available indexes of the file.
     pub available_indexes: Vec<IndexType>,
+    /// Size of the index file.
+    pub index_file_size: u64,
 }
 
 /// Type of index.
@@ -251,6 +253,7 @@ mod tests {
             level,
             file_size: 0,
             available_indexes: vec![],
+            index_file_size: 0,
         }
     }
 

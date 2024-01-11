@@ -68,6 +68,8 @@ pub struct SstInfo {
     pub file_metadata: Option<Arc<ParquetMetaData>>,
     /// Whether inverted index is available.
     pub inverted_index_available: bool,
+    /// Index file size in bytes.
+    pub index_file_size: u64,
 }
 
 #[cfg(test)]
