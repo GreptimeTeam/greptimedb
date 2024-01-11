@@ -38,8 +38,16 @@ pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
     current_user: ArcSwap<Option<UserInfoRef>>,
+    #[builder(setter(custom))]
     timezone: ArcSwap<Timezone>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
+}
+
+impl QueryContextBuilder {
+    pub fn timezone(mut self, tz: Timezone) -> Self {
+        self.timezone = Some(ArcSwap::new(Arc::new(tz)));
+        self
+    }
 }
 
 impl Display for QueryContext {

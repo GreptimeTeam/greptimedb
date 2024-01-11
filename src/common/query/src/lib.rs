@@ -60,7 +60,7 @@ impl From<&AddColumnLocation> for Location {
         match value {
             AddColumnLocation::First => Location {
                 location_type: LocationType::First.into(),
-                after_column_name: "".to_string(),
+                after_column_name: String::default(),
             },
             AddColumnLocation::After { column_name } => Location {
                 location_type: LocationType::After.into(),

@@ -523,7 +523,7 @@ mod tests {
                 let nodes = (1..=region_distribution.len())
                     .map(|id| Peer {
                         id: id as u64,
-                        addr: "".to_string(),
+                        addr: String::default(),
                     })
                     .collect();
                 Arc::new(RandomNodeSelector { nodes })
@@ -742,7 +742,7 @@ mod tests {
             peers: Arc::new(Mutex::new(vec![
                 Some(Peer {
                     id: 42,
-                    addr: "".to_string(),
+                    addr: String::default(),
                 }),
                 None,
             ])),

@@ -61,8 +61,8 @@ impl Database {
         Self {
             catalog: catalog.into(),
             schema: schema.into(),
-            dbname: "".to_string(),
-            timezone: "".to_string(),
+            dbname: String::default(),
+            timezone: String::default(),
             client,
             ctx: FlightContext::default(),
         }
@@ -77,9 +77,9 @@ impl Database {
     /// environment
     pub fn new_with_dbname(dbname: impl Into<String>, client: Client) -> Self {
         Self {
-            catalog: "".to_string(),
-            schema: "".to_string(),
-            timezone: "".to_string(),
+            catalog: String::default(),
+            schema: String::default(),
+            timezone: String::default(),
             dbname: dbname.into(),
             client,
             ctx: FlightContext::default(),

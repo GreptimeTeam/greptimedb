@@ -37,7 +37,7 @@ async fn run() {
         catalog_name: "greptime".to_string(),
         schema_name: "public".to_string(),
         table_name: "test_logical_dist_exec".to_string(),
-        desc: "".to_string(),
+        desc: String::default(),
         column_defs: vec![
             ColumnDef {
                 name: "timestamp".to_string(),

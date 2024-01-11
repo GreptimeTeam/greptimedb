@@ -62,8 +62,8 @@ pub async fn inner_auth<B>(
     let query_ctx = QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
+        .timezone(timezone)
         .build();
-    query_ctx.set_timezone(timezone);
     let need_auth = need_auth(&req);
     let is_influxdb = req.uri().path().contains("influxdb");
 

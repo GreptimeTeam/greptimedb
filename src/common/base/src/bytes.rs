@@ -216,7 +216,7 @@ mod tests {
         let bytes = StringBytes::from(hello.clone());
         assert_eq!(bytes.len(), hello.len());
 
-        let zero = "".to_string();
+        let zero = String::default();
         let bytes = StringBytes::from(zero);
         assert!(bytes.is_empty());
     }

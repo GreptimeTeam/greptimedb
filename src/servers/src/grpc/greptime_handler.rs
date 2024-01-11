@@ -163,12 +163,11 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
         })
         .unwrap_or((DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME));
     let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
-    let ctx = QueryContextBuilder::default()
+    QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
-        .build();
-    ctx.set_timezone(timezone);
-    ctx
+        .timezone(timezone)
+        .build()
 }
 
 /// Histogram timer for handling gRPC request.

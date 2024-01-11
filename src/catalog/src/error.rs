@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(
             StatusCode::StorageUnavailable,
             Error::SystemCatalog {
-                msg: "".to_string(),
+                msg: String::default(),
                 location: Location::generate(),
             }
             .status_code()

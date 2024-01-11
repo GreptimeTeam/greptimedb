@@ -506,7 +506,7 @@ pub fn sql_location_to_grpc_add_column_location(
     match location {
         Some(AddColumnLocation::First) => Some(Location {
             location_type: LocationType::First.into(),
-            after_column_name: "".to_string(),
+            after_column_name: String::default(),
         }),
         Some(AddColumnLocation::After { column_name }) => Some(Location {
             location_type: LocationType::After.into(),

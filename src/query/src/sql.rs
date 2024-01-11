@@ -234,7 +234,7 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
     let variable = stmt.variable.to_string().to_uppercase();
     let value = match variable.as_str() {
         "SYSTEM_TIME_ZONE" => get_timezone(None).to_string(),
-        "TIME_ZONE" => query_ctx.timezone().to_string(),
+        "TIME_ZONE" | "TIMEZONE" => query_ctx.timezone().to_string(),
         _ => return UnsupportedVariableSnafu { name: variable }.fail(),
     };
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(

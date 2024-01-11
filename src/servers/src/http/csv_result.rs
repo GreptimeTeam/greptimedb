@@ -78,7 +78,7 @@ impl IntoResponse for CsvResponse {
 
         let execution_time = self.execution_time_ms;
         let payload = match self.output.pop() {
-            None => "".to_string(),
+            None => String::default(),
             Some(GreptimeQueryOutput::AffectedRows(n)) => {
                 format!("{n}\n")
             }

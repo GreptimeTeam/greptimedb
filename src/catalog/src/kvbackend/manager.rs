@@ -83,7 +83,7 @@ impl KvBackendCatalogManager {
                 catalog_manager: me.clone(),
                 information_schema_provider: Arc::new(InformationSchemaProvider::new(
                     // The catalog name is not used in system_catalog, so let it empty
-                    "".to_string(),
+                    String::default(),
                     me.clone(),
                 )),
             },

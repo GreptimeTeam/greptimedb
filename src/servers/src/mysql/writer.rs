@@ -285,7 +285,7 @@ pub(crate) fn create_mysql_column(
 
         // TODO(LFC): Currently "table" and "colflags" are not relevant in MySQL server
         //   implementation, will revisit them again in the future.
-        table: "".to_string(),
+        table: String::default(),
         colflags,
     })
 }
