@@ -147,8 +147,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Physical region is busy, there are still some logical regions using it"))]
-    PhysicalRegionBusy { location: Location },
+    #[snafu(display(
+        "Physical region {} is busy, there are still some logical regions using it",
+        region_id
+    ))]
+    PhysicalRegionBusy {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

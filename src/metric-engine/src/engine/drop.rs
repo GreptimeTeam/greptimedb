@@ -29,7 +29,7 @@ use store_api::storage::RegionId;
 use super::MetricEngineInner;
 use crate::error::{
     CloseMitoRegionSnafu, Error, LogicalRegionNotFoundSnafu, OpenMitoRegionSnafu,
-    PhysicalRegionNotFoundSnafu, Result,
+    PhysicalRegionBusySnafu, PhysicalRegionNotFoundSnafu, Result,
 };
 use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::{metadata_region, utils};
@@ -53,6 +53,7 @@ impl MetricEngineInner {
             {
                 (true, !logical_regions.is_empty())
             } else {
+                // the second argument is not used, just pass in a dummy value
                 (false, true)
             }
         };
@@ -61,7 +62,10 @@ impl MetricEngineInner {
             // check if there is no logical region relates to this physical region
             if is_physical_region_busy {
                 // reject if there is any present logical region
-                return Err(PhysicalRegionNotFoundSnafu { region_id }.build());
+                return Err(PhysicalRegionBusySnafu {
+                    region_id: data_region_id,
+                }
+                .build());
             }
 
             self.drop_physical_region(data_region_id).await
