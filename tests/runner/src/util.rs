@@ -153,7 +153,7 @@ pub fn setup_wal() {
         .output()
         .expect("Failed to start kafka cluster");
 
-    println!("kafka cluster is on");
+    println!("kafka cluster is up");
 }
 
 /// Stop kafka cluster if needed. Config file is `conf/kafka-cluster.yml`.

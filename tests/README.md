@@ -27,7 +27,7 @@ Sqlness walks through every file recursively and runs them.
 
 Sqlness supports Kafka WAL. You can either provide a Kafka cluster or let sqlness to start one for you.
 
-To run test with kafka, you need pass the option `-w kafka`. If no other options are provided, sqlness will use `conf/kafka-cluster.yml` to start a Kafka cluster. This requires `docker` and `docker-compose` commands in your environment.
+To run test with kafka, you need to pass the option `-w kafka`. If no other options are provided, sqlness will use `conf/kafka-cluster.yml` to start a Kafka cluster. This requires `docker` and `docker-compose` commands in your environment.
 
 Otherwise, you can additionally pass the your existing kafka environment to sqlness with `-k` option. E.g.:
 
