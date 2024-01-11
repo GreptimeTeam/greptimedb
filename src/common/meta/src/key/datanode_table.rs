@@ -236,7 +236,15 @@ impl DatanodeTableManager {
             if need_update {
                 let key = DatanodeTableKey::new(datanode, table_id);
                 let raw_key = key.as_raw_key();
-                let val = DatanodeTableValue::new(table_id, regions, region_info.clone())
+                // FIXME(weny): add unit tests.
+                let mut new_region_info = region_info.clone();
+                if need_update_options {
+                    new_region_info.region_options = new_region_options.clone();
+                }
+                if need_update_wal_options {
+                    new_region_info.region_wal_options = new_region_wal_options.clone();
+                }
+                let val = DatanodeTableValue::new(table_id, regions, new_region_info)
                     .try_as_raw_value()?;
                 opts.push(TxnOp::Put(raw_key, val));
             }
