@@ -533,6 +533,13 @@ pub enum Error {
         error: std::io::Error,
         location: Location,
     },
+
+    #[snafu(display(
+        "Verify checksum failed! calculated: {}, expected: {}",
+        calculated,
+        expect
+    ))]
+    VerifyChecksum { calculated: String, expect: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -630,6 +637,7 @@ impl ErrorExt for Error {
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
             UploadSst { .. } => StatusCode::StorageUnavailable,
+            VerifyChecksum { .. } => StatusCode::Unexpected,
         }
     }
 
