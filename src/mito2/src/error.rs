@@ -512,6 +512,19 @@ pub enum Error {
         flushed_entry_id: u64,
         unexpected_entry_id: u64,
     },
+
+    #[snafu(display(
+        "Failed to upload sst file, region_id: {}, file_id: {}",
+        region_id,
+        file_id
+    ))]
+    UploadSst {
+        region_id: RegionId,
+        file_id: FileId,
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -608,6 +621,7 @@ impl ErrorExt for Error {
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
+            UploadSst { .. } => StatusCode::StorageUnavailable,
         }
     }
 

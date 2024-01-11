@@ -19,6 +19,7 @@ use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::logging;
+use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir;
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
 use frontend::error::{Error, Result};
@@ -29,7 +30,6 @@ use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 
-use crate::test_util::check_output_stream;
 use crate::tests::test_util::{
     both_instances_cases, both_instances_cases_with_custom_storages, check_unordered_output_stream,
     distributed, distributed_with_multiple_object_stores, find_testing_resource, prepare_path,

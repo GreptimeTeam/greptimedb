@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+client.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
 once_cell.workspace = true
 rand.workspace = true
 tempfile.workspace = true

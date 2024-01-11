@@ -20,6 +20,7 @@ use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use servers::error::InternalIoSnafu;
 use servers::grpc::builder::GrpcServerBuilder;
+use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::GrpcServerConfig;
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
@@ -34,14 +35,49 @@ use snafu::ResultExt;
 use crate::error::{self, Result, StartServerSnafu};
 use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::instance::FrontendInstance;
+use crate::service_config::GrpcOptions;
 
-pub(crate) struct Services;
+pub struct Services {
+    plugins: Plugins,
+}
 
 impl Services {
-    pub(crate) async fn build<T, U>(
+    pub fn new(plugins: Plugins) -> Self {
+        Self { plugins }
+    }
+
+    pub fn grpc_server_builder(opts: &GrpcOptions) -> Result<GrpcServerBuilder> {
+        let grpc_runtime = Arc::new(
+            RuntimeBuilder::default()
+                .worker_threads(opts.runtime_size)
+                .thread_name("grpc-handlers")
+                .build()
+                .context(error::RuntimeResourceSnafu)?,
+        );
+
+        let grpc_config = GrpcServerConfig {
+            max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
+            max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
+        };
+
+        Ok(GrpcServerBuilder::new(grpc_runtime).config(grpc_config))
+    }
+
+    pub async fn build<T, U>(&self, opts: T, instance: Arc<U>) -> Result<ServerHandlers>
+    where
+        T: Into<FrontendOptions> + TomlSerializable + Clone,
+        U: FrontendInstance,
+    {
+        let grpc_options = &opts.clone().into().grpc;
+        let builder = Self::grpc_server_builder(grpc_options)?;
+        self.build_with(opts, instance, builder).await
+    }
+
+    pub async fn build_with<T, U>(
+        &self,
         opts: T,
         instance: Arc<U>,
-        plugins: Plugins,
+        builder: GrpcServerBuilder,
     ) -> Result<ServerHandlers>
     where
         T: Into<FrontendOptions> + TomlSerializable,
@@ -49,33 +85,27 @@ impl Services {
     {
         let toml = opts.to_toml()?;
         let opts: FrontendOptions = opts.into();
-        let mut result = Vec::<ServerHandler>::with_capacity(plugins.len());
-        let user_provider = plugins.get::<UserProviderRef>();
+
+        let mut result = Vec::<ServerHandler>::new();
+
+        let user_provider = self.plugins.get::<UserProviderRef>();
 
         {
             // Always init GRPC server
             let opts = &opts.grpc;
             let grpc_addr = parse_addr(&opts.addr)?;
 
-            let grpc_runtime = Arc::new(
-                RuntimeBuilder::default()
-                    .worker_threads(opts.runtime_size)
-                    .thread_name("grpc-handlers")
-                    .build()
-                    .context(error::RuntimeResourceSnafu)?,
+            let greptime_request_handler = GreptimeRequestHandler::new(
+                ServerGrpcQueryHandlerAdapter::arc(instance.clone()),
+                user_provider.clone(),
+                builder.runtime().clone(),
             );
-
-            let grpc_config = GrpcServerConfig {
-                max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
-                max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
-            };
-
-            let grpc_server = GrpcServerBuilder::new(grpc_runtime)
-                .config(grpc_config)
-                .query_handler(ServerGrpcQueryHandlerAdapter::arc(instance.clone()))
+            let grpc_server = builder
+                .database_handler(greptime_request_handler.clone())
                 .prometheus_handler(instance.clone())
                 .otlp_handler(instance.clone())
                 .user_provider(user_provider.clone())
+                .flight_handler(Arc::new(greptime_request_handler))
                 .build();
 
             result.push((Box::new(grpc_server), grpc_addr));
@@ -116,7 +146,7 @@ impl Services {
             let http_server = http_server_builder
                 .with_metrics_handler(MetricsHandler)
                 .with_script_handler(instance.clone())
-                .with_plugins(plugins)
+                .with_plugins(self.plugins.clone())
                 .with_greptime_config_options(toml)
                 .build();
             result.push((Box::new(http_server), http_addr));
