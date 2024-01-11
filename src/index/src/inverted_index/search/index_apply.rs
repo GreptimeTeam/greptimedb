@@ -28,7 +28,7 @@ use crate::inverted_index::format::reader::InvertedIndexReader;
 /// avoiding repeated compilation of fixed predicates such as regex patterns.
 #[mockall::automock]
 #[async_trait]
-pub trait IndexApplier {
+pub trait IndexApplier: Send + Sync {
     /// Applies the predefined predicates to the data read by the given index reader, returning
     /// a list of relevant indices (e.g., post IDs, group IDs, row IDs).
     async fn apply<'a>(

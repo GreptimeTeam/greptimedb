@@ -22,6 +22,7 @@ use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
+use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -39,7 +40,7 @@ use crate::read::{BoxedBatchReader, Source};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
-use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
+use crate::sst::file::{FileHandle, FileId, FileMeta, IndexType, Level};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::LevelMeta;
@@ -330,6 +331,11 @@ impl TwcsCompactionTask {
                         time_range: sst_info.time_range,
                         level: output.output_level,
                         file_size: sst_info.file_size,
+                        available_indexes: sst_info
+                            .inverted_index_available
+                            .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
+                            .unwrap_or_default(),
+                        index_file_size: sst_info.index_file_size,
                     });
                 Ok(file_meta_opt)
             });

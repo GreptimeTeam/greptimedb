@@ -321,6 +321,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to delete index file, file id: {}", file_id))]
+    DeleteIndex {
+        file_id: FileId,
+        #[snafu(source)]
+        error: object_store::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to flush region {}", region_id))]
     FlushRegion {
         region_id: RegionId,
@@ -596,7 +604,7 @@ impl ErrorExt for Error {
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             StopScheduler { .. } => StatusCode::Internal,
-            DeleteSst { .. } => StatusCode::StorageUnavailable,
+            DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,

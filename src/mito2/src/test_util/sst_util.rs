@@ -106,6 +106,8 @@ pub fn sst_file_handle(start_ms: i64, end_ms: i64) -> FileHandle {
             ),
             level: 0,
             file_size: 0,
+            available_indexes: Default::default(),
+            index_file_size: 0,
         },
         file_purger,
     )

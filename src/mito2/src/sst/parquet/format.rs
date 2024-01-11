@@ -26,6 +26,7 @@
 //!
 //! We stores fields in the same order as [RegionMetadata::field_columns()](store_api::metadata::RegionMetadata::field_columns()).
 
+use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -261,7 +262,7 @@ impl ReadFormat {
     /// Returns min values of specific column in row groups.
     pub(crate) fn min_values(
         &self,
-        row_groups: &[RowGroupMetaData],
+        row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> Option<ArrayRef> {
         let column = self.metadata.column_by_id(column_id)?;
@@ -281,7 +282,7 @@ impl ReadFormat {
     /// Returns max values of specific column in row groups.
     pub(crate) fn max_values(
         &self,
-        row_groups: &[RowGroupMetaData],
+        row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> Option<ArrayRef> {
         let column = self.metadata.column_by_id(column_id)?;
@@ -301,7 +302,7 @@ impl ReadFormat {
     /// Returns null counts of specific column in row groups.
     pub(crate) fn null_counts(
         &self,
-        row_groups: &[RowGroupMetaData],
+        row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> Option<ArrayRef> {
         let column = self.metadata.column_by_id(column_id)?;
@@ -345,7 +346,7 @@ impl ReadFormat {
     /// Returns min/max values of specific tag.
     fn tag_values(
         &self,
-        row_groups: &[RowGroupMetaData],
+        row_groups: &[impl Borrow<RowGroupMetaData>],
         column: &ColumnMetadata,
         is_min: bool,
     ) -> Option<ArrayRef> {
@@ -363,7 +364,10 @@ impl ReadFormat {
         let converter =
             McmpRowCodec::new(vec![SortField::new(column.column_schema.data_type.clone())]);
         let values = row_groups.iter().map(|meta| {
-            let stats = meta.column(self.primary_key_position()).statistics()?;
+            let stats = meta
+                .borrow()
+                .column(self.primary_key_position())
+                .statistics()?;
             if !stats.has_min_max_set() {
                 return None;
             }
@@ -400,7 +404,7 @@ impl ReadFormat {
 
     /// Returns min/max values of specific non-tag columns.
     fn column_values(
-        row_groups: &[RowGroupMetaData],
+        row_groups: &[impl Borrow<RowGroupMetaData>],
         column: &ColumnMetadata,
         column_index: usize,
         is_min: bool,
@@ -414,7 +418,7 @@ impl ReadFormat {
         let scalar_values = row_groups
             .iter()
             .map(|meta| {
-                let stats = meta.column(column_index).statistics()?;
+                let stats = meta.borrow().column(column_index).statistics()?;
                 if !stats.has_min_max_set() {
                     return None;
                 }
@@ -463,11 +467,11 @@ impl ReadFormat {
 
     /// Returns null counts of specific non-tag columns.
     fn column_null_counts(
-        row_groups: &[RowGroupMetaData],
+        row_groups: &[impl Borrow<RowGroupMetaData>],
         column_index: usize,
     ) -> Option<ArrayRef> {
         let values = row_groups.iter().map(|meta| {
-            let col = meta.column(column_index);
+            let col = meta.borrow().column(column_index);
             let stat = col.statistics()?;
             Some(stat.null_count())
         });

@@ -14,6 +14,7 @@
 
 //! Statistics of parquet SSTs.
 
+use std::borrow::Borrow;
 use std::collections::HashSet;
 
 use datafusion::physical_optimizer::pruning::PruningStatistics;
@@ -25,9 +26,9 @@ use store_api::storage::ColumnId;
 use crate::sst::parquet::format::ReadFormat;
 
 /// Statistics for pruning row groups.
-pub(crate) struct RowGroupPruningStats<'a> {
+pub(crate) struct RowGroupPruningStats<'a, T> {
     /// Metadata of SST row groups.
-    row_groups: &'a [RowGroupMetaData],
+    row_groups: &'a [T],
     /// Helper to read the SST.
     read_format: &'a ReadFormat,
     /// Projected column ids to read.
@@ -37,10 +38,10 @@ pub(crate) struct RowGroupPruningStats<'a> {
     column_ids: HashSet<ColumnId>,
 }
 
-impl<'a> RowGroupPruningStats<'a> {
+impl<'a, T> RowGroupPruningStats<'a, T> {
     /// Creates a new statistics to prune specific `row_groups`.
     pub(crate) fn new(
-        row_groups: &'a [RowGroupMetaData],
+        row_groups: &'a [T],
         read_format: &'a ReadFormat,
         column_ids: HashSet<ColumnId>,
     ) -> Self {
@@ -61,7 +62,7 @@ impl<'a> RowGroupPruningStats<'a> {
     }
 }
 
-impl<'a> PruningStatistics for RowGroupPruningStats<'a> {
+impl<'a, T: Borrow<RowGroupMetaData>> PruningStatistics for RowGroupPruningStats<'a, T> {
     fn min_values(&self, column: &Column) -> Option<ArrayRef> {
         let column_id = self.column_id_to_prune(&column.name)?;
         self.read_format.min_values(self.row_groups, column_id)

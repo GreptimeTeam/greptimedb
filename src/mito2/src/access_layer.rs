@@ -22,9 +22,9 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
-use crate::error::{CleanDirSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
+use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
-use crate::sst::file::{FileHandle, FileId};
+use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -66,13 +66,27 @@ impl AccessLayer {
         &self.object_store
     }
 
-    /// Deletes a SST file with given file id.
-    pub(crate) async fn delete_sst(&self, file_id: FileId) -> Result<()> {
-        let path = location::sst_file_path(&self.region_dir, file_id);
+    /// Deletes a SST file (and its index file if it has one) with given file id.
+    pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
+        let path = location::sst_file_path(&self.region_dir, file_meta.file_id);
         self.object_store
             .delete(&path)
             .await
-            .context(DeleteSstSnafu { file_id })
+            .context(DeleteSstSnafu {
+                file_id: file_meta.file_id,
+            })?;
+
+        if file_meta.inverted_index_available() {
+            let path = location::index_file_path(&self.region_dir, file_meta.file_id);
+            self.object_store
+                .delete(&path)
+                .await
+                .context(DeleteIndexSnafu {
+                    file_id: file_meta.file_id,
+                })?;
+        }
+
+        Ok(())
     }
 
     /// Returns a reader builder for specific `file`.

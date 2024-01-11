@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
+use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
@@ -39,7 +40,7 @@ use crate::request::{
     SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::{FileId, FileMeta, IndexType};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
@@ -339,6 +340,11 @@ impl RegionFlushTask {
                 time_range: sst_info.time_range,
                 level: 0,
                 file_size: sst_info.file_size,
+                available_indexes: sst_info
+                    .inverted_index_available
+                    .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
+                    .unwrap_or_default(),
+                index_file_size: sst_info.index_file_size,
             };
             file_metas.push(file_meta);
         }

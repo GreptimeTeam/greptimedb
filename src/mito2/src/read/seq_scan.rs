@@ -39,6 +39,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanParallism;
 use crate::read::{BatchReader, BoxedBatchReader, BoxedBatchStream, Source};
 use crate::sst::file::FileHandle;
+use crate::sst::index::applier::SstIndexApplierRef;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
@@ -62,6 +63,8 @@ pub struct SeqScan {
     ignore_file_not_found: bool,
     /// Parallelism to scan data.
     parallelism: ScanParallism,
+    /// Index applier.
+    index_applier: Option<SstIndexApplierRef>,
 }
 
 impl SeqScan {
@@ -78,6 +81,7 @@ impl SeqScan {
             cache_manager: None,
             ignore_file_not_found: false,
             parallelism: ScanParallism::default(),
+            index_applier: None,
         }
     }
 
@@ -127,6 +131,13 @@ impl SeqScan {
     #[must_use]
     pub(crate) fn with_parallelism(mut self, parallelism: ScanParallism) -> Self {
         self.parallelism = parallelism;
+        self
+    }
+
+    /// Sets index applier.
+    #[must_use]
+    pub(crate) fn with_index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
+        self.index_applier = index_applier;
         self
     }
 
