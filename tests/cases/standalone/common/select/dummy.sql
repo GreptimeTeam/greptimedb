@@ -10,6 +10,8 @@ select "A";
 
 select * where "a" = "A";
 
+SELECT MOD(18, 4);
+
 select TO_UNIXTIME('2023-03-01T06:35:02Z');
 
 select TO_UNIXTIME('    2023-03-01T06:35:02Z    ');
