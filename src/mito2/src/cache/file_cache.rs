@@ -478,7 +478,7 @@ mod tests {
         let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
-        let key = (region_id, file_id);
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
         let file_path = file_cache.cache_file_path(key);
         // Write a file.
         let data = b"hello greptime database";
@@ -487,9 +487,7 @@ mod tests {
             .await
             .unwrap();
         // Add to the cache.
-        file_cache
-            .put((region_id, file_id), IndexValue { file_size: 5 })
-            .await;
+        file_cache.put(key, IndexValue { file_size: 5 }).await;
         // Ranges
         let ranges = vec![0..5, 6..10, 15..19, 0..data.len() as u64];
         let bytes = file_cache.read_ranges(key, &ranges).await.unwrap();
