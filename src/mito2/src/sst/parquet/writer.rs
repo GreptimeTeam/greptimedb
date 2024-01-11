@@ -38,10 +38,6 @@ use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 pub struct ParquetWriter {
     /// SST output file path.
     file_path: String,
-    /// Index file path.
-    ///
-    /// TODO(zhongzc): implement writing index file.
-    _index_file_path: String,
     /// Region metadata of the source and the target SST.
     metadata: RegionMetadataRef,
     object_store: ObjectStore,
@@ -51,13 +47,11 @@ impl ParquetWriter {
     /// Creates a new parquet SST writer.
     pub fn new(
         file_path: String,
-        index_file_path: String,
         metadata: RegionMetadataRef,
         object_store: ObjectStore,
     ) -> ParquetWriter {
         ParquetWriter {
             file_path,
-            _index_file_path: index_file_path,
             metadata,
             object_store,
         }

@@ -95,7 +95,6 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let file_path = handle.file_path(FILE_DIR);
-        let index_file_path = handle.index_file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -108,8 +107,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            ParquetWriter::new(file_path, index_file_path, metadata, object_store.clone());
+        let mut writer = ParquetWriter::new(file_path, metadata, object_store.clone());
         let info = writer
             .write_all(source, &write_opts)
             .await
@@ -146,7 +144,6 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let file_path = handle.file_path(FILE_DIR);
-        let index_file_path = handle.index_file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -159,12 +156,7 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(
-            file_path,
-            index_file_path,
-            metadata.clone(),
-            object_store.clone(),
-        );
+        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
         writer
             .write_all(source, &write_opts)
             .await
@@ -220,7 +212,6 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let file_path = handle.file_path(FILE_DIR);
-        let index_file_path = handle.index_file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -234,12 +225,7 @@ mod tests {
 
         // write the sst file and get sst info
         // sst info contains the parquet metadata, which is converted from FileMetaData
-        let mut writer = ParquetWriter::new(
-            file_path,
-            index_file_path,
-            metadata.clone(),
-            object_store.clone(),
-        );
+        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
         let sst_info = writer
             .write_all(source, &write_opts)
             .await

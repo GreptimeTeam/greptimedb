@@ -124,12 +124,8 @@ impl AccessLayer {
                 .await?
         } else {
             // Write cache is disabled.
-            let mut writer = ParquetWriter::new(
-                file_path,
-                index_file_path,
-                request.metadata,
-                self.object_store.clone(),
-            );
+            let mut writer =
+                ParquetWriter::new(file_path, request.metadata, self.object_store.clone());
             writer.write_all(request.source, write_opts).await?
         };
 

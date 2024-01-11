@@ -94,12 +94,10 @@ impl WriteCache {
         let region_id = request.metadata.region_id;
         let file_id = request.file_id;
         let parquet_key = IndexKey::new(region_id, file_id, FileType::Parquet);
-        let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
 
         // Write to FileCache.
         let mut writer = ParquetWriter::new(
             self.file_cache.cache_file_path(parquet_key),
-            self.file_cache.cache_file_path(puffin_key),
             request.metadata,
             self.file_cache.local_store(),
         );
@@ -119,6 +117,7 @@ impl WriteCache {
         self.upload(parquet_key, parquet_path, remote_store).await?;
 
         if sst_info.inverted_index_available {
+            let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
             let puffin_path = &request.index_upload_path;
             self.upload(puffin_key, puffin_path, remote_store).await?;
         }
@@ -158,11 +157,14 @@ impl WriteCache {
             .await
             .context(error::OpenDalSnafu)?;
 
-        let copy_res = futures::io::copy(reader, &mut writer).await;
-        let bytes_written = match file_type {
-            FileType::Parquet => copy_res.context(error::UploadSstSnafu { region_id, file_id })?,
-            FileType::Puffin => copy_res.context(error::UploadIndexSnafu { region_id, file_id })?,
-        };
+        let bytes_written =
+            futures::io::copy(reader, &mut writer)
+                .await
+                .context(error::UploadSnafu {
+                    region_id,
+                    file_id,
+                    file_type,
+                })?;
 
         // Must close to upload all data.
         writer.close().await.context(error::OpenDalSnafu)?;

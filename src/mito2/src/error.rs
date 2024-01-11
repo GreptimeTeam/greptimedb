@@ -28,6 +28,7 @@ use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
+use crate::cache::file_cache::FileType;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
@@ -522,26 +523,15 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to upload sst file, region_id: {}, file_id: {}",
+        "Failed to upload file, region_id: {}, file_id: {}, file_type: {:?}",
         region_id,
-        file_id
+        file_id,
+        file_type,
     ))]
-    UploadSst {
+    Upload {
         region_id: RegionId,
         file_id: FileId,
-        #[snafu(source)]
-        error: std::io::Error,
-        location: Location,
-    },
-
-    #[snafu(display(
-        "Failed to upload index file, region_id: {}, file_id: {}",
-        region_id,
-        file_id
-    ))]
-    UploadIndex {
-        region_id: RegionId,
-        file_id: FileId,
+        file_type: FileType,
         #[snafu(source)]
         error: std::io::Error,
         location: Location,
@@ -642,7 +632,7 @@ impl ErrorExt for Error {
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
-            UploadSst { .. } | UploadIndex { .. } => StatusCode::StorageUnavailable,
+            Upload { .. } => StatusCode::StorageUnavailable,
         }
     }
 

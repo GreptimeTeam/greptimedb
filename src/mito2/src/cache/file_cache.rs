@@ -225,7 +225,7 @@ impl IndexKey {
 
 /// Type of the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum FileType {
+pub enum FileType {
     /// Parquet file.
     Parquet,
     /// Puffin file.
@@ -262,7 +262,7 @@ pub(crate) struct IndexValue {
 
 /// Generates the path to the cached file.
 ///
-/// The file name format is `{region_id}.{file_id}`
+/// The file name format is `{region_id}.{file_id}.{file_type}`
 fn cache_file_path(cache_file_dir: &str, key: IndexKey) -> String {
     join_path(
         cache_file_dir,
@@ -470,5 +470,12 @@ mod tests {
         assert!(parse_index_key("5299989643269.").is_none());
         assert!(parse_index_key("5299989643269.3368731b-a556-42b8-a5df").is_none());
         assert!(parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095").is_none());
+        assert!(
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parque").is_none()
+        );
+        assert!(parse_index_key(
+            "5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet.puffin"
+        )
+        .is_none());
     }
 }
