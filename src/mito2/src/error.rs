@@ -487,6 +487,19 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Failed to upload sst file, region_id: {}, file_id: {}",
+        region_id,
+        file_id
+    ))]
+    UploadSst {
+        region_id: RegionId,
+        file_id: FileId,
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
+
+    #[snafu(display(
         "Verify checksum failed! calculated: {}, expected: {}",
         calculated,
         expect
@@ -583,6 +596,7 @@ impl ErrorExt for Error {
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
+            UploadSst { .. } => StatusCode::StorageUnavailable,
             VerifyChecksum { .. } => StatusCode::Unexpected,
         }
     }
