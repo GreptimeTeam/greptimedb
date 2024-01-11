@@ -15,6 +15,7 @@
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
@@ -118,4 +119,58 @@ pub async fn check_port(ip_addr: SocketAddr, timeout: Duration) -> bool {
     };
 
     tokio::time::timeout(timeout, check_task).await.is_ok()
+}
+
+/// Get the path of sqlness config dir `tests/conf`.
+pub fn sqlness_conf_path() -> PathBuf {
+    let mut sqlness_root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    sqlness_root_path.pop();
+    sqlness_root_path.push("conf");
+    sqlness_root_path
+}
+
+/// Start kafka cluster if needed. Config file is `conf/kafka-cluster.yml`.
+///
+/// ```shell
+/// docker compose -f kafka-cluster.yml up kafka -d --wait
+/// ```
+pub fn setup_wal() {
+    let mut sqlness_root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    sqlness_root_path.pop();
+    sqlness_root_path.push("conf");
+
+    Command::new("docker")
+        .current_dir(sqlness_conf_path())
+        .args([
+            "compose",
+            "-f",
+            "kafka-cluster.yml",
+            "up",
+            "kafka",
+            "-d",
+            "--wait",
+        ])
+        .output()
+        .expect("Failed to start kafka cluster");
+
+    println!("kafka cluster is up");
+}
+
+/// Stop kafka cluster if needed. Config file is `conf/kafka-cluster.yml`.
+///
+/// ```shell
+/// docker compose -f docker-compose-standalone.yml down kafka
+/// ```
+pub fn teardown_wal() {
+    let mut sqlness_root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    sqlness_root_path.pop();
+    sqlness_root_path.push("conf");
+
+    Command::new("docker")
+        .current_dir(sqlness_conf_path())
+        .args(["compose", "-f", "kafka-cluster.yml", "down", "kafka"])
+        .output()
+        .expect("Failed to stop kafka cluster");
+
+    println!("kafka cluster is down");
 }
