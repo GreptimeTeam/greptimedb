@@ -59,7 +59,6 @@ pub struct Env {
     wal: WalConfig,
 }
 
-#[allow(clippy::print_stdout)]
 #[async_trait]
 impl EnvController for Env {
     type DB = GreptimeDB;
@@ -78,7 +77,6 @@ impl EnvController for Env {
     }
 }
 
-#[allow(clippy::print_stdout)]
 impl Env {
     pub fn new(data_home: PathBuf, server_addr: Option<String>, wal: WalConfig) -> Self {
         Self {
@@ -445,7 +443,6 @@ impl Database for GreptimeDB {
 }
 
 impl GreptimeDB {
-    #![allow(clippy::print_stdout)]
     fn stop(&mut self) {
         if let Some(server_processes) = self.server_processes.clone() {
             let mut server_processes = server_processes.lock().unwrap();
