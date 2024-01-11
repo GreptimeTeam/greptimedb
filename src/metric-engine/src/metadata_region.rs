@@ -468,7 +468,7 @@ impl MetadataRegion {
             },
         ];
         let rows = keys
-            .into_iter()
+            .iter()
             .map(|key| Row {
                 values: vec![
                     Value {
