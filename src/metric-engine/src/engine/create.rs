@@ -534,7 +534,7 @@ mod test {
             ],
             primary_key: vec![0],
             options: HashMap::new(),
-            region_dir: "test_dir".to_string(),
+            region_dir: "/test_dir".to_string(),
         };
 
         let env = TestEnv::new().await;
