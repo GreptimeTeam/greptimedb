@@ -30,6 +30,7 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_error::ext::BoxedError;
 use common_meta::instruction::Instruction;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
@@ -45,12 +46,12 @@ use common_procedure::error::{
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status, StringKey};
 pub use manager::RegionMigrationProcedureTask;
 use serde::{Deserialize, Serialize};
-use snafu::{location, Location, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
-use crate::error::{self, Error, Result};
+use crate::error::{self, Result};
 use crate::service::mailbox::{BroadcastChannel, MailboxRef};
 
 /// It's shared in each step and available even after recovering.
@@ -220,9 +221,9 @@ impl Context {
                 .get(table_id)
                 .await
                 .context(error::TableMetadataManagerSnafu)
-                .map_err(|e| error::Error::RetryLater {
-                    reason: e.to_string(),
-                    location: location!(),
+                .map_err(BoxedError::new)
+                .context(error::RetryLaterWithSourceSnafu {
+                    reason: format!("Failed to get TableRoute: {table_id}"),
                 })?
                 .context(error::TableRouteNotFoundSnafu { table_id })?;
 
@@ -256,9 +257,9 @@ impl Context {
                 .get(table_id)
                 .await
                 .context(error::TableMetadataManagerSnafu)
-                .map_err(|e| error::Error::RetryLater {
-                    reason: e.to_string(),
-                    location: location!(),
+                .map_err(BoxedError::new)
+                .context(error::RetryLaterWithSourceSnafu {
+                    reason: format!("Failed to get TableInfo: {table_id}"),
                 })?
                 .context(error::TableInfoNotFoundSnafu { table_id })?;
 
@@ -289,9 +290,9 @@ impl Context {
                 })
                 .await
                 .context(error::TableMetadataManagerSnafu)
-                .map_err(|e| error::Error::RetryLater {
-                    reason: e.to_string(),
-                    location: location!(),
+                .map_err(BoxedError::new)
+                .context(error::RetryLaterWithSourceSnafu {
+                    reason: format!("Failed to get DatanodeTable: ({datanode_id},{table_id})"),
                 })?
                 .context(error::DatanodeTableNotFoundSnafu {
                     table_id,
@@ -412,7 +413,7 @@ impl Procedure for RegionMigrationProcedure {
         let state = &mut self.state;
 
         let (next, status) = state.next(&mut self.context).await.map_err(|e| {
-            if matches!(e, Error::RetryLater { .. }) {
+            if e.is_retryable() {
                 ProcedureError::retry_later(e)
             } else {
                 ProcedureError::external(e)

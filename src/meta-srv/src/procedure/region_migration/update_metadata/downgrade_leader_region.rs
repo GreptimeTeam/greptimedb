@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::BoxedError;
 use common_meta::rpc::router::RegionStatus;
 use snafu::ResultExt;
 
@@ -61,9 +62,11 @@ impl UpdateMetadata {
             .context(error::TableMetadataManagerSnafu)
         {
             ctx.remove_table_route_value();
-            return error::RetryLaterSnafu {
-                reason: format!("Failed to update the table route during the downgrading leader region, error: {err}")
-            }.fail();
+            return Err(BoxedError::new(err)).context(error::RetryLaterWithSourceSnafu {
+                reason: format!(
+                    "Failed to update the table route during the downgrading leader region, region_id: {region_id}, from_peer_id: {from_peer_id}"
+                ),
+            });
         }
 
         ctx.remove_table_route_value();
@@ -163,13 +166,9 @@ mod tests {
         ctx.volatile_ctx.table_route = Some(original_table_route);
 
         let err = state.downgrade_leader_region(&mut ctx).await.unwrap_err();
-
         assert!(ctx.volatile_ctx.table_route.is_none());
-
-        assert_matches!(err, Error::RetryLater { .. });
-
         assert!(err.is_retryable());
-        assert!(err.to_string().contains("Failed to update the table route"));
+        assert!(format!("{err:?}").contains("Failed to update the table route"));
     }
 
     #[tokio::test]

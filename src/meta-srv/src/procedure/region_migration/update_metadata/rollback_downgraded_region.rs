@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::BoxedError;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -45,9 +46,9 @@ impl UpdateMetadata {
             .context(error::TableMetadataManagerSnafu)
         {
             ctx.remove_table_route_value();
-            return error::RetryLaterSnafu {
-                reason: format!("Failed to update the table route during the rollback downgraded leader region, error: {err}")
-            }.fail();
+            return Err(BoxedError::new(err)).context(error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to update the table route during the rollback downgraded leader region: {region_id}"),
+            });
         }
 
         ctx.remove_table_route_value();
@@ -157,9 +158,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(ctx.volatile_ctx.table_route.is_none());
-        assert_matches!(err, Error::RetryLater { .. });
         assert!(err.is_retryable());
-        assert!(err.to_string().contains("Failed to update the table route"));
+        assert!(format!("{err:?}").contains("Failed to update the table route"));
 
         state.rollback_downgraded_region(&mut ctx).await.unwrap();
 

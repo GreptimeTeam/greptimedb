@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "mock")]
+#[cfg(any(test, feature = "mock"))]
 pub mod mock {
     use std::io::Error;
     use std::sync::Arc;
