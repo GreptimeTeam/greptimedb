@@ -44,7 +44,7 @@ pub fn join_dir(parent: &str, child: &str) -> String {
 /// It doesn't always append `/` ahead of the path,
 /// It only keeps `/` ahead if the original path starts with `/`.
 ///
-/// Make sure root is normalized to style like `/abc/def/`.
+/// Make sure the directory is normalized to style like `abc/def/`.
 ///
 /// # Normalize Rules
 ///
