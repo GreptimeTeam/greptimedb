@@ -46,11 +46,11 @@ impl SchedulerEnv {
         let mut builder = Fs::default();
         builder.root(&path_str);
 
-        let interm_mgr = IntermediateManager::init_fs(format!("{path_str}/interm/"))
+        let intm_mgr = IntermediateManager::init_fs(format!("{path_str}/interm/"))
             .await
             .unwrap();
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        let access_layer = Arc::new(AccessLayer::new("", object_store.clone(), interm_mgr));
+        let access_layer = Arc::new(AccessLayer::new("", object_store.clone(), intm_mgr));
 
         SchedulerEnv {
             path,

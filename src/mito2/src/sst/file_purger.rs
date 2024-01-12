@@ -118,7 +118,7 @@ mod tests {
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
         let path = location::sst_file_path(sst_dir, sst_file_id);
-        let interm_mgr = IntermediateManager::init_fs(format!("{dir_path}/interm"))
+        let intm_mgr = IntermediateManager::init_fs(format!("{dir_path}/intm"))
             .await
             .unwrap();
 
@@ -126,7 +126,7 @@ mod tests {
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
         let scheduler = Arc::new(LocalScheduler::new(3));
-        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone(), interm_mgr));
+        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone(), intm_mgr));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 
@@ -162,7 +162,7 @@ mod tests {
         builder.root(&dir_path);
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
-        let interm_mgr = IntermediateManager::init_fs(format!("{dir_path}/interm"))
+        let intm_mgr = IntermediateManager::init_fs(format!("{dir_path}/intm"))
             .await
             .unwrap();
         let path = location::sst_file_path(sst_dir, sst_file_id);
@@ -177,7 +177,7 @@ mod tests {
             .unwrap();
 
         let scheduler = Arc::new(LocalScheduler::new(3));
-        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone(), interm_mgr));
+        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone(), intm_mgr));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 

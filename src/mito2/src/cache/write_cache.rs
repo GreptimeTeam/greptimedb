@@ -88,7 +88,7 @@ impl WriteCache {
     /// Writes SST to the cache and then uploads it to the remote object store.
     pub(crate) async fn write_and_upload_sst(
         &self,
-        write_requet: SstWriteRequest,
+        write_request: SstWriteRequest,
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
         intermediate_manager: IntermediateManager,
@@ -97,13 +97,13 @@ impl WriteCache {
             .with_label_values(&["write_sst"])
             .start_timer();
 
-        let region_id = write_requet.metadata.region_id;
-        let file_id = write_requet.file_id;
+        let region_id = write_request.metadata.region_id;
+        let file_id = write_request.file_id;
         let parquet_key = IndexKey::new(region_id, file_id, FileType::Parquet);
         let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
 
         let indexer = Indexer::new(
-            &write_requet,
+            &write_request,
             write_opts,
             self.file_cache.cache_file_path(puffin_key),
             intermediate_manager,
@@ -113,12 +113,12 @@ impl WriteCache {
         // Write to FileCache.
         let mut writer = ParquetWriter::new(
             self.file_cache.cache_file_path(parquet_key),
-            write_requet.metadata,
+            write_request.metadata,
             self.file_cache.local_store(),
             indexer,
         );
 
-        let sst_info = writer.write_all(write_requet.source, write_opts).await?;
+        let sst_info = writer.write_all(write_request.source, write_opts).await?;
 
         timer.stop_and_record();
 
@@ -245,7 +245,7 @@ mod tests {
         let file_id = FileId::random();
         let upload_path = sst_file_path("test", file_id);
         let index_upload_path = index_file_path("test", file_id);
-        let interm_mgr = IntermediateManager::init_fs(format!("{data_home}/intermediate"))
+        let intm_mgr = IntermediateManager::init_fs(format!("{data_home}/intermediate"))
             .await
             .unwrap();
 
@@ -293,7 +293,7 @@ mod tests {
 
         // Write to cache and upload sst to mock remote store
         let sst_info = write_cache
-            .write_and_upload_sst(write_request, request, &write_opts, interm_mgr)
+            .write_and_upload_sst(write_request, request, &write_opts, intm_mgr)
             .await
             .unwrap()
             .unwrap();

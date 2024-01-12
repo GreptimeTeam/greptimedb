@@ -22,7 +22,7 @@ use crate::error::Result;
 use crate::sst::file::FileId;
 use crate::sst::index::store::InstrumentedStore;
 
-const INTERMEDIATE_DIR: &str = "__interm";
+const INTERMEDIATE_DIR: &str = "__intm";
 
 /// `IntermediateManager` provides store to access to intermediate files.
 #[derive(Clone)]
@@ -60,7 +60,7 @@ pub struct IntermediateLocation {
 
 impl IntermediateLocation {
     /// Create a new `IntermediateLocation`. Set the root directory to
-    /// `__interm/{region_id}/{sst_file_id}/{uuid}/`, incorporating
+    /// `__intm/{region_id}/{sst_file_id}/{uuid}/`, incorporating
     /// uuid to differentiate active sorting files from orphaned data due to unexpected
     /// process termination.
     pub fn new(region_id: &RegionId, sst_file_id: &FileId) -> Self {
@@ -77,13 +77,13 @@ impl IntermediateLocation {
     }
 
     /// Returns the path of the directory for intermediate files associated with a column:
-    /// `__interm/{region_id}/{sst_file_id}/{uuid}/{column_id}/`
+    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{column_id}/`
     pub fn column_path(&self, column_id: &str) -> String {
         util::join_path(&self.root_path, &format!("{column_id}/"))
     }
 
     /// Returns the path of the intermediate file with the given id for a column:
-    /// `__interm/{region_id}/{sst_file_id}/{uuid}/{column_id}/{im_file_id}.im`
+    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{column_id}/{im_file_id}.im`
     pub fn file_path(&self, column_id: &str, im_file_id: &str) -> String {
         util::join_path(&self.column_path(column_id), &format!("{im_file_id}.im"))
     }
