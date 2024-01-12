@@ -73,7 +73,7 @@ pub struct MitoConfig {
     pub page_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
-    /// File system path for write cache., defaults to `{data_home}/write_cache`.
+    /// File system path for write cache, defaults to `{data_home}/write_cache`.
     pub experimental_write_cache_path: String,
     /// Capacity for write cache.
     pub experimental_write_cache_size: ReadableSize,
