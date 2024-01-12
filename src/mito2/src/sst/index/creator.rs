@@ -43,22 +43,19 @@ use crate::sst::file::FileId;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::creator::statistics::Statistics;
 use crate::sst::index::creator::temp_provider::TempFileProvider;
+use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
 use crate::sst::index::store::InstrumentedStore;
 use crate::sst::index::{
     INDEX_BLOB_TYPE, MIN_MEMORY_USAGE_THRESHOLD, PIPE_BUFFER_SIZE_FOR_SENDING_BLOB,
 };
-use crate::sst::location::{self, IntermediateLocation};
 
 type ByteCount = usize;
 type RowCount = usize;
 
 /// Creates SST index.
 pub struct SstIndexCreator {
-    /// Directory of the region.
-    region_dir: String,
-    /// ID of the SST file.
-    sst_file_id: FileId,
-
+    /// Path of index file to write.
+    file_path: String,
     /// The store to write index files.
     store: InstrumentedStore,
     /// The index creator.
@@ -81,11 +78,11 @@ impl SstIndexCreator {
     /// Creates a new `SstIndexCreator`.
     /// Should ensure that the number of tag columns is greater than 0.
     pub fn new(
-        region_dir: String,
+        file_path: String,
         sst_file_id: FileId,
         metadata: &RegionMetadataRef,
         index_store: ObjectStore,
-        intermediate_store: ObjectStore, // prefer to use local store
+        intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
         row_group_size: NonZeroUsize,
     ) -> Self {
@@ -95,16 +92,15 @@ impl SstIndexCreator {
             (threshold / metadata.primary_key.len()).max(MIN_MEMORY_USAGE_THRESHOLD)
         });
         let temp_file_provider = Arc::new(TempFileProvider::new(
-            IntermediateLocation::new(&region_dir, &sst_file_id),
-            InstrumentedStore::new(intermediate_store),
+            IntermediateLocation::new(&metadata.region_id, &sst_file_id),
+            intermediate_manager,
         ));
         let sorter = ExternalSorter::factory(temp_file_provider.clone() as _, memory_threshold);
         let index_creator = Box::new(SortIndexCreator::new(sorter, row_group_size));
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
         Self {
-            region_dir,
-            sst_file_id,
+            file_path,
             store: InstrumentedStore::new(index_store),
             codec,
             index_creator,
@@ -129,10 +125,7 @@ impl SstIndexCreator {
         if let Err(update_err) = self.do_update(batch).await {
             // clean up garbage if failed to update
             if let Err(err) = self.do_cleanup().await {
-                warn!(
-                    err; "Failed to clean up index creator, region_dir: {}, sst_file_id: {}",
-                    self.region_dir, self.sst_file_id,
-                );
+                warn!(err; "Failed to clean up index creator");
             }
             return Err(update_err);
         }
@@ -153,10 +146,7 @@ impl SstIndexCreator {
         let finish_res = self.do_finish().await;
         // clean up garbage no matter finish successfully or not
         if let Err(err) = self.do_cleanup().await {
-            warn!(
-                err; "Failed to clean up index creator, region_dir: {}, sst_file_id: {}",
-                self.region_dir, self.sst_file_id,
-            );
+            warn!(err; "Failed to clean up index creator");
         }
 
         finish_res.map(|_| (self.stats.row_count(), self.stats.byte_count()))
@@ -216,11 +206,10 @@ impl SstIndexCreator {
     async fn do_finish(&mut self) -> Result<()> {
         let mut guard = self.stats.record_finish();
 
-        let file_path = location::index_file_path(&self.region_dir, self.sst_file_id);
         let file_writer = self
             .store
             .writer(
-                &file_path,
+                &self.file_path,
                 &INDEX_PUFFIN_WRITE_BYTES_TOTAL,
                 &INDEX_PUFFIN_WRITE_OP_TOTAL,
                 &INDEX_PUFFIN_FLUSH_OP_TOTAL,

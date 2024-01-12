@@ -23,7 +23,7 @@ use crate::inverted_index::BytesRef;
 
 /// `InvertedIndexCreator` provides functionality to construct an inverted index
 #[async_trait]
-pub trait InvertedIndexCreator {
+pub trait InvertedIndexCreator: Send {
     /// Adds a value to the named index. A `None` value represents an absence of data (null)
     ///
     /// - `index_name`: Identifier for the index being built

@@ -27,16 +27,15 @@ use crate::metrics::{
     INDEX_INTERMEDIATE_READ_OP_TOTAL, INDEX_INTERMEDIATE_SEEK_OP_TOTAL,
     INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL, INDEX_INTERMEDIATE_WRITE_OP_TOTAL,
 };
-use crate::sst::index::store::InstrumentedStore;
-use crate::sst::location::IntermediateLocation;
+use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
 
 /// `TempFileProvider` implements `ExternalTempFileProvider`.
 /// It uses `InstrumentedStore` to create and read intermediate files.
 pub(crate) struct TempFileProvider {
     /// Provides the location of intermediate files.
     location: IntermediateLocation,
-    /// Provides access to files in the object store.
-    store: InstrumentedStore,
+    /// Provides store to access to intermediate files.
+    manager: IntermediateManager,
 }
 
 #[async_trait]
@@ -48,7 +47,8 @@ impl ExternalTempFileProvider for TempFileProvider {
     ) -> IndexResult<Box<dyn AsyncWrite + Unpin + Send>> {
         let path = self.location.file_path(column_id, file_id);
         let writer = self
-            .store
+            .manager
+            .store()
             .writer(
                 &path,
                 &INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL,
@@ -67,7 +67,8 @@ impl ExternalTempFileProvider for TempFileProvider {
     ) -> IndexResult<Vec<Box<dyn AsyncRead + Unpin + Send>>> {
         let column_path = self.location.column_path(column_id);
         let entries = self
-            .store
+            .manager
+            .store()
             .list(&column_path)
             .await
             .map_err(BoxedError::new)
@@ -81,7 +82,8 @@ impl ExternalTempFileProvider for TempFileProvider {
             }
 
             let reader = self
-                .store
+                .manager
+                .store()
                 .reader(
                     entry.path(),
                     &INDEX_INTERMEDIATE_READ_BYTES_TOTAL,
@@ -100,30 +102,35 @@ impl ExternalTempFileProvider for TempFileProvider {
 
 impl TempFileProvider {
     /// Creates a new `TempFileProvider`.
-    pub fn new(location: IntermediateLocation, store: InstrumentedStore) -> Self {
-        Self { location, store }
+    pub fn new(location: IntermediateLocation, manager: IntermediateManager) -> Self {
+        Self { location, manager }
     }
 
     /// Removes all intermediate files.
     pub async fn cleanup(&self) -> Result<()> {
-        self.store.remove_all(self.location.root_path()).await
+        self.manager
+            .store()
+            .remove_all(self.location.root_path())
+            .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use common_test_util::temp_dir;
     use futures::{AsyncReadExt, AsyncWriteExt};
-    use object_store::services::Memory;
-    use object_store::ObjectStore;
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::sst::file::FileId;
 
     #[tokio::test]
     async fn test_temp_file_provider_basic() {
-        let location = IntermediateLocation::new("region_dir", &FileId::random());
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
-        let store = InstrumentedStore::new(object_store);
+        let temp_dir = temp_dir::create_temp_dir("intermediate");
+        let path = temp_dir.path().display().to_string();
+
+        let location = IntermediateLocation::new(&RegionId::new(0, 0), &FileId::random());
+        let store = IntermediateManager::init_fs(path).await.unwrap();
         let provider = TempFileProvider::new(location.clone(), store);
 
         let column_name = "tag0";
@@ -163,7 +170,8 @@ mod tests {
         provider.cleanup().await.unwrap();
 
         assert!(provider
-            .store
+            .manager
+            .store()
             .list(location.root_path())
             .await
             .unwrap()

@@ -25,6 +25,8 @@ use crate::cache::CacheManagerRef;
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId, FileMeta};
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::Indexer;
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -37,6 +39,8 @@ pub struct AccessLayer {
     region_dir: String,
     /// Target object store.
     object_store: ObjectStore,
+    /// Intermediate manager for inverted index.
+    intermediate_manager: IntermediateManager,
 }
 
 impl std::fmt::Debug for AccessLayer {
@@ -49,10 +53,15 @@ impl std::fmt::Debug for AccessLayer {
 
 impl AccessLayer {
     /// Returns a new [AccessLayer] for specific `region_dir`.
-    pub fn new(region_dir: impl Into<String>, object_store: ObjectStore) -> AccessLayer {
+    pub fn new(
+        region_dir: impl Into<String>,
+        object_store: ObjectStore,
+        intermediate_manager: IntermediateManager,
+    ) -> AccessLayer {
         AccessLayer {
             region_dir: region_dir.into(),
             object_store,
+            intermediate_manager,
         }
     }
 
@@ -105,38 +114,45 @@ impl AccessLayer {
         let file_path = location::sst_file_path(&self.region_dir, request.file_id);
         let index_file_path = location::index_file_path(&self.region_dir, request.file_id);
         let region_id = request.metadata.region_id;
+        let file_id = request.file_id;
+        let cache_manager = request.cache_manager.clone();
 
-        let sst_info = if let Some(write_cache) = request.cache_manager.write_cache() {
+        let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
             // Write to the write cache.
             write_cache
                 .write_and_upload_sst(
+                    request,
                     SstUploadRequest {
-                        file_id: request.file_id,
-                        metadata: request.metadata,
-                        source: request.source,
-                        storage: request.storage,
                         upload_path: file_path,
                         index_upload_path: index_file_path,
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
+                    self.intermediate_manager.clone(),
                 )
                 .await?
         } else {
+            let indexer = Indexer::new(
+                &request,
+                write_opts,
+                index_file_path,
+                self.intermediate_manager.clone(),
+                self.object_store.clone(),
+            );
             // Write cache is disabled.
-            let mut writer =
-                ParquetWriter::new(file_path, request.metadata, self.object_store.clone());
+            let mut writer = ParquetWriter::new(
+                file_path,
+                request.metadata,
+                self.object_store.clone(),
+                indexer,
+            );
             writer.write_all(request.source, write_opts).await?
         };
 
         // Put parquet metadata to cache manager.
         if let Some(sst_info) = &sst_info {
             if let Some(parquet_metadata) = &sst_info.file_metadata {
-                request.cache_manager.put_parquet_meta_data(
-                    region_id,
-                    request.file_id,
-                    parquet_metadata.clone(),
-                )
+                cache_manager.put_parquet_meta_data(region_id, file_id, parquet_metadata.clone())
             }
         }
 
@@ -150,7 +166,12 @@ pub(crate) struct SstWriteRequest {
     pub(crate) metadata: RegionMetadataRef,
     pub(crate) source: Source,
     pub(crate) cache_manager: CacheManagerRef,
+    #[allow(dead_code)]
     pub(crate) storage: Option<String>,
+    /// Whether to create inverted index.
+    pub(crate) create_inverted_index: bool,
+    /// The threshold of memory size to create inverted index.
+    pub(crate) mem_threshold_index_create: Option<usize>,
 }
 
 /// Creates a fs object store with atomic write dir.

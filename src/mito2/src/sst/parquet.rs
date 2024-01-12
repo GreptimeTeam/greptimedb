@@ -80,6 +80,7 @@ mod tests {
 
     use super::*;
     use crate::cache::{CacheManager, PageKey};
+    use crate::sst::index::Indexer;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::test_util::sst_util::{
@@ -107,7 +108,12 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer = ParquetWriter::new(file_path, metadata, object_store.clone());
+        let mut writer = ParquetWriter::new(
+            file_path,
+            metadata,
+            object_store.clone(),
+            Indexer::default(),
+        );
         let info = writer
             .write_all(source, &write_opts)
             .await
@@ -156,7 +162,12 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        let mut writer = ParquetWriter::new(
+            file_path,
+            metadata.clone(),
+            object_store.clone(),
+            Indexer::default(),
+        );
         writer
             .write_all(source, &write_opts)
             .await
@@ -225,7 +236,12 @@ mod tests {
 
         // write the sst file and get sst info
         // sst info contains the parquet metadata, which is converted from FileMetaData
-        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        let mut writer = ParquetWriter::new(
+            file_path,
+            metadata.clone(),
+            object_store.clone(),
+            Indexer::default(),
+        );
         let sst_info = writer
             .write_all(source, &write_opts)
             .await

@@ -12,12 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
-
-pub mod applier;
+pub(crate) mod applier;
 mod codec;
-pub mod creator;
+pub(crate) mod creator;
+pub(crate) mod intermediate;
 mod store;
+
+use std::num::NonZeroUsize;
+
+use common_telemetry::{debug, warn};
+use creator::SstIndexCreator;
+use object_store::ObjectStore;
+use store_api::storage::RegionId;
+
+use crate::access_layer::SstWriteRequest;
+use crate::read::Batch;
+use crate::sst::file::FileId;
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::parquet::WriteOptions;
 
 const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
 
@@ -27,3 +39,117 @@ const MIN_MEMORY_USAGE_THRESHOLD: usize = 8192;
 
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
+
+/// The index creator that hides the error handling details.
+#[derive(Default)]
+pub struct Indexer {
+    file_id: FileId,
+    region_id: RegionId,
+    inner: Option<SstIndexCreator>,
+}
+
+impl Indexer {
+    /// Sanity check for the write request and create a new [Indexer]
+    /// with inner [SstIndexCreator] if the request is valid.
+    pub(crate) fn new(
+        write_request: &SstWriteRequest,
+        opts: &WriteOptions,
+        file_path: String,
+        intermediate_manager: IntermediateManager,
+        object_store: ObjectStore,
+    ) -> Self {
+        let file_id = write_request.file_id;
+        let region_id = write_request.metadata.region_id;
+
+        if !write_request.create_inverted_index {
+            debug!(
+                "Skip creating index due to request, region_id: {}, file_id: {}",
+                region_id, file_id,
+            );
+            return Self::default();
+        }
+
+        if write_request.metadata.primary_key.is_empty() {
+            debug!(
+                "No tag columns, skip creating index, region_id: {}, file_id: {}",
+                region_id, file_id,
+            );
+            return Self::default();
+        }
+
+        let Some(row_group_size) = NonZeroUsize::new(opts.row_group_size) else {
+            warn!(
+                "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
+                region_id, file_id,
+            );
+            return Self::default();
+        };
+
+        let creator = SstIndexCreator::new(
+            file_path,
+            file_id,
+            &write_request.metadata,
+            object_store,
+            intermediate_manager,
+            write_request.mem_threshold_index_create,
+            row_group_size,
+        );
+
+        Self {
+            file_id,
+            region_id,
+            inner: Some(creator),
+        }
+    }
+
+    /// Update the index with the given batch.
+    pub async fn update(&mut self, batch: &Batch) {
+        if let Some(creator) = self.inner.as_mut() {
+            if let Err(err) = creator.update(batch).await {
+                warn!(
+                    err; "Failed to update index, skip creating index, region_id: {}, file_id: {}",
+                    self.region_id, self.file_id,
+                );
+
+                // Skip index creation if error occurs.
+                self.inner = None;
+            }
+        }
+    }
+
+    /// Finish the index creation.
+    /// Returns the number of bytes written if success or None if failed.
+    pub async fn finish(&mut self) -> Option<usize> {
+        if let Some(mut creator) = self.inner.take() {
+            match creator.finish().await {
+                Ok((row_count, byte_count)) => {
+                    debug!(
+                        "Create index successfully, region_id: {}, file_id: {}, bytes: {}, rows: {}",
+                        self.region_id, self.file_id, byte_count, row_count
+                    );
+                    return Some(byte_count);
+                }
+                Err(err) => {
+                    warn!(
+                        err; "Failed to create index, region_id: {}, file_id: {}",
+                        self.region_id, self.file_id,
+                    );
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Abort the index creation.
+    pub async fn abort(&mut self) {
+        if let Some(mut creator) = self.inner.take() {
+            if let Err(err) = creator.abort().await {
+                warn!(
+                    err; "Failed to abort index, region_id: {}, file_id: {}",
+                    self.region_id, self.file_id,
+                );
+            }
+        }
+    }
+}
