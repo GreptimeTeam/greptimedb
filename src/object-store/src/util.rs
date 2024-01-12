@@ -38,6 +38,24 @@ pub fn join_dir(parent: &str, child: &str) -> String {
 }
 
 /// Modified from the `opendal::raw::normalize_root`
+///
+/// # The different
+///
+/// It doesn't always append `/` ahead of the path,
+/// It only keeps `/` ahead if the original path starts with `/`.
+///
+/// Make sure root is normalized to style like `/abc/def/`.
+///
+/// # Normalize Rules
+///
+/// - All whitespace will be trimmed: ` abc/def ` => `abc/def`
+/// - All leading / will be trimmed: `///abc` => `abc`
+/// - Internal // will be replaced by /: `abc///def` => `abc/def`
+/// - Empty path will be `/`: `` => `/`
+/// - **(Removed❗️)** ~~Add leading `/` if not starts with: `abc/` => `/abc/`~~
+/// - Add trailing `/` if not ends with: `/abc` => `/abc/`
+///
+/// Finally, we will got path like `/path/to/root/`.
 pub fn normalize_dir(v: &str) -> String {
     let has_root = v.starts_with('/');
     let mut v = v
