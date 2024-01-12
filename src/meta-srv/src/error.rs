@@ -540,6 +540,13 @@ pub enum Error {
     #[snafu(display("Expected to retry later, reason: {}", reason))]
     RetryLater { reason: String, location: Location },
 
+    #[snafu(display("Expected to retry later, reason: {}", reason))]
+    RetryLaterWithSource {
+        reason: String,
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to update table metadata, err_msg: {}", err_msg))]
     UpdateTableMetadata { err_msg: String, location: Location },
 
@@ -628,6 +635,7 @@ impl Error {
     /// Returns `true` if the error is retryable.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Error::RetryLater { .. })
+            || matches!(self, Error::RetryLaterWithSource { .. })
     }
 }
 
@@ -665,6 +673,7 @@ impl ErrorExt for Error {
             | Error::MailboxTimeout { .. }
             | Error::MailboxReceiver { .. }
             | Error::RetryLater { .. }
+            | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }
             | Error::UpdateTableMetadata { .. }
             | Error::NoEnoughAvailableDatanode { .. }

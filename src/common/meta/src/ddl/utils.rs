@@ -36,7 +36,7 @@ pub fn handle_operate_region_error(datanode: Peer) -> impl FnOnce(crate::error::
 }
 
 pub fn handle_retry_error(e: Error) -> ProcedureError {
-    if matches!(e, error::Error::RetryLater { .. }) {
+    if e.is_retry_later() {
         ProcedureError::retry_later(e)
     } else {
         ProcedureError::external(e)

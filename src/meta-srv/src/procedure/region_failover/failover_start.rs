@@ -13,17 +13,17 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, location, Location};
 
 use super::deactivate_region::DeactivateRegion;
 use super::{RegionFailoverContext, State};
-use crate::error::{RegionFailoverCandidatesNotFoundSnafu, Result, RetryLaterSnafu};
+use crate::error::{self, RegionFailoverCandidatesNotFoundSnafu, Result};
 use crate::selector::SelectorOptions;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -93,10 +93,11 @@ impl State for RegionFailoverStart {
             .await
             .map_err(|e| {
                 if e.status_code() == StatusCode::RuntimeResourcesExhausted {
-                    RetryLaterSnafu {
-                        reason: format!("{e}"),
+                    error::Error::RetryLaterWithSource {
+                        reason: format!("Region failover aborted for {failed_region:?}"),
+                        location: location!(),
+                        source: BoxedError::new(e),
                     }
-                    .build()
                 } else {
                     e
                 }
