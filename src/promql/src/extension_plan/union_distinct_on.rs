@@ -362,6 +362,7 @@ impl HashedData {
     ) -> DataFusionResult<Self> {
         // Collect all batches from the input stream
         let initial = (Vec::new(), 0);
+        let schema = input.schema();
         let (batches, _num_rows) = input
             .try_fold(initial, |mut acc, batch| async {
                 // Update rowcount
@@ -399,7 +400,7 @@ impl HashedData {
         }
 
         // Finilize the hash map
-        let batch = interleave_batches(batches, interleave_indices)?;
+        let batch = interleave_batches(schema, batches, interleave_indices)?;
 
         Ok(Self {
             hash_map,
@@ -442,10 +443,19 @@ impl HashedData {
 
 /// Utility function to interleave batches. Based on [interleave](datafusion::arrow::compute::interleave)
 fn interleave_batches(
+    schema: SchemaRef,
     batches: Vec<RecordBatch>,
     indices: Vec<(usize, usize)>,
 ) -> DataFusionResult<RecordBatch> {
-    let schema = batches[0].schema();
+    if batches.is_empty() {
+        if indices.is_empty() {
+            return Ok(RecordBatch::new_empty(schema));
+        } else {
+            return Err(DataFusionError::Internal(
+                "Cannot interleave empty batches with non-empty indices".to_string(),
+            ));
+        }
+    }
 
     // transform batches into arrays
     let mut arrays = vec![vec![]; schema.fields().len()];
@@ -488,6 +498,8 @@ fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<Record
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use datafusion::arrow::array::Int32Array;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
 
@@ -529,7 +541,7 @@ mod test {
 
         let batches = vec![batch1, batch2, batch3];
         let indices = vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)];
-        let result = interleave_batches(batches, indices).unwrap();
+        let result = interleave_batches(Arc::new(schema.clone()), batches, indices).unwrap();
 
         let expected = RecordBatch::try_new(
             Arc::new(schema),
