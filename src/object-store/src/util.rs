@@ -24,16 +24,6 @@ pub async fn collect(stream: Lister) -> Result<Vec<Entry>, opendal::Error> {
     stream.try_collect::<Vec<_>>().await
 }
 
-/// Normalize a directory path, ensure it is ends with '/'
-pub fn normalize_dir(dir: &str) -> String {
-    let mut dir = dir.to_string();
-    if !dir.ends_with('/') {
-        dir.push('/')
-    }
-
-    dir
-}
-
 /// Join two paths and normalize the output dir.
 ///
 /// The output dir is always ends with `/`. e.g.
@@ -44,8 +34,42 @@ pub fn normalize_dir(dir: &str) -> String {
 pub fn join_dir(parent: &str, child: &str) -> String {
     // Always adds a `/` to the output path.
     let output = format!("{parent}/{child}/");
-    // We call opendal's normalize_root which keep the last `/`.
-    opendal::raw::normalize_root(&output)
+    normalize_dir(&output)
+}
+
+/// Modified from the `opendal::raw::normalize_root`
+///
+/// # The different
+///
+/// It doesn't always append `/` ahead of the path,
+/// It only keeps `/` ahead if the original path starts with `/`.
+///
+/// Make sure the directory is normalized to style like `abc/def/`.
+///
+/// # Normalize Rules
+///
+/// - All whitespace will be trimmed: ` abc/def ` => `abc/def`
+/// - All leading / will be trimmed: `///abc` => `abc`
+/// - Internal // will be replaced by /: `abc///def` => `abc/def`
+/// - Empty path will be `/`: `` => `/`
+/// - **(Removed❗️)** ~~Add leading `/` if not starts with: `abc/` => `/abc/`~~
+/// - Add trailing `/` if not ends with: `/abc` => `/abc/`
+///
+/// Finally, we will got path like `/path/to/root/`.
+pub fn normalize_dir(v: &str) -> String {
+    let has_root = v.starts_with('/');
+    let mut v = v
+        .split('/')
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<&str>>()
+        .join("/");
+    if has_root {
+        v.insert(0, '/');
+    }
+    if !v.ends_with('/') {
+        v.push('/')
+    }
+    v
 }
 
 /// Push `child` to `parent` dir and normalize the output path.
@@ -89,7 +113,7 @@ mod tests {
         assert_eq!("/", join_dir("", "/"));
         assert_eq!("/", join_dir("/", "/"));
         assert_eq!("/a/", join_dir("/a", ""));
-        assert_eq!("/a/b/c/", join_dir("a/b", "c"));
+        assert_eq!("a/b/c/", join_dir("a/b", "c"));
         assert_eq!("/a/b/c/", join_dir("/a/b", "c"));
         assert_eq!("/a/b/c/", join_dir("/a/b", "c/"));
         assert_eq!("/a/b/c/", join_dir("/a/b", "/c/"));
