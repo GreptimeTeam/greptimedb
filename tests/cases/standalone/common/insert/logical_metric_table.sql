@@ -6,7 +6,6 @@ INSERT INTO t1 VALUES (0, 0, 'host1'), (1, 1, 'host2');
 
 SELECT * from t1;
 
--- TODO(ruihang): fix this. t2 should not contains data from t1
 CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
 
 SELECT * from t2;
