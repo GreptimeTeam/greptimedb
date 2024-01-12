@@ -233,7 +233,7 @@ pub async fn show_tables(
 pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<Output> {
     let variable = stmt.variable.to_string().to_uppercase();
     let value = match variable.as_str() {
-        "SYSTEM_TIME_ZONE" => get_timezone(None).to_string(),
+        "SYSTEM_TIME_ZONE" | "SYSTEM_TIMEZONE" => get_timezone(None).to_string(),
         "TIME_ZONE" | "TIMEZONE" => query_ctx.timezone().to_string(),
         _ => return UnsupportedVariableSnafu { name: variable }.fail(),
     };
@@ -545,13 +545,18 @@ mod test {
     use common_query::Output;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use common_time::timestamp::TimeUnit;
+    use common_time::Timezone;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt32Vector, VectorRef};
+    use session::context::QueryContextBuilder;
     use snafu::ResultExt;
+    use sql::ast::{Ident, ObjectName};
+    use sql::statements::show::ShowVariables;
     use table::test_util::MemTable;
     use table::TableRef;
 
+    use super::show_variable;
     use crate::error;
     use crate::error::Result;
     use crate::sql::{
@@ -623,5 +628,45 @@ mod test {
     ) -> TableRef {
         let record_batch = RecordBatch::new(table_schema, data).unwrap();
         MemTable::table(table_name, record_batch)
+    }
+
+    #[test]
+    fn test_show_variable() {
+        assert_eq!(
+            exec_show_variable("SYSTEM_TIME_ZONE", "Asia/Shanghai").unwrap(),
+            "UTC"
+        );
+        assert_eq!(
+            exec_show_variable("SYSTEM_TIMEZONE", "Asia/Shanghai").unwrap(),
+            "UTC"
+        );
+        assert_eq!(
+            exec_show_variable("TIME_ZONE", "Asia/Shanghai").unwrap(),
+            "Asia/Shanghai"
+        );
+        assert_eq!(
+            exec_show_variable("TIMEZONE", "Asia/Shanghai").unwrap(),
+            "Asia/Shanghai"
+        );
+        assert!(exec_show_variable("TIME ZONE", "Asia/Shanghai").is_err());
+        assert!(exec_show_variable("SYSTEM TIME ZONE", "Asia/Shanghai").is_err());
+    }
+
+    fn exec_show_variable(variable: &str, tz: &str) -> Result<String> {
+        let stmt = ShowVariables {
+            variable: ObjectName(vec![Ident::new(variable)]),
+        };
+        let ctx = QueryContextBuilder::default()
+            .timezone(Timezone::from_tz_string(tz).unwrap())
+            .build();
+        match show_variable(stmt, ctx) {
+            Ok(Output::RecordBatches(record)) => {
+                let record = record.take().first().cloned().unwrap();
+                let data = record.column(0);
+                Ok(data.get(0).to_string())
+            }
+            Ok(_) => unreachable!(),
+            Err(e) => Err(e),
+        }
     }
 }

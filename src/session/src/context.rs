@@ -105,17 +105,14 @@ impl QueryContext {
             .build()
     }
 
-    #[inline]
     pub fn current_schema(&self) -> &str {
         &self.current_schema
     }
 
-    #[inline]
     pub fn current_catalog(&self) -> &str {
         &self.current_catalog
     }
 
-    #[inline]
     pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
         &*self.sql_dialect
     }
@@ -126,22 +123,18 @@ impl QueryContext {
         build_db_string(catalog, schema)
     }
 
-    #[inline]
     pub fn timezone(&self) -> Timezone {
         self.timezone.load().as_ref().clone()
     }
 
-    #[inline]
     pub fn current_user(&self) -> Option<UserInfoRef> {
         self.current_user.load().as_ref().clone()
     }
 
-    #[inline]
     pub fn set_current_user(&self, user: Option<UserInfoRef>) {
         let _ = self.current_user.swap(Arc::new(user));
     }
 
-    #[inline]
     pub fn set_timezone(&self, timezone: Timezone) {
         let _ = self.timezone.swap(Arc::new(timezone));
     }
