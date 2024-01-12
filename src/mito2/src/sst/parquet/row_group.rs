@@ -29,11 +29,11 @@ use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
 use store_api::storage::RegionId;
 
-use super::helper::fetch_byte_ranges;
-use crate::cache::file_cache::IndexKey;
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheManagerRef, PageKey, PageValue};
 use crate::metrics::READ_STAGE_ELAPSED;
 use crate::sst::file::FileId;
+use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::page_reader::CachedPageReader;
 
 /// An in-memory collection of column chunks
@@ -228,7 +228,7 @@ impl<'a> InMemoryRowGroup<'a> {
     /// Try to fetch data from WriteCache,
     /// if not in WriteCache, fetch data from object store directly.
     async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        let key = (self.region_id, self.file_id);
+        let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
         match self.fetch_ranges_from_write_cache(key, ranges).await {
             Some(data) => Ok(data),
             None => {

@@ -102,7 +102,8 @@ impl AccessLayer {
         request: SstWriteRequest,
         write_opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
-        let path = location::sst_file_path(&self.region_dir, request.file_id);
+        let file_path = location::sst_file_path(&self.region_dir, request.file_id);
+        let index_file_path = location::index_file_path(&self.region_dir, request.file_id);
         let region_id = request.metadata.region_id;
 
         let sst_info = if let Some(write_cache) = request.cache_manager.write_cache() {
@@ -114,7 +115,8 @@ impl AccessLayer {
                         metadata: request.metadata,
                         source: request.source,
                         storage: request.storage,
-                        upload_path: path,
+                        upload_path: file_path,
+                        index_upload_path: index_file_path,
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
@@ -122,7 +124,8 @@ impl AccessLayer {
                 .await?
         } else {
             // Write cache is disabled.
-            let mut writer = ParquetWriter::new(path, request.metadata, self.object_store.clone());
+            let mut writer =
+                ParquetWriter::new(file_path, request.metadata, self.object_store.clone());
             writer.write_all(request.source, write_opts).await?
         };
 

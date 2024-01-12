@@ -25,10 +25,10 @@ use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::RegionId;
 
-use super::file_cache::IndexKey;
 use crate::access_layer::new_fs_object_store;
-use crate::cache::file_cache::{FileCache, FileCacheRef, IndexValue};
+use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
 use crate::metrics::{FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
 use crate::read::Source;
@@ -78,6 +78,11 @@ impl WriteCache {
         Self::new(local_store, object_store_manager, cache_capacity).await
     }
 
+    /// Returns the file cache of the write cache.
+    pub(crate) fn file_cache(&self) -> FileCacheRef {
+        self.file_cache.clone()
+    }
+
     /// Writes SST to the cache and then uploads it to the remote object store.
     pub async fn write_and_upload_sst(
         &self,
@@ -90,11 +95,11 @@ impl WriteCache {
 
         let region_id = request.metadata.region_id;
         let file_id = request.file_id;
+        let parquet_key = IndexKey::new(region_id, file_id, FileType::Parquet);
 
-        let cache_path = self.file_cache.cache_file_path((region_id, file_id));
         // Write to FileCache.
         let mut writer = ParquetWriter::new(
-            cache_path.clone(),
+            self.file_cache.cache_file_path(parquet_key),
             request.metadata,
             self.file_cache.local_store(),
         );
@@ -109,8 +114,36 @@ impl WriteCache {
             return Ok(None);
         };
 
+        let parquet_path = &request.upload_path;
+        let remote_store = &request.remote_store;
+        self.upload(parquet_key, parquet_path, remote_store).await?;
+
+        if sst_info.inverted_index_available {
+            let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
+            let puffin_path = &request.index_upload_path;
+            self.upload(puffin_key, puffin_path, remote_store).await?;
+        }
+
+        Ok(Some(sst_info))
+    }
+
+    /// Uploads a Parquet file or a Puffin file to the remote object store.
+    async fn upload(
+        &self,
+        index_key: IndexKey,
+        upload_path: &str,
+        remote_store: &ObjectStore,
+    ) -> Result<()> {
+        let region_id = index_key.region_id;
+        let file_id = index_key.file_id;
+        let file_type = index_key.file_type;
+        let cache_path = self.file_cache.cache_file_path(index_key);
+
         let timer = FLUSH_ELAPSED
-            .with_label_values(&["upload_sst"])
+            .with_label_values(&[match file_type {
+                FileType::Parquet => "upload_parquet",
+                FileType::Puffin => "upload_puffin",
+            }])
             .start_timer();
 
         let reader = self
@@ -120,17 +153,20 @@ impl WriteCache {
             .await
             .context(error::OpenDalSnafu)?;
 
-        let upload_path = request.upload_path;
-        let mut writer = request
-            .remote_store
-            .writer_with(&upload_path)
+        let mut writer = remote_store
+            .writer_with(upload_path)
             .buffer(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
             .await
             .context(error::OpenDalSnafu)?;
 
-        let bytes_written = futures::io::copy(reader, &mut writer)
-            .await
-            .context(error::UploadSstSnafu { region_id, file_id })?;
+        let bytes_written =
+            futures::io::copy(reader, &mut writer)
+                .await
+                .context(error::UploadSnafu {
+                    region_id,
+                    file_id,
+                    file_type,
+                })?;
 
         // Must close to upload all data.
         writer.close().await.context(error::OpenDalSnafu)?;
@@ -145,18 +181,13 @@ impl WriteCache {
             timer.stop_and_record()
         );
 
+        let index_value = IndexValue {
+            file_size: bytes_written as _,
+        };
         // Register to file cache
-        let file_size = sst_info.file_size as u32;
-        self.file_cache
-            .put((region_id, file_id), IndexValue { file_size })
-            .await;
+        self.file_cache.put(index_key, index_value).await;
 
-        Ok(Some(sst_info))
-    }
-
-    /// Returns the file cache of the write cache.
-    pub(crate) fn file_cache(&self) -> FileCacheRef {
-        self.file_cache.clone()
+        Ok(())
     }
 }
 
@@ -168,6 +199,8 @@ pub struct SstUploadRequest {
     pub storage: Option<String>,
     /// Path to upload the file.
     pub upload_path: String,
+    /// Path to upload the index file.
+    pub index_upload_path: String,
     /// Remote object store to upload.
     pub remote_store: ObjectStore,
 }
@@ -186,7 +219,7 @@ mod tests {
     use crate::cache::file_cache::{self, FileCache};
     use crate::cache::test_util::new_fs_store;
     use crate::sst::file::FileId;
-    use crate::sst::location::sst_file_path;
+    use crate::sst::location::{index_file_path, sst_file_path};
     use crate::test_util::sst_util::{
         new_batch_by_range, new_source, sst_file_handle, sst_region_metadata,
     };
@@ -200,6 +233,7 @@ mod tests {
         let mock_store = env.init_object_store_manager();
         let file_id = FileId::random();
         let upload_path = sst_file_path("test", file_id);
+        let index_upload_path = index_file_path("test", file_id);
 
         // Create WriteCache
         let local_dir = create_temp_dir("");
@@ -228,6 +262,7 @@ mod tests {
             source,
             storage: None,
             upload_path: upload_path.clone(),
+            index_upload_path,
             remote_store: mock_store.clone(),
         };
 
@@ -244,7 +279,7 @@ mod tests {
             .unwrap();
 
         // Check write cache contains the key
-        let key = (region_id, file_id);
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
         assert!(write_cache.file_cache.contains_key(&key));
 
         // Check file data

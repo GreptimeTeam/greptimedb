@@ -23,6 +23,7 @@ use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::file_cache::FileCacheRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::read::projection::ProjectionMapper;
@@ -233,9 +234,17 @@ impl ScanRegion {
 
     /// Use the latest schema to build the index applier.
     fn build_index_applier(&self) -> Option<SstIndexApplierRef> {
+        let file_cache = || -> Option<FileCacheRef> {
+            let cache_manager = self.cache_manager.as_ref()?;
+            let write_cache = cache_manager.write_cache()?;
+            let file_cache = write_cache.file_cache();
+            Some(file_cache)
+        }();
+
         SstIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
+            file_cache,
             self.version.metadata.as_ref(),
         )
         .build(&self.request.filters)

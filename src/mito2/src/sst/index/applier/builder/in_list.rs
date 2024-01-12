@@ -64,7 +64,7 @@ mod tests {
     fn test_collect_in_list_basic() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         let in_list = InList {
             expr: Box::new(tag_column()),
@@ -88,7 +88,7 @@ mod tests {
     fn test_collect_in_list_negated() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         let in_list = InList {
             expr: Box::new(tag_column()),
@@ -104,7 +104,7 @@ mod tests {
     fn test_collect_in_list_field_column() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         let in_list = InList {
             expr: Box::new(field_column()),
@@ -120,7 +120,7 @@ mod tests {
     fn test_collect_in_list_type_mismatch() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         let in_list = InList {
             expr: Box::new(tag_column()),
@@ -137,7 +137,7 @@ mod tests {
     fn test_collect_in_list_nonexistent_column() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         let in_list = InList {
             expr: Box::new(nonexistent_column()),
