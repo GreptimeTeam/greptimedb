@@ -15,7 +15,6 @@
 //! Datanode implementation.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -45,11 +44,7 @@ use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::{join_dir, normalize_dir};
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
-use servers::grpc::builder::GrpcServerBuilder;
-use servers::grpc::GrpcServerConfig;
-use servers::http::HttpServerBuilder;
-use servers::metrics_handler::MetricsHandler;
-use servers::server::{start_server, ServerHandler, ServerHandlers};
+use servers::server::{start_server, ServerHandlers};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
@@ -62,8 +57,8 @@ use tokio::sync::Notify;
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
     BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
-    MissingNodeIdSnafu, OpenLogStoreSnafu, ParseAddrSnafu, Result, RuntimeResourceSnafu,
-    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
+    MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
+    ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -75,8 +70,6 @@ use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store;
 
 const OPEN_REGION_PARALLELISM: usize = 16;
-const REGION_SERVER_SERVICE_NAME: &str = "REGION_SERVER_SERVICE";
-const DATANODE_HTTP_SERVICE_NAME: &str = "DATANODE_HTTP_SERVICE";
 
 /// Datanode service.
 pub struct Datanode {
@@ -129,6 +122,10 @@ impl Datanode {
         }
     }
 
+    pub fn setup_services(&mut self, services: ServerHandlers) {
+        self.services = services;
+    }
+
     /// Start services of datanode. This method call will block until services are shutdown.
     pub async fn start_services(&mut self) -> Result<()> {
         let _ = future::try_join_all(self.services.values().map(start_server))
@@ -173,8 +170,6 @@ pub struct DatanodeBuilder {
     plugins: Plugins,
     meta_client: Option<MetaClient>,
     kv_backend: Option<KvBackendRef>,
-    enable_region_server_service: bool,
-    enable_http_service: bool,
 }
 
 impl DatanodeBuilder {
@@ -186,8 +181,6 @@ impl DatanodeBuilder {
             plugins,
             meta_client: None,
             kv_backend: None,
-            enable_region_server_service: false,
-            enable_http_service: false,
         }
     }
 
@@ -201,20 +194,6 @@ impl DatanodeBuilder {
     pub fn with_kv_backend(self, kv_backend: KvBackendRef) -> Self {
         Self {
             kv_backend: Some(kv_backend),
-            ..self
-        }
-    }
-
-    pub fn enable_region_server_service(self) -> Self {
-        Self {
-            enable_region_server_service: true,
-            ..self
-        }
-    }
-
-    pub fn enable_http_service(self) -> Self {
-        Self {
-            enable_http_service: true,
             ..self
         }
     }
@@ -269,8 +248,6 @@ impl DatanodeBuilder {
             None
         };
 
-        let services = self.create_datanode_services(&region_server)?;
-
         let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
             Some(self.opts.storage.data_home.clone()),
             mode,
@@ -290,7 +267,7 @@ impl DatanodeBuilder {
                 .context(StartServerSnafu)?;
 
         Ok(Datanode {
-            services,
+            services: HashMap::new(),
             heartbeat_task,
             region_server,
             greptimedb_telemetry_task,
@@ -299,66 +276,6 @@ impl DatanodeBuilder {
             plugins: self.plugins.clone(),
             export_metrics_task,
         })
-    }
-
-    fn create_datanode_services(&self, region_server: &RegionServer) -> Result<ServerHandlers> {
-        let mut services = HashMap::new();
-
-        if self.enable_region_server_service {
-            services.insert(
-                REGION_SERVER_SERVICE_NAME.to_string(),
-                self.create_region_server_service(region_server)?,
-            );
-        }
-
-        if self.enable_http_service {
-            services.insert(
-                DATANODE_HTTP_SERVICE_NAME.to_string(),
-                self.create_http_service()?,
-            );
-        }
-
-        Ok(services)
-    }
-
-    fn create_region_server_service(&self, region_server: &RegionServer) -> Result<ServerHandler> {
-        let opts = &self.opts;
-
-        let config = GrpcServerConfig {
-            max_recv_message_size: opts.rpc_max_recv_message_size.as_bytes() as usize,
-            max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
-        };
-
-        let server = Box::new(
-            GrpcServerBuilder::new(region_server.runtime())
-                .config(config)
-                .flight_handler(Arc::new(region_server.clone()))
-                .region_server_handler(Arc::new(region_server.clone()))
-                .build(),
-        );
-
-        let addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
-            addr: &opts.rpc_addr,
-        })?;
-
-        Ok((server, addr))
-    }
-
-    fn create_http_service(&self) -> Result<ServerHandler> {
-        let opts = &self.opts;
-
-        let server = Box::new(
-            HttpServerBuilder::new(opts.http.clone())
-                .with_metrics_handler(MetricsHandler)
-                .with_greptime_config_options(opts.to_toml_string())
-                .build(),
-        );
-
-        let addr = opts.http.addr.parse().context(ParseAddrSnafu {
-            addr: &opts.http.addr,
-        })?;
-
-        Ok((server, addr))
     }
 
     #[cfg(test)]

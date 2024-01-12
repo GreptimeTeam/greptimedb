@@ -60,7 +60,7 @@ impl Services {
             max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
         };
 
-        Ok(GrpcServerBuilder::new(grpc_runtime).config(grpc_config))
+        Ok(GrpcServerBuilder::new(grpc_config, grpc_runtime))
     }
 
     pub async fn build<T, U>(&self, opts: T, instance: Arc<U>) -> Result<ServerHandlers>
@@ -102,9 +102,8 @@ impl Services {
             );
             let grpc_server = builder
                 .database_handler(greptime_request_handler.clone())
-                .prometheus_handler(instance.clone())
-                .otlp_handler(instance.clone())
-                .user_provider(user_provider.clone())
+                .prometheus_handler(instance.clone(), user_provider.clone())
+                .otlp_handler(instance.clone(), user_provider.clone())
                 .flight_handler(Arc::new(greptime_request_handler))
                 .build();
 

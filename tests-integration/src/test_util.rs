@@ -511,12 +511,10 @@ pub async fn setup_grpc_server_with(
     let flight_handler = Arc::new(greptime_request_handler.clone());
 
     let fe_grpc_server = Arc::new(
-        GrpcServerBuilder::new(runtime)
-            .option_config(grpc_config)
+        GrpcServerBuilder::new(grpc_config.unwrap_or_default(), runtime)
             .database_handler(greptime_request_handler)
             .flight_handler(flight_handler)
-            .prometheus_handler(fe_instance_ref.clone())
-            .user_provider(user_provider)
+            .prometheus_handler(fe_instance_ref.clone(), user_provider)
             .build(),
     );
 

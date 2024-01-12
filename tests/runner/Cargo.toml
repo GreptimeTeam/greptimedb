@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-clap = { version = "4.0", features = ["derive"] }
+clap.workspace = true
 client.workspace = true
 common-base.workspace = true
 common-error.workspace = true
