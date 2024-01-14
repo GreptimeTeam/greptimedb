@@ -1,6 +1,6 @@
 ---
 Feature Name: Inverted Index for SST File
-Tracking Issue: TBD
+Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/2705
 Date: 2023-11-03
 Author: "Zhong Zhenchi <zhongzc_arch@outlook.com>"
 ---
