@@ -41,7 +41,7 @@ use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
@@ -131,9 +131,16 @@ impl StatementExecutor {
                 }
             }
 
-            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(arg)) => {
-                self.copy_database(to_copy_database_request(arg, &query_ctx)?)
-                    .await
+            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_database)) => {
+                match copy_database {
+                    CopyDatabase::To(arg) => {
+                        self.copy_database(to_copy_database_request(arg, &query_ctx)?)
+                            .await
+                    }
+                    CopyDatabase::From(_) => {
+                        todo!()
+                    }
+                }
             }
 
             Statement::CreateTable(stmt) => {

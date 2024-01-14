@@ -70,8 +70,8 @@ use servers::server::{start_server, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
-use sql::parser::{ParseOptions, ParserContext};
-use sql::statements::copy::CopyTable;
+use sql::parser::{ParseOptions, ParserContext, ParserContext};
+use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
@@ -487,8 +487,11 @@ pub fn check_permission(
                 validate_param(&copy_table_from.table_name, query_ctx)?
             }
         },
-        Statement::Copy(sql::statements::copy::Copy::CopyDatabase(stmt)) => {
-            validate_param(&stmt.database_name, query_ctx)?
+        Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_databse)) => {
+            match copy_databse {
+                CopyDatabase::To(stmt) => validate_param(&stmt.database_name, query_ctx)?,
+                CopyDatabase::From(stmt) => validate_param(&stmt.database_name, query_ctx)?,
+            }
         }
         Statement::TruncateTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
