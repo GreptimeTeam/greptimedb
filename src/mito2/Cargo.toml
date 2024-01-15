@@ -44,7 +44,6 @@ lazy_static = "1.4"
 log-store = { workspace = true, optional = true }
 memcomparable = "0.2"
 moka = { workspace = true, features = ["sync", "future"] }
-num_cpus = "1.13"
 object-store.workspace = true
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
@@ -60,6 +59,7 @@ smallvec.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 strum.workspace = true
+sysinfo.workspace = true
 table.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
