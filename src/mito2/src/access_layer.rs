@@ -128,7 +128,6 @@ impl AccessLayer {
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
-                    self.intermediate_manager.clone(),
                 )
                 .await?
         } else {

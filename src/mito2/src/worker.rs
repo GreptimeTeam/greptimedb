@@ -121,8 +121,15 @@ impl WorkerGroup {
         let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
             config.global_write_buffer_size.as_bytes() as usize,
         ));
+        let intermediate_manager =
+            IntermediateManager::init_fs(&config.inverted_index.intermediate_path).await?;
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let write_cache = write_cache_from_config(&config, object_store_manager.clone()).await?;
+        let write_cache = write_cache_from_config(
+            &config,
+            object_store_manager.clone(),
+            intermediate_manager.clone(),
+        )
+        .await?;
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
@@ -131,8 +138,6 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
-        let intermediate_manager =
-            IntermediateManager::init_fs(&config.inverted_index.intermediate_path).await?;
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -226,7 +231,14 @@ impl WorkerGroup {
             ))
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let write_cache = write_cache_from_config(&config, object_store_manager.clone()).await?;
+        let intermediate_manager =
+            IntermediateManager::init_fs(&config.inverted_index.intermediate_path).await?;
+        let write_cache = write_cache_from_config(
+            &config,
+            object_store_manager.clone(),
+            intermediate_manager.clone(),
+        )
+        .await?;
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
@@ -235,9 +247,6 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
-        let intermediate_manager =
-            IntermediateManager::init_fs(&config.inverted_index.intermediate_path).await?;
-
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -270,6 +279,7 @@ fn value_to_index(value: usize, num_workers: usize) -> usize {
 async fn write_cache_from_config(
     config: &MitoConfig,
     object_store_manager: ObjectStoreManagerRef,
+    intermediate_manager: IntermediateManager,
 ) -> Result<Option<WriteCacheRef>> {
     if !config.enable_experimental_write_cache {
         return Ok(None);
@@ -282,6 +292,7 @@ async fn write_cache_from_config(
         &config.experimental_write_cache_path,
         object_store_manager,
         config.experimental_write_cache_size,
+        intermediate_manager,
     )
     .await?;
     Ok(Some(Arc::new(cache)))

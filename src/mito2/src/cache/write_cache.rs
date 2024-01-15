@@ -47,6 +47,8 @@ pub struct WriteCache {
     file_cache: FileCacheRef,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
+    /// Intermediate manager for inverted index.
+    intermediate_manager: IntermediateManager,
 }
 
 pub type WriteCacheRef = Arc<WriteCache>;
@@ -58,6 +60,7 @@ impl WriteCache {
         local_store: ObjectStore,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
+        intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
         let file_cache = FileCache::new(local_store, cache_capacity);
         file_cache.recover().await?;
@@ -65,6 +68,7 @@ impl WriteCache {
         Ok(Self {
             file_cache: Arc::new(file_cache),
             object_store_manager,
+            intermediate_manager,
         })
     }
 
@@ -73,11 +77,18 @@ impl WriteCache {
         cache_dir: &str,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
+        intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
         info!("Init write cache on {cache_dir}, capacity: {cache_capacity}");
 
         let local_store = new_fs_object_store(cache_dir).await?;
-        Self::new(local_store, object_store_manager, cache_capacity).await
+        Self::new(
+            local_store,
+            object_store_manager,
+            cache_capacity,
+            intermediate_manager,
+        )
+        .await
     }
 
     /// Returns the file cache of the write cache.
@@ -91,7 +102,6 @@ impl WriteCache {
         write_request: SstWriteRequest,
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
-        intermediate_manager: IntermediateManager,
     ) -> Result<Option<SstInfo>> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["write_sst"])
@@ -106,7 +116,7 @@ impl WriteCache {
             &write_request,
             write_opts,
             self.file_cache.cache_file_path(puffin_key),
-            intermediate_manager,
+            self.intermediate_manager.clone(),
             self.file_cache.local_store(),
         );
 
@@ -258,6 +268,7 @@ mod tests {
             local_store.clone(),
             object_store_manager,
             ReadableSize::mb(10),
+            intm_mgr,
         )
         .await
         .unwrap();
@@ -294,7 +305,7 @@ mod tests {
 
         // Write to cache and upload sst to mock remote store
         let sst_info = write_cache
-            .write_and_upload_sst(write_request, request, &write_opts, intm_mgr)
+            .write_and_upload_sst(write_request, request, &write_opts)
             .await
             .unwrap()
             .unwrap();
