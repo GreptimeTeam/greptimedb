@@ -244,6 +244,38 @@ mod tests {
     }
 
     #[test]
+    fn test_as_formatted_string() {
+        let d: DateTime = DateTime::new(1000);
+
+        assert_eq!(
+            "1970-01-01",
+            d.as_formatted_string("%Y-%m-%d", None).unwrap().unwrap()
+        );
+        assert_eq!(
+            "1970-01-01 00:00:01",
+            d.as_formatted_string("%Y-%m-%d %H:%M:%S", None)
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            "1970-01-01T00:00:01:000",
+            d.as_formatted_string("%Y-%m-%dT%H:%M:%S:%3f", None)
+                .unwrap()
+                .unwrap()
+        );
+
+        assert_eq!(
+            "1970-01-01T08:00:01:000",
+            d.as_formatted_string(
+                "%Y-%m-%dT%H:%M:%S:%3f",
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap()
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn test_from_max_date() {
         let date = Date::new(i32::MAX);
         let datetime = DateTime::from(date);

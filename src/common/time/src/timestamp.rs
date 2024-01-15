@@ -1181,6 +1181,33 @@ mod tests {
     }
 
     #[test]
+    fn test_as_formatted_string() {
+        let ts = Timestamp::new(1, TimeUnit::Millisecond);
+
+        assert_eq!(
+            "1970-01-01",
+            ts.as_formatted_string("%Y-%m-%d", None).unwrap()
+        );
+        assert_eq!(
+            "1970-01-01 00:00:00",
+            ts.as_formatted_string("%Y-%m-%d %H:%M:%S", None).unwrap()
+        );
+        assert_eq!(
+            "1970-01-01T00:00:00:001",
+            ts.as_formatted_string("%Y-%m-%dT%H:%M:%S:%3f", None)
+                .unwrap()
+        );
+        assert_eq!(
+            "1970-01-01T08:00:00:001",
+            ts.as_formatted_string(
+                "%Y-%m-%dT%H:%M:%S:%3f",
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn test_from_arrow_time_unit() {
         assert_eq!(TimeUnit::Second, TimeUnit::from(ArrowTimeUnit::Second));
         assert_eq!(

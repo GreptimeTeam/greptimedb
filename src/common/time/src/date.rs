@@ -207,6 +207,37 @@ mod tests {
     }
 
     #[test]
+    fn test_as_formatted_string() {
+        let d: Date = 42.into();
+
+        assert_eq!(
+            "1970-02-12",
+            d.as_formatted_string("%Y-%m-%d", None).unwrap().unwrap()
+        );
+        assert_eq!(
+            "1970-02-12 00:00:00",
+            d.as_formatted_string("%Y-%m-%d %H:%M:%S", None)
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            "1970-02-12T00:00:00:000",
+            d.as_formatted_string("%Y-%m-%dT%H:%M:%S:%3f", None)
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            "1970-02-12T08:00:00:000",
+            d.as_formatted_string(
+                "%Y-%m-%dT%H:%M:%S:%3f",
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap()
+            .unwrap()
+        );
+    }
+
+    #[test]
     pub fn test_from() {
         let d: Date = 42.into();
         assert_eq!(42, d.val());
