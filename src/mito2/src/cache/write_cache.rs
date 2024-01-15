@@ -21,16 +21,13 @@ use common_telemetry::{debug, info};
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use store_api::metadata::RegionMetadataRef;
 
 use crate::access_layer::{new_fs_object_store, SstWriteRequest};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
 use crate::metrics::{FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
-use crate::read::Source;
-use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::{Indexer, IndexerBuilder};
+use crate::sst::index::IndexerBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -232,11 +229,7 @@ mod tests {
 
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::manager::ObjectStoreManager;
-    use object_store::services::Fs;
     use object_store::util::join_dir;
-    use object_store::ObjectStore;
-    use store_api::storage::RegionId;
 
     use super::*;
     use crate::cache::test_util::new_fs_store;
@@ -291,7 +284,7 @@ mod tests {
             cache_manager: Default::default(),
         };
 
-        let request = SstUploadRequest {
+        let upload_request = SstUploadRequest {
             upload_path: upload_path.clone(),
             index_upload_path: index_upload_path.clone(),
             remote_store: mock_store.clone(),
@@ -303,8 +296,8 @@ mod tests {
         };
 
         // Write to cache and upload sst to mock remote store
-        let sst_info = write_cache
-            .write_and_upload_sst(write_request, request, &write_opts)
+        write_cache
+            .write_and_upload_sst(write_request, upload_request, &write_opts)
             .await
             .unwrap()
             .unwrap();
