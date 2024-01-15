@@ -46,7 +46,7 @@ impl SchedulerEnv {
         let mut builder = Fs::default();
         builder.root(&path_str);
 
-        let intm_mgr = IntermediateManager::init_fs(format!("{path_str}/interm/"))
+        let intm_mgr = IntermediateManager::init_fs(join_dir(path_str, "interm"))
             .await
             .unwrap();
         let object_store = ObjectStore::new(builder).unwrap().finish();
