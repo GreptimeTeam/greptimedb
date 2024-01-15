@@ -20,7 +20,6 @@ use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_query::Output;
 use common_telemetry::{debug, error, info, tracing};
-use object_store::util::join_path;
 use object_store::Entry;
 use regex::Regex;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -145,7 +144,7 @@ impl StatementExecutor {
                 catalog_name: req.catalog_name.clone(),
                 schema_name: req.schema_name.clone(),
                 table_name: table_name.clone(),
-                location: join_path(&req.location, e.path()),
+                location: format!("{}/{}", req.location, e.path()),
                 with: req.with.clone(),
                 connection: req.connection.clone(),
                 pattern: None,
