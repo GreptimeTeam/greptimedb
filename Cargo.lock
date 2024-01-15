@@ -1915,6 +1915,7 @@ dependencies = [
 name = "common-recordbatch"
 version = "0.5.1"
 dependencies = [
+ "common-base",
  "common-error",
  "common-macro",
  "datafusion",
