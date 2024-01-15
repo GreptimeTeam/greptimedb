@@ -50,7 +50,7 @@ pub struct InfluxdbRecordsOutput {
 impl InfluxdbRecordsOutput {
     pub fn new(columns: Vec<String>, values: Vec<Vec<Value>>) -> Self {
         Self {
-            name: "".to_string(),
+            name: String::default(),
             columns,
             values,
         }

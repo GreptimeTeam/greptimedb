@@ -89,7 +89,7 @@ pub mod mock {
                 header: Some(ResponseHeader {
                     status: Some(PbStatus {
                         status_code: 0,
-                        err_msg: "".to_string(),
+                        err_msg: String::default(),
                     }),
                 }),
                 affected_rows: 0,

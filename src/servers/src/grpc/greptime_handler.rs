@@ -28,6 +28,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
 use common_telemetry::logging;
+use common_time::timezone::parse_timezone;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
@@ -161,10 +162,11 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
             }
         })
         .unwrap_or((DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME));
-
+    let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
     QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
+        .timezone(timezone)
         .build()
 }
 

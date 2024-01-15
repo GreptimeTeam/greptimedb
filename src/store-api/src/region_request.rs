@@ -501,14 +501,14 @@ mod tests {
     fn test_from_proto_location() {
         let proto_location = v1::AddColumnLocation {
             location_type: LocationType::First as i32,
-            after_column_name: "".to_string(),
+            after_column_name: String::default(),
         };
         let location = AddColumnLocation::try_from(proto_location).unwrap();
         assert_eq!(location, AddColumnLocation::First);
 
         let proto_location = v1::AddColumnLocation {
             location_type: 10,
-            after_column_name: "".to_string(),
+            after_column_name: String::default(),
         };
         AddColumnLocation::try_from(proto_location).unwrap_err();
 
@@ -562,7 +562,7 @@ mod tests {
                     }),
                     location: Some(v1::AddColumnLocation {
                         location_type: LocationType::First as i32,
-                        after_column_name: "".to_string(),
+                        after_column_name: String::default(),
                     }),
                 }],
             })),

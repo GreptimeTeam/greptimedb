@@ -258,7 +258,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
         catalog_name: CATALOG_NAME.to_string(),
         schema_name: SCHEMA_NAME.to_string(),
         table_name: table_name.to_string(),
-        desc: "".to_string(),
+        desc: String::default(),
         column_defs: vec![
             ColumnDef {
                 name: "VendorID".to_string(),

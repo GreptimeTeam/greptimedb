@@ -230,7 +230,7 @@ mod test {
         let result = check_response_header(Some(ResponseHeader {
             status: Some(PbStatus {
                 status_code: StatusCode::Success as u32,
-                err_msg: "".to_string(),
+                err_msg: String::default(),
             }),
         }));
         assert!(result.is_ok());
@@ -238,7 +238,7 @@ mod test {
         let result = check_response_header(Some(ResponseHeader {
             status: Some(PbStatus {
                 status_code: u32::MAX,
-                err_msg: "".to_string(),
+                err_msg: String::default(),
             }),
         }));
         assert!(matches!(

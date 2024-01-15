@@ -395,7 +395,7 @@ impl IntervalFormat {
             return "PT0S".to_string();
         }
         let fract_str = match self.microseconds {
-            0 => "".to_string(),
+            0 => String::default(),
             _ => format!(".{:06}", self.microseconds)
                 .trim_end_matches('0')
                 .to_string(),
@@ -446,7 +446,7 @@ impl IntervalFormat {
         if self.is_zero() {
             return "00:00:00".to_string();
         }
-        let mut result = "".to_string();
+        let mut result = String::default();
         if self.has_year_month() {
             if self.years != 0 {
                 result.push_str(&format!("{} year ", self.years));
@@ -464,7 +464,7 @@ impl IntervalFormat {
 
     /// get postgres time part(include hours, minutes, seconds, microseconds)
     fn get_postgres_time_part(&self) -> String {
-        let mut time_part = "".to_string();
+        let mut time_part = String::default();
         if self.has_time_part() {
             let sign = if !self.has_time_part_positive() {
                 "-"
@@ -516,7 +516,7 @@ fn get_time_part(
     is_time_part_positive: bool,
     is_only_time: bool,
 ) -> String {
-    let mut interval = "".to_string();
+    let mut interval = String::default();
     if is_time_part_positive && is_only_time {
         interval.push_str(&format!("{}:{:02}:{:02}", hours, mins, secs));
     } else {
