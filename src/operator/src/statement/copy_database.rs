@@ -93,7 +93,7 @@ impl StatementExecutor {
         Ok(Output::AffectedRows(exported_rows))
     }
 
-    /// Copies database from a given directory.
+    /// Imports data to database from a given location and returns total rows imported.
     #[tracing::instrument(skip_all)]
     pub(crate) async fn copy_database_from(
         &self,
@@ -167,4 +167,54 @@ async fn list_files_to_copy(req: &CopyDatabaseRequest, suffix: &str) -> error::R
         Some(pattern),
     );
     lister.list().await.context(error::ListObjectsSnafu)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use object_store::services::Fs;
+    use object_store::util::normalize_dir;
+    use object_store::ObjectStore;
+    use table::requests::CopyDatabaseRequest;
+
+    use crate::statement::copy_database::{list_files_to_copy, parse_file_name_to_copy};
+
+    #[tokio::test]
+    async fn test_list_files_and_parse_table_name() {
+        let dir = common_test_util::temp_dir::create_temp_dir("test_list_files_to_copy");
+        let store_dir = normalize_dir(dir.path().to_str().unwrap());
+        let mut builder = Fs::default();
+        let _ = builder.root(&store_dir);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        object_store.write("a.parquet", "").await.unwrap();
+        object_store.write("b.parquet", "").await.unwrap();
+        object_store.write("c.csv", "").await.unwrap();
+        object_store.write("d", "").await.unwrap();
+        object_store.write("e.f.parquet", "").await.unwrap();
+
+        let request = CopyDatabaseRequest {
+            catalog_name: "catalog_0".to_string(),
+            schema_name: "schema_0".to_string(),
+            location: store_dir,
+            with: [("FORMAT".to_string(), "parquet".to_string())]
+                .into_iter()
+                .collect(),
+            connection: Default::default(),
+            time_range: None,
+        };
+        let listed = list_files_to_copy(&request, ".parquet")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| parse_file_name_to_copy(&e).unwrap())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(
+            ["a".to_string(), "b".to_string(), "e.f".to_string()]
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            listed
+        );
+    }
 }
