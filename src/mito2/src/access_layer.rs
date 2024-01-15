@@ -132,6 +132,7 @@ impl AccessLayer {
                 )
                 .await?
         } else {
+            // Write cache is disabled.
             let indexer = Indexer::new(
                 &request,
                 write_opts,
@@ -139,7 +140,6 @@ impl AccessLayer {
                 self.intermediate_manager.clone(),
                 self.object_store.clone(),
             );
-            // Write cache is disabled.
             let mut writer = ParquetWriter::new(
                 file_path,
                 request.metadata,
