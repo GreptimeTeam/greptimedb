@@ -25,7 +25,6 @@ use paste::paste;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
-use super::LogicalPrimitiveType;
 use crate::data_type::DataType;
 use crate::duration::{
     DurationMicrosecond, DurationMillisecond, DurationNanosecond, DurationSecond,
@@ -34,6 +33,7 @@ use crate::error;
 use crate::prelude::{
     ConcreteDataType, LogicalTypeId, MutableVector, ScalarVectorBuilder, Value, ValueRef, Vector,
 };
+use crate::types::LogicalPrimitiveType;
 use crate::vectors::{
     DurationMicrosecondVector, DurationMicrosecondVectorBuilder, DurationMillisecondVector,
     DurationMillisecondVectorBuilder, DurationNanosecondVector, DurationNanosecondVectorBuilder,

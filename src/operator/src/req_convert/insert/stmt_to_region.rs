@@ -25,13 +25,13 @@ use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
 use table::TableRef;
 
-use super::semantic_type;
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
     ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
     TableNotFoundSnafu,
 };
 use crate::req_convert::common::partitioner::Partitioner;
+use crate::req_convert::insert::semantic_type;
 
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
