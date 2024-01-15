@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use std::path::Path;
+use std::str::FromStr;
 
 use common_datasource::file_format::Format;
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_query::Output;
-use common_telemetry::{debug, info, tracing};
+use common_telemetry::{debug, error, info, tracing};
+use object_store::util::join_path;
 use object_store::Entry;
 use regex::Regex;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -31,6 +33,7 @@ use crate::statement::StatementExecutor;
 
 pub(crate) const COPY_DATABASE_TIME_START_KEY: &str = "start_time";
 pub(crate) const COPY_DATABASE_TIME_END_KEY: &str = "end_time";
+pub(crate) const CONTINUE_ON_ERROR_KEY: &str = "continue_on_error";
 
 impl StatementExecutor {
     #[tracing::instrument(skip_all)]
@@ -45,7 +48,7 @@ impl StatementExecutor {
         );
 
         info!(
-            "Copy database {}.{} to dir: {},. time: {:?}",
+            "Copy database {}.{} to dir: {}, time: {:?}",
             req.catalog_name, req.schema_name, req.location, req.time_range
         );
         let table_names = self
@@ -119,14 +122,30 @@ impl StatementExecutor {
 
         let entries = list_files_to_copy(&req, suffix).await?;
 
+        let continue_on_error = req
+            .with
+            .get(CONTINUE_ON_ERROR_KEY)
+            .and_then(|v| bool::from_str(v).ok())
+            .unwrap_or(false);
         let mut rows_inserted = 0;
+
         for e in entries {
-            let table_name = parse_file_name_to_copy(&e)?;
+            let table_name = match parse_file_name_to_copy(&e) {
+                Ok(table_name) => table_name,
+                Err(err) => {
+                    if continue_on_error {
+                        error!(err; "Failed to import table from file: {:?}", e);
+                        continue;
+                    } else {
+                        return Err(err);
+                    }
+                }
+            };
             let req = CopyTableRequest {
                 catalog_name: req.catalog_name.clone(),
                 schema_name: req.schema_name.clone(),
-                table_name,
-                location: format!("{}/{}", req.location, e.path()),
+                table_name: table_name.clone(),
+                location: join_path(&req.location, e.path()),
                 with: req.with.clone(),
                 connection: req.connection.clone(),
                 pattern: None,
@@ -134,7 +153,19 @@ impl StatementExecutor {
                 timestamp_range: None,
             };
             debug!("Copy table, arg: {:?}", req);
-            rows_inserted += self.copy_table_from(req, ctx.clone()).await?;
+            match self.copy_table_from(req, ctx.clone()).await {
+                Ok(rows) => {
+                    rows_inserted += rows;
+                }
+                Err(err) => {
+                    if continue_on_error {
+                        error!(err; "Failed to import file to table: {}", table_name);
+                        continue;
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
         }
         Ok(Output::AffectedRows(rows_inserted))
     }
