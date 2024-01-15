@@ -142,7 +142,7 @@ impl<'a> IndexerBuilder<'a> {
         let creator = SstIndexCreator::new(
             self.file_path,
             self.file_id,
-            &self.metadata,
+            self.metadata,
             self.object_store,
             self.intermediate_manager,
             self.mem_threshold_index_create,
