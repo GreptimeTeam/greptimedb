@@ -168,7 +168,7 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
 pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWireResult<String> {
     // the index is managed from portal's parameters count so it's safe to
     // unwrap here.
-    let param_type = portal.statement().parameter_types().get(idx).unwrap();
+    let param_type = portal.statement.parameter_types.get(idx).unwrap();
     match param_type {
         &Type::VARCHAR | &Type::TEXT => Ok(format!(
             "'{}'",
@@ -218,7 +218,7 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
 
 pub(super) fn invalid_parameter_error(msg: &str, detail: Option<&str>) -> PgWireError {
     let mut error_info = ErrorInfo::new("ERROR".to_owned(), "22023".to_owned(), msg.to_owned());
-    error_info.set_detail(detail.map(|s| s.to_owned()));
+    error_info.detail = detail.map(|s| s.to_owned());
     PgWireError::UserError(Box::new(error_info))
 }
 
@@ -246,7 +246,7 @@ pub(super) fn parameters_to_scalar_values(
     let param_count = portal.parameter_len();
     let mut results = Vec::with_capacity(param_count);
 
-    let client_param_types = portal.statement().parameter_types();
+    let client_param_types = &portal.statement.parameter_types;
     let param_types = plan
         .get_param_types()
         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
