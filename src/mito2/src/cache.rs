@@ -15,12 +15,10 @@
 //! Cache for the engine.
 
 mod cache_size;
-// TODO(yingwen): Remove this after the write cache is ready.
-#[allow(unused)]
+
 pub(crate) mod file_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
-#[allow(unused)]
 pub(crate) mod write_cache;
 
 use std::mem;

@@ -181,6 +181,15 @@ impl MitoConfig {
 
         Ok(())
     }
+
+    /// Enable experimental write cache.
+    #[cfg(test)]
+    pub fn enable_write_cache(mut self, path: String, size: ReadableSize) -> Self {
+        self.enable_experimental_write_cache = true;
+        self.experimental_write_cache_path = path;
+        self.experimental_write_cache_size = size;
+        self
+    }
 }
 
 /// Operational mode for certain actions.

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use api::v1::value::ValueData;
 use api::v1::Rows;
+use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
@@ -554,4 +555,46 @@ async fn test_region_usage() {
 
     // region total usage
     assert_eq!(region_stat.disk_usage(), 4072);
+}
+
+#[tokio::test]
+async fn test_engine_with_write_cache() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new();
+    let path = env.data_home().to_str().unwrap().to_string();
+    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512));
+    let engine = env.create_engine(mito_config).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 3, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    flush_region(&engine, region_id, None).await;
+
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id, request).unwrap();
+
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 1.0     | 1970-01-01T00:00:01 |
+| a     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
