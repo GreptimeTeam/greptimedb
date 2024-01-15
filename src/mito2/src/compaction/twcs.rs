@@ -17,7 +17,6 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
@@ -32,6 +31,7 @@ use crate::access_layer::{AccessLayerRef, SstWriteRequest};
 use crate::cache::CacheManagerRef;
 use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
+use crate::config::MitoConfig;
 use crate::error::{self, CompactRegionSnafu};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::read::projection::ProjectionMapper;
@@ -123,13 +123,13 @@ impl TwcsPicker {
 impl Picker for TwcsPicker {
     fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
         let CompactionRequest {
+            engine_config,
             current_version,
             access_layer,
             request_sender,
             waiters,
             file_purger,
             start_time,
-            sst_write_buffer_size,
             cache_manager,
         } = req;
 
@@ -173,12 +173,12 @@ impl Picker for TwcsPicker {
             return None;
         }
         let task = TwcsCompactionTask {
+            engine_config,
             region_id,
             metadata: region_metadata,
             sst_layer: access_layer,
             outputs,
             expired_ssts,
-            sst_write_buffer_size,
             compaction_time_window: Some(time_window_size),
             request_sender,
             waiters,
@@ -234,12 +234,12 @@ fn find_latest_window_in_seconds<'a>(
 }
 
 pub(crate) struct TwcsCompactionTask {
+    pub engine_config: Arc<MitoConfig>,
     pub region_id: RegionId,
     pub metadata: RegionMetadataRef,
     pub sst_layer: AccessLayerRef,
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
-    pub sst_write_buffer_size: ReadableSize,
     pub compaction_time_window: Option<i64>,
     pub file_purger: FilePurgerRef,
     /// Request sender to notify the worker.
@@ -301,9 +301,20 @@ impl TwcsCompactionTask {
             );
 
             let write_opts = WriteOptions {
-                write_buffer_size: self.sst_write_buffer_size,
+                write_buffer_size: self.engine_config.sst_write_buffer_size,
                 ..Default::default()
             };
+            let create_inverted_index = self
+                .engine_config
+                .inverted_index
+                .create_on_compaction
+                .auto();
+            let mem_threshold_index_create = self
+                .engine_config
+                .inverted_index
+                .mem_threshold_on_create
+                .map(|m| m.as_bytes() as _);
+
             let metadata = self.metadata.clone();
             let sst_layer = self.sst_layer.clone();
             let region_id = self.region_id;
@@ -321,6 +332,8 @@ impl TwcsCompactionTask {
                             source: Source::Reader(reader),
                             cache_manager,
                             storage,
+                            create_inverted_index,
+                            mem_threshold_index_create,
                         },
                         &write_opts,
                     )

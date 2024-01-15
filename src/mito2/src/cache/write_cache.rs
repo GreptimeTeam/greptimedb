@@ -27,12 +27,14 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::access_layer::new_fs_object_store;
+use crate::access_layer::{new_fs_object_store, SstWriteRequest};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
 use crate::metrics::{FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
 use crate::read::Source;
 use crate::sst::file::FileId;
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -45,6 +47,8 @@ pub struct WriteCache {
     file_cache: FileCacheRef,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
+    /// Intermediate manager for inverted index.
+    intermediate_manager: IntermediateManager,
 }
 
 pub type WriteCacheRef = Arc<WriteCache>;
@@ -56,6 +60,7 @@ impl WriteCache {
         local_store: ObjectStore,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
+        intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
         let file_cache = FileCache::new(local_store, cache_capacity);
         file_cache.recover().await?;
@@ -63,6 +68,7 @@ impl WriteCache {
         Ok(Self {
             file_cache: Arc::new(file_cache),
             object_store_manager,
+            intermediate_manager,
         })
     }
 
@@ -71,11 +77,18 @@ impl WriteCache {
         cache_dir: &str,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
+        intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
         info!("Init write cache on {cache_dir}, capacity: {cache_capacity}");
 
         let local_store = new_fs_object_store(cache_dir).await?;
-        Self::new(local_store, object_store_manager, cache_capacity).await
+        Self::new(
+            local_store,
+            object_store_manager,
+            cache_capacity,
+            intermediate_manager,
+        )
+        .await
     }
 
     /// Returns the file cache of the write cache.
@@ -84,27 +97,42 @@ impl WriteCache {
     }
 
     /// Writes SST to the cache and then uploads it to the remote object store.
-    pub async fn write_and_upload_sst(
+    pub(crate) async fn write_and_upload_sst(
         &self,
-        request: SstUploadRequest,
+        write_request: SstWriteRequest,
+        upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["write_sst"])
             .start_timer();
 
-        let region_id = request.metadata.region_id;
-        let file_id = request.file_id;
+        let region_id = write_request.metadata.region_id;
+        let file_id = write_request.file_id;
         let parquet_key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
+
+        let indexer = IndexerBuilder {
+            create_inverted_index: write_request.create_inverted_index,
+            mem_threshold_index_create: write_request.mem_threshold_index_create,
+            file_id,
+            file_path: self.file_cache.cache_file_path(puffin_key),
+            metadata: &write_request.metadata,
+            row_group_size: write_opts.row_group_size,
+            object_store: self.file_cache.local_store(),
+            intermediate_manager: self.intermediate_manager.clone(),
+        }
+        .build();
 
         // Write to FileCache.
         let mut writer = ParquetWriter::new(
             self.file_cache.cache_file_path(parquet_key),
-            request.metadata,
+            write_request.metadata,
             self.file_cache.local_store(),
+            indexer,
         );
 
-        let sst_info = writer.write_all(request.source, write_opts).await?;
+        let sst_info = writer.write_all(write_request.source, write_opts).await?;
 
         timer.stop_and_record();
 
@@ -114,13 +142,13 @@ impl WriteCache {
             return Ok(None);
         };
 
-        let parquet_path = &request.upload_path;
-        let remote_store = &request.remote_store;
+        let parquet_path = &upload_request.upload_path;
+        let remote_store = &upload_request.remote_store;
         self.upload(parquet_key, parquet_path, remote_store).await?;
 
         if sst_info.inverted_index_available {
             let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
-            let puffin_path = &request.index_upload_path;
+            let puffin_path = &upload_request.index_upload_path;
             self.upload(puffin_key, puffin_path, remote_store).await?;
         }
 
@@ -193,10 +221,6 @@ impl WriteCache {
 
 /// Request to write and upload a SST.
 pub struct SstUploadRequest {
-    pub file_id: FileId,
-    pub metadata: RegionMetadataRef,
-    pub source: Source,
-    pub storage: Option<String>,
     /// Path to upload the file.
     pub upload_path: String,
     /// Path to upload the index file.
@@ -212,6 +236,7 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::manager::ObjectStoreManager;
     use object_store::services::Fs;
+    use object_store::util::join_dir;
     use object_store::ObjectStore;
     use store_api::storage::RegionId;
 
@@ -230,10 +255,14 @@ mod tests {
         // TODO(QuenKar): maybe find a way to create some object server for testing,
         // and now just use local file system to mock.
         let mut env = TestEnv::new();
+        let data_home = env.data_home().display().to_string();
         let mock_store = env.init_object_store_manager();
         let file_id = FileId::random();
         let upload_path = sst_file_path("test", file_id);
         let index_upload_path = index_file_path("test", file_id);
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&data_home, "intm"))
+            .await
+            .unwrap();
 
         // Create WriteCache
         let local_dir = create_temp_dir("");
@@ -243,6 +272,7 @@ mod tests {
             local_store.clone(),
             object_store_manager,
             ReadableSize::mb(10),
+            intm_mgr,
         )
         .await
         .unwrap();
@@ -256,13 +286,19 @@ mod tests {
             new_batch_by_range(&["b", "h"], 100, 200),
         ]);
 
-        let request = SstUploadRequest {
+        let write_request = SstWriteRequest {
             file_id,
             metadata,
             source,
             storage: None,
+            create_inverted_index: true,
+            mem_threshold_index_create: None,
+            cache_manager: Default::default(),
+        };
+
+        let request = SstUploadRequest {
             upload_path: upload_path.clone(),
-            index_upload_path,
+            index_upload_path: index_upload_path.clone(),
             remote_store: mock_store.clone(),
         };
 
@@ -273,7 +309,7 @@ mod tests {
 
         // Write to cache and upload sst to mock remote store
         let sst_info = write_cache
-            .write_and_upload_sst(request, &write_opts)
+            .write_and_upload_sst(write_request, request, &write_opts)
             .await
             .unwrap()
             .unwrap();
@@ -289,5 +325,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remote_data, cache_data);
+
+        // Check write cache contains the index key
+        let index_key = IndexKey::new(region_id, file_id, FileType::Puffin);
+        assert!(write_cache.file_cache.contains_key(&index_key));
+
+        let remote_index_data = mock_store.read(&index_upload_path).await.unwrap();
+        let cache_index_data = local_store
+            .read(&write_cache.file_cache.cache_file_path(index_key))
+            .await
+            .unwrap();
+        assert_eq!(remote_index_data, cache_index_data);
     }
 }

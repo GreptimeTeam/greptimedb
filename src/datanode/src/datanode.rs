@@ -41,7 +41,7 @@ use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
-use object_store::util::{join_dir, normalize_dir};
+use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::{start_server, ServerHandlers};
@@ -374,19 +374,11 @@ impl DatanodeBuilder {
     async fn build_mito_engine(
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
-        mut config: MitoConfig,
+        config: MitoConfig,
     ) -> Result<MitoEngine> {
-        // Sets write cache path if it is empty.
-        if config.experimental_write_cache_path.is_empty() {
-            config.experimental_write_cache_path = join_dir(&opts.storage.data_home, "write_cache");
-            info!(
-                "Sets write cache path to {}",
-                config.experimental_write_cache_path
-            );
-        }
-
         let mito_engine = match &opts.wal {
             WalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
+                &opts.storage.data_home,
                 config,
                 Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
                     .await?,
@@ -394,7 +386,9 @@ impl DatanodeBuilder {
             )
             .await
             .context(BuildMitoEngineSnafu)?,
+
             WalConfig::Kafka(kafka_config) => MitoEngine::new(
+                &opts.storage.data_home,
                 config,
                 Self::build_kafka_log_store(kafka_config).await?,
                 object_store_manager,

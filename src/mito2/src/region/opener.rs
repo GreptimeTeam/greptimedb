@@ -45,6 +45,7 @@ use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
+use crate::sst::index::intermediate::IntermediateManager;
 use crate::wal::{EntryId, Wal};
 
 /// Builder to create a new [MitoRegion] or open an existing one.
@@ -58,6 +59,7 @@ pub(crate) struct RegionOpener {
     options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
+    intermediate_manager: IntermediateManager,
 }
 
 impl RegionOpener {
@@ -68,6 +70,7 @@ impl RegionOpener {
         memtable_builder: MemtableBuilderRef,
         object_store_manager: ObjectStoreManagerRef,
         scheduler: SchedulerRef,
+        intermediate_manager: IntermediateManager,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
@@ -79,6 +82,7 @@ impl RegionOpener {
             options: None,
             cache_manager: None,
             skip_wal_replay: false,
+            intermediate_manager,
         }
     }
 
@@ -170,7 +174,11 @@ impl RegionOpener {
             .options(options)
             .build();
         let version_control = Arc::new(VersionControl::new(version));
-        let access_layer = Arc::new(AccessLayer::new(self.region_dir, object_store));
+        let access_layer = Arc::new(AccessLayer::new(
+            self.region_dir,
+            object_store,
+            self.intermediate_manager,
+        ));
 
         Ok(MitoRegion {
             region_id,
@@ -240,7 +248,11 @@ impl RegionOpener {
 
         let region_id = self.region_id;
         let object_store = self.object_store(&region_options.storage)?.clone();
-        let access_layer = Arc::new(AccessLayer::new(self.region_dir.clone(), object_store));
+        let access_layer = Arc::new(AccessLayer::new(
+            self.region_dir.clone(),
+            object_store,
+            self.intermediate_manager.clone(),
+        ));
         let file_purger = Arc::new(LocalFilePurger::new(
             self.scheduler.clone(),
             access_layer.clone(),

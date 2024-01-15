@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error};
 pub use picker::CompactionPickerRef;
 use snafu::ResultExt;
@@ -44,6 +43,7 @@ use crate::sst::file_purger::FilePurgerRef;
 
 /// Region compaction request.
 pub struct CompactionRequest {
+    pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) current_version: VersionRef,
     pub(crate) access_layer: AccessLayerRef,
     /// Sender to send notification to the region worker.
@@ -53,8 +53,6 @@ pub struct CompactionRequest {
     pub(crate) file_purger: FilePurgerRef,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
-    /// Buffering threshold while writing SST files.
-    pub(crate) sst_write_buffer_size: ReadableSize,
     pub(crate) cache_manager: CacheManagerRef,
 }
 
@@ -331,13 +329,13 @@ impl CompactionStatus {
         let current_version = self.version_control.current().version;
         let start_time = Instant::now();
         let mut req = CompactionRequest {
+            engine_config,
             current_version,
             access_layer: self.access_layer.clone(),
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),
             start_time,
-            sst_write_buffer_size: engine_config.sst_write_buffer_size,
             cache_manager,
         };
 
@@ -363,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schedule_empty() {
-        let env = SchedulerEnv::new();
+        let env = SchedulerEnv::new().await;
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
@@ -432,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_on_finished() {
         let job_scheduler = Arc::new(VecScheduler::default());
-        let env = SchedulerEnv::new().scheduler(job_scheduler.clone());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();

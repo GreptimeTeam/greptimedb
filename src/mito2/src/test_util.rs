@@ -136,7 +136,8 @@ impl TestEnv {
         let object_store_manager = Arc::new(object_store_manager);
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());
-        MitoEngine::new(config, logstore, object_store_manager)
+        let data_home = self.data_home().display().to_string();
+        MitoEngine::new(&data_home, config, logstore, object_store_manager)
             .await
             .unwrap()
     }
@@ -145,8 +146,8 @@ impl TestEnv {
     pub async fn create_follower_engine(&mut self, config: MitoConfig) -> MitoEngine {
         let logstore = self.logstore.as_ref().unwrap().clone();
         let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
-
-        MitoEngine::new(config, logstore, object_store_manager)
+        let data_home = self.data_home().display().to_string();
+        MitoEngine::new(&data_home, config, logstore, object_store_manager)
             .await
             .unwrap()
     }
@@ -164,9 +165,19 @@ impl TestEnv {
         let object_store_manager = Arc::new(object_store_manager);
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());
-        MitoEngine::new_for_test(config, logstore, object_store_manager, manager, listener)
-            .await
-            .unwrap()
+
+        let data_home = self.data_home().display().to_string();
+
+        MitoEngine::new_for_test(
+            &data_home,
+            config,
+            logstore,
+            object_store_manager,
+            manager,
+            listener,
+        )
+        .await
+        .unwrap()
     }
 
     pub async fn create_engine_with_multiple_object_stores(
@@ -195,9 +206,18 @@ impl TestEnv {
         let object_store_manager = Arc::new(object_store_manager);
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());
-        MitoEngine::new_for_test(config, logstore, object_store_manager, manager, listener)
-            .await
-            .unwrap()
+        let data_home = self.data_home().display().to_string();
+
+        MitoEngine::new_for_test(
+            &data_home,
+            config,
+            logstore,
+            object_store_manager,
+            manager,
+            listener,
+        )
+        .await
+        .unwrap()
     }
 
     /// Reopen the engine.
@@ -205,6 +225,7 @@ impl TestEnv {
         engine.stop().await.unwrap();
 
         MitoEngine::new(
+            &self.data_home().display().to_string(),
             config,
             self.logstore.clone().unwrap(),
             self.object_store_manager.clone().unwrap(),
@@ -216,6 +237,7 @@ impl TestEnv {
     /// Open the engine.
     pub async fn open_engine(&mut self, config: MitoConfig) -> MitoEngine {
         MitoEngine::new(
+            &self.data_home().display().to_string(),
             config,
             self.logstore.clone().unwrap(),
             self.object_store_manager.clone().unwrap(),
@@ -231,9 +253,11 @@ impl TestEnv {
     }
 
     /// Creates a new [WorkerGroup] with specific config under this env.
-    pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
+    pub(crate) async fn create_worker_group(&self, mut config: MitoConfig) -> WorkerGroup {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
+        let data_home = self.data_home().display().to_string();
+        config.sanitize(&data_home).unwrap();
         WorkerGroup::start(
             Arc::new(config),
             Arc::new(log_store),

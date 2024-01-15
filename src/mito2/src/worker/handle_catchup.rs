@@ -54,6 +54,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     self.memtable_builder.clone(),
                     self.object_store_manager.clone(),
                     self.scheduler.clone(),
+                    self.intermediate_manager.clone(),
                 )
                 .cache(Some(self.cache_manager.clone()))
                 .options(region.version().options.clone())

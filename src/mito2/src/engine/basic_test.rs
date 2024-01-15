@@ -550,8 +550,8 @@ async fn test_region_usage() {
 
     let region_stat = region.region_usage().await;
     assert_eq!(region_stat.wal_usage, 0);
-    assert_eq!(region_stat.sst_usage, 2742);
+    assert_eq!(region_stat.sst_usage, 3006);
 
     // region total usage
-    assert_eq!(region_stat.disk_usage(), 3791);
+    assert_eq!(region_stat.disk_usage(), 4072);
 }
