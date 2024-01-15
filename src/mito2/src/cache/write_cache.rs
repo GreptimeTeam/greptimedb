@@ -14,18 +14,14 @@
 
 //! A write-through cache for remote object stores.
 
-use std::ops::Range;
 use std::sync::Arc;
 
-use api::v1::region;
-use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
 
 use crate::access_layer::{new_fs_object_store, SstWriteRequest};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
@@ -46,6 +42,7 @@ pub struct WriteCache {
     /// Local file cache.
     file_cache: FileCacheRef,
     /// Object store manager.
+    #[allow(dead_code)]
     object_store_manager: ObjectStoreManagerRef,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
@@ -231,7 +228,7 @@ pub struct SstUploadRequest {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::OpType;
+
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::manager::ObjectStoreManager;
@@ -241,14 +238,11 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::cache::file_cache::{self, FileCache};
     use crate::cache::test_util::new_fs_store;
     use crate::sst::file::FileId;
     use crate::sst::location::{index_file_path, sst_file_path};
-    use crate::test_util::sst_util::{
-        new_batch_by_range, new_source, sst_file_handle, sst_region_metadata,
-    };
-    use crate::test_util::{build_rows, new_batch_builder, CreateRequestBuilder, TestEnv};
+    use crate::test_util::sst_util::{new_batch_by_range, new_source, sst_region_metadata};
+    use crate::test_util::TestEnv;
 
     #[tokio::test]
     async fn test_write_and_upload_sst() {
