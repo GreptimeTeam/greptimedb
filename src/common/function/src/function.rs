@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use common_query::error::Result;
 use common_query::prelude::Signature;
+use common_time::timezone::get_timezone;
 use common_time::Timezone;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::VectorRef;
@@ -29,7 +30,7 @@ pub struct FunctionContext {
 impl Default for FunctionContext {
     fn default() -> Self {
         Self {
-            timezone: Timezone::from_tz_string("UTC").unwrap(),
+            timezone: get_timezone(None).clone(),
         }
     }
 }
