@@ -171,7 +171,7 @@ Please refer to [contribution guidelines](CONTRIBUTING.md) for more information.
 ## Acknowledgement
 
 - GreptimeDB uses [Apache Arrow™](https://arrow.apache.org/) as the memory model and [Apache Parquet™](https://parquet.apache.org/) as the persistent file format.
-- GreptimeDB's query engine is powered by [Apache Arrow DataFusion](https://github.com/apache/arrow-datafusion).
+- GreptimeDB's query engine is powered by [Apache Arrow DataFusion™](https://github.com/apache/arrow-datafusion).
 - [Apache OpenDAL™](https://opendal.apache.org) gives GreptimeDB a very general and elegant data access abstraction layer.
 - GreptimeDB's meta service is based on [etcd](https://etcd.io/).
 - GreptimeDB uses [RustPython](https://github.com/RustPython/RustPython) for experimental embedded python scripting.
