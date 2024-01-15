@@ -97,6 +97,7 @@ impl FilePurger for LocalFilePurger {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
+    use object_store::util::join_dir;
     use object_store::ObjectStore;
     use smallvec::SmallVec;
 
@@ -118,7 +119,7 @@ mod tests {
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
         let path = location::sst_file_path(sst_dir, sst_file_id);
-        let intm_mgr = IntermediateManager::init_fs(format!("{dir_path}/intm"))
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&dir_path, "intm"))
             .await
             .unwrap();
 
@@ -162,7 +163,7 @@ mod tests {
         builder.root(&dir_path);
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
-        let intm_mgr = IntermediateManager::init_fs(format!("{dir_path}/intm"))
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&dir_path, "intm"))
             .await
             .unwrap();
         let path = location::sst_file_path(sst_dir, sst_file_id);

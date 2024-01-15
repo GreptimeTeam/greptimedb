@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use object_store::services::Fs;
+use object_store::util::join_dir;
 use object_store::ObjectStore;
 use tokio::sync::mpsc::Sender;
 
@@ -46,7 +47,7 @@ impl SchedulerEnv {
         let mut builder = Fs::default();
         builder.root(&path_str);
 
-        let intm_mgr = IntermediateManager::init_fs(join_dir(path_str, "interm"))
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&path_str, "intm"))
             .await
             .unwrap();
         let object_store = ObjectStore::new(builder).unwrap().finish();

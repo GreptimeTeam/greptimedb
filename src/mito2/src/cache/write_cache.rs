@@ -222,6 +222,7 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::manager::ObjectStoreManager;
     use object_store::services::Fs;
+    use object_store::util::join_dir;
     use object_store::ObjectStore;
     use store_api::storage::RegionId;
 
@@ -245,7 +246,7 @@ mod tests {
         let file_id = FileId::random();
         let upload_path = sst_file_path("test", file_id);
         let index_upload_path = index_file_path("test", file_id);
-        let intm_mgr = IntermediateManager::init_fs(format!("{data_home}/intermediate"))
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&data_home, "intm"))
             .await
             .unwrap();
 
