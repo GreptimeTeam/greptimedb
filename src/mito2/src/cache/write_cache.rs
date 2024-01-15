@@ -42,7 +42,7 @@ pub struct WriteCache {
     /// Local file cache.
     file_cache: FileCacheRef,
     /// Object store manager.
-    #[allow(dead_code)]
+    #[allow(unused)]
     object_store_manager: ObjectStoreManagerRef,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
