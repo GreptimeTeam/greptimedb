@@ -17,7 +17,8 @@
 //! - Merges small immutable parts into a big immutable part
 
 use std::fmt;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::Arc;
 
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -26,13 +27,14 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableId, MemtableStats,
+    AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
+    MemtableRef, MemtableStats,
 };
 
 /// Memtable based on a merge tree.
 pub struct MergeTreeMemtable {
     id: MemtableId,
-    region_metadata: RegionMetadataRef,
+    metadata: RegionMetadataRef,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
@@ -42,12 +44,12 @@ impl MergeTreeMemtable {
     /// Returns a new memtable.
     pub fn new(
         id: MemtableId,
-        region_metadata: RegionMetadataRef,
+        metadata: RegionMetadataRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
     ) -> Self {
         Self {
             id,
-            region_metadata,
+            metadata,
             alloc_tracker: AllocTracker::new(write_buffer_manager),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
@@ -100,7 +102,7 @@ impl Memtable for MergeTreeMemtable {
         }
 
         let ts_type = self
-            .region_metadata
+            .metadata
             .time_index_column()
             .column_schema
             .data_type
@@ -113,5 +115,33 @@ impl Memtable for MergeTreeMemtable {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
         }
+    }
+}
+
+/// Builder to build a [MergeTreeMemtable].
+#[derive(Debug, Default)]
+pub struct MergeTreeMemtableBuilder {
+    id: AtomicU32,
+    write_buffer_manager: Option<WriteBufferManagerRef>,
+}
+
+impl MergeTreeMemtableBuilder {
+    /// Creates a new builder with specific `write_buffer_manager`.
+    pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>) -> Self {
+        Self {
+            id: AtomicU32::new(0),
+            write_buffer_manager,
+        }
+    }
+}
+
+impl MemtableBuilder for MergeTreeMemtableBuilder {
+    fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef {
+        let id = self.id.fetch_add(1, Ordering::Relaxed);
+        Arc::new(MergeTreeMemtable::new(
+            id,
+            metadata.clone(),
+            self.write_buffer_manager.clone(),
+        ))
     }
 }
