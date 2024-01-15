@@ -161,18 +161,17 @@ In addition, you may:
 
 ## License
 
-GreptimeDB uses the [Apache 2.0 license][1] to strike a balance between
+GreptimeDB uses the [Apache License 2.0 ](https://apache.org/licenses/LICENSE-2.0.txt) to strike a balance between
 open contributions and allowing you to use the software however you want.
-
-[1]: <https://github.com/greptimeTeam/greptimedb/blob/main/LICENSE>
 
 ## Contributing
 
 Please refer to [contribution guidelines](CONTRIBUTING.md) for more information.
 
 ## Acknowledgement
-- GreptimeDB uses [Apache Arrow](https://arrow.apache.org/) as the memory model and [Apache Parquet](https://parquet.apache.org/) as the persistent file format.
+
+- GreptimeDB uses [Apache Arrow™](https://arrow.apache.org/) as the memory model and [Apache Parquet™](https://parquet.apache.org/) as the persistent file format.
 - GreptimeDB's query engine is powered by [Apache Arrow DataFusion](https://github.com/apache/arrow-datafusion).
-- [Apache OpenDAL (incubating)](https://opendal.apache.org) gives GreptimeDB a very general and elegant data access abstraction layer.
+- [Apache OpenDAL™](https://opendal.apache.org) gives GreptimeDB a very general and elegant data access abstraction layer.
 - GreptimeDB's meta service is based on [etcd](https://etcd.io/).
 - GreptimeDB uses [RustPython](https://github.com/RustPython/RustPython) for experimental embedded python scripting.
