@@ -161,7 +161,7 @@ In addition, you may:
 
 ## License
 
-GreptimeDB uses the [Apache License 2.0 ](https://apache.org/licenses/LICENSE-2.0.txt) to strike a balance between
+GreptimeDB uses the [Apache License 2.0](https://apache.org/licenses/LICENSE-2.0.txt) to strike a balance between
 open contributions and allowing you to use the software however you want.
 
 ## Contributing
