@@ -41,6 +41,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to list {}.{}'s tables", catalog, schema))]
+    ListTables {
+        location: Location,
+        catalog: String,
+        schema: String,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to re-compile script due to internal error"))]
     CompileScriptInternal {
         location: Location,
@@ -270,9 +278,9 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
 
-            Error::ListCatalogs { source, .. } | Error::ListSchemas { source, .. } => {
-                source.status_code()
-            }
+            Error::ListCatalogs { source, .. }
+            | Error::ListSchemas { source, .. }
+            | Error::ListTables { source, .. } => source.status_code(),
 
             Error::OpenSystemCatalog { source, .. }
             | Error::CreateSystemCatalog { source, .. }

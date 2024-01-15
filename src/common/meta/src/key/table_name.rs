@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
@@ -24,7 +25,9 @@ use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
+use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
+use crate::rpc::KeyValue;
 use crate::table_name::TableName;
 
 #[derive(Debug, Clone, Copy)]
@@ -77,6 +80,14 @@ impl TableMetaKey for TableNameKey<'_> {
         )
         .into_bytes()
     }
+}
+
+/// Decodes `KeyValue` to ({table_name}, TableNameValue)
+pub fn table_decoder(kv: KeyValue) -> Result<(String, TableNameValue)> {
+    let table_name = TableNameKey::strip_table_name(kv.key())?;
+    let table_name_value = TableNameValue::try_from_raw_value(&kv.value)?;
+
+    Ok((table_name, table_name_value))
 }
 
 impl<'a> From<&'a TableName> for TableNameKey<'a> {
@@ -218,19 +229,18 @@ impl TableNameManager {
         &self,
         catalog: &str,
         schema: &str,
-    ) -> Result<Vec<(String, TableNameValue)>> {
+    ) -> BoxStream<'static, Result<(String, TableNameValue)>> {
         let key = TableNameKey::prefix_to_table(catalog, schema).into_bytes();
         let req = RangeRequest::new().with_prefix(key);
-        let resp = self.kv_backend.range(req).await?;
 
-        let mut res = Vec::with_capacity(resp.kvs.len());
-        for kv in resp.kvs {
-            res.push((
-                TableNameKey::strip_table_name(kv.key())?,
-                TableNameValue::try_from_raw_value(&kv.value)?,
-            ))
-        }
-        Ok(res)
+        let stream = PaginationStream::new(
+            self.kv_backend.clone(),
+            req,
+            DEFAULT_PAGE_SIZE,
+            Arc::new(table_decoder),
+        );
+
+        Box::pin(stream)
     }
 }
 
