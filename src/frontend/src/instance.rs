@@ -487,8 +487,8 @@ pub fn check_permission(
                 validate_param(&copy_table_from.table_name, query_ctx)?
             }
         },
-        Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_databse)) => {
-            match copy_databse {
+        Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_database)) => {
+            match copy_database {
                 CopyDatabase::To(stmt) => validate_param(&stmt.database_name, query_ctx)?,
                 CopyDatabase::From(stmt) => validate_param(&stmt.database_name, query_ctx)?,
             }
