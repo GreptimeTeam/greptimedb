@@ -194,10 +194,10 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Date(v) => row_writer.write_col(v.to_chrono_date())?,
                     // convert datetime and timestamp to timezone of current connection
                     Value::DateTime(v) => row_writer.write_col(
-                        v.to_chrono_datetime_with_timezone(Some(query_context.timezone())),
+                        v.to_chrono_datetime_with_timezone(Some(query_context.timezone().as_ref())),
                     )?,
                     Value::Timestamp(v) => row_writer.write_col(
-                        v.to_chrono_datetime_with_timezone(Some(query_context.timezone())),
+                        v.to_chrono_datetime_with_timezone(Some(query_context.timezone().as_ref())),
                     )?,
                     Value::Interval(v) => row_writer.write_col(v.to_iso8601_string())?,
                     Value::Duration(v) => row_writer.write_col(v.to_std_duration())?,
@@ -209,8 +209,9 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             ),
                         })
                     }
-                    Value::Time(v) => row_writer
-                        .write_col(v.to_timezone_aware_string(Some(query_context.timezone())))?,
+                    Value::Time(v) => row_writer.write_col(
+                        v.to_timezone_aware_string(Some(query_context.timezone().as_ref())),
+                    )?,
                     Value::Decimal128(v) => row_writer.write_col(v.to_string())?,
                 }
             }
