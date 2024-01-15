@@ -43,7 +43,7 @@ pub struct WriteCache {
     file_cache: FileCacheRef,
     /// Object store manager.
     #[allow(unused)]
-    /// Remove unused after implementing async write cache
+    /// TODO: Remove unused after implementing async write cache
     object_store_manager: ObjectStoreManagerRef,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
