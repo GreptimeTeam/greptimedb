@@ -16,6 +16,8 @@
 //! - Flushes mutable parts to immutable parts
 //! - Merges small immutable parts into a big immutable part
 
+mod tree;
+
 use std::fmt;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -26,6 +28,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::merge_tree::tree::{MergeTree, MergeTreePtr};
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
@@ -34,7 +37,7 @@ use crate::memtable::{
 /// Memtable based on a merge tree.
 pub struct MergeTreeMemtable {
     id: MemtableId,
-    metadata: RegionMetadataRef,
+    tree: MergeTreePtr,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
@@ -49,7 +52,7 @@ impl MergeTreeMemtable {
     ) -> Self {
         Self {
             id,
-            metadata,
+            tree: Arc::new(MergeTree::new(metadata)),
             alloc_tracker: AllocTracker::new(write_buffer_manager),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
@@ -102,6 +105,7 @@ impl Memtable for MergeTreeMemtable {
         }
 
         let ts_type = self
+            .tree
             .metadata
             .time_index_column()
             .column_schema
