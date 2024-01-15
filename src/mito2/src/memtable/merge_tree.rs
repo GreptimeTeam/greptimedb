@@ -34,6 +34,10 @@ use crate::memtable::{
     MemtableRef, MemtableStats,
 };
 
+/// Config for the merge tree memtable.
+#[derive(Debug, Default, Clone)]
+pub struct MergeTreeConfig {}
+
 /// Memtable based on a merge tree.
 pub struct MergeTreeMemtable {
     id: MemtableId,
@@ -49,6 +53,7 @@ impl MergeTreeMemtable {
         id: MemtableId,
         metadata: RegionMetadataRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
+        _config: &MergeTreeConfig,
     ) -> Self {
         Self {
             id,
@@ -127,6 +132,7 @@ impl Memtable for MergeTreeMemtable {
 pub struct MergeTreeMemtableBuilder {
     id: AtomicU32,
     write_buffer_manager: Option<WriteBufferManagerRef>,
+    config: MergeTreeConfig,
 }
 
 impl MergeTreeMemtableBuilder {
@@ -135,6 +141,7 @@ impl MergeTreeMemtableBuilder {
         Self {
             id: AtomicU32::new(0),
             write_buffer_manager,
+            config: MergeTreeConfig::default(),
         }
     }
 }
@@ -146,6 +153,7 @@ impl MemtableBuilder for MergeTreeMemtableBuilder {
             id,
             metadata.clone(),
             self.write_buffer_manager.clone(),
+            &self.config,
         ))
     }
 }
