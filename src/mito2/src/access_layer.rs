@@ -26,7 +26,7 @@ use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu
 use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::Indexer;
+use crate::sst::index::IndexerBuilder;
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -132,13 +132,17 @@ impl AccessLayer {
                 .await?
         } else {
             // Write cache is disabled.
-            let indexer = Indexer::new(
-                &request,
-                write_opts,
-                index_file_path,
-                self.intermediate_manager.clone(),
-                self.object_store.clone(),
-            );
+            let indexer = IndexerBuilder {
+                create_inverted_index: request.create_inverted_index,
+                mem_threshold_index_create: request.mem_threshold_index_create,
+                file_id,
+                file_path: index_file_path,
+                metadata: &request.metadata,
+                row_group_size: write_opts.row_group_size,
+                object_store: self.object_store.clone(),
+                intermediate_manager: self.intermediate_manager.clone(),
+            }
+            .build();
             let mut writer = ParquetWriter::new(
                 file_path,
                 request.metadata,

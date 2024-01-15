@@ -49,6 +49,13 @@ impl IntermediateManager {
     pub(crate) fn store(&self) -> &InstrumentedStore {
         &self.store
     }
+
+    #[cfg(test)]
+    pub(crate) fn new(store: object_store::ObjectStore) -> Self {
+        Self {
+            store: InstrumentedStore::new(store),
+        }
+    }
 }
 
 /// `IntermediateLocation` produces paths for intermediate files

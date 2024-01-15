@@ -34,7 +34,7 @@ use crate::metrics::{FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
 use crate::read::Source;
 use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::Indexer;
+use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -112,13 +112,17 @@ impl WriteCache {
         let parquet_key = IndexKey::new(region_id, file_id, FileType::Parquet);
         let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
 
-        let indexer = Indexer::new(
-            &write_request,
-            write_opts,
-            self.file_cache.cache_file_path(puffin_key),
-            self.intermediate_manager.clone(),
-            self.file_cache.local_store(),
-        );
+        let indexer = IndexerBuilder {
+            create_inverted_index: write_request.create_inverted_index,
+            mem_threshold_index_create: write_request.mem_threshold_index_create,
+            file_id,
+            file_path: self.file_cache.cache_file_path(puffin_key),
+            metadata: &write_request.metadata,
+            row_group_size: write_opts.row_group_size,
+            object_store: self.file_cache.local_store(),
+            intermediate_manager: self.intermediate_manager.clone(),
+        }
+        .build();
 
         // Write to FileCache.
         let mut writer = ParquetWriter::new(

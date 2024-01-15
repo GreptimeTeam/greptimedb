@@ -23,13 +23,12 @@ use std::num::NonZeroUsize;
 use common_telemetry::{debug, warn};
 use creator::SstIndexCreator;
 use object_store::ObjectStore;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::access_layer::SstWriteRequest;
 use crate::read::Batch;
 use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::parquet::WriteOptions;
 
 const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
 
@@ -49,59 +48,6 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    /// Sanity check for the write request and create a new [Indexer]
-    /// with inner [SstIndexCreator] if the request is valid.
-    pub(crate) fn new(
-        write_request: &SstWriteRequest,
-        opts: &WriteOptions,
-        file_path: String,
-        intermediate_manager: IntermediateManager,
-        object_store: ObjectStore,
-    ) -> Self {
-        let file_id = write_request.file_id;
-        let region_id = write_request.metadata.region_id;
-
-        if !write_request.create_inverted_index {
-            debug!(
-                "Skip creating index due to request, region_id: {}, file_id: {}",
-                region_id, file_id,
-            );
-            return Self::default();
-        }
-
-        if write_request.metadata.primary_key.is_empty() {
-            debug!(
-                "No tag columns, skip creating index, region_id: {}, file_id: {}",
-                region_id, file_id,
-            );
-            return Self::default();
-        }
-
-        let Some(row_group_size) = NonZeroUsize::new(opts.row_group_size) else {
-            warn!(
-                "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
-                region_id, file_id,
-            );
-            return Self::default();
-        };
-
-        let creator = SstIndexCreator::new(
-            file_path,
-            file_id,
-            &write_request.metadata,
-            object_store,
-            intermediate_manager,
-            write_request.mem_threshold_index_create,
-            row_group_size,
-        );
-
-        Self {
-            file_id,
-            region_id,
-            inner: Some(creator),
-        }
-    }
-
     /// Update the index with the given batch.
     pub async fn update(&mut self, batch: &Batch) {
         if let Some(creator) = self.inner.as_mut() {
@@ -151,5 +97,208 @@ impl Indexer {
                 );
             }
         }
+    }
+}
+
+pub(crate) struct IndexerBuilder<'a> {
+    pub(crate) create_inverted_index: bool,
+    pub(crate) mem_threshold_index_create: Option<usize>,
+    pub(crate) file_id: FileId,
+    pub(crate) file_path: String,
+    pub(crate) metadata: &'a RegionMetadataRef,
+    pub(crate) row_group_size: usize,
+    pub(crate) object_store: ObjectStore,
+    pub(crate) intermediate_manager: IntermediateManager,
+}
+
+impl<'a> IndexerBuilder<'a> {
+    /// Sanity check for arguments and create a new [Indexer]
+    /// with inner [SstIndexCreator] if arguments are valid.
+    pub(crate) fn build(self) -> Indexer {
+        if !self.create_inverted_index {
+            debug!(
+                "Skip creating index due to request, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
+            return Indexer::default();
+        }
+
+        if self.metadata.primary_key.is_empty() {
+            debug!(
+                "No tag columns, skip creating index, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
+            return Indexer::default();
+        }
+
+        let Some(row_group_size) = NonZeroUsize::new(self.row_group_size) else {
+            warn!(
+                "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
+            return Indexer::default();
+        };
+
+        let creator = SstIndexCreator::new(
+            self.file_path,
+            self.file_id,
+            &self.metadata,
+            self.object_store,
+            self.intermediate_manager,
+            self.mem_threshold_index_create,
+            row_group_size,
+        );
+
+        Indexer {
+            file_id: self.file_id,
+            region_id: self.metadata.region_id,
+            inner: Some(creator),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::SemanticType;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use object_store::services::Memory;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+
+    use super::*;
+
+    fn mock_region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("b", ConcreteDataType::float64_datatype(), false),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "c",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 3,
+            })
+            .primary_key(vec![1]);
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn no_tag_region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("b", ConcreteDataType::float64_datatype(), false),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "c",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 3,
+            });
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn mock_object_store() -> ObjectStore {
+        ObjectStore::new(Memory::default()).unwrap().finish()
+    }
+
+    fn mock_intm_mgr() -> IntermediateManager {
+        IntermediateManager::new(mock_object_store())
+    }
+
+    #[test]
+    fn test_build_indexer_basic() {
+        let metadata = mock_region_metadata();
+        let indexer = IndexerBuilder {
+            create_inverted_index: true,
+            mem_threshold_index_create: Some(1024),
+            file_id: FileId::random(),
+            file_path: "test".to_string(),
+            metadata: &metadata,
+            row_group_size: 1024,
+            object_store: mock_object_store(),
+            intermediate_manager: mock_intm_mgr(),
+        }
+        .build();
+
+        assert!(indexer.inner.is_some());
+    }
+
+    #[test]
+    fn test_build_indexer_disable_create() {
+        let metadata = mock_region_metadata();
+        let indexer = IndexerBuilder {
+            create_inverted_index: false,
+            mem_threshold_index_create: Some(1024),
+            file_id: FileId::random(),
+            file_path: "test".to_string(),
+            metadata: &metadata,
+            row_group_size: 1024,
+            object_store: mock_object_store(),
+            intermediate_manager: mock_intm_mgr(),
+        }
+        .build();
+
+        assert!(indexer.inner.is_none());
+    }
+
+    #[test]
+    fn test_build_indexer_no_tag() {
+        let metadata = no_tag_region_metadata();
+        let indexer = IndexerBuilder {
+            create_inverted_index: true,
+            mem_threshold_index_create: Some(1024),
+            file_id: FileId::random(),
+            file_path: "test".to_string(),
+            metadata: &metadata,
+            row_group_size: 1024,
+            object_store: mock_object_store(),
+            intermediate_manager: mock_intm_mgr(),
+        }
+        .build();
+
+        assert!(indexer.inner.is_none());
+    }
+
+    #[test]
+    fn test_build_indexer_zero_row_group() {
+        let metadata = mock_region_metadata();
+        let indexer = IndexerBuilder {
+            create_inverted_index: true,
+            mem_threshold_index_create: Some(1024),
+            file_id: FileId::random(),
+            file_path: "test".to_string(),
+            metadata: &metadata,
+            row_group_size: 0,
+            object_store: mock_object_store(),
+            intermediate_manager: mock_intm_mgr(),
+        }
+        .build();
+
+        assert!(indexer.inner.is_none());
     }
 }
