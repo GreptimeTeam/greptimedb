@@ -9487,6 +9487,7 @@ name = "tests-integration"
 version = "0.6.0"
 dependencies = [
  "api",
+ "arrow-flight",
  "async-trait",
  "auth",
  "axum",
