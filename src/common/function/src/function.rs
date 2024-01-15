@@ -15,21 +15,21 @@
 use std::fmt;
 use std::sync::Arc;
 
-use chrono_tz::Tz;
 use common_query::error::Result;
 use common_query::prelude::Signature;
+use common_time::Timezone;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 
 #[derive(Clone)]
 pub struct FunctionContext {
-    pub tz: Tz,
+    pub timezone: Timezone,
 }
 
 impl Default for FunctionContext {
     fn default() -> Self {
         Self {
-            tz: "UTC".parse::<Tz>().unwrap(),
+            timezone: Timezone::from_tz_string("UTC").unwrap(),
         }
     }
 }

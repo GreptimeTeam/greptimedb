@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Write};
 use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{Days, LocalResult, Months, NaiveDateTime, TimeZone as ChronoTimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
 use crate::error::{Error, InvalidDateStrSnafu, Result};
-use crate::timezone::Timezone;
+use crate::timezone::{get_timezone, Timezone};
 use crate::util::{format_utc_datetime, local_datetime_to_utc};
 use crate::{Date, Interval};
 
@@ -110,7 +111,38 @@ impl DateTime {
         NaiveDateTime::from_timestamp_millis(self.0)
     }
 
-    pub fn to_chrono_datetime_with_timezone(&self, tz: Option<Timezone>) -> Option<NaiveDateTime> {
+    /// Format DateTime for given format and timezone.
+    /// If `tz==None`, the server default timezone will used.
+    pub fn as_formatted_string(
+        self,
+        pattern: &str,
+        timezone: Option<&Timezone>,
+    ) -> Result<Option<String>> {
+        if let Some(v) = self.to_chrono_datetime() {
+            let mut formatted = String::new();
+
+            match get_timezone(timezone) {
+                Timezone::Offset(offset) => {
+                    write!(
+                        formatted,
+                        "{}",
+                        offset.from_utc_datetime(&v).format(pattern)
+                    )
+                    .context(crate::error::FormatSnafu { pattern })?;
+                }
+                Timezone::Named(tz) => {
+                    write!(formatted, "{}", tz.from_utc_datetime(&v).format(pattern))
+                        .context(crate::error::FormatSnafu { pattern })?;
+                }
+            }
+
+            return Ok(Some(formatted));
+        }
+
+        Ok(None)
+    }
+
+    pub fn to_chrono_datetime_with_timezone(&self, tz: Option<&Timezone>) -> Option<NaiveDateTime> {
         let datetime = self.to_chrono_datetime();
         datetime.map(|v| match tz {
             Some(Timezone::Offset(offset)) => offset.from_utc_datetime(&v).naive_local(),

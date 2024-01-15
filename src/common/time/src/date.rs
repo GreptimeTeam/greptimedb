@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Write};
 use std::str::FromStr;
 
-use chrono::{Datelike, Days, Months, NaiveDate};
+use chrono::{Datelike, Days, Months, NaiveDate, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ResultExt;
 
 use crate::error::{Error, ParseDateStrSnafu, Result};
 use crate::interval::Interval;
+use crate::timezone::get_timezone;
+use crate::Timezone;
 
 const UNIX_EPOCH_FROM_CE: i32 = 719_163;
 
@@ -82,6 +84,40 @@ impl Date {
 
     pub fn to_chrono_date(&self) -> Option<NaiveDate> {
         NaiveDate::from_num_days_from_ce_opt(UNIX_EPOCH_FROM_CE + self.0)
+    }
+
+    /// Format Date for given format and timezone.
+    /// If `tz==None`, the server default timezone will used.
+    pub fn as_formatted_string(
+        self,
+        pattern: &str,
+        timezone: Option<&Timezone>,
+    ) -> Result<Option<String>> {
+        if let Some(v) = self.to_chrono_date() {
+            // Safety: always success
+            let time = NaiveTime::from_hms_nano_opt(0, 0, 0, 0).unwrap();
+            let v = v.and_time(time);
+            let mut formatted = String::new();
+
+            match get_timezone(timezone) {
+                Timezone::Offset(offset) => {
+                    write!(
+                        formatted,
+                        "{}",
+                        offset.from_utc_datetime(&v).format(pattern)
+                    )
+                    .context(crate::error::FormatSnafu { pattern })?;
+                }
+                Timezone::Named(tz) => {
+                    write!(formatted, "{}", tz.from_utc_datetime(&v).format(pattern))
+                        .context(crate::error::FormatSnafu { pattern })?;
+                }
+            }
+
+            return Ok(Some(formatted));
+        }
+
+        Ok(None)
     }
 
     pub fn to_secs(&self) -> i64 {

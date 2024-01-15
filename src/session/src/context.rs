@@ -68,8 +68,12 @@ impl From<&RegionRequestHeader> for QueryContext {
             current_catalog: catalog.to_string(),
             current_schema: schema.to_string(),
             current_user: Default::default(),
+<<<<<<< HEAD
             // for request send to datanode, all timestamp have converted to UTC, so timezone is not important
             timezone: ArcSwap::new(Arc::new(get_timezone(None))),
+=======
+            timezone: get_timezone(None).clone(),
+>>>>>>> ceaaff08b9 (feat: adds date_format function)
             sql_dialect: Box::new(GreptimeDbDialect {}),
         }
     }
@@ -123,8 +127,8 @@ impl QueryContext {
         build_db_string(catalog, schema)
     }
 
-    pub fn timezone(&self) -> Timezone {
-        self.timezone.load().as_ref().clone()
+    pub fn timezone(&self) -> &Timezone {
+        &self.timezone
     }
 
     pub fn current_user(&self) -> Option<UserInfoRef> {
@@ -163,7 +167,7 @@ impl QueryContextBuilder {
                 .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
             timezone: self
                 .timezone
-                .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None)))),
+                .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None).clone()))),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),

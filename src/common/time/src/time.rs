@@ -115,11 +115,11 @@ impl Time {
 
     /// Format Time for given timezone.
     /// When timezone is None, using system timezone by default.
-    pub fn to_timezone_aware_string(&self, tz: Option<Timezone>) -> String {
+    pub fn to_timezone_aware_string(&self, tz: Option<&Timezone>) -> String {
         self.as_formatted_string("%H:%M:%S%.f", tz)
     }
 
-    fn as_formatted_string(self, pattern: &str, timezone: Option<Timezone>) -> String {
+    fn as_formatted_string(self, pattern: &str, timezone: Option<&Timezone>) -> String {
         if let Some(time) = self.to_chrono_time() {
             let date = Utc::now().date_naive();
             let datetime = NaiveDateTime::new(date, time);
@@ -380,37 +380,39 @@ mod tests {
         assert_eq!(
             "08:00:00.001",
             Time::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(Some(Timezone::from_tz_string("SYSTEM").unwrap()))
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("SYSTEM").unwrap()))
         );
         assert_eq!(
             "08:00:00.001",
             Time::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(Some(Timezone::from_tz_string("+08:00").unwrap()))
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("+08:00").unwrap()))
         );
         assert_eq!(
             "07:00:00.001",
             Time::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(Some(Timezone::from_tz_string("+07:00").unwrap()))
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("+07:00").unwrap()))
         );
         assert_eq!(
             "23:00:00.001",
             Time::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(Some(Timezone::from_tz_string("-01:00").unwrap()))
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("-01:00").unwrap()))
         );
         assert_eq!(
             "08:00:00.001",
-            Time::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(Some(Timezone::from_tz_string("Asia/Shanghai").unwrap()))
+            Time::new(1, TimeUnit::Millisecond).to_timezone_aware_string(Some(
+                &Timezone::from_tz_string("Asia/Shanghai").unwrap()
+            ))
         );
         assert_eq!(
             "00:00:00.001",
             Time::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(Some(Timezone::from_tz_string("UTC").unwrap()))
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("UTC").unwrap()))
         );
         assert_eq!(
             "03:00:00.001",
-            Time::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(Some(Timezone::from_tz_string("Europe/Moscow").unwrap()))
+            Time::new(1, TimeUnit::Millisecond).to_timezone_aware_string(Some(
+                &Timezone::from_tz_string("Europe/Moscow").unwrap()
+            ))
         );
     }
 }
