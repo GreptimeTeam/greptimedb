@@ -12,15 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
+use std::sync::Arc;
+
+use arrow::datatypes::Schema;
 use arrow_ipc::writer::FileWriter;
 use axum::http::{header, HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::Output;
+use common_recordbatch::RecordBatchStream;
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
+use crate::error::{self, Error};
 use crate::http::error_result::ErrorResponse;
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::{HttpResponse, ResponseFormat};
@@ -29,6 +36,27 @@ use crate::http::{HttpResponse, ResponseFormat};
 pub struct ArrowResponse {
     data: Vec<u8>,
     execution_time_ms: u64,
+}
+
+async fn write_arrow_bytes(
+    mut recordbatches: Pin<Box<dyn RecordBatchStream + Send>>,
+    schema: &Arc<Schema>,
+) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut bytes, schema).context(error::ArrowSnafu)?;
+
+        while let Some(rb) = recordbatches.next().await {
+            let rb = rb.context(error::CollectRecordbatchSnafu)?;
+            writer
+                .write(&rb.into_df_record_batch())
+                .context(error::ArrowSnafu)?;
+        }
+
+        writer.finish().context(error::ArrowSnafu)?;
+    }
+
+    Ok(bytes)
 }
 
 impl ArrowResponse {
@@ -42,54 +70,38 @@ impl ArrowResponse {
         }
 
         match outputs.remove(0) {
-            Ok(output) => {
-                let payload = match output {
-                    Output::AffectedRows(_rows) => {
-                        vec![]
-                    }
-                    Output::RecordBatches(recordbatches) => {
-                        let schema = recordbatches.schema();
-                        let schema = schema.arrow_schema();
-
-                        // unwrap should be safe here
-                        let mut bytes = Vec::new();
-                        {
-                            let mut writer = FileWriter::try_new(&mut bytes, schema).unwrap();
-
-                            for recordbatch in recordbatches {
-                                writer.write(&recordbatch.into_df_record_batch()).unwrap();
-                            }
-
-                            writer.finish().unwrap();
-                        }
-
-                        bytes
-                    }
-
-                    Output::Stream(mut recordbatches) => {
-                        let schema = recordbatches.schema();
-                        let schema = schema.arrow_schema();
-
-                        let mut bytes = Vec::new();
-                        {
-                            let mut writer = FileWriter::try_new(&mut bytes, schema).unwrap();
-
-                            while let Some(rb) = recordbatches.next().await {
-                                let rb = rb.unwrap();
-                                writer.write(&rb.into_df_record_batch()).unwrap();
-                            }
-
-                            writer.finish().unwrap();
-                        }
-
-                        bytes
-                    }
-                };
-                HttpResponse::Arrow(ArrowResponse {
-                    data: payload,
+            Ok(output) => match output {
+                Output::AffectedRows(_rows) => HttpResponse::Arrow(ArrowResponse {
+                    data: vec![],
                     execution_time_ms: 0,
-                })
-            }
+                }),
+                Output::RecordBatches(recordbatches) => {
+                    let schema = recordbatches.schema();
+                    match write_arrow_bytes(recordbatches.as_stream(), schema.arrow_schema()).await
+                    {
+                        Ok(payload) => HttpResponse::Arrow(ArrowResponse {
+                            data: payload,
+                            execution_time_ms: 0,
+                        }),
+                        Err(e) => {
+                            HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::Arrow, e))
+                        }
+                    }
+                }
+
+                Output::Stream(recordbatches) => {
+                    let schema = recordbatches.schema();
+                    match write_arrow_bytes(recordbatches, schema.arrow_schema()).await {
+                        Ok(payload) => HttpResponse::Arrow(ArrowResponse {
+                            data: payload,
+                            execution_time_ms: 0,
+                        }),
+                        Err(e) => {
+                            HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::Arrow, e))
+                        }
+                    }
+                }
+            },
             Err(e) => HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::Arrow, e)),
         }
     }
