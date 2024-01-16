@@ -245,14 +245,14 @@ mod test {
 
         let input_1 = ScalarValue::Int64(Some(1));
         let result = evaluator.evaluate_scalar(&input_1).unwrap();
-        assert_eq!(result, false);
+        assert!(!result);
 
         let input_2 = ScalarValue::Int64(Some(0));
         let result = evaluator.evaluate_scalar(&input_2).unwrap();
-        assert_eq!(result, true);
+        assert!(result);
 
         let input_3 = ScalarValue::Int64(None);
         let result = evaluator.evaluate_scalar(&input_3).unwrap();
-        assert_eq!(result, false);
+        assert!(!result,);
     }
 }

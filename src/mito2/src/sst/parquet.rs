@@ -305,7 +305,12 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        let mut writer = ParquetWriter::new(
+            file_path,
+            metadata.clone(),
+            object_store.clone(),
+            Indexer::default(),
+        );
         writer
             .write_all(source, &write_opts)
             .await
@@ -354,7 +359,12 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        let mut writer = ParquetWriter::new(
+            file_path,
+            metadata.clone(),
+            object_store.clone(),
+            Indexer::default(),
+        );
         writer
             .write_all(source, &write_opts)
             .await
@@ -384,7 +394,12 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        let mut writer = ParquetWriter::new(
+            file_path,
+            metadata.clone(),
+            object_store.clone(),
+            Indexer::default(),
+        );
         writer
             .write_all(source, &write_opts)
             .await
