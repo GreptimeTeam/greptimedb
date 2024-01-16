@@ -28,9 +28,9 @@ use common_meta::wal_options_allocator::prepare_wal_option;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
 use common_telemetry::{error, info, warn};
-use common_wal::config::kafka::DatanodeKafkaConfig as KafkaConfig;
+use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
-use common_wal::config::DatanodeWalConfig as WalConfig;
+use common_wal::config::DatanodeWalConfig;
 use file_engine::engine::FileRegionEngine;
 use futures::future;
 use futures_util::future::try_join_all;
@@ -378,7 +378,7 @@ impl DatanodeBuilder {
         config: MitoConfig,
     ) -> Result<MitoEngine> {
         let mito_engine = match &opts.wal {
-            WalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
+            DatanodeWalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
                 &opts.storage.data_home,
                 config,
                 Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
@@ -387,8 +387,7 @@ impl DatanodeBuilder {
             )
             .await
             .context(BuildMitoEngineSnafu)?,
-
-            WalConfig::Kafka(kafka_config) => MitoEngine::new(
+            DatanodeWalConfig::Kafka(kafka_config) => MitoEngine::new(
                 &opts.storage.data_home,
                 config,
                 Self::build_kafka_log_store(kafka_config).await?,
@@ -428,7 +427,7 @@ impl DatanodeBuilder {
     }
 
     /// Builds [KafkaLogStore].
-    async fn build_kafka_log_store(config: &KafkaConfig) -> Result<Arc<KafkaLogStore>> {
+    async fn build_kafka_log_store(config: &DatanodeKafkaConfig) -> Result<Arc<KafkaLogStore>> {
         KafkaLogStore::try_new(config)
             .await
             .map_err(Box::new)

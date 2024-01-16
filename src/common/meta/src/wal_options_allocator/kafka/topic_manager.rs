@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
-use common_wal::config::kafka::MetasrvKafkaConfig as KafkaConfig;
+use common_wal::config::kafka::MetasrvKafkaConfig;
 use common_wal::TopicSelectorType;
 use rskafka::client::controller::ControllerClient;
 use rskafka::client::error::Error as RsKafkaError;
@@ -46,7 +46,7 @@ const DEFAULT_PARTITION: i32 = 0;
 
 /// Manages topic initialization and selection.
 pub struct TopicManager {
-    config: KafkaConfig,
+    config: MetasrvKafkaConfig,
     pub(crate) topic_pool: Vec<String>,
     pub(crate) topic_selector: TopicSelectorRef,
     kv_backend: KvBackendRef,
@@ -54,7 +54,7 @@ pub struct TopicManager {
 
 impl TopicManager {
     /// Creates a new topic manager.
-    pub fn new(config: KafkaConfig, kv_backend: KvBackendRef) -> Self {
+    pub fn new(config: MetasrvKafkaConfig, kv_backend: KvBackendRef) -> Self {
         // Topics should be created.
         let topics = (0..config.num_topics)
             .map(|topic_id| format!("{}_{topic_id}", config.topic_name_prefix))
@@ -280,7 +280,7 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 // Creates a topic manager.
-                let config = KafkaConfig {
+                let config = MetasrvKafkaConfig {
                     replication_factor: broker_endpoints.len() as i16,
                     broker_endpoints,
                     ..Default::default()

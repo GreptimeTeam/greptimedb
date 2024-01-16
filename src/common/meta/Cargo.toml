@@ -7,7 +7,6 @@ license.workspace = true
 [features]
 testing = []
 
-# TODO(niebayes): remove unused crates.
 [dependencies]
 api.workspace = true
 async-recursion = "1.0"
@@ -17,7 +16,6 @@ base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 common-catalog.workspace = true
-common-config.workspace = true
 common-error.workspace = true
 common-grpc-expr.workspace = true
 common-macro.workspace = true
@@ -30,7 +28,6 @@ common-wal.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true
-futures-util.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
@@ -41,13 +38,12 @@ regex.workspace = true
 rskafka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_with = "3"
+serde_with.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true
-toml.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]

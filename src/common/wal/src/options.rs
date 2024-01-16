@@ -19,7 +19,6 @@ use serde_with::with_prefix;
 
 pub use crate::options::kafka::KafkaWalOptions;
 
-// TODO(niebayes): update comments if necessary.
 /// An encoded wal options will be wrapped into a (WAL_OPTIONS_KEY, encoded wal options) key-value pair
 /// and inserted into the options of a `RegionCreateRequest`.
 pub const WAL_OPTIONS_KEY: &str = "wal_options";

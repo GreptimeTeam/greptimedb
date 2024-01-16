@@ -17,8 +17,6 @@ serde_with.workspace = true
 common-telemetry.workspace = true
 futures-util.workspace = true
 
-# TODO(niebayes): maybe move wal options into this package.
-
 [dev-dependencies]
 serde_json.workspace = true
 toml.workspace = true

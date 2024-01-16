@@ -31,7 +31,7 @@ use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
-use common_wal::config::MetasrvWalConfig as WalConfig;
+use common_wal::config::MetasrvWalConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
@@ -74,7 +74,7 @@ pub struct MetaSrvOptions {
     pub datanode: DatanodeOptions,
     pub enable_telemetry: bool,
     pub data_home: String,
-    pub wal: WalConfig,
+    pub wal: MetasrvWalConfig,
     pub export_metrics: ExportMetricsOption,
     pub store_key_prefix: String,
 }
@@ -107,7 +107,7 @@ impl Default for MetaSrvOptions {
             datanode: DatanodeOptions::default(),
             enable_telemetry: true,
             data_home: METASRV_HOME.to_string(),
-            wal: WalConfig::default(),
+            wal: MetasrvWalConfig::default(),
             export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
         }

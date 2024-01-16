@@ -22,7 +22,7 @@ use common_grpc::channel_manager::{
 };
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
-use common_wal::config::DatanodeWalConfig as WalConfig;
+use common_wal::config::DatanodeWalConfig;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
@@ -237,7 +237,7 @@ pub struct DatanodeOptions {
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
-    pub wal: WalConfig,
+    pub wal: DatanodeWalConfig,
     pub storage: StorageConfig,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
@@ -260,7 +260,7 @@ impl Default for DatanodeOptions {
             rpc_max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             http: HttpOptions::default(),
             meta_client: None,
-            wal: WalConfig::default(),
+            wal: DatanodeWalConfig::default(),
             storage: StorageConfig::default(),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),

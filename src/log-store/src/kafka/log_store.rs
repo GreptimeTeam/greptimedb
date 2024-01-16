@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
-use common_wal::config::kafka::DatanodeKafkaConfig as KafkaConfig;
+use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::options::WalOptions;
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
@@ -36,14 +36,14 @@ use crate::kafka::{EntryImpl, NamespaceImpl};
 /// A log store backed by Kafka.
 #[derive(Debug)]
 pub struct KafkaLogStore {
-    config: KafkaConfig,
+    config: DatanodeKafkaConfig,
     /// Manages kafka clients through which the log store contact the Kafka cluster.
     client_manager: ClientManagerRef,
 }
 
 impl KafkaLogStore {
     /// Tries to create a Kafka log store.
-    pub async fn try_new(config: &KafkaConfig) -> Result<Self> {
+    pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
         Ok(Self {
             client_manager: Arc::new(ClientManager::try_new(config).await?),
             config: config.clone(),
@@ -316,7 +316,7 @@ mod tests {
         )
         .await;
 
-        let config = KafkaConfig {
+        let config = DatanodeKafkaConfig {
             broker_endpoints,
             max_batch_size: ReadableSize::kb(32),
             ..Default::default()
