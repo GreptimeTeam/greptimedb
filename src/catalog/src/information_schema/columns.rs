@@ -186,8 +186,7 @@ impl InformationSchemaColumnsBuilder {
 
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
 
-            while let Some(table) = stream.next().await {
-                let table = table?;
+            while let Some(table) = stream.try_next().await? {
                 let keys = &table.table_info().meta.primary_key_indices;
                 let schema = table.schema();
 
