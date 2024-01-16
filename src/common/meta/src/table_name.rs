@@ -16,7 +16,7 @@ use std::fmt::{Display, Formatter};
 
 use api::v1::meta::TableName as PbTableName;
 use serde::{Deserialize, Serialize};
-use table::engine::TableReference;
+use table::table_reference::TableReference;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct TableName {

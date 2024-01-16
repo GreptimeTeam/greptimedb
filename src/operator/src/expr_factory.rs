@@ -35,8 +35,8 @@ use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
 use sql::util::to_lowercase_options_map;
-use table::engine::TableReference;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
+use table::table_reference::TableReference;
 
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
