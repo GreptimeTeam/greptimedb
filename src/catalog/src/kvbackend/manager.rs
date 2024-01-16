@@ -258,7 +258,6 @@ impl CatalogManager for KvBackendCatalogManager {
             .tables(catalog, schema)
             .await
             .map_ok(|(_, v)| v.table_id());
-
         const BATCH_SIZE: usize = 128;
         let user_tables = try_stream!({
             // Split table ids into chunks
