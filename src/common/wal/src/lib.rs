@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod config;
 pub mod options;
+#[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 
 pub const BROKER_ENDPOINT: &str = "127.0.0.1:9092";

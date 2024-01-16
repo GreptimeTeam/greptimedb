@@ -9,13 +9,12 @@ testing = []
 
 [dependencies]
 common-base.workspace = true
+common-telemetry.workspace = true
+futures-util.workspace = true
 humantime-serde.workspace = true
 rskafka.workspace = true
 serde.workspace = true
 serde_with.workspace = true
-# TODO(niebayes): move to dev dependencies.
-common-telemetry.workspace = true
-futures-util.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
