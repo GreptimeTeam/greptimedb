@@ -31,6 +31,7 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
+use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
@@ -183,37 +184,30 @@ impl InformationSchemaColumnsBuilder {
                 continue;
             }
 
-            for table_name in catalog_manager
-                .table_names(&catalog_name, &schema_name)
-                .await?
-            {
-                if let Some(table) = catalog_manager
-                    .table(&catalog_name, &schema_name, &table_name)
-                    .await?
-                {
-                    let keys = &table.table_info().meta.primary_key_indices;
-                    let schema = table.schema();
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
 
-                    for (idx, column) in schema.column_schemas().iter().enumerate() {
-                        let semantic_type = if column.is_time_index() {
-                            SEMANTIC_TYPE_TIME_INDEX
-                        } else if keys.contains(&idx) {
-                            SEMANTIC_TYPE_PRIMARY_KEY
-                        } else {
-                            SEMANTIC_TYPE_FIELD
-                        };
+            while let Some(table) = stream.next().await {
+                let table = table?;
+                let keys = &table.table_info().meta.primary_key_indices;
+                let schema = table.schema();
 
-                        self.add_column(
-                            &predicates,
-                            &catalog_name,
-                            &schema_name,
-                            &table_name,
-                            semantic_type,
-                            column,
-                        );
-                    }
-                } else {
-                    unreachable!();
+                for (idx, column) in schema.column_schemas().iter().enumerate() {
+                    let semantic_type = if column.is_time_index() {
+                        SEMANTIC_TYPE_TIME_INDEX
+                    } else if keys.contains(&idx) {
+                        SEMANTIC_TYPE_PRIMARY_KEY
+                    } else {
+                        SEMANTIC_TYPE_FIELD
+                    };
+
+                    self.add_column(
+                        &predicates,
+                        &catalog_name,
+                        &schema_name,
+                        &table.table_info().name,
+                        semantic_type,
+                        column,
+                    );
                 }
             }
         }

@@ -27,6 +27,7 @@ use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
+use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
@@ -166,27 +167,20 @@ impl InformationSchemaTablesBuilder {
                 continue;
             }
 
-            for table_name in catalog_manager
-                .table_names(&catalog_name, &schema_name)
-                .await?
-            {
-                if let Some(table) = catalog_manager
-                    .table(&catalog_name, &schema_name, &table_name)
-                    .await?
-                {
-                    let table_info = table.table_info();
-                    self.add_table(
-                        &predicates,
-                        &catalog_name,
-                        &schema_name,
-                        &table_name,
-                        table.table_type(),
-                        Some(table_info.ident.table_id),
-                        Some(&table_info.meta.engine),
-                    );
-                } else {
-                    unreachable!();
-                }
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
+
+            while let Some(table) = stream.next().await {
+                let table = table?;
+                let table_info = table.table_info();
+                self.add_table(
+                    &predicates,
+                    &catalog_name,
+                    &schema_name,
+                    &table_info.name,
+                    table.table_type(),
+                    Some(table_info.ident.table_id),
+                    Some(&table_info.meta.engine),
+                );
             }
         }
 

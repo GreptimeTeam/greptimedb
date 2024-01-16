@@ -252,8 +252,6 @@ impl CatalogManager for KvBackendCatalogManager {
             }
         });
 
-        const BATCH_SIZE: usize = 128;
-        // Split table ids into batches
         let table_id_stream = self
             .table_metadata_manager
             .table_name_manager()
@@ -261,7 +259,9 @@ impl CatalogManager for KvBackendCatalogManager {
             .await
             .map_ok(|(_, v)| v.table_id());
 
+        const BATCH_SIZE: usize = 128;
         let user_tables = try_stream!({
+            // Split table ids into chunks
             let mut table_id_chunks = table_id_stream.ready_chunks(BATCH_SIZE);
 
             while let Some(table_ids) = table_id_chunks.next().await {
