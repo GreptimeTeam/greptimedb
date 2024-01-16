@@ -315,9 +315,6 @@ mod tests {
             &[
                 new_batch_by_range(&["a", "d"], 0, 50),
                 new_batch_by_range(&["a", "d"], 50, 60),
-                new_batch_by_range(&["b", "f"], 0, 40),
-                new_batch_by_range(&["b", "h"], 100, 150),
-                new_batch_by_range(&["b", "h"], 150, 200),
             ],
         )
         .await;

@@ -41,13 +41,14 @@ use tokio::io::BufReader;
 
 use crate::cache::CacheManagerRef;
 use crate::error::{
-    ArrowReaderSnafu, ColumnNotFoundSnafu, FilterRecordBatchSnafu, InvalidMetadataSnafu,
-    InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu, Result,
+    ArrowReaderSnafu, ColumnNotFoundSnafu, FieldTypeMismatchSnafu, FilterRecordBatchSnafu,
+    InvalidMetadataSnafu, InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu, Result,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
 };
 use crate::read::{Batch, BatchReader};
+use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::SstIndexApplierRef;
 use crate::sst::parquet::format::ReadFormat;
@@ -196,6 +197,14 @@ impl ParquetReaderBuilder {
             vec![]
         };
 
+        let codec = McmpRowCodec::new(
+            read_format
+                .metadata()
+                .primary_key_columns()
+                .map(|c| SortField::new(c.column_schema.data_type.clone()))
+                .collect(),
+        );
+
         Ok(ParquetReader {
             row_groups,
             read_format,
@@ -203,6 +212,7 @@ impl ParquetReaderBuilder {
             predicate,
             current_reader: None,
             batches: VecDeque::new(),
+            codec,
             metrics,
         })
     }
@@ -424,6 +434,8 @@ pub struct ParquetReader {
     current_reader: Option<ParquetRecordBatchReader>,
     /// Buffered batches to return.
     batches: VecDeque<Batch>,
+    /// Decoder for primary keys
+    codec: McmpRowCodec,
     /// Local metrics.
     metrics: Metrics,
 }
@@ -549,9 +561,11 @@ impl ParquetReader {
 
         let mut new_batches = VecDeque::new();
         let mut batches = std::mem::take(&mut self.batches);
-        for mut batch in batches.drain(..) {
-            batch = self.percise_filter(batch)?;
-            new_batches.push_back(batch);
+        for batch in batches.drain(..) {
+            let Some(batch_filtered) = self.percise_filter(batch)? else {
+                continue;
+            };
+            new_batches.push_back(batch_filtered);
         }
         self.batches = new_batches;
 
@@ -561,7 +575,10 @@ impl ParquetReader {
     /// TRY THE BEST to perform pushed down predicate percisely on the input batch.
     ///
     /// Supported filter expr type is defined in [SimpleFilterEvaluator].
-    fn percise_filter(&self, mut input: Batch) -> Result<Batch> {
+    ///
+    /// When a filter is referencing primary key column, this method will decode
+    /// the primary key and put it into the batch.
+    fn percise_filter(&self, mut input: Batch) -> Result<Option<Batch>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
         let field_id_map = self
@@ -572,6 +589,8 @@ impl ParquetReader {
             .map(|(i, f)| (f.column_id, i))
             .collect::<HashMap<_, _>>();
 
+        // Run filter one by one and combine them result
+        // TODO(ruihang): run primary key filter first. It may short circuit other filters
         for filter in &self.predicate {
             let column_name = filter.column_name();
             let column_metadata = self
@@ -583,8 +602,26 @@ impl ParquetReader {
                 })?;
             let result = match column_metadata.semantic_type {
                 SemanticType::Tag => {
-                    // todo!()
-                    BooleanBuffer::new_set(input.num_rows())
+                    let pk_values = self.codec.decode(input.primary_key())?;
+                    // Safety: this is a primary key
+                    let pk_index = self
+                        .read_format
+                        .metadata()
+                        .primary_key_index(column_metadata.column_id)
+                        .unwrap();
+                    let pk_value = pk_values[pk_index]
+                        .try_to_scalar_value(&column_metadata.column_schema.data_type)
+                        .context(FieldTypeMismatchSnafu)?;
+                    if filter
+                        .evaluate_scalar(&pk_value)
+                        .context(FilterRecordBatchSnafu)?
+                    {
+                        input.set_pk_values(pk_values);
+                        continue;
+                    } else {
+                        // PK not match means the entire batch is filtered out.
+                        return Ok(None);
+                    }
                 }
                 SemanticType::Field => {
                     // Safety: both id and name are checked before.
@@ -604,7 +641,7 @@ impl ParquetReader {
 
         input.filter(&BooleanArray::from(mask).into())?;
 
-        Ok(input)
+        Ok(Some(input))
     }
 
     #[cfg(test)]

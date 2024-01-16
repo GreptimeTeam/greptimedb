@@ -514,7 +514,8 @@ pub fn new_batch(
 /// Ensure the reader returns batch as `expect`.
 pub async fn check_reader_result<R: BatchReader>(reader: &mut R, expect: &[Batch]) {
     let mut result = Vec::new();
-    while let Some(batch) = reader.next_batch().await.unwrap() {
+    while let Some(mut batch) = reader.next_batch().await.unwrap() {
+        batch.remove_pk_values();
         result.push(batch);
     }
 
