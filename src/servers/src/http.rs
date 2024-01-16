@@ -1020,30 +1020,10 @@ mod test {
                     let mut reader =
                         FileReader::try_new(Cursor::new(output), None).expect("Arrow reader error");
                     let schema = reader.schema();
-                    assert_eq!(
-                        schema.fields.get(0).expect("At least 1 field").name(),
-                        "numbers"
-                    );
-                    assert_eq!(
-                        schema.fields.get(0).expect("At least 1 field").data_type(),
-                        &DataType::UInt32
-                    );
-                    assert_eq!(
-                        schema
-                            .fields
-                            .get(1)
-                            .expect("failed to access field 1")
-                            .name(),
-                        "strings"
-                    );
-                    assert_eq!(
-                        schema
-                            .fields
-                            .get(1)
-                            .expect("failed to access field 2")
-                            .data_type(),
-                        &DataType::Utf8
-                    );
+                    assert_eq!(schema.fields[0].name(), "numbers");
+                    assert_eq!(schema.fields[0].data_type(), &DataType::UInt32);
+                    assert_eq!(schema.fields[1].name(), "strings");
+                    assert_eq!(schema.fields[1].data_type(), &DataType::Utf8);
 
                     let rb = reader.next().unwrap().expect("read record batch failed");
                     assert_eq!(rb.num_columns(), 2);
