@@ -26,11 +26,11 @@ use crate::helper;
 
 /// A function that formats timestamp/date/datetime into string by the format
 #[derive(Clone, Debug, Default)]
-pub struct DateformatFunction;
+pub struct DateFormatFunction;
 
 const NAME: &str = "date_format";
 
-impl Function for DateformatFunction {
+impl Function for DateFormatFunction {
     fn name(&self) -> &str {
         NAME
     }
@@ -134,7 +134,7 @@ impl Function for DateformatFunction {
     }
 }
 
-impl fmt::Display for DateformatFunction {
+impl fmt::Display for DateFormatFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "DATE_FORMAT")
     }
@@ -149,11 +149,11 @@ mod tests {
     use datatypes::value::Value;
     use datatypes::vectors::{DateTimeVector, DateVector, StringVector, TimestampSecondVector};
 
-    use super::{DateformatFunction, *};
+    use super::{DateFormatFunction, *};
 
     #[test]
     fn test_date_format_misc() {
-        let f = DateformatFunction;
+        let f = DateFormatFunction;
         assert_eq!("date_format", f.name());
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_date_format() {
-        let f = DateformatFunction;
+        let f = DateFormatFunction;
 
         let times = vec![Some(123), None, Some(42), None];
         let formats = vec![
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_date_date_format() {
-        let f = DateformatFunction;
+        let f = DateFormatFunction;
 
         let dates = vec![Some(123), None, Some(42), None];
         let formats = vec![
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn test_datetime_date_format() {
-        let f = DateformatFunction;
+        let f = DateFormatFunction;
 
         let dates = vec![Some(123), None, Some(42), None];
         let formats = vec![
