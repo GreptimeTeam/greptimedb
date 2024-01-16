@@ -253,6 +253,6 @@ mod test {
 
         let input_3 = ScalarValue::Int64(None);
         let result = evaluator.evaluate_scalar(&input_3).unwrap();
-        assert!(!result,);
+        assert!(!result);
     }
 }
