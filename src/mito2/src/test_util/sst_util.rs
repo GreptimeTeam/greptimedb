@@ -114,7 +114,7 @@ pub fn sst_file_handle(start_ms: i64, end_ms: i64) -> FileHandle {
 }
 
 pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
-    assert!(end > start);
+    assert!(end >= start);
     let pk = new_primary_key(tags);
     let timestamps: Vec<_> = (start..end).map(|v| v as i64).collect();
     let sequences = vec![1000; end - start];

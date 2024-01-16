@@ -14,13 +14,18 @@
 
 //! Parquet reader.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::ops::BitAnd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use api::v1::SemanticType;
 use async_trait::async_trait;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, warn};
 use common_time::range::TimestampRange;
+use datafusion_common::arrow::array::BooleanArray;
+use datafusion_common::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
@@ -36,10 +41,12 @@ use tokio::io::BufReader;
 
 use crate::cache::CacheManagerRef;
 use crate::error::{
-    ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu,
-    Result,
+    ArrowReaderSnafu, ColumnNotFoundSnafu, FilterRecordBatchSnafu, InvalidMetadataSnafu,
+    InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu, Result,
 };
-use crate::metrics::{READ_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED};
+use crate::metrics::{
+    PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
+};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::SstIndexApplierRef;
@@ -180,10 +187,20 @@ impl ParquetReaderBuilder {
             ..Default::default()
         };
 
+        let predicate = if let Some(p) = &self.predicate {
+            p.exprs()
+                .iter()
+                .filter_map(|expr| SimpleFilterEvaluator::try_new(expr.df_expr()))
+                .collect()
+        } else {
+            vec![]
+        };
+
         Ok(ParquetReader {
             row_groups,
             read_format,
             reader_builder,
+            predicate,
             current_reader: None,
             batches: VecDeque::new(),
             metrics,
@@ -316,6 +333,7 @@ struct Metrics {
     num_row_groups_inverted_index_selected: usize,
     /// Number of row groups to read after filtering by min-max index.
     num_row_groups_min_max_selected: usize,
+    num_rows_percise_filtered: usize,
     /// Duration to build the parquet reader.
     build_cost: Duration,
     /// Duration to scan the reader.
@@ -400,6 +418,8 @@ pub struct ParquetReader {
     /// The builder contains the file handle, so don't drop the builder while using
     /// the [ParquetReader].
     reader_builder: RowGroupReaderBuilder,
+    /// Predicate pushed down to this reader.
+    predicate: Vec<SimpleFilterEvaluator>,
     /// Reader of current row group.
     current_reader: Option<ParquetRecordBatchReader>,
     /// Buffered batches to return.
@@ -419,16 +439,18 @@ impl BatchReader for ParquetReader {
         }
 
         // We need to fetch next record batch and convert it to batches.
-        let Some(record_batch) = self.fetch_next_record_batch().await? else {
-            self.metrics.scan_cost += start.elapsed();
-            return Ok(None);
-        };
-        self.metrics.num_record_batches += 1;
+        while self.batches.is_empty() {
+            let Some(record_batch) = self.fetch_next_record_batch().await? else {
+                self.metrics.scan_cost += start.elapsed();
+                return Ok(None);
+            };
+            self.metrics.num_record_batches += 1;
 
-        self.read_format
-            .convert_record_batch(&record_batch, &mut self.batches)?;
-        self.metrics.num_batches += self.batches.len();
-
+            self.read_format
+                .convert_record_batch(&record_batch, &mut self.batches)?;
+            self.prune_batches()?;
+            self.metrics.num_batches += self.batches.len();
+        }
         let batch = self.batches.pop_front();
         self.metrics.scan_cost += start.elapsed();
         self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
@@ -467,6 +489,9 @@ impl Drop for ParquetReader {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["min_max_index_selected"])
             .inc_by(self.metrics.num_row_groups_min_max_selected as u64);
+        PRECISE_FILTER_ROWS_TOTAL
+            .with_label_values(&["parquet"])
+            .inc_by(self.metrics.num_rows_percise_filtered as u64);
     }
 }
 
@@ -513,6 +538,73 @@ impl ParquetReader {
         }
 
         Ok(None)
+    }
+
+    /// Prunes batches by the pushed down predicate.
+    fn prune_batches(&mut self) -> Result<()> {
+        // fast path
+        if self.predicate.is_empty() {
+            return Ok(());
+        }
+
+        let mut new_batches = VecDeque::new();
+        let mut batches = std::mem::take(&mut self.batches);
+        for mut batch in batches.drain(..) {
+            batch = self.percise_filter(batch)?;
+            new_batches.push_back(batch);
+        }
+        self.batches = new_batches;
+
+        Ok(())
+    }
+
+    /// TRY THE BEST to perform pushed down predicate percisely on the input batch.
+    ///
+    /// Supported filter expr type is defined in [SimpleFilterEvaluator].
+    fn percise_filter(&self, mut input: Batch) -> Result<Batch> {
+        let mut mask = BooleanBuffer::new_set(input.num_rows());
+
+        let field_id_map = self
+            .read_format
+            .metadata()
+            .field_columns()
+            .enumerate()
+            .map(|(i, f)| (f.column_id, i))
+            .collect::<HashMap<_, _>>();
+
+        for filter in &self.predicate {
+            let column_name = filter.column_name();
+            let column_metadata = self
+                .read_format
+                .metadata()
+                .column_by_name(column_name)
+                .with_context(|| ColumnNotFoundSnafu {
+                    column: column_name,
+                })?;
+            let result = match column_metadata.semantic_type {
+                SemanticType::Tag => {
+                    // todo!()
+                    BooleanBuffer::new_set(input.num_rows())
+                }
+                SemanticType::Field => {
+                    // Safety: both id and name are checked before.
+                    let field_index = *field_id_map.get(&column_metadata.column_id).unwrap();
+                    let field_col = input.fields()[field_index].data.clone();
+                    filter
+                        .evaluate_vector(field_col)
+                        .context(FilterRecordBatchSnafu)?
+                }
+                SemanticType::Timestamp => filter
+                    .evaluate_vector(input.timestamps().clone())
+                    .context(FilterRecordBatchSnafu)?,
+            };
+
+            mask = mask.bitand(&result);
+        }
+
+        input.filter(&BooleanArray::from(mask).into())?;
+
+        Ok(input)
     }
 
     #[cfg(test)]

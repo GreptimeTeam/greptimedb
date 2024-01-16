@@ -77,6 +77,9 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::Timestamp;
+    use datafusion_common::{Column, ScalarValue};
+    use datafusion_expr::{BinaryExpr, Expr, Operator};
+    use table::predicate::Predicate;
 
     use super::*;
     use crate::cache::{CacheManager, PageKey};
@@ -266,5 +269,129 @@ mod tests {
             column_index,
             offset_index,
         );
+    }
+
+    #[tokio::test]
+    async fn test_read_with_tag_filter() {
+        let mut env = TestEnv::new();
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = handle.file_path(FILE_DIR);
+        let metadata = Arc::new(sst_region_metadata());
+        let source = new_source(&[
+            new_batch_by_range(&["a", "d"], 0, 60),
+            new_batch_by_range(&["b", "f"], 0, 40),
+            new_batch_by_range(&["b", "h"], 100, 200),
+        ]);
+        // Use a small row group size for test.
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            ..Default::default()
+        };
+        // Prepare data.
+        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        writer
+            .write_all(source, &write_opts)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Predicate
+        let predicate = Some(Predicate::new(vec![Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Column(Column {
+                relation: None,
+                name: "tag_0".to_string(),
+            })),
+            op: Operator::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::Utf8(Some("a".to_string())))),
+        })
+        .into()]));
+
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
+            .predicate(predicate);
+        let mut reader = builder.build().await.unwrap();
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch_by_range(&["a", "d"], 0, 50),
+                new_batch_by_range(&["a", "d"], 50, 60),
+                new_batch_by_range(&["b", "f"], 0, 40),
+                new_batch_by_range(&["b", "h"], 100, 150),
+                new_batch_by_range(&["b", "h"], 150, 200),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_read_empty_batch() {
+        let mut env = TestEnv::new();
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = handle.file_path(FILE_DIR);
+        let metadata = Arc::new(sst_region_metadata());
+        let source = new_source(&[
+            new_batch_by_range(&["a", "z"], 0, 0),
+            new_batch_by_range(&["a", "z"], 100, 100),
+            new_batch_by_range(&["a", "z"], 200, 230),
+        ]);
+        // Use a small row group size for test.
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            ..Default::default()
+        };
+        // Prepare data.
+        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        writer
+            .write_all(source, &write_opts)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let mut reader = builder.build().await.unwrap();
+        check_reader_result(&mut reader, &[new_batch_by_range(&["a", "z"], 200, 230)]).await;
+    }
+
+    #[tokio::test]
+    async fn test_read_with_field_filter() {
+        let mut env = TestEnv::new();
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = handle.file_path(FILE_DIR);
+        let metadata = Arc::new(sst_region_metadata());
+        let source = new_source(&[
+            new_batch_by_range(&["a", "d"], 0, 60),
+            new_batch_by_range(&["b", "f"], 0, 40),
+            new_batch_by_range(&["b", "h"], 100, 200),
+        ]);
+        // Use a small row group size for test.
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            ..Default::default()
+        };
+        // Prepare data.
+        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        writer
+            .write_all(source, &write_opts)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Predicate
+        let predicate = Some(Predicate::new(vec![Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Column(Column {
+                relation: None,
+                name: "field_0".to_string(),
+            })),
+            op: Operator::GtEq,
+            right: Box::new(Expr::Literal(ScalarValue::UInt64(Some(150)))),
+        })
+        .into()]));
+
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
+            .predicate(predicate);
+        let mut reader = builder.build().await.unwrap();
+        check_reader_result(&mut reader, &[new_batch_by_range(&["b", "h"], 150, 200)]).await;
     }
 }
