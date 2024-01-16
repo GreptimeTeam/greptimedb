@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 use api::v1::OpType;
 use bytes::Bytes;
+use common_time::Timestamp;
 use datatypes::data_type::DataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::value::ValueRef;
@@ -51,8 +52,6 @@ impl MutablePart {
         row_codec: &McmpRowCodec,
         kvs: &KeyValues,
     ) -> Result<()> {
-        let mut min_ts = i64::MAX;
-        let mut max_ts = i64::MIN;
         let mut primary_key = Vec::new();
 
         for kv in kvs.iter() {
@@ -71,11 +70,19 @@ impl MutablePart {
                 self.blocks.push(DictBlock::new(metadata, self.dict_size));
             }
 
+            // Update metrics first.
+            // Safety: timestamp of kv must be both present and a valid timestamp value.
+            let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+            self.metrics.min_ts = self.metrics.min_ts.min(ts);
+            self.metrics.max_ts = self.metrics.max_ts.max(ts);
+            self.metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
+
             if self.find_blocks_to_insert(&primary_key, &kv) {
                 continue;
             }
 
             // A new key.
+            // TODO(yingwen): Also consider size of the block.
             if self.blocks.last().unwrap().key_dict.is_full() {
                 self.blocks.push(DictBlock::new(metadata, self.dict_size));
             }
@@ -85,6 +92,9 @@ impl MutablePart {
             // Safety: The block is not full.
             last.insert_by_key(std::mem::take(&mut primary_key), &kv);
         }
+
+        self.metrics.value_bytes +=
+            kvs.num_rows() * (std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>());
 
         Ok(())
     }
@@ -108,12 +118,15 @@ impl MutablePart {
 }
 
 /// Metrics of the mutable part.
-#[derive(Default)]
 struct Metrics {
     /// Size allocated by keys.
     key_bytes: usize,
     /// Size allocated by values.
     value_bytes: usize,
+    /// Minimum timestamp.
+    min_ts: i64,
+    /// Maximum timestamp
+    max_ts: i64,
 }
 
 // TODO(yingwen): Block without dictionary.
