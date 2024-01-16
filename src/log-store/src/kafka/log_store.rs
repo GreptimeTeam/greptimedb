@@ -15,9 +15,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_config::wal_options::WalOptions;
 use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig as KafkaConfig;
+use common_wal::options::WalOptions;
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;

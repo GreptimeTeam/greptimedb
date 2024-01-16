@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_config::wal_options::WalOptions;
+use common_wal::options::WalOptions;
 use store_api::logstore::entry::{Entry, Id as EntryId};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};

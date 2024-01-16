@@ -32,6 +32,7 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-test-util = { workspace = true, optional = true }
 common-time.workspace = true
+common-wal.workspace = true
 dashmap.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true

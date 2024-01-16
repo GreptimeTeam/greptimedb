@@ -1631,8 +1631,6 @@ dependencies = [
  "common-base",
  "humantime-serde",
  "serde",
- "serde_json",
- "serde_with",
 ]
 
 [[package]]
@@ -5001,6 +4999,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-wal",
  "dashmap",
  "datafusion",
  "datafusion-common",
@@ -9115,6 +9114,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-time",
+ "common-wal",
  "datatypes",
  "derive_builder 0.12.0",
  "futures",

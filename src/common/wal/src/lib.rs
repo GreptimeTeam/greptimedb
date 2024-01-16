@@ -15,6 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod config;
+pub mod options;
 pub mod test_util;
 
 pub const BROKER_ENDPOINT: &str = "127.0.0.1:9092";

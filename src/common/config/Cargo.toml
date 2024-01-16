@@ -4,13 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# TODO(niebayes): move content in common-wal into this package.
-
 [dependencies]
 common-base.workspace = true
 humantime-serde.workspace = true
 serde.workspace = true
-serde_with.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true

@@ -17,8 +17,8 @@ pub mod kafka;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_config::wal_options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use common_wal::config::MetasrvWalConfig as WalConfig;
+use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
 

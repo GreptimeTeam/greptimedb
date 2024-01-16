@@ -22,9 +22,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use common_config::wal_options::WalOptions;
 use common_telemetry::info;
 use common_time::util::current_time_millis;
+use common_wal::options::WalOptions;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;

@@ -14,10 +14,10 @@
 
 use std::str::Utf8Error;
 
-use common_config::wal_options::WalOptions;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_wal::options::WalOptions;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};

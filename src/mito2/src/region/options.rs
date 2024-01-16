@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use common_config::wal_options::{WalOptions, WAL_OPTIONS_KEY};
+use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr};
@@ -173,7 +173,7 @@ fn options_map_to_value(options: &HashMap<String, String>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use common_config::wal_options::{KafkaWalOptions, WalOptions};
+    use common_wal::options::KafkaWalOptions;
 
     use super::*;
 
