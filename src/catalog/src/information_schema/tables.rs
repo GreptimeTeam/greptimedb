@@ -169,8 +169,7 @@ impl InformationSchemaTablesBuilder {
 
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
 
-            while let Some(table) = stream.next().await {
-                let table = table?;
+            while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();
                 self.add_table(
                     &predicates,
