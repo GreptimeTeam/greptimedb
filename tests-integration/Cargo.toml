@@ -9,6 +9,7 @@ dashboard = []
 
 [dependencies]
 api.workspace = true
+arrow-flight.workspace = true
 async-trait = "0.1"
 auth.workspace = true
 axum = "0.6"

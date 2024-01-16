@@ -25,17 +25,15 @@ use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
-use super::{
-    Decimal128Vector, DurationMicrosecondVector, DurationMillisecondVector,
-    DurationNanosecondVector, DurationSecondVector, IntervalDayTimeVector, IntervalYearMonthVector,
-};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::value::{ListValue, ListValueRef};
 use crate::vectors::{
-    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Float32Vector,
-    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalMonthDayNanoVector,
+    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Decimal128Vector,
+    DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
+    DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
+    Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
     ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,

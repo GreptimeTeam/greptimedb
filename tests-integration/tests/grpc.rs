@@ -71,6 +71,7 @@ macro_rules! grpc_tests {
                 test_grpc_auth,
                 test_health_check,
                 test_prom_gateway_query,
+                test_grpc_timezone,
             );
         )*
     };
@@ -626,4 +627,65 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     // clean up
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
+}
+
+pub async fn test_grpc_timezone(store_type: StorageType) {
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024,
+        max_send_message_size: 1024,
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let mut db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    db.set_timezone("Asia/Shanghai");
+    let sys1 = to_batch(db.sql("show variables system_time_zone;").await.unwrap()).await;
+    let user1 = to_batch(db.sql("show variables time_zone;").await.unwrap()).await;
+    db.set_timezone("");
+    let sys2 = to_batch(db.sql("show variables system_time_zone;").await.unwrap()).await;
+    let user2 = to_batch(db.sql("show variables time_zone;").await.unwrap()).await;
+    assert_eq!(sys1, sys2);
+    assert_eq!(
+        sys2,
+        "\
++------------------+
+| SYSTEM_TIME_ZONE |
++------------------+
+| UTC              |
++------------------+"
+    );
+    assert_eq!(
+        user1,
+        "\
++---------------+
+| TIME_ZONE     |
++---------------+
+| Asia/Shanghai |
++---------------+"
+    );
+    assert_eq!(
+        user2,
+        "\
++-----------+
+| TIME_ZONE |
++-----------+
+| UTC       |
++-----------+"
+    );
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+async fn to_batch(output: Output) -> String {
+    match output {
+        Output::RecordBatches(batch) => batch,
+        Output::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        Output::AffectedRows(_) => unreachable!(),
+    }
+    .pretty_print()
+    .unwrap()
 }

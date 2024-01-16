@@ -35,6 +35,11 @@ lazy_static::lazy_static! {
 pub trait App {
     fn name(&self) -> &str;
 
+    /// A hook for implementor to make something happened before actual startup. Defaults to no-op.
+    fn pre_start(&mut self) -> error::Result<()> {
+        Ok(())
+    }
+
     async fn start(&mut self) -> error::Result<()>;
 
     async fn stop(&self) -> error::Result<()>;

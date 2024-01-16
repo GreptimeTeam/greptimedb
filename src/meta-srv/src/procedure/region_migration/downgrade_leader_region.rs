@@ -374,7 +374,7 @@ mod tests {
 
         assert_matches!(err, Error::RetryLater { .. });
         assert!(err.is_retryable());
-        assert!(err.to_string().contains("test mocked"));
+        assert!(format!("{err:?}").contains("test mocked"), "err: {err:?}",);
     }
 
     #[tokio::test]

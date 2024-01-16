@@ -322,7 +322,7 @@ impl Env {
         }
     }
 
-    /// Setup kafka wal cluster if needed. The conterpart is in [GreptimeDB::stop].
+    /// Setup kafka wal cluster if needed. The counterpart is in [GreptimeDB::stop].
     fn setup_wal(&self) {
         if matches!(self.wal, WalConfig::Kafka { needs_kafka_cluster, .. } if needs_kafka_cluster) {
             util::setup_wal();

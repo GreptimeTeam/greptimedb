@@ -35,8 +35,8 @@ use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
 use crate::error::{
-    self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, Result as CatalogResult,
-    TableMetadataManagerSnafu,
+    self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, ListTablesSnafu,
+    Result as CatalogResult, TableMetadataManagerSnafu,
 };
 use crate::information_schema::InformationSchemaProvider;
 use crate::CatalogManager;
@@ -83,7 +83,7 @@ impl KvBackendCatalogManager {
                 catalog_manager: me.clone(),
                 information_schema_provider: Arc::new(InformationSchemaProvider::new(
                     // The catalog name is not used in system_catalog, so let it empty
-                    "".to_string(),
+                    String::default(),
                     me.clone(),
                 )),
             },
@@ -135,18 +135,22 @@ impl CatalogManager for KvBackendCatalogManager {
     }
 
     async fn table_names(&self, catalog: &str, schema: &str) -> CatalogResult<Vec<String>> {
-        let mut tables = self
+        let stream = self
             .table_metadata_manager
             .table_name_manager()
             .tables(catalog, schema)
+            .await;
+        let mut tables = stream
+            .try_collect::<Vec<_>>()
             .await
-            .context(TableMetadataManagerSnafu)?
+            .map_err(BoxedError::new)
+            .context(ListTablesSnafu { catalog, schema })?
             .into_iter()
             .map(|(k, _)| k)
-            .collect::<Vec<String>>();
+            .collect::<Vec<_>>();
         tables.extend_from_slice(&self.system_catalog.table_names(schema));
 
-        Ok(tables)
+        Ok(tables.into_iter().collect())
     }
 
     async fn catalog_exists(&self, catalog: &str) -> CatalogResult<bool> {

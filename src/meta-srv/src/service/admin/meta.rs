@@ -115,15 +115,19 @@ impl HttpHandler for TablesHandler {
         let catalog = util::get_value(params, "catalog")?;
         let schema = util::get_value(params, "schema")?;
 
-        let tables = self
+        let stream = self
             .table_metadata_manager
             .table_name_manager()
             .tables(catalog, schema)
+            .await;
+        let tables = stream
+            .try_collect::<Vec<_>>()
             .await
-            .context(TableMetadataManagerSnafu)?
+            .map_err(BoxedError::new)
+            .context(error::ListTablesSnafu { catalog, schema })?
             .into_iter()
             .map(|(k, _)| k)
-            .collect();
+            .collect::<Vec<_>>();
 
         to_http_response(tables)
     }

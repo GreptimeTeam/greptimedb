@@ -52,13 +52,14 @@ members = [
     "src/store-api",
     "src/table",
     "src/index",
+    "tests-fuzz",
     "tests-integration",
     "tests/runner",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -77,6 +78,7 @@ bitflags = "2.4.1"
 bytemuck = "1.12"
 bytes = { version = "1.5", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.4", features = ["derive"] }
 dashmap = "5.4"
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
@@ -90,7 +92,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a31ea166fc015ea7ff111ac94e26c3a5d64364d2" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2c1f17dce7af748c9a1255e82d6ceb7959f8919b" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"

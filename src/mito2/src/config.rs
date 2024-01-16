@@ -18,10 +18,11 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::warn;
+use object_store::util::join_dir;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use serde_with::{serde_as, NoneAsEmptyString};
 
-use crate::error::{InvalidConfigSnafu, Result};
+use crate::error::Result;
 
 /// Default max running background job.
 const DEFAULT_MAX_BG_JOB: usize = 4;
@@ -72,7 +73,7 @@ pub struct MitoConfig {
     pub page_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
-    /// Path for write cache.
+    /// File system path for write cache, defaults to `{data_home}/write_cache`.
     pub experimental_write_cache_path: String,
     /// Capacity for write cache.
     pub experimental_write_cache_size: ReadableSize,
@@ -89,6 +90,9 @@ pub struct MitoConfig {
     pub parallel_scan_channel_size: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
+
+    /// Inverted index configs.
+    pub inverted_index: InvertedIndexConfig,
 }
 
 impl Default for MitoConfig {
@@ -113,6 +117,7 @@ impl Default for MitoConfig {
             scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
+            inverted_index: InvertedIndexConfig::default(),
         }
     }
 }
@@ -121,7 +126,7 @@ impl MitoConfig {
     /// Sanitize incorrect configurations.
     ///
     /// Returns an error if there is a configuration that unable to sanitize.
-    pub(crate) fn sanitize(&mut self) -> Result<()> {
+    pub(crate) fn sanitize(&mut self, data_home: &str) -> Result<()> {
         // Use default value if `num_workers` is 0.
         if self.num_workers == 0 {
             self.num_workers = divide_num_cpus(2);
@@ -167,13 +172,84 @@ impl MitoConfig {
             );
         }
 
-        if self.enable_experimental_write_cache {
-            ensure!(
-                !self.experimental_write_cache_path.is_empty(),
-                InvalidConfigSnafu {
-                    reason: "experimental_write_cache_path should not be empty",
-                }
-            );
+        // Sets write cache path if it is empty.
+        if self.experimental_write_cache_path.is_empty() {
+            self.experimental_write_cache_path = join_dir(data_home, "write_cache");
+        }
+
+        self.inverted_index.sanitize(data_home)?;
+
+        Ok(())
+    }
+
+    /// Enable experimental write cache.
+    #[cfg(test)]
+    pub fn enable_write_cache(mut self, path: String, size: ReadableSize) -> Self {
+        self.enable_experimental_write_cache = true;
+        self.experimental_write_cache_path = path;
+        self.experimental_write_cache_size = size;
+        self
+    }
+}
+
+/// Operational mode for certain actions.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// The action is performed automatically based on internal criteria.
+    #[default]
+    Auto,
+    /// The action is explicitly disabled.
+    Disable,
+}
+
+impl Mode {
+    /// Whether the action is disabled.
+    pub fn disabled(&self) -> bool {
+        matches!(self, Mode::Disable)
+    }
+
+    /// Whether the action is automatic.
+    pub fn auto(&self) -> bool {
+        matches!(self, Mode::Auto)
+    }
+}
+
+/// Configuration options for the inverted index.
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct InvertedIndexConfig {
+    /// Whether to create the index on flush: automatically or never.
+    pub create_on_flush: Mode,
+    /// Whether to create the index on compaction: automatically or never.
+    pub create_on_compaction: Mode,
+    /// Whether to apply the index on query: automatically or never.
+    pub apply_on_query: Mode,
+    /// Memory threshold for performing an external sort during index creation.
+    /// `None` means all sorting will happen in memory.
+    #[serde_as(as = "NoneAsEmptyString")]
+    pub mem_threshold_on_create: Option<ReadableSize>,
+    /// File system path to store intermediate files for external sort, defaults to `{data_home}/index_intermediate`.
+    pub intermediate_path: String,
+}
+
+impl Default for InvertedIndexConfig {
+    fn default() -> Self {
+        Self {
+            create_on_flush: Mode::Auto,
+            create_on_compaction: Mode::Auto,
+            apply_on_query: Mode::Auto,
+            mem_threshold_on_create: Some(ReadableSize::mb(64)),
+            intermediate_path: String::new(),
+        }
+    }
+}
+
+impl InvertedIndexConfig {
+    pub fn sanitize(&mut self, data_home: &str) -> Result<()> {
+        if self.intermediate_path.is_empty() {
+            self.intermediate_path = join_dir(data_home, "index_intermediate");
         }
 
         Ok(())

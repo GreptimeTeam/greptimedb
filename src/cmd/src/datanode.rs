@@ -22,6 +22,7 @@ use common_config::WalConfig;
 use common_telemetry::{info, logging};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
+use datanode::service::DatanodeServiceBuilder;
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
@@ -37,6 +38,10 @@ pub struct Instance {
 impl Instance {
     fn new(datanode: Datanode) -> Self {
         Self { datanode }
+    }
+
+    pub fn datanode_mut(&mut self) -> &mut Datanode {
+        &mut self.datanode
     }
 }
 
@@ -219,14 +224,19 @@ impl StartCommand {
             client: Arc::new(meta_client.clone()),
         });
 
-        let datanode = DatanodeBuilder::new(opts, plugins)
+        let mut datanode = DatanodeBuilder::new(opts.clone(), plugins)
             .with_meta_client(meta_client)
             .with_kv_backend(meta_backend)
-            .enable_region_server_service()
-            .enable_http_service()
             .build()
             .await
             .context(StartDatanodeSnafu)?;
+
+        let services = DatanodeServiceBuilder::new(&opts)
+            .with_default_grpc_server(&datanode.region_server())
+            .enable_http_service()
+            .build()
+            .context(StartDatanodeSnafu)?;
+        datanode.setup_services(services);
 
         Ok(Instance::new(datanode))
     }

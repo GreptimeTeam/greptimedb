@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Role;
+use api::v1::region::region_server::RegionServer;
+use arrow_flight::flight_service_server::FlightServiceServer;
 use catalog::kvbackend::{CachedMetaKvBackend, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
@@ -45,7 +47,8 @@ use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
-use servers::grpc::builder::GrpcServerBuilder;
+use servers::grpc::flight::FlightCraftWrapper;
+use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::Mode;
 use tempfile::TempDir;
@@ -373,15 +376,15 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
             .unwrap(),
     );
 
-    let grpc_server = GrpcServerBuilder::new(runtime)
-        .flight_handler(Arc::new(datanode.region_server()))
-        .region_server_handler(Arc::new(datanode.region_server()))
-        .build();
+    let flight_handler = FlightCraftWrapper(datanode.region_server());
+
+    let region_server_handler =
+        RegionServerRequestHandler::new(Arc::new(datanode.region_server()), runtime);
 
     let _handle = tokio::spawn(async move {
         Server::builder()
-            .add_service(grpc_server.create_flight_service())
-            .add_service(grpc_server.create_region_service())
+            .add_service(FlightServiceServer::new(flight_handler))
+            .add_service(RegionServer::new(region_server_handler))
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

@@ -57,7 +57,7 @@ use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
 
 /// Parquet SST reader builder.
-pub struct ParquetReaderBuilder {
+pub(crate) struct ParquetReaderBuilder {
     /// SST directory.
     file_dir: String,
     file_handle: FileHandle,

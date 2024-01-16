@@ -306,7 +306,9 @@ mod test {
         assert!(ExportMetricsTask::try_new(
             &ExportMetricsOption {
                 enable: true,
-                self_import: Some(SelfImportOption { db: "".to_string() }),
+                self_import: Some(SelfImportOption {
+                    db: String::default()
+                }),
                 remote_write: None,
                 ..Default::default()
             },
@@ -319,7 +321,7 @@ mod test {
                 enable: true,
                 self_import: None,
                 remote_write: Some(RemoteWriteOption {
-                    url: "".to_string(),
+                    url: String::default(),
                     ..Default::default()
                 }),
                 ..Default::default()

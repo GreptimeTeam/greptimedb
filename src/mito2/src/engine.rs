@@ -78,11 +78,12 @@ pub struct MitoEngine {
 impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
     pub async fn new<S: LogStore>(
+        data_home: &str,
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
     ) -> Result<MitoEngine> {
-        config.sanitize()?;
+        config.sanitize(data_home)?;
 
         Ok(MitoEngine {
             inner: Arc::new(EngineInner::new(config, log_store, object_store_manager).await?),
@@ -192,7 +193,8 @@ impl EngineInner {
             request,
             Some(cache_manager),
         )
-        .with_parallelism(scan_parallelism);
+        .with_parallelism(scan_parallelism)
+        .ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled());
 
         scan_region.scanner()
     }
@@ -315,13 +317,14 @@ impl RegionEngine for MitoEngine {
 impl MitoEngine {
     /// Returns a new [MitoEngine] for tests.
     pub async fn new_for_test<S: LogStore>(
+        data_home: &str,
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> Result<MitoEngine> {
-        config.sanitize()?;
+        config.sanitize(data_home)?;
 
         let config = Arc::new(config);
         Ok(MitoEngine {

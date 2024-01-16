@@ -23,6 +23,7 @@ use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::file_cache::FileCacheRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::read::projection::ProjectionMapper;
@@ -121,6 +122,8 @@ pub(crate) struct ScanRegion {
     cache_manager: Option<CacheManagerRef>,
     /// Parallelism to scan.
     parallelism: ScanParallism,
+    /// Whether to ignore inverted index.
+    ignore_inverted_index: bool,
 }
 
 impl ScanRegion {
@@ -137,6 +140,7 @@ impl ScanRegion {
             request,
             cache_manager,
             parallelism: ScanParallism::default(),
+            ignore_inverted_index: false,
         }
     }
 
@@ -144,6 +148,12 @@ impl ScanRegion {
     #[must_use]
     pub(crate) fn with_parallelism(mut self, parallelism: ScanParallism) -> Self {
         self.parallelism = parallelism;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn ignore_inverted_index(mut self, ignore: bool) -> Self {
+        self.ignore_inverted_index = ignore;
         self
     }
 
@@ -233,9 +243,21 @@ impl ScanRegion {
 
     /// Use the latest schema to build the index applier.
     fn build_index_applier(&self) -> Option<SstIndexApplierRef> {
+        if self.ignore_inverted_index {
+            return None;
+        }
+
+        let file_cache = || -> Option<FileCacheRef> {
+            let cache_manager = self.cache_manager.as_ref()?;
+            let write_cache = cache_manager.write_cache()?;
+            let file_cache = write_cache.file_cache();
+            Some(file_cache)
+        }();
+
         SstIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
+            file_cache,
             self.version.metadata.as_ref(),
         )
         .build(&self.request.filters)

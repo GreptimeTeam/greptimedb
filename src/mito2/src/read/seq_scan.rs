@@ -224,6 +224,7 @@ impl SeqScan {
                 .time_range(self.time_range)
                 .projection(Some(self.mapper.column_ids().to_vec()))
                 .cache(self.cache_manager.clone())
+                .index_applier(self.index_applier.clone())
                 .build()
                 .await;
             let reader = match maybe_reader {

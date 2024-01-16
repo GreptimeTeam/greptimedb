@@ -15,13 +15,14 @@
 use std::collections::BTreeMap;
 
 use auth::user_provider_from_option;
-use axum::http::StatusCode;
+use axum::http::{HeaderName, StatusCode};
 use axum_test_helper::TestClient;
 use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
 use servers::http::error_result::ErrorResponse;
 use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::handler::HealthResponse;
+use servers::http::header::GREPTIME_TIMEZONE_HEADER_NAME;
 use servers::http::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
 use servers::http::GreptimeQueryOutput;
@@ -318,6 +319,43 @@ pub async fn test_sql_api(store_type: StorageType) {
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
+    // test timezone header
+    let res = client
+        .get("/v1/sql?&sql=show variables system_time_zone")
+        .header(
+            TryInto::<HeaderName>::try_into(GREPTIME_TIMEZONE_HEADER_NAME.to_string()).unwrap(),
+            "Asia/Shanghai",
+        )
+        .send()
+        .await
+        .text()
+        .await;
+    assert!(res.contains("SYSTEM_TIME_ZONE") && res.contains("UTC"));
+    let res = client
+        .get("/v1/sql?&sql=show variables time_zone")
+        .header(
+            TryInto::<HeaderName>::try_into(GREPTIME_TIMEZONE_HEADER_NAME.to_string()).unwrap(),
+            "Asia/Shanghai",
+        )
+        .send()
+        .await
+        .text()
+        .await;
+    assert!(res.contains("TIME_ZONE") && res.contains("Asia/Shanghai"));
+    let res = client
+        .get("/v1/sql?&sql=show variables system_time_zone")
+        .send()
+        .await
+        .text()
+        .await;
+    assert!(res.contains("SYSTEM_TIME_ZONE") && res.contains("UTC"));
+    let res = client
+        .get("/v1/sql?&sql=show variables time_zone")
+        .send()
+        .await
+        .text()
+        .await;
+    assert!(res.contains("TIME_ZONE") && res.contains("UTC"));
     guard.remove_all().await;
 }
 
@@ -738,6 +776,13 @@ experimental_write_cache_size = "512MiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 allow_stale_entries = false
+
+[datanode.region_engine.mito.inverted_index]
+create_on_flush = "auto"
+create_on_compaction = "auto"
+apply_on_query = "auto"
+mem_threshold_on_create = "64.0MiB"
+intermediate_path = ""
 
 [[datanode.region_engine]]
 

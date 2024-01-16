@@ -58,7 +58,7 @@ openmetrics-parser = "0.4"
 opensrv-mysql = { git = "https://github.com/MichaelScofield/opensrv.git", rev = "1676c1d" }
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
-pgwire = "0.18"
+pgwire = "0.19.1"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 pprof = { version = "0.13", features = [

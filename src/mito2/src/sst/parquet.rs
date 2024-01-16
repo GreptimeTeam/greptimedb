@@ -15,7 +15,7 @@
 //! SST in parquet format.
 
 mod format;
-mod helper;
+pub(crate) mod helper;
 mod page_reader;
 pub mod reader;
 pub mod row_group;
@@ -27,8 +27,8 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
 
-use super::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
+use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 /// Key of metadata in parquet SST.
 pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
@@ -83,6 +83,7 @@ mod tests {
 
     use super::*;
     use crate::cache::{CacheManager, PageKey};
+    use crate::sst::index::Indexer;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::test_util::sst_util::{
@@ -110,7 +111,12 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer = ParquetWriter::new(file_path, metadata, object_store.clone());
+        let mut writer = ParquetWriter::new(
+            file_path,
+            metadata,
+            object_store.clone(),
+            Indexer::default(),
+        );
         let info = writer
             .write_all(source, &write_opts)
             .await
@@ -159,7 +165,12 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        let mut writer = ParquetWriter::new(
+            file_path,
+            metadata.clone(),
+            object_store.clone(),
+            Indexer::default(),
+        );
         writer
             .write_all(source, &write_opts)
             .await
@@ -228,7 +239,12 @@ mod tests {
 
         // write the sst file and get sst info
         // sst info contains the parquet metadata, which is converted from FileMetaData
-        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
+        let mut writer = ParquetWriter::new(
+            file_path,
+            metadata.clone(),
+            object_store.clone(),
+            Indexer::default(),
+        );
         let sst_info = writer
             .write_all(source, &write_opts)
             .await

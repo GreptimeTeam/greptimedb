@@ -53,7 +53,8 @@ impl SimpleQueryHandler for PostgresServerHandler {
         let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY, db.as_str()])
             .start_timer();
-        let outputs = self.query_handler.do_query(query, query_ctx).await;
+        let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
+        query_ctx.update_session(&self.session);
 
         let mut results = Vec::with_capacity(outputs.len());
 
@@ -71,10 +72,7 @@ fn output_to_query_response<'a>(
     field_format: &Format,
 ) -> PgWireResult<Response<'a>> {
     match output {
-        Ok(Output::AffectedRows(rows)) => Ok(Response::Execution(Tag::new_for_execution(
-            "OK",
-            Some(rows),
-        ))),
+        Ok(Output::AffectedRows(rows)) => Ok(Response::Execution(Tag::new("OK").with_rows(rows))),
         Ok(Output::Stream(record_stream)) => {
             let schema = record_stream.schema();
             recordbatches_to_query_response(record_stream, schema, field_format)
@@ -211,7 +209,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY, db.as_str()])
             .start_timer();
 
-        let sql_plan = portal.statement().statement();
+        let sql_plan = &portal.statement.statement;
 
         let output = if let Some(plan) = &sql_plan.plan {
             let plan = plan
@@ -230,7 +228,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             self.query_handler.do_query(&sql, query_ctx).await.remove(0)
         };
 
-        output_to_query_response(output, portal.result_column_format())
+        output_to_query_response(output, &portal.result_column_format)
     }
 
     async fn do_describe<C>(
@@ -243,7 +241,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     {
         let (param_types, sql_plan, format) = match target {
             StatementOrPortal::Statement(stmt) => {
-                let sql_plan = stmt.statement();
+                let sql_plan = &stmt.statement;
                 if let Some(plan) = &sql_plan.plan {
                     let param_types = plan
                         .get_param_types()
@@ -254,14 +252,14 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 
                     (Some(types), sql_plan, &Format::UnifiedBinary)
                 } else {
-                    let param_types = Some(stmt.parameter_types().clone());
+                    let param_types = Some(stmt.parameter_types.clone());
                     (param_types, sql_plan, &Format::UnifiedBinary)
                 }
             }
             StatementOrPortal::Portal(portal) => (
                 None,
-                portal.statement().statement(),
-                portal.result_column_format(),
+                &portal.statement.statement,
+                &portal.result_column_format,
             ),
         };
 

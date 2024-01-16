@@ -22,11 +22,11 @@ use num::NumCast;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
-use super::boolean_type::bool_to_numeric;
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
 use crate::type_id::LogicalTypeId;
+use crate::types::boolean_type::bool_to_numeric;
 use crate::types::{DateTimeType, DateType};
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};

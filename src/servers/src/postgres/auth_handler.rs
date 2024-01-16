@@ -184,7 +184,7 @@ impl StartupHandler for PostgresServerHandler {
                 let login_info = LoginInfo::from_client_info(client);
 
                 // do authenticate
-                let auth_result = self.login_verifier.auth(&login_info, pwd.password()).await;
+                let auth_result = self.login_verifier.auth(&login_info, &pwd.password).await;
 
                 if let Ok(Some(user_info)) = auth_result {
                     self.session.set_user_info(user_info);

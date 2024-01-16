@@ -18,7 +18,9 @@ use sqlparser::tokenizer::Token;
 
 use crate::error::{self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result};
 use crate::parser::ParserContext;
-use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
+use crate::statements::show::{
+    ShowCreateTable, ShowDatabases, ShowKind, ShowTables, ShowVariables,
+};
 use crate::statements::statement::Statement;
 
 /// SHOW statement parser implementation
@@ -43,6 +45,16 @@ impl<'a> ParserContext<'a> {
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
+        } else if self.consume_token("VARIABLES") {
+            let variable =
+                self.parser
+                    .parse_object_name()
+                    .with_context(|_| error::UnexpectedSnafu {
+                        sql: self.sql,
+                        expected: "a variable name",
+                        actual: self.peek_token_as_string(),
+                    })?;
+            Ok(Statement::ShowVariables(ShowVariables { variable }))
         } else {
             self.unsupported(self.peek_token_as_string())
         }
@@ -177,6 +189,8 @@ impl<'a> ParserContext<'a> {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+
+    use sqlparser::ast::{Ident, ObjectName};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -384,6 +398,20 @@ mod tests {
                 }),
                 database: Some(_),
                 full: true
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_variables() {
+        let sql = "SHOW VARIABLES system_time_zone";
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowVariables(ShowVariables {
+                variable: ObjectName(vec![Ident::new("system_time_zone")]),
             })
         );
     }

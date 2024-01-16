@@ -59,7 +59,7 @@ impl Session {
             .current_catalog(self.catalog.load().to_string())
             .current_schema(self.schema.load().to_string())
             .sql_dialect(self.conn_info.channel.dialect())
-            .timezone((**self.timezone.load()).clone())
+            .timezone(self.timezone())
             .build()
     }
 

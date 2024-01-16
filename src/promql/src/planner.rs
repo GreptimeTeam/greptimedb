@@ -46,10 +46,11 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
     CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultiFieldsNotSupportedSnafu,
+    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, Result,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
@@ -291,13 +292,13 @@ impl PromPlanner {
                     (None, None) => {
                         let left_input = self.prom_expr_to_plan(*lhs.clone()).await?;
                         let left_field_columns = self.ctx.field_columns.clone();
-                        let left_table_ref: OwnedTableReference =
+                        let mut left_table_ref: OwnedTableReference =
                             self.ctx.table_name.clone().unwrap_or_default().into();
                         let left_context = self.ctx.clone();
 
                         let right_input = self.prom_expr_to_plan(*rhs.clone()).await?;
                         let right_field_columns = self.ctx.field_columns.clone();
-                        let right_table_ref: OwnedTableReference =
+                        let mut right_table_ref: OwnedTableReference =
                             self.ctx.table_name.clone().unwrap_or_default().into();
                         let right_context = self.ctx.clone();
 
@@ -316,6 +317,12 @@ impl PromPlanner {
                         }
 
                         // normal join
+                        if left_table_ref == right_table_ref {
+                            // rename table references to avoid ambiguity
+                            left_table_ref = OwnedTableReference::bare("lhs");
+                            right_table_ref = OwnedTableReference::bare("rhs");
+                            self.ctx.table_name = Some("lhs".to_string());
+                        }
                         let mut field_columns =
                             left_field_columns.iter().zip(right_field_columns.iter());
                         let join_plan = self.join_on_non_field_columns(
@@ -1541,7 +1548,7 @@ impl PromPlanner {
     fn set_op_on_non_field_columns(
         &mut self,
         left: LogicalPlan,
-        right: LogicalPlan,
+        mut right: LogicalPlan,
         left_context: PromPlannerContext,
         right_context: PromPlannerContext,
         op: TokenType,
@@ -1613,11 +1620,36 @@ impl PromPlanner {
                 }
             )
         };
+        let left_time_index = left_context.time_index_column.clone().unwrap();
+        let right_time_index = right_context.time_index_column.clone().unwrap();
         let join_keys = left_tag_col_set
             .iter()
             .cloned()
-            .chain([self.ctx.time_index_column.clone().unwrap()])
+            .chain([left_time_index.clone()])
             .collect::<Vec<_>>();
+        self.ctx.time_index_column = Some(left_time_index.clone());
+
+        // alias right time index column if necessary
+        if left_context.time_index_column != right_context.time_index_column {
+            let right_project_exprs = right
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| {
+                    if field.name() == &right_time_index {
+                        DfExpr::Column(Column::from_name(&right_time_index)).alias(&left_time_index)
+                    } else {
+                        DfExpr::Column(Column::from_name(field.name()))
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            right = LogicalPlanBuilder::from(right)
+                .project(right_project_exprs)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
 
         // Generate join plan.
         // All set operations in PromQL are "distinct"
@@ -1669,6 +1701,21 @@ impl PromPlanner {
         right_context: PromPlannerContext,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
+        // checks
+        ensure!(
+            left_context.field_columns.len() == right_context.field_columns.len(),
+            CombineTableColumnMismatchSnafu {
+                left: left_context.field_columns.clone(),
+                right: right_context.field_columns.clone()
+            }
+        );
+        ensure!(
+            left_context.field_columns.len() == 1,
+            MultiFieldsNotSupportedSnafu {
+                operator: "OR operator"
+            }
+        );
+
         // prepare hash sets
         let all_tags = left_tag_cols_set
             .union(&right_tag_cols_set)
@@ -1706,6 +1753,9 @@ impl PromPlanner {
                 .with_context(|| TimeIndexNotFoundSnafu {
                     table: right_qualifier_string.clone(),
                 })?;
+        // Take the name of first field column. The length is checked above.
+        let left_field_col = left_context.field_columns.first().unwrap();
+        let right_field_col = right_context.field_columns.first().unwrap();
 
         // step 0: fill all columns in output schema
         let mut all_columns_set = left
@@ -1718,6 +1768,10 @@ impl PromPlanner {
         // remove time index column
         all_columns_set.remove(&left_time_index_column);
         all_columns_set.remove(&right_time_index_column);
+        // remove field column in the right
+        if left_field_col != right_field_col {
+            all_columns_set.remove(right_field_col);
+        }
         let mut all_columns = all_columns_set.into_iter().collect::<Vec<_>>();
         // sort to ensure the generated schema is not volatile
         all_columns.sort_unstable();
@@ -1729,7 +1783,7 @@ impl PromPlanner {
             if tags_not_in_left.contains(col) {
                 DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
             } else {
-                DfExpr::Column(Column::new(left_qualifier.clone(), col))
+                DfExpr::Column(Column::new(None::<String>, col))
             }
         });
         let right_time_index_expr = DfExpr::Column(Column::new(
@@ -1737,11 +1791,16 @@ impl PromPlanner {
             right_time_index_column,
         ))
         .alias(left_time_index_column.clone());
+        // `skip（1)` to skip the time index column
         let right_proj_exprs_without_time_index = all_columns.iter().skip(1).map(|col| {
-            if tags_not_in_right.contains(col) {
+            // expr
+            if col == left_field_col && left_field_col != right_field_col {
+                // alias field in right side if necessary to handle different field name
+                DfExpr::Column(Column::new(right_qualifier.clone(), right_field_col))
+            } else if tags_not_in_right.contains(col) {
                 DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
             } else {
-                DfExpr::Column(Column::new(right_qualifier.clone(), col))
+                DfExpr::Column(Column::new(None::<String>, col))
             }
         });
         let right_proj_exprs = [right_time_index_expr]
@@ -1847,7 +1906,7 @@ impl PromPlanner {
             .zip(self.ctx.field_columns.iter())
             .map(|(expr, name)| Ok(DfExpr::Alias(Alias::new(expr, name.to_string()))));
 
-        // chain non-value columns (unchanged) and value columns (applied computation then alias)
+        // chain non-field columns (unchanged) and field columns (applied computation then alias)
         let project_fields = non_field_columns_iter
             .chain(field_columns_iter)
             .collect::<Result<Vec<_>>>()?;
@@ -2379,16 +2438,16 @@ mod test {
             .unwrap();
 
         let  expected = String::from(
-            "Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0 + some_metric.field_0 AS some_metric.field_0 + some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), some_metric.field_0 + some_metric.field_0:Float64;N]\
-            \n  Inner Join: some_metric.tag_0 = some_metric.tag_0, some_metric.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n    SubqueryAlias: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            "Projection: lhs.tag_0, lhs.timestamp, lhs.field_0 + rhs.field_0 AS lhs.field_0 + rhs.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), lhs.field_0 + rhs.field_0:Float64;N]\
+            \n  Inner Join: lhs.tag_0 = rhs.tag_0, lhs.timestamp = rhs.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    SubqueryAlias: lhs [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n            Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n              Filter: some_metric.tag_0 = Utf8(\"foo\") [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n                TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"foo\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n    SubqueryAlias: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    SubqueryAlias: rhs [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\

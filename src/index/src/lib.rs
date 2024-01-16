@@ -13,7 +13,5 @@
 // limitations under the License.
 
 #![feature(iter_partition_in_place)]
-// TODO(zhongzc): remove once further code is added
-#![allow(dead_code)]
 
 pub mod inverted_index;

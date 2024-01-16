@@ -178,15 +178,6 @@ impl DatanodeTableManager {
         let txns = distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
-                let filtered_region_wal_options = regions
-                    .iter()
-                    .filter_map(|region_number| {
-                        region_wal_options
-                            .get(region_number)
-                            .map(|wal_options| (*region_number, wal_options.clone()))
-                    })
-                    .collect();
-
                 let key = DatanodeTableKey::new(datanode_id, table_id);
                 let val = DatanodeTableValue::new(
                     table_id,
@@ -195,7 +186,9 @@ impl DatanodeTableManager {
                         engine: engine.to_string(),
                         region_storage_path: region_storage_path.to_string(),
                         region_options: region_options.clone(),
-                        region_wal_options: filtered_region_wal_options,
+                        // FIXME(weny): Before we store all region wal options into table metadata or somewhere,
+                        // We must store all region wal options.
+                        region_wal_options: region_wal_options.clone(),
                     },
                 );
 
@@ -243,7 +236,15 @@ impl DatanodeTableManager {
             if need_update {
                 let key = DatanodeTableKey::new(datanode, table_id);
                 let raw_key = key.as_raw_key();
-                let val = DatanodeTableValue::new(table_id, regions, region_info.clone())
+                // FIXME(weny): add unit tests.
+                let mut new_region_info = region_info.clone();
+                if need_update_options {
+                    new_region_info.region_options = new_region_options.clone();
+                }
+                if need_update_wal_options {
+                    new_region_info.region_wal_options = new_region_wal_options.clone();
+                }
+                let val = DatanodeTableValue::new(table_id, regions, new_region_info)
                     .try_as_raw_value()?;
                 opts.push(TxnOp::Put(raw_key, val));
             }
