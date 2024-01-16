@@ -21,6 +21,7 @@ use common_catalog::build_db_string;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME,
 };
+use futures_util::stream::BoxStream;
 use snafu::OptionExt;
 use table::TableRef;
 
@@ -39,42 +40,8 @@ pub struct MemoryCatalogManager {
 
 #[async_trait::async_trait]
 impl CatalogManager for MemoryCatalogManager {
-    async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool> {
-        self.schema_exist_sync(catalog, schema)
-    }
-
-    async fn table(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table_name: &str,
-    ) -> Result<Option<TableRef>> {
-        let result = try {
-            self.catalogs
-                .read()
-                .unwrap()
-                .get(catalog)?
-                .get(schema)?
-                .get(table_name)
-                .cloned()?
-        };
-        Ok(result)
-    }
-
-    async fn catalog_exists(&self, catalog: &str) -> Result<bool> {
-        self.catalog_exist_sync(catalog)
-    }
-
-    async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
-        let catalogs = self.catalogs.read().unwrap();
-        Ok(catalogs
-            .get(catalog)
-            .with_context(|| CatalogNotFoundSnafu {
-                catalog_name: catalog,
-            })?
-            .get(schema)
-            .with_context(|| SchemaNotFoundSnafu { catalog, schema })?
-            .contains_key(table))
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     async fn catalog_names(&self) -> Result<Vec<String>> {
@@ -110,8 +77,46 @@ impl CatalogManager for MemoryCatalogManager {
             .collect())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    async fn catalog_exists(&self, catalog: &str) -> Result<bool> {
+        self.catalog_exist_sync(catalog)
+    }
+
+    async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool> {
+        self.schema_exist_sync(catalog, schema)
+    }
+
+    async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
+        let catalogs = self.catalogs.read().unwrap();
+        Ok(catalogs
+            .get(catalog)
+            .with_context(|| CatalogNotFoundSnafu {
+                catalog_name: catalog,
+            })?
+            .get(schema)
+            .with_context(|| SchemaNotFoundSnafu { catalog, schema })?
+            .contains_key(table))
+    }
+
+    async fn table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
+    ) -> Result<Option<TableRef>> {
+        let result = try {
+            self.catalogs
+                .read()
+                .unwrap()
+                .get(catalog)?
+                .get(schema)?
+                .get(table_name)
+                .cloned()?
+        };
+        Ok(result)
+    }
+
+    async fn tables<'a>(&'a self, _: &'a str, _: &'a str) -> BoxStream<'a, Result<TableRef>> {
+        unimplemented!("`MemoryCatalogManager` does not support tables()")
     }
 }
 
