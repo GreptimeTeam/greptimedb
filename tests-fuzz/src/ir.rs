@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(extract_if)]
+//! The intermediate representation
 
-pub(crate) mod context;
-pub(crate) mod error;
-pub(crate) mod executor;
-// TODO(weny): removes it.
-#[allow(unused)]
-pub(crate) mod generator;
-pub(crate) mod ir;
-pub(crate) mod table_creator;
-pub(crate) mod translator;
+pub(crate) mod create_expr;
+
+pub use create_expr::CreateTableExpr;

@@ -12,14 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(extract_if)]
+use common_macro::stack_trace_debug;
+use snafu::{Location, Snafu};
 
-pub(crate) mod context;
-pub(crate) mod error;
-pub(crate) mod executor;
-// TODO(weny): removes it.
-#[allow(unused)]
-pub(crate) mod generator;
-pub(crate) mod ir;
-pub(crate) mod table_creator;
-pub(crate) mod translator;
+use crate::ir::create_expr::CreateTableExprBuilderError;
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Snafu)]
+#[snafu(visibility(pub))]
+#[stack_trace_debug]
+pub enum Error {
+    #[snafu(display("Unexpected, violated: {violated}"))]
+    Unexpected {
+        violated: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build create table expr"))]
+    BuildCreateTableExpr {
+        #[snafu(source)]
+        error: CreateTableExprBuilderError,
+        location: Location,
+    },
+}

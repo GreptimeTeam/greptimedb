@@ -6,3 +6,13 @@ license.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+common-error = { workspace = true }
+common-macro = { workspace = true }
+datatypes = { workspace = true }
+derive_builder = { workspace = true }
+faker_rand = "0.1"
+lazy_static = { workspace = true }
+partition = { workspace = true }
+rand = { workspace = true }
+snafu = { workspace = true }
+sql = { workspace = true }
