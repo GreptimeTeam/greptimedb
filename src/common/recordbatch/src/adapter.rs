@@ -158,6 +158,7 @@ pub struct RecordBatchStreamAdapter {
     metrics_2: Metrics,
 }
 
+/// Json encoded metrics. Contains metric from a whole plan tree.
 enum Metrics {
     Unavailable,
     Unresolved(Arc<dyn ExecutionPlan>),
