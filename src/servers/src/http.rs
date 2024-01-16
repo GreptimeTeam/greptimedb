@@ -817,9 +817,12 @@ async fn handle_error(err: BoxError) -> Json<HttpResponse> {
 #[cfg(test)]
 mod test {
     use std::future::pending;
+    use std::io::Cursor;
     use std::sync::Arc;
 
     use api::v1::greptime_request::Request;
+    use arrow_ipc::reader::FileReader;
+    use arrow_schema::DataType;
     use axum::handler::Handler;
     use axum::http::StatusCode;
     use axum::routing::get;
@@ -960,11 +963,13 @@ mod test {
             ResponseFormat::GreptimedbV1,
             ResponseFormat::InfluxdbV1,
             ResponseFormat::Csv,
+            ResponseFormat::Arrow,
         ] {
             let recordbatches =
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
             let outputs = vec![Ok(Output::RecordBatches(recordbatches))];
             let json_resp = match format {
+                ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
                 ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
                 ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
@@ -1009,6 +1014,40 @@ mod test {
                     } else {
                         panic!("invalid output type");
                     }
+                }
+                HttpResponse::Arrow(resp) => {
+                    let output = resp.data;
+                    let mut reader =
+                        FileReader::try_new(Cursor::new(output), None).expect("Arrow reader error");
+                    let schema = reader.schema();
+                    assert_eq!(
+                        schema.fields.get(0).expect("At least 1 field").name(),
+                        "numbers"
+                    );
+                    assert_eq!(
+                        schema.fields.get(0).expect("At least 1 field").data_type(),
+                        &DataType::UInt32
+                    );
+                    assert_eq!(
+                        schema
+                            .fields
+                            .get(1)
+                            .expect("failed to access field 1")
+                            .name(),
+                        "strings"
+                    );
+                    assert_eq!(
+                        schema
+                            .fields
+                            .get(1)
+                            .expect("failed to access field 2")
+                            .data_type(),
+                        &DataType::Utf8
+                    );
+
+                    let rb = reader.next().unwrap().expect("read record batch failed");
+                    assert_eq!(rb.num_columns(), 2);
+                    assert_eq!(rb.num_rows(), 4);
                 }
                 HttpResponse::Error(err) => unreachable!("{err:?}"),
             }

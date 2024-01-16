@@ -34,8 +34,8 @@ use crate::http::{HttpResponse, ResponseFormat};
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct ArrowResponse {
-    data: Vec<u8>,
-    execution_time_ms: u64,
+    pub(crate) data: Vec<u8>,
+    pub(crate) execution_time_ms: u64,
 }
 
 async fn write_arrow_bytes(
