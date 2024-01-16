@@ -31,7 +31,9 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
+use crate::memtable::MemtableId;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::OnFailure;
 use crate::sst::file_purger::FilePurgerRef;
@@ -60,7 +62,7 @@ impl RegionUsage {
 /// - Only the region worker thread this region belongs to can modify the metadata.
 /// - Multiple reader threads are allowed to read a specific `version` of a region.
 #[derive(Debug)]
-pub(crate) struct MitoRegion {
+pub struct MitoRegion {
     /// Id of this region.
     ///
     /// Accessing region id from the version control is inconvenient so
@@ -162,6 +164,23 @@ impl MitoRegion {
     /// Use the memtables size to estimate the size of wal.
     fn estimated_wal_usage(&self, memtable_usage: u64) -> u64 {
         ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
+    }
+
+    pub async fn apply_edit(
+        &self,
+        edit: RegionEdit,
+        memtables_to_remove: &[MemtableId],
+    ) -> Result<()> {
+        self.manifest_manager
+            .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
+                edit.clone(),
+            )))
+            .await?;
+
+        // Apply edit to region's version.
+        self.version_control
+            .apply_edit(edit, memtables_to_remove, self.file_purger.clone());
+        Ok(())
     }
 }
 

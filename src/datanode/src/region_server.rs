@@ -113,6 +113,16 @@ impl RegionServer {
         self.inner.register_engine(engine);
     }
 
+    /// Finds the regine's engine by its id. If the region is not ready, returns `None`.
+    pub fn find_engine(&self, region_id: RegionId) -> Result<Option<RegionEngineRef>> {
+        self.inner
+            .get_engine(region_id, &RegionChange::None)
+            .map(|x| match x {
+                CurrentEngine::Engine(engine) => Some(engine),
+                _ => None,
+            })
+    }
+
     pub async fn handle_request(
         &self,
         region_id: RegionId,

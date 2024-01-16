@@ -63,7 +63,7 @@ use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
-use crate::region::RegionUsage;
+use crate::region::{MitoRegionRef, RegionUsage};
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
 
@@ -111,8 +111,7 @@ impl MitoEngine {
         self.inner.handle_query(region_id, request)
     }
 
-    #[cfg(test)]
-    pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
+    pub fn get_region(&self, id: RegionId) -> Option<MitoRegionRef> {
         self.inner.workers.get_region(id)
     }
 }
