@@ -11,4 +11,5 @@ rskafka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with = "3"
+sysinfo.workspace = true
 toml.workspace = true

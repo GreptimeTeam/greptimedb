@@ -1633,6 +1633,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "sysinfo",
  "toml 0.8.8",
 ]
 
@@ -5010,7 +5011,6 @@ dependencies = [
  "snafu",
  "store-api",
  "strum 0.25.0",
- "sysinfo",
  "table",
  "tokio",
  "tokio-stream",

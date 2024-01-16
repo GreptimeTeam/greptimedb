@@ -18,12 +18,12 @@ use std::cmp;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_config::utils::{get_cpus, get_sys_total_memory};
 use common_telemetry::warn;
 use lazy_static::lazy_static;
 use object_store::util::join_dir;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, NoneAsEmptyString};
-use sysinfo::System;
 
 use crate::error::Result;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -37,19 +37,10 @@ const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 
 lazy_static! {
     /// Number of cpu cores.
-    pub static ref CPU_CORES: usize = {
-        let mut sys_info = System::new();
-        sys_info.refresh_cpu();
-        // At least 1 cpu core.
-        sys_info.cpus().len().max(1)
-    };
+    pub static ref CPU_CORES: usize = get_cpus();
 
     /// Total memory size of the OS.
-    pub static ref SYS_TOTAL_MEMORY: ReadableSize = {
-        let mut sys_info = System::new();
-        sys_info.refresh_memory();
-        ReadableSize(sys_info.total_memory())
-    };
+    pub static ref SYS_TOTAL_MEMORY: ReadableSize = get_sys_total_memory();
 }
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
