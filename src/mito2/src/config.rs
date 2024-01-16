@@ -39,8 +39,6 @@ lazy_static! {
     /// Number of cpu cores.
     pub static ref CPU_CORES: usize = get_cpus();
 
-    /// Total memory size of the OS.
-    pub static ref SYS_TOTAL_MEMORY: ReadableSize = get_sys_total_memory();
 }
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
@@ -112,7 +110,7 @@ impl Default for MitoConfig {
         // Use 1/2 of cpu cores' number as workers' number.
         let num_workers = divide_num_cpus(2);
         // OS total memory size.
-        let sys_memory = *SYS_TOTAL_MEMORY;
+        let sys_memory = get_sys_total_memory().unwrap_or(ReadableSize::gb(16));
         // Use 1/64 of OS memory as global write buffer size, it shouldn't be greater than 1G in default mode.
         // For example, if the OS memory size is 16GB, the global write buffer size is 256MB.
         let global_write_buffer_size = cmp::min(sys_memory / 64, ReadableSize::gb(1));

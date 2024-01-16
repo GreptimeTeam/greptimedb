@@ -98,6 +98,7 @@ lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
 mockall = "0.11.4"
 moka = "0.12"
+num_cpus = "1.16.0"
 once_cell = "1.18"
 opentelemetry-proto = { git = "https://github.com/waynexia/opentelemetry-rust.git", rev = "33841b38dda79b15f2024952be5f32533325ca02", features = [
     "gen-tonic",
