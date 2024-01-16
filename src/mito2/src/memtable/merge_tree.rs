@@ -16,6 +16,7 @@
 //! - Flushes mutable parts to immutable parts
 //! - Merges small immutable parts into a big immutable part
 
+mod mutable;
 mod tree;
 
 use std::fmt;
@@ -79,6 +80,8 @@ impl Memtable for MergeTreeMemtable {
     }
 
     fn write(&self, _kvs: &KeyValues) -> Result<()> {
+        // TODO(yingwen): Validate schema while inserting rows.
+
         todo!()
     }
 
