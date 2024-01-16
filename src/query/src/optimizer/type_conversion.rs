@@ -87,7 +87,6 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             | LogicalPlan::Repartition { .. }
             | LogicalPlan::Extension { .. }
             | LogicalPlan::Sort { .. }
-            | LogicalPlan::Explain { .. }
             | LogicalPlan::Limit { .. }
             | LogicalPlan::Union { .. }
             | LogicalPlan::Join { .. }
@@ -110,6 +109,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             }
 
             LogicalPlan::Subquery { .. }
+            | LogicalPlan::Explain { .. }
             | LogicalPlan::SubqueryAlias { .. }
             | LogicalPlan::EmptyRelation(_)
             | LogicalPlan::Prepare(_)
