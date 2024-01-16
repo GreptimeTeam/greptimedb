@@ -52,6 +52,7 @@ members = [
     "src/store-api",
     "src/table",
     "src/index",
+    "tests-fuzz",
     "tests-integration",
     "tests/runner",
 ]
