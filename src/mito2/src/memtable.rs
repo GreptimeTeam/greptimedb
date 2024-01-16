@@ -14,9 +14,9 @@
 
 //! Memtables are write buffers for regions.
 
-pub mod time_series;
-
 pub mod key_values;
+pub mod merge_tree;
+pub mod time_series;
 pub(crate) mod version;
 
 use std::fmt;
