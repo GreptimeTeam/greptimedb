@@ -12,19 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+use serde::{Deserialize, Serialize};
 
-use common_base::readable_size::ReadableSize;
-use common_wal::config::raft_engine::RaftEngineConfig;
+pub mod config;
+pub mod test_util;
 
-use crate::raft_engine::log_store::RaftEngineLogStore;
+pub const BROKER_ENDPOINT: &str = "127.0.0.1:9092";
+pub const TOPIC_NAME_PREFIX: &str = "greptimedb_wal_topic";
 
-/// Create a write log for the provided path, used for test.
-pub async fn create_tmp_local_file_log_store<P: AsRef<Path>>(path: P) -> RaftEngineLogStore {
-    let path = path.as_ref().display().to_string();
-    let cfg = RaftEngineConfig {
-        file_size: ReadableSize::kb(128),
-        ..Default::default()
-    };
-    RaftEngineLogStore::try_new(path, cfg).await.unwrap()
+/// The type of the topic selector, i.e. with which strategy to select a topic.
+// The enum is defined here to work around cyclic dependency issues.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TopicSelectorType {
+    #[default]
+    RoundRobin,
 }

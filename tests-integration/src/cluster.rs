@@ -24,7 +24,6 @@ use catalog::kvbackend::{CachedMetaKvBackend, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
-use common_config::WalConfig;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
@@ -33,10 +32,10 @@ use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::wal::WalConfig as MetaWalConfig;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
+use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
@@ -77,8 +76,8 @@ pub struct GreptimeDbClusterBuilder {
     store_config: Option<ObjectStoreConfig>,
     store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
-    wal_config: WalConfig,
-    meta_wal_config: MetaWalConfig,
+    wal_config: DatanodeWalConfig,
+    meta_wal_config: MetasrvWalConfig,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
 }
@@ -106,8 +105,8 @@ impl GreptimeDbClusterBuilder {
             store_config: None,
             store_providers: None,
             datanodes: None,
-            wal_config: WalConfig::default(),
-            meta_wal_config: MetaWalConfig::default(),
+            wal_config: DatanodeWalConfig::default(),
+            meta_wal_config: MetasrvWalConfig::default(),
             shared_home_dir: None,
             meta_selector: None,
         }
@@ -132,13 +131,13 @@ impl GreptimeDbClusterBuilder {
     }
 
     #[must_use]
-    pub fn with_wal_config(mut self, wal_config: WalConfig) -> Self {
+    pub fn with_wal_config(mut self, wal_config: DatanodeWalConfig) -> Self {
         self.wal_config = wal_config;
         self
     }
 
     #[must_use]
-    pub fn with_meta_wal_config(mut self, wal_meta: MetaWalConfig) -> Self {
+    pub fn with_meta_wal_config(mut self, wal_meta: MetasrvWalConfig) -> Self {
         self.meta_wal_config = wal_meta;
         self
     }

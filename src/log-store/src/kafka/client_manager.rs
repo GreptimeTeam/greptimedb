@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_config::wal::KafkaConfig;
+use common_wal::config::kafka::DatanodeKafkaConfig as KafkaConfig;
 use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
 use rskafka::client::producer::aggregator::RecordAggregator;
 use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
@@ -136,7 +136,7 @@ impl ClientManager {
 
 #[cfg(test)]
 mod tests {
-    use common_meta::wal::kafka::test_util::run_test_with_kafka_wal;
+    use common_wal::test_util::run_test_with_kafka_wal;
     use tokio::sync::Barrier;
 
     use super::*;

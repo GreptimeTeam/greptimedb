@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use common_config::wal::WalOptions;
+use common_config::wal_options::WalOptions;
 use common_error::ext::ErrorExt;
 
 use crate::logstore::entry::Entry;

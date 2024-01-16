@@ -16,16 +16,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_config::wal::KafkaConfig;
-use common_config::WalConfig;
 use common_meta::key::{RegionDistribution, TableMetadataManagerRef};
 use common_meta::peer::Peer;
-use common_meta::wal::kafka::KafkaConfig as MetaKafkaConfig;
-use common_meta::wal::WalConfig as MetaWalConfig;
 use common_query::Output;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::create_temp_dir;
+use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
+use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
 use futures::future::BoxFuture;
@@ -108,12 +106,12 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     let cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
-        .with_wal_config(WalConfig::Kafka(KafkaConfig {
+        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
+        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -238,12 +236,12 @@ pub async fn test_region_migration_multiple_regions(
     let cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
-        .with_wal_config(WalConfig::Kafka(KafkaConfig {
+        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
+        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -375,12 +373,12 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     let cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
-        .with_wal_config(WalConfig::Kafka(KafkaConfig {
+        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
+        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -507,12 +505,12 @@ pub async fn test_region_migration_incorrect_from_peer(
     let cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
-        .with_wal_config(WalConfig::Kafka(KafkaConfig {
+        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
+        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -582,12 +580,12 @@ pub async fn test_region_migration_incorrect_region_id(
     let cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
-        .with_wal_config(WalConfig::Kafka(KafkaConfig {
+        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
+        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),

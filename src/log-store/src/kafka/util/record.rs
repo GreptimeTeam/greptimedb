@@ -295,7 +295,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_base::readable_size::ReadableSize;
-    use common_config::wal::KafkaConfig;
+    use common_wal::config::kafka::DatanodeKafkaConfig as KafkaConfig;
     use uuid::Uuid;
 
     use super::*;

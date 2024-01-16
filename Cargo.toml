@@ -29,6 +29,7 @@ members = [
     "src/common/time",
     "src/common/decimal",
     "src/common/version",
+    "src/common/wal",
     "src/datanode",
     "src/datatypes",
     "src/file-engine",
@@ -122,6 +123,7 @@ rskafka = "0.5"
 rust_decimal = "1.33"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_with = "3"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.7"
 # on branch v0.38.x
@@ -166,6 +168,7 @@ common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }
 common-version = { path = "src/common/version" }
+common-wal = { path = "src/common/wal" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
 file-engine = { path = "src/file-engine" }

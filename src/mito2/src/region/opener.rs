@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
-use common_config::wal::WalOptions;
+use common_config::wal_options::WalOptions;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use futures::StreamExt;

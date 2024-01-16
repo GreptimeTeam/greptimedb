@@ -19,9 +19,10 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use async_stream::stream;
-use common_config::wal::{RaftEngineConfig, WalOptions};
+use common_config::wal_options::WalOptions;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{error, info};
+use common_wal::config::raft_engine::RaftEngineConfig;
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::Id as EntryId;

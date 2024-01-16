@@ -12,31 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod wal_options;
+use std::time::Duration;
 
-use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
+use serde_with::with_prefix;
 
-pub fn metadata_store_dir(store_dir: &str) -> String {
-    format!("{store_dir}/metadata")
-}
+with_prefix!(pub backoff_prefix "backoff_");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct KvBackendConfig {
-    // Kv file size in bytes
-    pub file_size: ReadableSize,
-    // Kv purge threshold in bytes
-    pub purge_threshold: ReadableSize,
+pub struct BackoffConfig {
+    /// The initial backoff delay.
+    #[serde(with = "humantime_serde")]
+    pub init: Duration,
+    /// The maximum backoff delay.
+    #[serde(with = "humantime_serde")]
+    pub max: Duration,
+    /// The exponential backoff rate, i.e. next backoff = base * current backoff.
+    pub base: u32,
+    /// The deadline of retries. `None` stands for no deadline.
+    #[serde(with = "humantime_serde")]
+    pub deadline: Option<Duration>,
 }
 
-impl Default for KvBackendConfig {
+impl Default for BackoffConfig {
     fn default() -> Self {
         Self {
-            // log file size 256MB
-            file_size: ReadableSize::mb(256),
-            // purge threshold 4GB
-            purge_threshold: ReadableSize::gb(4),
+            init: Duration::from_millis(500),
+            max: Duration::from_secs(10),
+            base: 2,
+            deadline: Some(Duration::from_secs(60 * 5)), // 5 mins
         }
     }
 }

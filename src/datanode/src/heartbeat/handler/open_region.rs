@@ -14,7 +14,7 @@
 
 use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
-use common_meta::wal::prepare_wal_option;
+use common_meta::wal_options_allocator::prepare_wal_option;
 use futures_util::future::BoxFuture;
 use store_api::path_utils::region_dir;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};

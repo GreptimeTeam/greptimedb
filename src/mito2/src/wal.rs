@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use api::v1::WalEntry;
 use async_stream::try_stream;
-use common_config::wal::WalOptions;
+use common_config::wal_options::WalOptions;
 use common_error::ext::BoxedError;
 use futures::stream::BoxStream;
 use futures::StreamExt;

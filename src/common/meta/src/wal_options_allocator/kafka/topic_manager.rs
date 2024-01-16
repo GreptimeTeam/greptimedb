@@ -15,8 +15,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_config::wal::kafka::TopicSelectorType;
 use common_telemetry::{error, info};
+use common_wal::config::kafka::MetasrvKafkaConfig as KafkaConfig;
+use common_wal::TopicSelectorType;
 use rskafka::client::controller::ControllerClient;
 use rskafka::client::error::Error as RsKafkaError;
 use rskafka::client::error::ProtocolError::TopicAlreadyExists;
@@ -33,8 +34,9 @@ use crate::error::{
 };
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::PutRequest;
-use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, TopicSelectorRef};
-use crate::wal::kafka::KafkaConfig;
+use crate::wal_options_allocator::kafka::topic_selector::{
+    RoundRobinTopicSelector, TopicSelectorRef,
+};
 
 const CREATED_TOPICS_KEY: &str = "__created_wal_topics/kafka/";
 
@@ -237,9 +239,10 @@ impl TopicManager {
 
 #[cfg(test)]
 mod tests {
+    use common_wal::test_util::run_test_with_kafka_wal;
+
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::wal::kafka::test_util::run_test_with_kafka_wal;
 
     // Tests that topics can be successfully persisted into the kv backend and can be successfully restored from the kv backend.
     #[tokio::test]

@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 testing = []
 
+# TODO(niebayes): remove unused crates.
 [dependencies]
 api.workspace = true
 async-recursion = "1.0"
@@ -25,6 +26,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+common-wal.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true

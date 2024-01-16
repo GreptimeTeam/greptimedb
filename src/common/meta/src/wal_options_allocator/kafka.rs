@@ -12,19 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
-
-use common_base::readable_size::ReadableSize;
-use common_wal::config::raft_engine::RaftEngineConfig;
-
-use crate::raft_engine::log_store::RaftEngineLogStore;
-
-/// Create a write log for the provided path, used for test.
-pub async fn create_tmp_local_file_log_store<P: AsRef<Path>>(path: P) -> RaftEngineLogStore {
-    let path = path.as_ref().display().to_string();
-    let cfg = RaftEngineConfig {
-        file_size: ReadableSize::kb(128),
-        ..Default::default()
-    };
-    RaftEngineLogStore::try_new(path, cfg).await.unwrap()
-}
+pub mod topic_manager;
+pub mod topic_selector;

@@ -1537,6 +1537,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-version",
+ "common-wal",
  "config",
  "datanode",
  "datatypes",
@@ -1629,11 +1630,9 @@ version = "0.6.0"
 dependencies = [
  "common-base",
  "humantime-serde",
- "rskafka",
  "serde",
  "serde_json",
  "serde_with",
- "toml 0.8.8",
 ]
 
 [[package]]
@@ -1830,6 +1829,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "common-wal",
  "datatypes",
  "derive_builder 0.12.0",
  "etcd-client",
@@ -2007,6 +2007,21 @@ name = "common-version"
 version = "0.6.0"
 dependencies = [
  "build-data",
+]
+
+[[package]]
+name = "common-wal"
+version = "0.6.0"
+dependencies = [
+ "common-base",
+ "common-telemetry",
+ "futures-util",
+ "humantime-serde",
+ "rskafka",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "toml 0.8.8",
 ]
 
 [[package]]
@@ -2665,6 +2680,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-wal",
  "dashmap",
  "datafusion",
  "datafusion-common",
@@ -4514,6 +4530,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-wal",
  "dashmap",
  "futures",
  "futures-util",
@@ -4829,6 +4846,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "common-wal",
  "dashmap",
  "datatypes",
  "derive_builder 0.12.0",
@@ -9507,6 +9525,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
+ "common-wal",
  "datafusion",
  "datafusion-expr",
  "datanode",

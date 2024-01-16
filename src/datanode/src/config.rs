@@ -17,12 +17,12 @@
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_config::WalConfig;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
+use common_wal::config::DatanodeWalConfig as WalConfig;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;

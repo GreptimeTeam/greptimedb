@@ -48,7 +48,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
-use crate::wal::prepare_wal_option;
+use crate::wal_options_allocator::prepare_wal_option;
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,

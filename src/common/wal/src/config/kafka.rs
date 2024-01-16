@@ -12,19 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+pub mod common;
+pub mod datanode;
+pub mod metasrv;
+pub mod standalone;
 
-use common_base::readable_size::ReadableSize;
-use common_wal::config::raft_engine::RaftEngineConfig;
-
-use crate::raft_engine::log_store::RaftEngineLogStore;
-
-/// Create a write log for the provided path, used for test.
-pub async fn create_tmp_local_file_log_store<P: AsRef<Path>>(path: P) -> RaftEngineLogStore {
-    let path = path.as_ref().display().to_string();
-    let cfg = RaftEngineConfig {
-        file_size: ReadableSize::kb(128),
-        ..Default::default()
-    };
-    RaftEngineLogStore::try_new(path, cfg).await.unwrap()
-}
+pub use datanode::DatanodeKafkaConfig;
+pub use metasrv::MetasrvKafkaConfig;
+pub use standalone::StandaloneKafkaConfig;
