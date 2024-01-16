@@ -8470,6 +8470,7 @@ dependencies = [
  "aide",
  "api",
  "arrow-flight",
+ "arrow-ipc",
  "async-trait",
  "auth",
  "axum",

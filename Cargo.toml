@@ -68,6 +68,7 @@ aquamarine = "0.3"
 arrow = { version = "47.0" }
 arrow-array = "47.0"
 arrow-flight = "47.0"
+arrow-ipc = "47.0"
 arrow-schema = { version = "47.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"

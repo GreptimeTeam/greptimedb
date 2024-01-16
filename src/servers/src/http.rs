@@ -49,6 +49,7 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSnafu};
+use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
@@ -82,6 +83,7 @@ pub mod prom_store;
 pub mod prometheus;
 pub mod script;
 
+pub mod arrow_result;
 pub mod csv_result;
 #[cfg(feature = "dashboard")]
 mod dashboard;
@@ -252,6 +254,7 @@ pub enum GreptimeQueryOutput {
 /// It allows the results of SQL queries to be presented in different formats.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
+    Arrow,
     Csv,
     #[default]
     GreptimedbV1,
@@ -261,6 +264,7 @@ pub enum ResponseFormat {
 impl ResponseFormat {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "arrow" => Some(ResponseFormat::Arrow),
             "csv" => Some(ResponseFormat::Csv),
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
@@ -270,6 +274,7 @@ impl ResponseFormat {
 
     pub fn as_str(&self) -> &'static str {
         match self {
+            ResponseFormat::Arrow => "arrow",
             ResponseFormat::Csv => "csv",
             ResponseFormat::GreptimedbV1 => "greptimedb_v1",
             ResponseFormat::InfluxdbV1 => "influxdb_v1",
@@ -323,6 +328,7 @@ impl Display for Epoch {
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub enum HttpResponse {
+    Arrow(ArrowResponse),
     Csv(CsvResponse),
     Error(ErrorResponse),
     GreptimedbV1(GreptimedbV1Response),
@@ -332,6 +338,7 @@ pub enum HttpResponse {
 impl HttpResponse {
     pub fn with_execution_time(self, execution_time: u64) -> Self {
         match self {
+            HttpResponse::Arrow(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::Csv(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::GreptimedbV1(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::InfluxdbV1(resp) => resp.with_execution_time(execution_time).into(),
@@ -343,6 +350,7 @@ impl HttpResponse {
 impl IntoResponse for HttpResponse {
     fn into_response(self) -> Response {
         match self {
+            HttpResponse::Arrow(resp) => resp.into_response(),
             HttpResponse::Csv(resp) => resp.into_response(),
             HttpResponse::GreptimedbV1(resp) => resp.into_response(),
             HttpResponse::InfluxdbV1(resp) => resp.into_response(),
@@ -353,6 +361,12 @@ impl IntoResponse for HttpResponse {
 
 impl OperationOutput for HttpResponse {
     type Inner = Response;
+}
+
+impl From<ArrowResponse> for HttpResponse {
+    fn from(value: ArrowResponse) -> Self {
+        HttpResponse::Arrow(value)
+    }
 }
 
 impl From<CsvResponse> for HttpResponse {
