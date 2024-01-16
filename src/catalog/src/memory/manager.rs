@@ -17,6 +17,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Weak};
 
+use async_stream::{stream, try_stream};
 use common_catalog::build_db_string;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME,
@@ -48,30 +49,31 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(self.catalogs.read().unwrap().keys().cloned().collect())
     }
 
-    async fn schema_names(&self, catalog_name: &str) -> Result<Vec<String>> {
+    async fn schema_names(&self, catalog: &str) -> Result<Vec<String>> {
         Ok(self
             .catalogs
             .read()
             .unwrap()
-            .get(catalog_name)
-            .with_context(|| CatalogNotFoundSnafu { catalog_name })?
+            .get(catalog)
+            .with_context(|| CatalogNotFoundSnafu {
+                catalog_name: catalog,
+            })?
             .keys()
             .cloned()
             .collect())
     }
 
-    async fn table_names(&self, catalog_name: &str, schema_name: &str) -> Result<Vec<String>> {
+    async fn table_names(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
         Ok(self
             .catalogs
             .read()
             .unwrap()
-            .get(catalog_name)
-            .with_context(|| CatalogNotFoundSnafu { catalog_name })?
-            .get(schema_name)
-            .with_context(|| SchemaNotFoundSnafu {
-                catalog: catalog_name,
-                schema: schema_name,
+            .get(catalog)
+            .with_context(|| CatalogNotFoundSnafu {
+                catalog_name: catalog,
             })?
+            .get(schema)
+            .with_context(|| SchemaNotFoundSnafu { catalog, schema })?
             .keys()
             .cloned()
             .collect())
@@ -115,8 +117,35 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(result)
     }
 
-    async fn tables<'a>(&'a self, _: &'a str, _: &'a str) -> BoxStream<'a, Result<TableRef>> {
-        unimplemented!("`MemoryCatalogManager` does not support tables()")
+    async fn tables<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+    ) -> BoxStream<'a, Result<TableRef>> {
+        let catalogs = self.catalogs.read().unwrap();
+
+        let Some(schemas) = catalogs.get(catalog) else {
+            return Box::pin(stream!({
+                yield CatalogNotFoundSnafu {
+                    catalog_name: catalog,
+                }
+                .fail();
+            }));
+        };
+
+        let Some(tables) = schemas.get(schema) else {
+            return Box::pin(stream!({
+                yield SchemaNotFoundSnafu { catalog, schema }.fail();
+            }));
+        };
+
+        let tables = tables.values().cloned().collect::<Vec<_>>();
+
+        return Box::pin(try_stream!({
+            for table in tables {
+                yield table;
+            }
+        }));
     }
 }
 
@@ -312,6 +341,7 @@ pub fn new_memory_catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
 #[cfg(test)]
 mod tests {
     use common_catalog::consts::*;
+    use futures_util::TryStreamExt;
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
@@ -336,8 +366,18 @@ mod tests {
                 NUMBERS_TABLE_NAME,
             )
             .await
+            .unwrap()
             .unwrap();
-        let _ = table.unwrap();
+        let stream = catalog_list
+            .tables(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .await;
+        let tables = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(
+            table.table_info().table_id(),
+            tables[0].table_info().table_id()
+        );
+
         assert!(catalog_list
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "not_exists")
             .await
