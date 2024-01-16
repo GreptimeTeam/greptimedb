@@ -164,12 +164,13 @@ impl Repl {
 
             let plan = query_engine
                 .planner()
-                .plan(stmt, query_ctx)
+                .plan(stmt, query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
 
-            let LogicalPlan::DfPlan(plan) =
-                query_engine.optimize(&plan).context(PlanStatementSnafu)?;
+            let LogicalPlan::DfPlan(plan) = query_engine
+                .optimize(&mut query_engine.engine_context(query_ctx), &plan)
+                .context(PlanStatementSnafu)?;
 
             let plan = DFLogicalSubstraitConvertor {}
                 .encode(&plan)

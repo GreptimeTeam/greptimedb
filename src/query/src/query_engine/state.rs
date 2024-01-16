@@ -42,10 +42,12 @@ use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
+use crate::optimizer::ExtensionAnalyzerRule;
 use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
 use crate::table_mutation::TableMutationHandlerRef;
+use crate::QueryEngineContext;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -57,6 +59,7 @@ pub struct QueryEngineState {
     catalog_manager: CatalogManagerRef,
     table_mutation_handler: Option<TableMutationHandlerRef>,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
+    extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
 }
 
@@ -78,9 +81,12 @@ impl QueryEngineState {
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
-        // Apply the type conversion rule first.
+        // Apply extension rules
+        let mut extension_rules = Vec::new();
+        // The [`TypeConversionRule`] must be at first
+        extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
+        // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
-        analyzer.rules.insert(0, Arc::new(TypeConversionRule));
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
         Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
         analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));
@@ -110,12 +116,26 @@ impl QueryEngineState {
             catalog_manager: catalog_list,
             table_mutation_handler,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
+            extension_rules,
             plugins,
         }
     }
 
     fn remove_analyzer_rule(rules: &mut Vec<Arc<dyn AnalyzerRule + Send + Sync>>, name: &str) {
         rules.retain(|rule| rule.name() != name);
+    }
+
+    /// Optimize the logical plan by the extension anayzer rules.
+    pub fn optimize_by_extension_rules(
+        &self,
+        plan: DfLogicalPlan,
+        context: &mut QueryEngineContext,
+    ) -> DfResult<DfLogicalPlan> {
+        self.extension_rules
+            .iter()
+            .try_fold(plan, |acc_plan, rule| {
+                rule.analyze(acc_plan, context, self.session_state().config_options())
+            })
     }
 
     /// Register a udf function

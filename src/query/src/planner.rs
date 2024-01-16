@@ -26,12 +26,12 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
 
-use crate::error::{PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
+use crate::error::{DataFusionSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
 use crate::parser::QueryStatement;
 use crate::plan::LogicalPlan;
 use crate::query_engine::QueryEngineState;
 use crate::range_select::plan_rewrite::RangePlanRewriter;
-use crate::DfContextProviderAdapter;
+use crate::{DfContextProviderAdapter, QueryEngineContext};
 
 #[async_trait]
 pub trait LogicalPlanner: Send + Sync {
@@ -66,7 +66,7 @@ impl DfLogicalPlanner {
             self.engine_state.clone(),
             self.session_state.clone(),
             &df_stmt,
-            query_ctx,
+            query_ctx.clone(),
         )
         .await?;
 
@@ -84,6 +84,14 @@ impl DfLogicalPlanner {
         let plan = RangePlanRewriter::new(table_provider)
             .rewrite(result)
             .await?;
+
+        // Optimize logical plan by extension rules
+        let mut context = QueryEngineContext::new(self.session_state.clone(), query_ctx);
+        let plan = self
+            .engine_state
+            .optimize_by_extension_rules(plan, &mut context)
+            .context(DataFusionSnafu)?;
+
         Ok(LogicalPlan::DfPlan(plan))
     }
 

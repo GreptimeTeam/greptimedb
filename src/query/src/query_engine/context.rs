@@ -51,4 +51,23 @@ impl QueryEngineContext {
             state.runtime_env().clone(),
         ))
     }
+
+    /// Mock an engine context for unit tests.
+    #[cfg(test)]
+    pub fn mock() -> Self {
+        use common_base::Plugins;
+        use session::context::QueryContext;
+
+        use crate::query_engine::QueryEngineState;
+
+        let state = Arc::new(QueryEngineState::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            false,
+            Plugins::default(),
+        ));
+
+        QueryEngineContext::new(state.session_state(), QueryContext::arc())
+    }
 }

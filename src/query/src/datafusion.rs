@@ -84,7 +84,7 @@ impl DatafusionQueryEngine {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let mut ctx = QueryEngineContext::new(self.state.session_state(), query_ctx.clone());
+        let mut ctx = self.engine_context(query_ctx.clone());
 
         // `create_physical_plan` will optimize logical plan internally
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
@@ -242,8 +242,13 @@ impl QueryEngine for DatafusionQueryEngine {
         "datafusion"
     }
 
-    async fn describe(&self, plan: LogicalPlan) -> Result<DescribeResult> {
-        let optimised_plan = self.optimize(&plan)?;
+    async fn describe(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<DescribeResult> {
+        let mut ctx = self.engine_context(query_ctx);
+        let optimised_plan = self.optimize(&mut ctx, &plan)?;
         Ok(DescribeResult {
             schema: optimised_plan.schema()?,
             logical_plan: optimised_plan,
@@ -287,18 +292,35 @@ impl QueryEngine for DatafusionQueryEngine {
                 .context(QueryExecutionSnafu)?,
         ))
     }
+
+    fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
+        QueryEngineContext::new(self.state.session_state(), query_ctx)
+    }
 }
 
 impl LogicalOptimizer for DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
-    fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
+    fn optimize(
+        &self,
+        context: &mut QueryEngineContext,
+        plan: &LogicalPlan,
+    ) -> Result<LogicalPlan> {
         let _timer = metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
+                // Optimized by extension rules
+                let optimized_plan = self
+                    .state
+                    .optimize_by_extension_rules(df_plan.clone(), context)
+                    .context(error::DatafusionSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+
+                // Optimized by datafusion optimizer
                 let optimized_plan = self
                     .state
                     .session_state()
-                    .optimize(df_plan)
+                    .optimize(&optimized_plan)
                     .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
@@ -654,7 +676,7 @@ mod tests {
         let DescribeResult {
             schema,
             logical_plan,
-        } = engine.describe(plan).await.unwrap();
+        } = engine.describe(plan, QueryContext::arc()).await.unwrap();
 
         assert_eq!(
             schema.column_schemas()[0],
