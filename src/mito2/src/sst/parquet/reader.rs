@@ -343,7 +343,7 @@ struct Metrics {
     num_row_groups_inverted_index_selected: usize,
     /// Number of row groups to read after filtering by min-max index.
     num_row_groups_min_max_selected: usize,
-    num_rows_percise_filtered: usize,
+    num_rows_precise_filtered: usize,
     /// Duration to build the parquet reader.
     build_cost: Duration,
     /// Duration to scan the reader.
@@ -503,7 +503,7 @@ impl Drop for ParquetReader {
             .inc_by(self.metrics.num_row_groups_min_max_selected as u64);
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
-            .inc_by(self.metrics.num_rows_percise_filtered as u64);
+            .inc_by(self.metrics.num_rows_precise_filtered as u64);
     }
 }
 
@@ -562,7 +562,7 @@ impl ParquetReader {
         let mut new_batches = VecDeque::new();
         let mut batches = std::mem::take(&mut self.batches);
         for batch in batches.drain(..) {
-            let Some(batch_filtered) = self.percise_filter(batch)? else {
+            let Some(batch_filtered) = self.precise_filter(batch)? else {
                 continue;
             };
             if !batch_filtered.is_empty() {
@@ -574,13 +574,13 @@ impl ParquetReader {
         Ok(())
     }
 
-    /// TRY THE BEST to perform pushed down predicate percisely on the input batch.
+    /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
     ///
     /// Supported filter expr type is defined in [SimpleFilterEvaluator].
     ///
     /// When a filter is referencing primary key column, this method will decode
     /// the primary key and put it into the batch.
-    fn percise_filter(&self, mut input: Batch) -> Result<Option<Batch>> {
+    fn precise_filter(&self, mut input: Batch) -> Result<Option<Batch>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
         let field_id_map = self
