@@ -565,7 +565,9 @@ impl ParquetReader {
             let Some(batch_filtered) = self.percise_filter(batch)? else {
                 continue;
             };
-            new_batches.push_back(batch_filtered);
+            if !batch_filtered.is_empty() {
+                new_batches.push_back(batch_filtered);
+            }
         }
         self.batches = new_batches;
 
