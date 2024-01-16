@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::kafka::common::{backoff_prefix, BackoffConfig};
 use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
 
-/// Kafka configurations for metasrv.
+/// Kafka wal configurations for metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvKafkaConfig {

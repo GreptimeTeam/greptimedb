@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::kafka::common::{backoff_prefix, BackoffConfig};
 use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
 
-/// Wal configurations for standalone.
+/// Kafka wal configurations for standalone.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct StandaloneKafkaConfig {

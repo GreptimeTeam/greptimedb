@@ -21,24 +21,24 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RaftEngineConfig {
-    // wal directory
+    /// Wal directory
     pub dir: Option<String>,
-    // wal file size in bytes
+    /// Wal file size in bytes
     pub file_size: ReadableSize,
-    // wal purge threshold in bytes
+    /// Wal purge threshold in bytes
     pub purge_threshold: ReadableSize,
-    // purge interval in seconds
+    /// Purge interval in seconds
     #[serde(with = "humantime_serde")]
     pub purge_interval: Duration,
-    // read batch size
+    /// Read batch size
     pub read_batch_size: usize,
-    // whether to sync log file after every write
+    /// Whether to sync log file after every write
     pub sync_write: bool,
-    // whether to reuse logically truncated log files.
+    /// Whether to reuse logically truncated log files.
     pub enable_log_recycle: bool,
-    // whether to pre-create log files on start up
+    /// Whether to pre-create log files on start up
     pub prefill_log_files: bool,
-    // duration for fsyncing log files.
+    /// Duration for fsyncing log files.
     #[serde(with = "humantime_serde")]
     pub sync_period: Option<Duration>,
 }

@@ -19,6 +19,7 @@ use serde_with::with_prefix;
 
 with_prefix!(pub backoff_prefix "backoff_");
 
+/// Backoff configurations for kafka clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct BackoffConfig {

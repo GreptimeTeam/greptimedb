@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::kafka::common::{backoff_prefix, BackoffConfig};
 use crate::BROKER_ENDPOINT;
 
-/// Configurations for kafka wal.
+/// Kafka wal configurations for datanode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DatanodeKafkaConfig {
