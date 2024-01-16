@@ -44,7 +44,7 @@ use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use crate::error::{Error, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
@@ -357,7 +357,7 @@ impl Procedure for RegionFailoverProcedure {
             .next(&self.context, &self.node.failed_region)
             .await
             .map_err(|e| {
-                if matches!(e, Error::RetryLater { .. }) {
+                if e.is_retryable() {
                     ProcedureError::retry_later(e)
                 } else {
                     ProcedureError::external(e)
@@ -532,7 +532,7 @@ mod tests {
                 let nodes = (1..=region_distribution.len())
                     .map(|id| Peer {
                         id: id as u64,
-                        addr: "".to_string(),
+                        addr: String::default(),
                     })
                     .collect();
                 Arc::new(RandomNodeSelector { nodes })
@@ -751,7 +751,7 @@ mod tests {
             peers: Arc::new(Mutex::new(vec![
                 Some(Peer {
                     id: 42,
-                    addr: "".to_string(),
+                    addr: String::default(),
                 }),
                 None,
             ])),
@@ -780,7 +780,8 @@ mod tests {
 
         let result = procedure.execute(&ctx).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().is_retry_later());
+        let err = result.unwrap_err();
+        assert!(err.is_retry_later(), "err: {:?}", err);
         assert_eq!(
             r#"{"region_failover_state":"RegionFailoverStart","failover_candidate":null}"#,
             serde_json::to_string(&procedure.node.state).unwrap()

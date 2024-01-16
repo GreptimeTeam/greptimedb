@@ -336,7 +336,7 @@ mod tests {
 
         assert_matches!(err, Error::RetryLater { .. });
         assert!(err.is_retryable());
-        assert!(err.to_string().contains("test mocked"));
+        assert!(format!("{err:?}").contains("test mocked"));
     }
 
     #[tokio::test]
@@ -398,7 +398,7 @@ mod tests {
 
         assert_matches!(err, Error::RetryLater { .. });
         assert!(err.is_retryable());
-        assert!(err.to_string().contains("still replaying the wal"));
+        assert!(format!("{err:?}").contains("still replaying the wal"));
 
         // Sets the `require_ready` to false.
         state.require_ready = false;

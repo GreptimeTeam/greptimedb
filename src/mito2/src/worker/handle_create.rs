@@ -61,6 +61,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.memtable_builder.clone(),
             self.object_store_manager.clone(),
             self.scheduler.clone(),
+            self.intermediate_manager.clone(),
         )
         .metadata(metadata)
         .parse_options(request.options)?

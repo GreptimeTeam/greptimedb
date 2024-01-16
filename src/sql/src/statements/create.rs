@@ -96,7 +96,7 @@ impl CreateTable {
         if let Some(partitions) = &self.partitions {
             format!("{}\n", partitions)
         } else {
-            "".to_string()
+            String::default()
         }
     }
 
@@ -112,7 +112,7 @@ impl CreateTable {
     #[inline]
     fn format_options(&self) -> String {
         if self.options.is_empty() {
-            "".to_string()
+            String::default()
         } else {
             let options: Vec<&SqlOption> = self.options.iter().sorted().collect();
             let options = format_list_indent!(options);

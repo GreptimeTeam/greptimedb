@@ -14,9 +14,11 @@
 
 //! A cache for files.
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
+use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{info, warn};
 use futures::{FutureExt, TryStreamExt};
@@ -31,6 +33,7 @@ use crate::cache::FILE_TYPE;
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
+use crate::sst::parquet::helper::fetch_byte_ranges;
 
 /// Subdirectory of cached files.
 const FILE_DIR: &str = "files/";
@@ -68,7 +71,7 @@ impl FileCache {
                         // The cache is replaced by another file. This is unexpected, we don't remove the same
                         // file but updates the metrics as the file is already replaced by users.
                         CACHE_BYTES.with_label_values(&[FILE_TYPE]).sub(value.file_size.into());
-                        warn!("Replace existing cache {} for region {} unexpectedly", file_path, key.0);
+                        warn!("Replace existing cache {} for region {} unexpectedly", file_path, key.region_id);
                         return;
                     }
 
@@ -77,7 +80,7 @@ impl FileCache {
                             CACHE_BYTES.with_label_values(&[FILE_TYPE]).sub(value.file_size.into());
                         }
                         Err(e) => {
-                            warn!(e; "Failed to delete cached file {} for region {}", file_path, key.0);
+                            warn!(e; "Failed to delete cached file {} for region {}", file_path, key.region_id);
                         }
                     }
                 }
@@ -129,6 +132,40 @@ impl FileCache {
         None
     }
 
+    /// Reads ranges from the cache.
+    pub(crate) async fn read_ranges(
+        &self,
+        key: IndexKey,
+        ranges: &[Range<u64>],
+    ) -> Option<Vec<Bytes>> {
+        if self.memory_index.get(&key).await.is_none() {
+            CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+            return None;
+        }
+
+        let file_path = self.cache_file_path(key);
+        // In most cases, it will use blocking read,
+        // because FileCache is normally based on local file system, which supports blocking read.
+        let bytes_result = fetch_byte_ranges(&file_path, self.local_store.clone(), ranges).await;
+        match bytes_result {
+            Ok(bytes) => {
+                CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
+                Some(bytes)
+            }
+            Err(e) => {
+                if e.kind() != ErrorKind::NotFound {
+                    warn!("Failed to get file for key {:?}, err: {}", key, e);
+                }
+
+                // We removes the file from the index.
+                self.memory_index.remove(&key).await;
+                CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+                None
+            }
+        }
+    }
+
+    #[allow(unused)]
     /// Removes a file from the cache explicitly.
     pub(crate) async fn remove(&self, key: IndexKey) {
         let file_path = self.cache_file_path(key);
@@ -205,7 +242,51 @@ impl FileCache {
 }
 
 /// Key of file cache index.
-pub(crate) type IndexKey = (RegionId, FileId);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct IndexKey {
+    pub region_id: RegionId,
+    pub file_id: FileId,
+    pub file_type: FileType,
+}
+
+impl IndexKey {
+    /// Creates a new index key.
+    pub fn new(region_id: RegionId, file_id: FileId, file_type: FileType) -> IndexKey {
+        IndexKey {
+            region_id,
+            file_id,
+            file_type,
+        }
+    }
+}
+
+/// Type of the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileType {
+    /// Parquet file.
+    Parquet,
+    /// Puffin file.
+    Puffin,
+}
+
+impl FileType {
+    /// Parses the file type from string.
+    fn parse(s: &str) -> Option<FileType> {
+        match s {
+            "parquet" => Some(FileType::Parquet),
+            "puffin" => Some(FileType::Puffin),
+            _ => None,
+        }
+    }
+
+    /// Converts the file type to string.
+    fn as_str(&self) -> &'static str {
+        match self {
+            FileType::Parquet => "parquet",
+            FileType::Puffin => "puffin",
+        }
+    }
+}
 
 /// An entity that describes the file in the file cache.
 ///
@@ -218,21 +299,30 @@ pub(crate) struct IndexValue {
 
 /// Generates the path to the cached file.
 ///
-/// The file name format is `{region_id}.{file_id}`
+/// The file name format is `{region_id}.{file_id}.{file_type}`
 fn cache_file_path(cache_file_dir: &str, key: IndexKey) -> String {
-    join_path(cache_file_dir, &format!("{}.{}", key.0.as_u64(), key.1))
+    join_path(
+        cache_file_dir,
+        &format!(
+            "{}.{}.{}",
+            key.region_id.as_u64(),
+            key.file_id,
+            key.file_type.as_str()
+        ),
+    )
 }
 
 /// Parse index key from the file name.
 fn parse_index_key(name: &str) -> Option<IndexKey> {
-    let mut splited = name.splitn(2, '.');
-    let region_id = splited.next().and_then(|s| {
+    let mut split = name.splitn(3, '.');
+    let region_id = split.next().and_then(|s| {
         let id = s.parse::<u64>().ok()?;
         Some(RegionId::from_u64(id))
     })?;
-    let file_id = splited.next().and_then(|s| FileId::parse_str(s).ok())?;
+    let file_id = split.next().and_then(|s| FileId::parse_str(s).ok())?;
+    let file_type = split.next().and_then(FileType::parse)?;
 
-    Some((region_id, file_id))
+    Some(IndexKey::new(region_id, file_id, file_type))
 }
 
 #[cfg(test)]
@@ -257,7 +347,7 @@ mod tests {
         let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
-        let key = (region_id, file_id);
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
         let file_path = cache.cache_file_path(key);
 
         // Get an empty file.
@@ -270,7 +360,10 @@ mod tests {
             .unwrap();
         // Add to the cache.
         cache
-            .put((region_id, file_id), IndexValue { file_size: 5 })
+            .put(
+                IndexKey::new(region_id, file_id, FileType::Parquet),
+                IndexValue { file_size: 5 },
+            )
             .await;
 
         // Read file content.
@@ -303,7 +396,7 @@ mod tests {
         let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
-        let key = (region_id, file_id);
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
         let file_path = cache.cache_file_path(key);
 
         // Write a file.
@@ -313,7 +406,10 @@ mod tests {
             .unwrap();
         // Add to the cache.
         cache
-            .put((region_id, file_id), IndexValue { file_size: 5 })
+            .put(
+                IndexKey::new(region_id, file_id, FileType::Parquet),
+                IndexValue { file_size: 5 },
+            )
             .await;
 
         // Remove the file but keep the index.
@@ -332,11 +428,12 @@ mod tests {
         let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
 
         let region_id = RegionId::new(2000, 0);
+        let file_type = FileType::Parquet;
         // Write N files.
         let file_ids: Vec<_> = (0..10).map(|_| FileId::random()).collect();
         let mut total_size = 0;
         for (i, file_id) in file_ids.iter().enumerate() {
-            let key = (region_id, *file_id);
+            let key = IndexKey::new(region_id, *file_id, file_type);
             let file_path = cache.cache_file_path(key);
             let bytes = i.to_string().into_bytes();
             local_store.write(&file_path, bytes.clone()).await.unwrap();
@@ -344,7 +441,7 @@ mod tests {
             // Add to the cache.
             cache
                 .put(
-                    (region_id, *file_id),
+                    IndexKey::new(region_id, *file_id, file_type),
                     IndexValue {
                         file_size: bytes.len() as u32,
                     },
@@ -356,7 +453,10 @@ mod tests {
         // Recover the cache.
         let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
         // No entry before recovery.
-        assert!(cache.reader((region_id, file_ids[0])).await.is_none());
+        assert!(cache
+            .reader(IndexKey::new(region_id, file_ids[0], file_type))
+            .await
+            .is_none());
         cache.recover().await.unwrap();
 
         // Check size.
@@ -364,7 +464,7 @@ mod tests {
         assert_eq!(total_size, cache.memory_index.weighted_size() as usize);
 
         for (i, file_id) in file_ids.iter().enumerate() {
-            let key = (region_id, *file_id);
+            let key = IndexKey::new(region_id, *file_id, file_type);
             let mut reader = cache.reader(key).await.unwrap();
             let mut buf = String::new();
             reader.read_to_string(&mut buf).await.unwrap();
@@ -372,16 +472,50 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_file_cache_read_ranges() {
+        let dir = create_temp_dir("");
+        let local_store = new_fs_store(dir.path().to_str().unwrap());
+        let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let region_id = RegionId::new(2000, 0);
+        let file_id = FileId::random();
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        let file_path = file_cache.cache_file_path(key);
+        // Write a file.
+        let data = b"hello greptime database";
+        local_store
+            .write(&file_path, data.as_slice())
+            .await
+            .unwrap();
+        // Add to the cache.
+        file_cache.put(key, IndexValue { file_size: 5 }).await;
+        // Ranges
+        let ranges = vec![0..5, 6..10, 15..19, 0..data.len() as u64];
+        let bytes = file_cache.read_ranges(key, &ranges).await.unwrap();
+
+        assert_eq!(4, bytes.len());
+        assert_eq!(b"hello", bytes[0].as_ref());
+        assert_eq!(b"grep", bytes[1].as_ref());
+        assert_eq!(b"data", bytes[2].as_ref());
+        assert_eq!(data, bytes[3].as_ref());
+    }
+
     #[test]
     fn test_cache_file_path() {
         let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095").unwrap();
         assert_eq!(
-            "test_dir/5299989643269.3368731b-a556-42b8-a5df-9c31ce155095",
-            cache_file_path("test_dir", (RegionId::new(1234, 5), file_id))
+            "test_dir/5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet",
+            cache_file_path(
+                "test_dir",
+                IndexKey::new(RegionId::new(1234, 5), file_id, FileType::Parquet)
+            )
         );
         assert_eq!(
-            "test_dir/5299989643269.3368731b-a556-42b8-a5df-9c31ce155095",
-            cache_file_path("test_dir/", (RegionId::new(1234, 5), file_id))
+            "test_dir/5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet",
+            cache_file_path(
+                "test_dir/",
+                IndexKey::new(RegionId::new(1234, 5), file_id, FileType::Parquet)
+            )
         );
     }
 
@@ -390,8 +524,8 @@ mod tests {
         let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095").unwrap();
         let region_id = RegionId::new(1234, 5);
         assert_eq!(
-            (region_id, file_id),
-            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095").unwrap()
+            IndexKey::new(region_id, file_id, FileType::Parquet),
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet").unwrap()
         );
         assert!(parse_index_key("").is_none());
         assert!(parse_index_key(".").is_none());
@@ -400,8 +534,13 @@ mod tests {
         assert!(parse_index_key(".5299989643269").is_none());
         assert!(parse_index_key("5299989643269.").is_none());
         assert!(parse_index_key("5299989643269.3368731b-a556-42b8-a5df").is_none());
+        assert!(parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095").is_none());
         assert!(
-            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet").is_none()
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parque").is_none()
         );
+        assert!(parse_index_key(
+            "5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet.puffin"
+        )
+        .is_none());
     }
 }

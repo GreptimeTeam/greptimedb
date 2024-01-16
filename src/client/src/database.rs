@@ -47,6 +47,9 @@ pub struct Database {
     // The dbname follows naming rule as out mysql, postgres and http
     // protocol. The server treat dbname in priority of catalog/schema.
     dbname: String,
+    // The time zone indicates the time zone where the user is located.
+    // Some queries need to be aware of the user's time zone to perform some specific actions.
+    timezone: String,
 
     client: Client,
     ctx: FlightContext,
@@ -58,7 +61,8 @@ impl Database {
         Self {
             catalog: catalog.into(),
             schema: schema.into(),
-            dbname: "".to_string(),
+            dbname: String::default(),
+            timezone: String::default(),
             client,
             ctx: FlightContext::default(),
         }
@@ -73,8 +77,9 @@ impl Database {
     /// environment
     pub fn new_with_dbname(dbname: impl Into<String>, client: Client) -> Self {
         Self {
-            catalog: "".to_string(),
-            schema: "".to_string(),
+            catalog: String::default(),
+            schema: String::default(),
+            timezone: String::default(),
             dbname: dbname.into(),
             client,
             ctx: FlightContext::default(),
@@ -103,6 +108,14 @@ impl Database {
 
     pub fn set_dbname(&mut self, dbname: impl Into<String>) {
         self.dbname = dbname.into();
+    }
+
+    pub fn timezone(&self) -> &String {
+        &self.timezone
+    }
+
+    pub fn set_timezone(&mut self, timezone: impl Into<String>) {
+        self.timezone = timezone.into();
     }
 
     pub fn set_auth(&mut self, auth: AuthScheme) {
@@ -161,6 +174,7 @@ impl Database {
                 schema: self.schema.clone(),
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
+                timezone: self.timezone.clone(),
                 // TODO(Taylor-lagrange): add client grpc tracing
                 tracing_context: W3cTrace::new(),
             }),

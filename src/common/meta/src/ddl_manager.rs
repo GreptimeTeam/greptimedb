@@ -389,15 +389,21 @@ async fn handle_drop_table_task(
     let table_metadata_manager = &ddl_manager.table_metadata_manager();
     let table_ref = drop_table_task.table_ref();
 
-    let (table_info_value, table_route_value) =
-        table_metadata_manager.get_full_table_info(table_id).await?;
+    let table_info_value = table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await?;
+    let (_, table_route_value) = table_metadata_manager
+        .table_route_manager()
+        .get_physical_table_route(table_id)
+        .await?;
 
     let table_info_value = table_info_value.with_context(|| error::TableInfoNotFoundSnafu {
         table_name: table_ref.to_string(),
     })?;
 
     let table_route_value =
-        table_route_value.context(error::TableRouteNotFoundSnafu { table_id })?;
+        DeserializedValueWithBytes::from_inner(TableRouteValue::Physical(table_route_value));
 
     let id = ddl_manager
         .submit_drop_table_task(

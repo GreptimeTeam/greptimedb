@@ -29,7 +29,7 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::RegionPutRequest;
+use store_api::region_request::{RegionDeleteRequest, RegionPutRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::error::{
@@ -109,6 +109,34 @@ impl MetadataRegion {
             Self::serialize_column_metadata(column_metadata),
         )
         .await
+    }
+
+    /// Remove a registered logical region from metadata.
+    ///
+    /// This method doesn't check if the previous key exists.
+    pub async fn remove_logical_region(
+        &self,
+        physical_region_id: RegionId,
+        logical_region_id: RegionId,
+    ) -> Result<()> {
+        // concat region key
+        let region_id = utils::to_metadata_region_id(physical_region_id);
+        let region_key = Self::concat_region_key(logical_region_id);
+
+        // concat column keys
+        let logical_columns = self
+            .logical_columns(physical_region_id, logical_region_id)
+            .await?;
+        let mut column_keys = logical_columns
+            .into_iter()
+            .map(|(col, _)| Self::concat_column_key(logical_region_id, &col))
+            .collect::<Vec<_>>();
+
+        // remove region key and column keys
+        column_keys.push(region_key);
+        self.delete(region_id, &column_keys).await?;
+
+        Ok(())
     }
 
     /// Check if the given logical region exists.
@@ -354,6 +382,20 @@ impl MetadataRegion {
         Ok(result)
     }
 
+    /// Delete the given keys. For performance consideration, this method
+    /// doesn't check if those keys exist or not.
+    async fn delete(&self, region_id: RegionId, keys: &[String]) -> Result<()> {
+        let delete_request = Self::build_delete_request(keys);
+        self.mito
+            .handle_request(
+                region_id,
+                store_api::region_request::RegionRequest::Delete(delete_request),
+            )
+            .await
+            .context(MitoWriteOperationSnafu)?;
+        Ok(())
+    }
+
     /// Builds a [ScanRequest] to read metadata for a given key.
     /// The request will contains a EQ filter on the key column.
     ///
@@ -408,6 +450,39 @@ impl MetadataRegion {
         };
 
         RegionPutRequest { rows }
+    }
+
+    fn build_delete_request(keys: &[String]) -> RegionDeleteRequest {
+        let cols = vec![
+            ColumnSchema {
+                column_name: METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as _,
+                semantic_type: SemanticType::Timestamp as _,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: METADATA_SCHEMA_KEY_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::String as _,
+                semantic_type: SemanticType::Tag as _,
+                ..Default::default()
+            },
+        ];
+        let rows = keys
+            .iter()
+            .map(|key| Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(0)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::StringValue(key.to_string())),
+                    },
+                ],
+            })
+            .collect();
+        let rows = Rows { schema: cols, rows };
+
+        RegionDeleteRequest { rows }
     }
 }
 

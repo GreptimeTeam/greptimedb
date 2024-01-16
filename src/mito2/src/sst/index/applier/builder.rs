@@ -34,18 +34,22 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
 
+use crate::cache::file_cache::FileCacheRef;
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::applier::SstIndexApplier;
 use crate::sst::index::codec::IndexValueCodec;
 
 /// Constructs an [`SstIndexApplier`] which applies predicates to SST files during scan.
-pub struct SstIndexApplierBuilder<'a> {
+pub(crate) struct SstIndexApplierBuilder<'a> {
     /// Directory of the region, required argument for constructing [`SstIndexApplier`].
     region_dir: String,
 
     /// Object store, required argument for constructing [`SstIndexApplier`].
     object_store: ObjectStore,
+
+    /// File cache, required argument for constructing [`SstIndexApplier`].
+    file_cache: Option<FileCacheRef>,
 
     /// Metadata of the region, used to get metadata like column type.
     metadata: &'a RegionMetadata,
@@ -59,11 +63,13 @@ impl<'a> SstIndexApplierBuilder<'a> {
     pub fn new(
         region_dir: String,
         object_store: ObjectStore,
+        file_cache: Option<FileCacheRef>,
         metadata: &'a RegionMetadata,
     ) -> Self {
         Self {
             region_dir,
             object_store,
+            file_cache,
             metadata,
             output: HashMap::default(),
         }
@@ -88,7 +94,9 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let applier = PredicatesIndexApplier::try_from(predicates);
         Ok(Some(SstIndexApplier::new(
             self.region_dir,
+            self.metadata.region_id,
             self.object_store,
+            self.file_cache,
             Box::new(applier.context(BuildIndexApplierSnafu)?),
         )))
     }
@@ -286,7 +294,7 @@ mod tests {
     fn test_collect_and_basic() {
         let metadata = test_region_metadata();
         let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
 
         let expr = DfExpr::BinaryExpr(BinaryExpr {
             left: Box::new(DfExpr::BinaryExpr(BinaryExpr {

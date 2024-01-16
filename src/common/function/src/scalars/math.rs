@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod modulo;
 mod pow;
 mod rate;
 
@@ -30,11 +31,13 @@ use snafu::ResultExt;
 
 use crate::function::{Function, FunctionContext};
 use crate::function_registry::FunctionRegistry;
+use crate::scalars::math::modulo::ModuloFunction;
 
 pub(crate) struct MathFunction;
 
 impl MathFunction {
     pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(ModuloFunction));
         registry.register(Arc::new(PowFunction));
         registry.register(Arc::new(RateFunction));
         registry.register(Arc::new(RangeFunction))

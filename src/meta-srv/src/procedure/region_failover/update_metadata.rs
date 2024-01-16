@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::peer::Peer;
@@ -27,7 +28,7 @@ use store_api::storage::RegionNumber;
 
 use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
-use crate::error::{self, Result, RetryLaterSnafu, TableRouteNotFoundSnafu};
+use crate::error::{self, Result, TableRouteNotFoundSnafu};
 use crate::lock::keys::table_metadata_lock_key;
 use crate::lock::Opts;
 
@@ -172,14 +173,12 @@ impl State for UpdateRegionMetadata {
     ) -> Result<Box<dyn State>> {
         self.update_metadata(ctx, failed_region)
             .await
-            .map_err(|e| {
-                RetryLaterSnafu {
-                    reason: format!(
-                        "Failed to update metadata for failed region: {}, error: {}",
-                        failed_region, e
-                    ),
-                }
-                .build()
+            .map_err(BoxedError::new)
+            .context(error::RetryLaterWithSourceSnafu {
+                reason: format!(
+                    "Failed to update metadata for failed region: {}",
+                    failed_region
+                ),
             })?;
         Ok(Box::new(InvalidateCache))
     }

@@ -99,7 +99,9 @@ impl MysqlInstanceShim {
         {
             vec![Ok(output)]
         } else {
-            self.query_handler.do_query(query, query_ctx).await
+            let output = self.query_handler.do_query(query, query_ctx.clone()).await;
+            query_ctx.update_session(&self.session);
+            output
         }
     }
 

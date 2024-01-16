@@ -374,7 +374,7 @@ pub struct ManagerConfig {
 impl Default for ManagerConfig {
     fn default() -> Self {
         Self {
-            parent_path: "".to_string(),
+            parent_path: String::default(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             remove_outdated_meta_task_interval: Duration::from_secs(60 * 10),

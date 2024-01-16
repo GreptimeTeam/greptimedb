@@ -29,8 +29,11 @@ use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
 use store_api::storage::RegionId;
 
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheManagerRef, PageKey, PageValue};
+use crate::metrics::READ_STAGE_ELAPSED;
 use crate::sst::file::FileId;
+use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::page_reader::CachedPageReader;
 
 /// An in-memory collection of column chunks
@@ -100,7 +103,7 @@ impl<'a> InMemoryRowGroup<'a> {
             // `RowSelection`
             let mut page_start_offsets: Vec<Vec<usize>> = vec![];
 
-            let fetch_ranges: Vec<_> = self
+            let fetch_ranges = self
                 .column_chunks
                 .iter()
                 .zip(self.metadata.columns())
@@ -115,21 +118,25 @@ impl<'a> InMemoryRowGroup<'a> {
                     let (start, _len) = chunk_meta.byte_range();
                     match page_locations[idx].first() {
                         Some(first) if first.offset as u64 != start => {
-                            ranges.push(start as usize..first.offset as usize);
+                            ranges.push(start..first.offset as u64);
                         }
                         _ => (),
                     }
 
-                    ranges.extend(selection.scan_ranges(&page_locations[idx]));
-                    page_start_offsets.push(ranges.iter().map(|range| range.start).collect());
+                    ranges.extend(
+                        selection
+                            .scan_ranges(&page_locations[idx])
+                            .iter()
+                            .map(|range| range.start as u64..range.end as u64),
+                    );
+                    page_start_offsets
+                        .push(ranges.iter().map(|range| range.start as usize).collect());
 
                     ranges
                 })
-                .collect();
-            let mut chunk_data =
-                fetch_byte_ranges(self.file_path, self.object_store.clone(), fetch_ranges)
-                    .await?
-                    .into_iter();
+                .collect::<Vec<_>>();
+
+            let mut chunk_data = self.fetch_bytes(&fetch_ranges).await?.into_iter();
 
             let mut page_start_offsets = page_start_offsets.into_iter();
 
@@ -154,7 +161,7 @@ impl<'a> InMemoryRowGroup<'a> {
             // Now we only use cache in dense chunk data.
             self.fetch_pages_from_cache(projection);
 
-            let fetch_ranges: Vec<_> = self
+            let fetch_ranges = self
                 .column_chunks
                 .iter()
                 .zip(&self.column_cached_pages)
@@ -166,19 +173,16 @@ impl<'a> InMemoryRowGroup<'a> {
                 .map(|(idx, (_chunk, _cached_pages))| {
                     let column = self.metadata.column(idx);
                     let (start, length) = column.byte_range();
-                    start as usize..(start + length) as usize
+                    start..(start + length)
                 })
-                .collect();
+                .collect::<Vec<_>>();
 
             if fetch_ranges.is_empty() {
                 // Nothing to fetch.
                 return Ok(());
             }
 
-            let mut chunk_data =
-                fetch_byte_ranges(self.file_path, self.object_store.clone(), fetch_ranges)
-                    .await?
-                    .into_iter();
+            let mut chunk_data = self.fetch_bytes(&fetch_ranges).await?.into_iter();
 
             for (idx, (chunk, cached_pages)) in self
                 .column_chunks
@@ -219,6 +223,38 @@ impl<'a> InMemoryRowGroup<'a> {
                     self.column_cached_pages[idx] = cache.get_pages(&page_key);
                 }
             });
+    }
+
+    /// Try to fetch data from WriteCache,
+    /// if not in WriteCache, fetch data from object store directly.
+    async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
+        match self.fetch_ranges_from_write_cache(key, ranges).await {
+            Some(data) => Ok(data),
+            None => {
+                // Fetch data from object store.
+                let _timer = READ_STAGE_ELAPSED
+                    .with_label_values(&["cache_miss_read"])
+                    .start_timer();
+                let data = fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
+                    .await
+                    .map_err(|e| ParquetError::External(Box::new(e)))?;
+                Ok(data)
+            }
+        }
+    }
+
+    /// Fetches data from write cache.
+    /// Returns `None` if the data is not in the cache.
+    async fn fetch_ranges_from_write_cache(
+        &self,
+        key: IndexKey,
+        ranges: &[Range<u64>],
+    ) -> Option<Vec<Bytes>> {
+        if let Some(cache) = self.cache_manager.as_ref()?.write_cache() {
+            return cache.file_cache().read_ranges(key, ranges).await;
+        }
+        None
     }
 
     /// Creates a page reader to read column at `i`.
@@ -349,86 +385,3 @@ impl Iterator for ColumnChunkIterator {
 }
 
 impl PageIterator for ColumnChunkIterator {}
-
-/// Fetches data from object store.
-/// If the object store supports blocking, use sequence blocking read.
-/// Otherwise, use concurrent read.
-async fn fetch_byte_ranges(
-    file_path: &str,
-    object_store: ObjectStore,
-    ranges: Vec<Range<usize>>,
-) -> Result<Vec<Bytes>> {
-    let ranges: Vec<_> = ranges
-        .iter()
-        .map(|range| range.start as u64..range.end as u64)
-        .collect();
-    if object_store.info().full_capability().blocking {
-        fetch_ranges_seq(file_path, object_store, ranges).await
-    } else {
-        fetch_ranges_concurrent(file_path, object_store, ranges).await
-    }
-}
-
-/// Fetches data from object store sequentially
-async fn fetch_ranges_seq(
-    file_path: &str,
-    object_store: ObjectStore,
-    ranges: Vec<Range<u64>>,
-) -> Result<Vec<Bytes>> {
-    let block_object_store = object_store.blocking();
-    let file_path = file_path.to_string();
-
-    let f = move || -> Result<Vec<Bytes>> {
-        ranges
-            .into_iter()
-            .map(|range| {
-                let data = block_object_store
-                    .read_with(&file_path)
-                    .range(range)
-                    .call()
-                    .map_err(|e| ParquetError::External(Box::new(e)))?;
-                Ok::<_, ParquetError>(Bytes::from(data))
-            })
-            .collect::<Result<Vec<_>>>()
-    };
-
-    maybe_spawn_blocking(f).await
-}
-
-/// Fetches data from object store concurrently.
-async fn fetch_ranges_concurrent(
-    file_path: &str,
-    object_store: ObjectStore,
-    ranges: Vec<Range<u64>>,
-) -> Result<Vec<Bytes>> {
-    // TODO(QuenKar): may merge small ranges to a bigger range to optimize.
-    let mut handles = Vec::with_capacity(ranges.len());
-    for range in ranges {
-        let future_read = object_store.read_with(file_path);
-        handles.push(async move {
-            let data = future_read
-                .range(range.start..range.end)
-                .await
-                .map_err(|e| ParquetError::External(Box::new(e)))?;
-            Ok::<_, ParquetError>(Bytes::from(data))
-        });
-    }
-    let results = futures::future::try_join_all(handles).await?;
-    Ok(results)
-}
-
-//  Port from https://github.com/apache/arrow-rs/blob/802ed428f87051fdca31180430ddb0ecb2f60e8b/object_store/src/util.rs#L74-L83
-/// Takes a function and spawns it to a tokio blocking pool if available
-pub async fn maybe_spawn_blocking<F, T>(f: F) -> Result<T>
-where
-    F: FnOnce() -> Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    match tokio::runtime::Handle::try_current() {
-        Ok(runtime) => runtime
-            .spawn_blocking(f)
-            .await
-            .map_err(|e| ParquetError::External(Box::new(e)))?,
-        Err(_) => f(),
-    }
-}

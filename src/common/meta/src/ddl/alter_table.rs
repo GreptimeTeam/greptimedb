@@ -40,7 +40,7 @@ use table::requests::AlterKind;
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::handle_operate_region_error;
 use crate::ddl::DdlContext;
-use crate::error::{self, ConvertAlterTableRequestSnafu, InvalidProtoMsgSnafu, Result};
+use crate::error::{self, ConvertAlterTableRequestSnafu, Error, InvalidProtoMsgSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::DeserializedValueWithBytes;
@@ -374,8 +374,8 @@ impl Procedure for AlterTableProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let error_handler = |e| {
-            if matches!(e, error::Error::RetryLater { .. }) {
+        let error_handler = |e: Error| {
+            if e.is_retry_later() {
                 ProcedureError::retry_later(e)
             } else {
                 ProcedureError::external(e)

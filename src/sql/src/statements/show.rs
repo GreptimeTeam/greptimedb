@@ -63,6 +63,12 @@ pub struct ShowCreateTable {
     pub table_name: ObjectName,
 }
 
+/// SQL structure for `SHOW VARIABLES xxx`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowVariables {
+    pub variable: ObjectName,
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;

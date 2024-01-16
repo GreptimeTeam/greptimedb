@@ -284,6 +284,7 @@ impl DatanodeOptions {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum RegionEngineConfig {
     #[serde(rename = "mito")]

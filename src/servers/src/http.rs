@@ -565,10 +565,7 @@ impl HttpServer {
 
         let config_router = self
             .route_config(GreptimeOptionsConfigState {
-                greptime_config_options: self
-                    .greptime_config_options
-                    .clone()
-                    .unwrap_or("".to_string()),
+                greptime_config_options: self.greptime_config_options.clone().unwrap_or_default(),
             })
             .finish_api(&mut api);
 

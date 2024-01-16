@@ -114,6 +114,7 @@ where
         Ok(!resp.kvs.is_empty())
     }
 
+    /// Returns previous key-value pair if `prev_kv` is `true`.
     async fn delete(&self, key: &[u8], prev_kv: bool) -> Result<Option<KeyValue>, Self::Error> {
         let mut req = DeleteRangeRequest::new().with_key(key.to_vec());
         if prev_kv {

@@ -26,6 +26,8 @@ use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
+use crate::SessionRef;
+
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
@@ -36,8 +38,16 @@ pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
     current_user: ArcSwap<Option<UserInfoRef>>,
-    timezone: Timezone,
+    #[builder(setter(custom))]
+    timezone: ArcSwap<Timezone>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
+}
+
+impl QueryContextBuilder {
+    pub fn timezone(mut self, tz: Timezone) -> Self {
+        self.timezone = Some(ArcSwap::new(Arc::new(tz)));
+        self
+    }
 }
 
 impl Display for QueryContext {
@@ -58,7 +68,8 @@ impl From<&RegionRequestHeader> for QueryContext {
             current_catalog: catalog.to_string(),
             current_schema: schema.to_string(),
             current_user: Default::default(),
-            timezone: get_timezone(None),
+            // for request send to datanode, all timestamp have converted to UTC, so timezone is not important
+            timezone: ArcSwap::new(Arc::new(get_timezone(None))),
             sql_dialect: Box::new(GreptimeDbDialect {}),
         }
     }
@@ -94,17 +105,14 @@ impl QueryContext {
             .build()
     }
 
-    #[inline]
     pub fn current_schema(&self) -> &str {
         &self.current_schema
     }
 
-    #[inline]
     pub fn current_catalog(&self) -> &str {
         &self.current_catalog
     }
 
-    #[inline]
     pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
         &*self.sql_dialect
     }
@@ -115,19 +123,29 @@ impl QueryContext {
         build_db_string(catalog, schema)
     }
 
-    #[inline]
     pub fn timezone(&self) -> Timezone {
-        self.timezone.clone()
+        self.timezone.load().as_ref().clone()
     }
 
-    #[inline]
     pub fn current_user(&self) -> Option<UserInfoRef> {
         self.current_user.load().as_ref().clone()
     }
 
-    #[inline]
     pub fn set_current_user(&self, user: Option<UserInfoRef>) {
         let _ = self.current_user.swap(Arc::new(user));
+    }
+
+    pub fn set_timezone(&self, timezone: Timezone) {
+        let _ = self.timezone.swap(Arc::new(timezone));
+    }
+
+    /// SQL like `set variable` may change timezone or other info in `QueryContext`.
+    /// We need persist these change in `Session`.
+    pub fn update_session(&self, session: &SessionRef) {
+        let tz = self.timezone();
+        if session.timezone() != tz {
+            session.set_timezone(tz)
+        }
     }
 }
 
@@ -143,7 +161,9 @@ impl QueryContextBuilder {
             current_user: self
                 .current_user
                 .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
-            timezone: self.timezone.unwrap_or(get_timezone(None)),
+            timezone: self
+                .timezone
+                .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None)))),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),

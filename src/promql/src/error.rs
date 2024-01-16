@@ -129,6 +129,12 @@ pub enum Error {
         right: Vec<String>,
         location: Location,
     },
+
+    #[snafu(display("Multi fields calculation is not supported in {}", operator))]
+    MultiFieldsNotSupported {
+        operator: String,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -149,6 +155,7 @@ impl ErrorExt for Error {
             | UnsupportedVectorMatch { .. }
             | CombineTableColumnMismatch { .. }
             | DataFusionPlanning { .. }
+            | MultiFieldsNotSupported { .. }
             | UnexpectedPlanExpr { .. }
             | IllegalRange { .. } => StatusCode::InvalidArguments,
 

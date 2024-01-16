@@ -25,7 +25,9 @@ use index::inverted_index::search::index_apply::{
 use object_store::ObjectStore;
 use puffin::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 
+use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::error::{
     ApplyIndexSnafu, PuffinBlobTypeNotFoundSnafu, PuffinReadBlobSnafu, PuffinReadMetadataSnafu,
     Result,
@@ -41,34 +43,42 @@ use crate::sst::location;
 
 /// The [`SstIndexApplier`] is responsible for applying predicates to the provided SST files
 /// and returning the relevant row group ids for further scan.
-pub struct SstIndexApplier {
+pub(crate) struct SstIndexApplier {
     /// The root directory of the region.
     region_dir: String,
 
-    /// Store responsible for accessing SST files.
+    /// Region ID.
+    region_id: RegionId,
+
+    /// Store responsible for accessing remote index files.
     store: InstrumentedStore,
+
+    /// The cache of index files.
+    file_cache: Option<FileCacheRef>,
 
     /// Predefined index applier used to apply predicates to index files
     /// and return the relevant row group ids for further scan.
     index_applier: Box<dyn IndexApplier>,
 }
 
-pub type SstIndexApplierRef = Arc<SstIndexApplier>;
+pub(crate) type SstIndexApplierRef = Arc<SstIndexApplier>;
 
 impl SstIndexApplier {
     /// Creates a new [`SstIndexApplier`].
-    ///
-    /// TODO(zhongzc): leverage `WriteCache`
     pub fn new(
         region_dir: String,
+        region_id: RegionId,
         object_store: ObjectStore,
+        file_cache: Option<FileCacheRef>,
         index_applier: Box<dyn IndexApplier>,
     ) -> Self {
         INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
 
         Self {
             region_dir,
+            region_id,
             store: InstrumentedStore::new(object_store),
+            file_cache,
             index_applier,
         }
     }
@@ -77,22 +87,49 @@ impl SstIndexApplier {
     pub async fn apply(&self, file_id: FileId) -> Result<BTreeSet<usize>> {
         let _timer = INDEX_APPLY_ELAPSED.start_timer();
 
-        let mut puffin_reader = self.puffin_reader(file_id).await?;
-        let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
-        let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
-
         let context = SearchContext {
             // Encountering a non-existing column indicates that it doesn't match predicates.
             index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
         };
-        self.index_applier
-            .apply(context, &mut index_reader)
-            .await
-            .context(ApplyIndexSnafu)
+
+        match self.cached_puffin_reader(file_id).await? {
+            Some(mut puffin_reader) => {
+                let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
+                let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
+                self.index_applier
+                    .apply(context, &mut index_reader)
+                    .await
+                    .context(ApplyIndexSnafu)
+            }
+            None => {
+                let mut puffin_reader = self.remote_puffin_reader(file_id).await?;
+                let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
+                let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
+                self.index_applier
+                    .apply(context, &mut index_reader)
+                    .await
+                    .context(ApplyIndexSnafu)
+            }
+        }
     }
 
-    /// Helper function to create a [`PuffinFileReader`] for the provided SST file id.
-    async fn puffin_reader(
+    /// Helper function to create a [`PuffinFileReader`] from the cached index file.
+    async fn cached_puffin_reader(
+        &self,
+        file_id: FileId,
+    ) -> Result<Option<PuffinFileReader<impl AsyncRead + AsyncSeek>>> {
+        let Some(file_cache) = &self.file_cache else {
+            return Ok(None);
+        };
+
+        Ok(file_cache
+            .reader(IndexKey::new(self.region_id, file_id, FileType::Puffin))
+            .await
+            .map(PuffinFileReader::new))
+    }
+
+    /// Helper function to create a [`PuffinFileReader`] from the remote index file.
+    async fn remote_puffin_reader(
         &self,
         file_id: FileId,
     ) -> Result<PuffinFileReader<impl AsyncRead + AsyncSeek>> {
@@ -172,7 +209,9 @@ mod tests {
 
         let sst_index_applier = SstIndexApplier::new(
             region_dir.clone(),
+            RegionId::new(0, 0),
             object_store,
+            None,
             Box::new(mock_index_applier),
         );
         let ids = sst_index_applier.apply(file_id).await.unwrap();
@@ -203,7 +242,9 @@ mod tests {
 
         let sst_index_applier = SstIndexApplier::new(
             region_dir.clone(),
+            RegionId::new(0, 0),
             object_store,
+            None,
             Box::new(mock_index_applier),
         );
         let res = sst_index_applier.apply(file_id).await;

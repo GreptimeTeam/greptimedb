@@ -21,7 +21,7 @@ use tests_integration::test_util::{
     setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
     setup_pg_server_with_user_provider, StorageType,
 };
-use tokio_postgres::NoTls;
+use tokio_postgres::{NoTls, SimpleQueryMessage};
 
 #[macro_export]
 macro_rules! sql_test {
@@ -59,6 +59,7 @@ macro_rules! sql_tests {
                 test_mysql_async_timestamp,
                 test_postgres_auth,
                 test_postgres_crud,
+                test_postgres_timezone,
                 test_postgres_parameter_inference,
                 test_mysql_prepare_stmt_insert_timestamp,
             );
@@ -218,8 +219,18 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
         .await
         .unwrap();
 
+    let _ = conn
+        .execute("SET time_zone = 'Asia/Shanghai'")
+        .await
+        .unwrap();
+    let timezone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "Asia/Shanghai");
+    let timezone = conn.fetch_all("SELECT @@system_time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "UTC");
     let _ = conn.execute("SET time_zone = 'UTC'").await.unwrap();
     let timezone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "UTC");
+    let timezone = conn.fetch_all("SELECT @@system_time_zone").await.unwrap();
     assert_eq!(timezone[0].get::<String, usize>(0), "UTC");
 
     // test data
@@ -384,6 +395,61 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         .unwrap();
     assert_eq!(rows.len(), 0);
 
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_timezone(store_type: StorageType) {
+    let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_inference").await;
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+
+    let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
+        match &mess[0] {
+            SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
+            _ => unreachable!(),
+        }
+    };
+
+    let _ = client.simple_query("SET time_zone = 'UTC'").await.unwrap();
+    let timezone = get_row(
+        client
+            .simple_query("SHOW VARIABLES time_zone")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(timezone, "UTC");
+    let timezone = get_row(
+        client
+            .simple_query("SHOW VARIABLES system_time_zone")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(timezone, "UTC");
+    let _ = client
+        .simple_query("SET time_zone = 'Asia/Shanghai'")
+        .await
+        .unwrap();
+    let timezone = get_row(
+        client
+            .simple_query("SHOW VARIABLES time_zone")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(timezone, "Asia/Shanghai");
+    let timezone = get_row(
+        client
+            .simple_query("SHOW VARIABLES system_time_zone")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(timezone, "UTC");
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }

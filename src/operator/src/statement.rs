@@ -34,7 +34,7 @@ use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
 use common_time::range::TimestampRange;
-use common_time::Timestamp;
+use common_time::{Timestamp, Timezone};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
@@ -45,14 +45,14 @@ use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
-use sqlparser::ast::ObjectName;
+use sqlparser::ast::{Expr, ObjectName, Value};
 use table::engine::TableReference;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, PlanStatementSnafu,
-    Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
+    PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -188,6 +188,20 @@ impl StatementExecutor {
                 self.show_create_table(table_name, table_ref, query_ctx)
                     .await
             }
+            Statement::SetVariables(set_var) => {
+                let var_name = set_var.variable.to_string().to_uppercase();
+                match var_name.as_str() {
+                    "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
+                    _ => {
+                        return NotSupportedSnafu {
+                            feat: format!("Unsupported set variable {}", var_name),
+                        }
+                        .fail()
+                    }
+                }
+                Ok(Output::AffectedRows(0))
+            }
+            Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
         }
     }
 
@@ -225,6 +239,33 @@ impl StatementExecutor {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_ref.to_string(),
             })
+    }
+}
+
+fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let tz_expr = exprs.first().context(NotSupportedSnafu {
+        feat: "No timezone find in set variable statement",
+    })?;
+    match tz_expr {
+        Expr::Value(Value::SingleQuotedString(tz)) | Expr::Value(Value::DoubleQuotedString(tz)) => {
+            match Timezone::from_tz_string(tz.as_str()) {
+                Ok(timezone) => ctx.set_timezone(timezone),
+                Err(_) => {
+                    return NotSupportedSnafu {
+                        feat: format!("Invalid timezone expr {} in set variable statement", tz),
+                    }
+                    .fail()
+                }
+            }
+            Ok(())
+        }
+        expr => NotSupportedSnafu {
+            feat: format!(
+                "Unsupported timezone expr {} in set variable statement",
+                expr
+            ),
+        }
+        .fail(),
     }
 }
 

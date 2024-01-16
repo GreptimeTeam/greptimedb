@@ -97,6 +97,7 @@ impl FilePurger for LocalFilePurger {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
+    use object_store::util::join_dir;
     use object_store::ObjectStore;
     use smallvec::SmallVec;
 
@@ -104,6 +105,7 @@ mod tests {
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType};
+    use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::location;
 
     #[tokio::test]
@@ -111,17 +113,21 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let dir = create_temp_dir("file-purge");
+        let dir_path = dir.path().display().to_string();
         let mut builder = Fs::default();
-        builder.root(dir.path().to_str().unwrap());
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        builder.root(&dir_path);
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
         let path = location::sst_file_path(sst_dir, sst_file_id);
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&dir_path, "intm"))
+            .await
+            .unwrap();
 
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
         let scheduler = Arc::new(LocalScheduler::new(3));
-        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone()));
+        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone(), intm_mgr));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 
@@ -152,13 +158,17 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let dir = create_temp_dir("file-purge");
+        let dir_path = dir.path().display().to_string();
         let mut builder = Fs::default();
-        builder.root(dir.path().to_str().unwrap());
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        builder.root(&dir_path);
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
-
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&dir_path, "intm"))
+            .await
+            .unwrap();
         let path = location::sst_file_path(sst_dir, sst_file_id);
+
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
         let index_path = location::index_file_path(sst_dir, sst_file_id);
@@ -168,7 +178,7 @@ mod tests {
             .unwrap();
 
         let scheduler = Arc::new(LocalScheduler::new(3));
-        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone()));
+        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone(), intm_mgr));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 

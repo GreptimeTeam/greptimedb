@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 arrow.workspace = true
 chrono.workspace = true
-clap = { version = "4.0", features = ["derive"] }
+clap.workspace = true
 client.workspace = true
 futures-util.workspace = true
 indicatif = "0.17.1"

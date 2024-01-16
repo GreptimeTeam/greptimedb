@@ -55,6 +55,7 @@ use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
+use crate::sst::index::intermediate::IntermediateManager;
 use crate::wal::Wal;
 
 /// Identifier for a worker.
@@ -120,8 +121,15 @@ impl WorkerGroup {
         let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
             config.global_write_buffer_size.as_bytes() as usize,
         ));
+        let intermediate_manager =
+            IntermediateManager::init_fs(&config.inverted_index.intermediate_path).await?;
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let write_cache = write_cache_from_config(&config, object_store_manager.clone()).await?;
+        let write_cache = write_cache_from_config(
+            &config,
+            object_store_manager.clone(),
+            intermediate_manager.clone(),
+        )
+        .await?;
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
@@ -142,6 +150,7 @@ impl WorkerGroup {
                     scheduler: scheduler.clone(),
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
+                    intermediate_manager: intermediate_manager.clone(),
                 }
                 .start()
             })
@@ -222,7 +231,14 @@ impl WorkerGroup {
             ))
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let write_cache = write_cache_from_config(&config, object_store_manager.clone()).await?;
+        let intermediate_manager =
+            IntermediateManager::init_fs(&config.inverted_index.intermediate_path).await?;
+        let write_cache = write_cache_from_config(
+            &config,
+            object_store_manager.clone(),
+            intermediate_manager.clone(),
+        )
+        .await?;
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
@@ -231,7 +247,6 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
-
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -243,6 +258,7 @@ impl WorkerGroup {
                     scheduler: scheduler.clone(),
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
+                    intermediate_manager: intermediate_manager.clone(),
                 }
                 .start()
             })
@@ -263,6 +279,7 @@ fn value_to_index(value: usize, num_workers: usize) -> usize {
 async fn write_cache_from_config(
     config: &MitoConfig,
     object_store_manager: ObjectStoreManagerRef,
+    intermediate_manager: IntermediateManager,
 ) -> Result<Option<WriteCacheRef>> {
     if !config.enable_experimental_write_cache {
         return Ok(None);
@@ -275,6 +292,7 @@ async fn write_cache_from_config(
         &config.experimental_write_cache_path,
         object_store_manager,
         config.experimental_write_cache_size,
+        intermediate_manager,
     )
     .await?;
     Ok(Some(Arc::new(cache)))
@@ -290,6 +308,7 @@ struct WorkerStarter<S> {
     scheduler: SchedulerRef,
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
+    intermediate_manager: IntermediateManager,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -323,6 +342,7 @@ impl<S: LogStore> WorkerStarter<S> {
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
             cache_manager: self.cache_manager,
+            intermediate_manager: self.intermediate_manager,
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -479,6 +499,8 @@ struct RegionWorkerLoop<S> {
     listener: WorkerListener,
     /// Cache.
     cache_manager: CacheManagerRef,
+    /// Intermediate manager for inverted index.
+    intermediate_manager: IntermediateManager,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

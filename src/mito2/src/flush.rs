@@ -315,6 +315,12 @@ impl RegionFlushTask {
             let file_id = FileId::random();
             let iter = mem.iter(None, None);
             let source = Source::Iter(iter);
+            let create_inverted_index = self.engine_config.inverted_index.create_on_flush.auto();
+            let mem_threshold_index_create = self
+                .engine_config
+                .inverted_index
+                .mem_threshold_on_create
+                .map(|m| m.as_bytes() as _);
 
             // Flush to level 0.
             let write_request = SstWriteRequest {
@@ -323,6 +329,8 @@ impl RegionFlushTask {
                 source,
                 cache_manager: self.cache_manager.clone(),
                 storage: version.options.storage.clone(),
+                create_inverted_index,
+                mem_threshold_index_create,
             };
             let Some(sst_info) = self
                 .access_layer
@@ -732,7 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schedule_empty() {
-        let env = SchedulerEnv::new();
+        let env = SchedulerEnv::new().await;
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_flush_scheduler();
         let builder = VersionControlBuilder::new();

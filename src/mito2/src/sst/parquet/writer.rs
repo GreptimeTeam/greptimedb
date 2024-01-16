@@ -19,6 +19,7 @@ use std::sync::Arc;
 use common_datasource::file_format::parquet::BufferedWriter;
 use common_telemetry::debug;
 use common_time::Timestamp;
+use futures::TryFutureExt;
 use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
@@ -28,10 +29,11 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
-use super::helper::parse_parquet_metadata;
 use crate::error::{InvalidMetadataSnafu, Result, WriteBufferSnafu};
 use crate::read::{Batch, Source};
+use crate::sst::index::Indexer;
 use crate::sst::parquet::format::WriteFormat;
+use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 
 /// Parquet SST writer.
@@ -41,6 +43,7 @@ pub struct ParquetWriter {
     /// Region metadata of the source and the target SST.
     metadata: RegionMetadataRef,
     object_store: ObjectStore,
+    indexer: Indexer,
 }
 
 impl ParquetWriter {
@@ -49,11 +52,13 @@ impl ParquetWriter {
         file_path: String,
         metadata: RegionMetadataRef,
         object_store: ObjectStore,
+        indexer: Indexer,
     ) -> ParquetWriter {
         ParquetWriter {
             file_path,
             metadata,
             object_store,
+            indexer,
         }
     }
 
@@ -90,15 +95,21 @@ impl ParquetWriter {
         .context(WriteBufferSnafu)?;
 
         let mut stats = SourceStats::default();
-        while let Some(batch) = source.next_batch().await? {
+        while let Some(batch) = write_next_batch(&mut source, &write_format, &mut buffered_writer)
+            .or_else(|err| async {
+                // abort index creation if error occurs.
+                self.indexer.abort().await;
+                Err(err)
+            })
+            .await?
+        {
             stats.update(&batch);
-            let arrow_batch = write_format.convert_batch(&batch)?;
-
-            buffered_writer
-                .write(&arrow_batch)
-                .await
-                .context(WriteBufferSnafu)?;
+            self.indexer.update(&batch).await;
         }
+
+        let index_size = self.indexer.finish().await;
+        let inverted_index_available = index_size.is_some();
+        let index_file_size = index_size.unwrap_or(0) as u64;
 
         if stats.num_rows == 0 {
             debug!(
@@ -124,8 +135,8 @@ impl ParquetWriter {
             file_size,
             num_rows: stats.num_rows,
             file_metadata: Some(Arc::new(parquet_metadata)),
-            inverted_index_available: false,
-            index_file_size: 0,
+            inverted_index_available,
+            index_file_size,
         }))
     }
 
@@ -147,6 +158,24 @@ impl ParquetWriter {
             .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(ts_col, false)
     }
+}
+
+async fn write_next_batch(
+    source: &mut Source,
+    write_format: &WriteFormat,
+    buffered_writer: &mut BufferedWriter,
+) -> Result<Option<Batch>> {
+    let Some(batch) = source.next_batch().await? else {
+        return Ok(None);
+    };
+
+    let arrow_batch = write_format.convert_batch(&batch)?;
+    buffered_writer
+        .write(&arrow_batch)
+        .await
+        .context(WriteBufferSnafu)?;
+
+    Ok(Some(batch))
 }
 
 #[derive(Default)]

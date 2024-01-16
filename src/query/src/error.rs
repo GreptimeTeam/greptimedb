@@ -30,6 +30,9 @@ pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, location: Location },
 
+    #[snafu(display("Unsupported show variable: {}", name))]
+    UnsupportedVariable { name: String, location: Location },
+
     #[snafu(display("Operation {} not implemented yet", operation))]
     Unimplemented {
         operation: String,
@@ -274,6 +277,7 @@ impl ErrorExt for Error {
             | ConvertSchema { .. }
             | AddSystemTimeOverflow { .. }
             | ColumnSchemaIncompatible { .. }
+            | UnsupportedVariable { .. }
             | ColumnSchemaNoDefault { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
