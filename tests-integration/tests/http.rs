@@ -768,6 +768,7 @@ max_background_jobs = 4
 auto_flush_interval = "30m"
 enable_experimental_write_cache = false
 experimental_write_cache_path = ""
+experimental_write_cache_size = "512MiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 allow_stale_entries = false
@@ -822,7 +823,6 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "sst_meta_cache_size =",
         "vector_cache_size =",
         "page_cache_size =",
-        "experimental_write_cache_size =",
     ];
 
     input

@@ -200,15 +200,12 @@ impl MitoConfig {
         let sst_meta_cache_size = cmp::min(sys_memory / 256, ReadableSize::mb(128));
         // Use 1/128 of OS memory size as mem cache size, it shouldn't be greater than 512MB in default mode.
         let mem_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
-        // Use 1/128 of OS memory size as disk cache size, it shouldn't be greater than 512MB in default mode.
-        let disk_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
 
         self.global_write_buffer_size = global_write_buffer_size;
         self.global_write_buffer_reject_size = global_write_buffer_reject_size;
         self.sst_meta_cache_size = sst_meta_cache_size;
         self.vector_cache_size = mem_cache_size;
         self.page_cache_size = mem_cache_size;
-        self.experimental_write_cache_size = disk_cache_size;
     }
 
     /// Enable experimental write cache.

@@ -15,7 +15,7 @@
 use common_base::readable_size::ReadableSize;
 use sysinfo::System;
 
-/// Get the cpu cores number of system.
+/// Get the CPU core number of system, aware of cgroups.
 pub fn get_cpus() -> usize {
     // This function will check cgroups
     num_cpus::get()
