@@ -35,7 +35,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::storage::RegionId;
@@ -46,9 +46,7 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error::{
-    InvalidRequestSnafu, JoinSnafu, RegionNotFoundSnafu, Result, WorkerStoppedSnafu,
-};
+use crate::error::{InvalidRequestSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::manifest::action::RegionEdit;
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
@@ -653,10 +651,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
-        let region = self
-            .regions
-            .get_region(region_id)
-            .context(RegionNotFoundSnafu { region_id })?;
+        let region = self.regions.writable_region(region_id)?;
 
         for file_meta in &edit.files_to_add {
             let is_exist = region.access_layer.is_exist(file_meta).await?;
