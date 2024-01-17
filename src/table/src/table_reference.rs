@@ -26,14 +26,11 @@ pub struct TableReference<'a> {
 
 pub type OwnedTableReference = TableReference<'static>;
 
-// TODO(LFC): Find a better place for `TableReference`,
-// so that we can reuse the default catalog and schema consts.
-// Could be done together with issue #559.
 impl<'a> TableReference<'a> {
     pub fn bare(table: &'a str) -> Self {
         TableReference {
-            catalog: "greptime",
-            schema: "public",
+            catalog: common_catalog::consts::DEFAULT_CATALOG_NAME,
+            schema: common_catalog::consts::DEFAULT_SCHEMA_NAME,
             table,
         }
     }
