@@ -29,7 +29,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
-use crate::memtable::merge_tree::tree::{MergeTree, MergeTreePtr};
+use crate::memtable::merge_tree::tree::{MergeTree, MergeTreeRef};
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
@@ -42,7 +42,7 @@ pub struct MergeTreeConfig {}
 /// Memtable based on a merge tree.
 pub struct MergeTreeMemtable {
     id: MemtableId,
-    tree: MergeTreePtr,
+    tree: MergeTreeRef,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,

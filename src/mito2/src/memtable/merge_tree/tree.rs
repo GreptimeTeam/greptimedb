@@ -27,7 +27,7 @@ pub(crate) struct MergeTree {
     pub(crate) metadata: RegionMetadataRef,
 }
 
-pub(crate) type MergeTreePtr = Arc<MergeTree>;
+pub(crate) type MergeTreeRef = Arc<MergeTree>;
 
 impl MergeTree {
     /// Creates a new merge tree.
