@@ -34,8 +34,8 @@ use crate::memtable::key_values::KeyValue;
 use crate::memtable::KeyValues;
 use crate::row_converter::{McmpRowCodec, RowCodec};
 
-/// Initial capacity allocated to store rows.
-const INITIAL_CAPACITY: usize = 8;
+/// Initial capacity for builders.
+const INITIAL_BUILDER_CAPACITY: usize = 8;
 
 /// Mutable part that buffers input data.
 pub(crate) struct MutablePart {
@@ -44,7 +44,7 @@ pub(crate) struct MutablePart {
     interned_blocks: HashMap<DictIdType, InternedBlock>,
     /// Stores rows without interning primary keys. If the region doesn't have primary key,
     /// it also stores rows in this block.
-    plain_block: PlainBlock,
+    plain_block: Option<PlainBlock>,
     /// Next id of the dictionary.
     next_dict_id: DictIdType,
     /// Number of keys in a dictionary.
@@ -55,6 +55,23 @@ pub(crate) struct MutablePart {
 }
 
 impl MutablePart {
+    /// Creates a new mutable part.
+    pub(crate) fn new(dict_size: usize, max_dict_num: usize) -> MutablePart {
+        let dict_size = dict_size.try_into().unwrap_or(KeyIdType::MAX);
+
+        MutablePart {
+            active_dict: KeyDict::new(0, dict_size),
+            immutable_dicts: Vec::new(),
+            interned_blocks: HashMap::new(),
+            plain_block: None,
+            // 0 is allocated by the first active dict.
+            next_dict_id: 1,
+            dict_size,
+            max_dict_num,
+            metrics: Metrics::default(),
+        }
+    }
+
     /// Write key-values into the part.
     pub(crate) fn write(
         &mut self,
@@ -125,7 +142,7 @@ impl MutablePart {
         let block = self
             .interned_blocks
             .entry(dict_id)
-            .or_insert_with(|| InternedBlock::new(dict_id, metadata, INITIAL_CAPACITY));
+            .or_insert_with(|| InternedBlock::new(dict_id, metadata, INITIAL_BUILDER_CAPACITY));
         block.key.push(Some(key_id));
         block.value.push(key_value);
     }
@@ -137,12 +154,16 @@ impl MutablePart {
         key_value: &KeyValue,
         primary_key: Option<&[u8]>,
     ) {
+        let block = self
+            .plain_block
+            .get_or_insert_with(|| PlainBlock::new(metadata, INITIAL_BUILDER_CAPACITY));
+
         if primary_key.is_some() {
             // None means no primary key so we only push the key when it is `Some`.
-            self.plain_block.key.push(primary_key);
+            block.key.push(primary_key);
         }
 
-        self.plain_block.value.push(key_value);
+        block.value.push(key_value);
     }
 
     /// Tries to intern the primary key, returns the id of the dictionary and the key.
@@ -201,6 +222,17 @@ struct Metrics {
     max_ts: i64,
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            key_bytes: 0,
+            value_bytes: 0,
+            min_ts: i64::MAX,
+            max_ts: i64::MIN,
+        }
+    }
+}
+
 /// Id of the primary key.
 type KeyIdType = u16;
 /// Id of a [KeyDict].
@@ -224,9 +256,7 @@ impl KeyDict {
         Self {
             id,
             dict: BTreeMap::new(),
-            // We initialize the keys buffer with a small capacity to avoid
-            // allocating too much memory.
-            keys: Vec::with_capacity(INITIAL_CAPACITY),
+            keys: Vec::new(),
             dict_size: capacity,
         }
     }
@@ -295,6 +325,16 @@ struct PlainBlock {
     key: BinaryVectorBuilder,
     /// Values of rows.
     value: ValueBuilder,
+}
+
+impl PlainBlock {
+    /// Returns a new block.
+    fn new(metadata: &RegionMetadataRef, capacity: usize) -> PlainBlock {
+        PlainBlock {
+            key: BinaryVectorBuilder::with_capacity(capacity),
+            value: ValueBuilder::new(metadata, capacity),
+        }
+    }
 }
 
 /// Mutable buffer for values.
