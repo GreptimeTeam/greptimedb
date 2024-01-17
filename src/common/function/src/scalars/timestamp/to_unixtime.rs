@@ -32,11 +32,12 @@ pub struct ToUnixtimeFunction;
 const NAME: &str = "to_unixtime";
 
 fn convert_to_seconds(arg: &str) -> Option<i64> {
+    // FIXME(dennis): use timezone in function context
     if let Ok(dt) = DateTime::from_str(arg) {
         return Some(dt.val() / 1000);
     }
 
-    if let Ok(ts) = Timestamp::from_str(arg) {
+    if let Ok(ts) = Timestamp::from_str_utc(arg) {
         return Some(ts.split().0);
     }
 

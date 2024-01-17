@@ -18,6 +18,7 @@ use chrono::{LocalResult, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 
 use crate::timezone::get_timezone;
+use crate::Timezone;
 
 pub fn format_utc_datetime(utc: &NaiveDateTime, pattern: &str) -> String {
     match get_timezone(None) {
@@ -29,9 +30,15 @@ pub fn format_utc_datetime(utc: &NaiveDateTime, pattern: &str) -> String {
 }
 
 pub fn local_datetime_to_utc(local: &NaiveDateTime) -> LocalResult<NaiveDateTime> {
-    match get_timezone(None) {
-        crate::Timezone::Offset(offset) => offset.from_local_datetime(local).map(|x| x.naive_utc()),
-        crate::Timezone::Named(tz) => tz.from_local_datetime(local).map(|x| x.naive_utc()),
+    datetime_to_utc(local, get_timezone(None))
+}
+
+pub fn datetime_to_utc(datetime: &NaiveDateTime, timezone: Timezone) -> LocalResult<NaiveDateTime> {
+    match timezone {
+        crate::Timezone::Offset(offset) => {
+            offset.from_local_datetime(datetime).map(|x| x.naive_utc())
+        }
+        crate::Timezone::Named(tz) => tz.from_local_datetime(datetime).map(|x| x.naive_utc()),
     }
 }
 

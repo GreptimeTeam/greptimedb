@@ -111,17 +111,17 @@ mod tests {
     fn test_date_cast() {
         set_default_timezone(Some("Asia/Shanghai")).unwrap();
         // timestamp -> date
-        let ts = Value::Timestamp(Timestamp::from_str("2000-01-01 08:00:01").unwrap());
+        let ts = Value::Timestamp(Timestamp::from_str_utc("2000-01-01 08:00:01").unwrap());
         let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();
         assert_eq!(date, Value::Date(Date::from_str("2000-01-01").unwrap()));
 
         // this case bind with Zulu timezone.
-        let ts = Value::Timestamp(Timestamp::from_str("2000-01-02 07:59:59").unwrap());
+        let ts = Value::Timestamp(Timestamp::from_str_utc("2000-01-02 07:59:59").unwrap());
         let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();
         assert_eq!(date, Value::Date(Date::from_str("2000-01-02").unwrap()));
 
         // while this case is offsetted to Asia/Shanghai.
-        let ts = Value::Timestamp(Timestamp::from_str("2000-01-02 07:59:59+08:00").unwrap());
+        let ts = Value::Timestamp(Timestamp::from_str_utc("2000-01-02 07:59:59+08:00").unwrap());
         let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();
         assert_eq!(date, Value::Date(Date::from_str("2000-01-01").unwrap()));
 

@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::str::FromStr;
-
 use arrow::datatypes::{
     DataType as ArrowDataType, TimeUnit as ArrowTimeUnit,
     TimestampMicrosecondType as ArrowTimestampMicrosecondType,
@@ -132,7 +130,7 @@ macro_rules! impl_data_type_for_timestamp {
                 fn try_cast(&self, from: Value)-> Option<Value>{
                     match from {
                         Value::Timestamp(v) => v.convert_to(TimeUnit::$unit).map(Value::Timestamp),
-                        Value::String(v) => Timestamp::from_str(v.as_utf8()).map(Value::Timestamp).ok(),
+                        Value::String(v) => Timestamp::from_str_utc(v.as_utf8()).map(Value::Timestamp).ok(),
                         Value::Int64(v) => Some(Value::Timestamp(Timestamp::new(v, TimeUnit::$unit))),
                         Value::DateTime(v) => Timestamp::new_second(v.val()).convert_to(TimeUnit::$unit).map(Value::Timestamp),
                         Value::Date(v) => Timestamp::new_second(v.to_secs()).convert_to(TimeUnit::$unit).map(Value::Timestamp),
@@ -203,6 +201,8 @@ impl_data_type_for_timestamp!(Microsecond);
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use common_time::timezone::set_default_timezone;
     use common_time::{Date, DateTime};
 

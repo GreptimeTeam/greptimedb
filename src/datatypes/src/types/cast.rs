@@ -301,7 +301,7 @@ mod tests {
 
         // timestamp -> other types
         test_can_cast!(
-            Value::Timestamp(Timestamp::from_str("2021-01-01 00:00:00").unwrap()),
+            Value::Timestamp(Timestamp::from_str_utc("2021-01-01 00:00:00").unwrap()),
             null_datatype,
             int64_datatype,
             date_datatype,

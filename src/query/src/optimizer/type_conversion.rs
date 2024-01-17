@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::str::FromStr;
-use std::sync::Arc;
-
 use common_time::timestamp::{TimeUnit, Timestamp};
+use common_time::Timezone;
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
@@ -143,8 +141,8 @@ impl TypeConverter {
     }
 
     /// Retrieve the timezone from query context.
-    fn get_timezone(&self) -> Option<Arc<str>> {
-        Some(format!("{}", self.query_ctx.timezone()).into())
+    fn get_timezone(&self) -> Option<Timezone> {
+        Some(self.query_ctx.timezone())
     }
 
     fn cast_scalar_value(
@@ -297,15 +295,16 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
     Expr::Literal(ScalarValue::TimestampMillisecond(Some(timestamp), None))
 }
 
-fn string_to_timestamp_ms(string: &str, timezone: Option<Arc<str>>) -> Result<ScalarValue> {
-    let ts = Timestamp::from_str(string).map_err(|e| DataFusionError::External(Box::new(e)))?;
+fn string_to_timestamp_ms(string: &str, timezone: Option<Timezone>) -> Result<ScalarValue> {
+    let ts = Timestamp::from_str(string, timezone)
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
     let value = Some(ts.value());
     let scalar = match ts.unit() {
-        TimeUnit::Second => ScalarValue::TimestampSecond(value, timezone),
-        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(value, timezone),
-        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(value, timezone),
-        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(value, timezone),
+        TimeUnit::Second => ScalarValue::TimestampSecond(value, None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(value, None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(value, None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(value, None),
     };
     Ok(scalar)
 }
@@ -335,8 +334,21 @@ mod tests {
         );
 
         assert_eq!(
-            string_to_timestamp_ms("2009-02-13 23:31:30Z", Some("Asia/Shanghai".into())).unwrap(),
-            ScalarValue::TimestampSecond(Some(1234567890), Some("Asia/Shanghai".into()))
+            string_to_timestamp_ms(
+                "2009-02-13 23:31:30",
+                Some(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap(),
+            ScalarValue::TimestampSecond(Some(1234567890 - 8 * 3600), None)
+        );
+
+        assert_eq!(
+            string_to_timestamp_ms(
+                "2009-02-13 23:31:30",
+                Some(Timezone::from_tz_string("-8:00").unwrap())
+            )
+            .unwrap(),
+            ScalarValue::TimestampSecond(Some(1234567890 + 8 * 3600), None)
         );
     }
 
@@ -485,8 +497,8 @@ mod tests {
             .unwrap();
         let expected = String::from(
             "Aggregate: groupBy=[[]], aggr=[[COUNT(column1)]]\
-            \n  Filter: TimestampSecond(-28800, Some(\"UTC\")) <= column3\
-            \n    Filter: column3 > TimestampSecond(-28800, Some(\"UTC\"))\
+            \n  Filter: TimestampSecond(-28800, None) <= column3\
+            \n    Filter: column3 > TimestampSecond(-28800, None)\
             \n      Values: (Int64(1), Float64(1), TimestampMillisecond(1, None))",
         );
         assert_eq!(format!("{}", transformed_plan.display_indent()), expected);

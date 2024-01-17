@@ -14,7 +14,6 @@
 
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
-use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
@@ -432,7 +431,7 @@ pub fn duration_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue
 /// Return `None` if given scalar value cannot be converted to a valid timestamp.
 pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
     match scalar {
-        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s) {
+        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str_utc(s) {
             Ok(t) => Some(t),
             Err(e) => {
                 logging::error!(e;"Failed to convert string literal {s} to timestamp");

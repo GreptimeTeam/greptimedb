@@ -94,7 +94,7 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::Timestamp(t) => {
-            if let Ok(ts) = Timestamp::from_str(&s) {
+            if let Ok(ts) = Timestamp::from_str_utc(&s) {
                 Ok(Value::Timestamp(ts.convert_to(t.unit()).context(
                     TimestampOverflowSnafu {
                         timestamp: ts,

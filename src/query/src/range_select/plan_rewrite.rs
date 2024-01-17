@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::BTreeSet;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -143,7 +142,8 @@ fn parse_align_to(args: &[Expr], i: usize) -> DFResult<i64> {
         "" => return Ok(0),
         _ => (),
     }
-    Timestamp::from_str(s)
+    // FIXME(dennis): respect timezone in query context
+    Timestamp::from_str_utc(s)
         .map_err(|e| {
             DataFusionError::Plan(format!(
                 "Illegal `align to` argument `{}` in range select query, can't be parse as NOW/CALENDAR/Timestamp, error: {}",
