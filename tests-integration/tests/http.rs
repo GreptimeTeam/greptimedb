@@ -647,6 +647,7 @@ pub async fn test_config_api(store_type: StorageType) {
 
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
+
     let expected_toml_str = format!(
         r#"
 [procedure]
@@ -765,11 +766,6 @@ manifest_checkpoint_distance = 10
 compress_manifest = false
 max_background_jobs = 4
 auto_flush_interval = "30m"
-global_write_buffer_size = "1GiB"
-global_write_buffer_reject_size = "2GiB"
-sst_meta_cache_size = "128MiB"
-vector_cache_size = "512MiB"
-page_cache_size = "512MiB"
 enable_experimental_write_cache = false
 experimental_write_cache_path = ""
 experimental_write_cache_size = "512MiB"
@@ -822,6 +818,11 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "scope =",
         "num_workers =",
         "scan_parallelism =",
+        "global_write_buffer_size =",
+        "global_write_buffer_reject_size =",
+        "sst_meta_cache_size =",
+        "vector_cache_size =",
+        "page_cache_size =",
     ];
 
     input
