@@ -14,9 +14,7 @@
 
 mod empty_table;
 mod memtable;
-mod mock_engine;
 pub mod table_info;
 
 pub use empty_table::EmptyTable;
 pub use memtable::MemTable;
-pub use mock_engine::MockTableEngine;

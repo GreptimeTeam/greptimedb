@@ -69,7 +69,7 @@ impl From<&RegionRequestHeader> for QueryContext {
             current_schema: schema.to_string(),
             current_user: Default::default(),
             // for request send to datanode, all timestamp have converted to UTC, so timezone is not important
-            timezone: ArcSwap::new(Arc::new(get_timezone(None))),
+            timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
             sql_dialect: Box::new(GreptimeDbDialect {}),
         }
     }
@@ -123,8 +123,8 @@ impl QueryContext {
         build_db_string(catalog, schema)
     }
 
-    pub fn timezone(&self) -> Timezone {
-        self.timezone.load().as_ref().clone()
+    pub fn timezone(&self) -> Arc<Timezone> {
+        self.timezone.load().clone()
     }
 
     pub fn current_user(&self) -> Option<UserInfoRef> {
@@ -143,8 +143,8 @@ impl QueryContext {
     /// We need persist these change in `Session`.
     pub fn update_session(&self, session: &SessionRef) {
         let tz = self.timezone();
-        if session.timezone() != tz {
-            session.set_timezone(tz)
+        if session.timezone() != *tz {
+            session.set_timezone(tz.as_ref().clone())
         }
     }
 }
@@ -163,7 +163,7 @@ impl QueryContextBuilder {
                 .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
             timezone: self
                 .timezone
-                .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None)))),
+                .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None).clone()))),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),

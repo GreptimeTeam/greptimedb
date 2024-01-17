@@ -218,6 +218,14 @@ impl Value {
         }
     }
 
+    /// Cast Value to utf8 String. Return None if value is not a valid string data type.
+    pub fn as_string(&self) -> Option<String> {
+        match self {
+            Value::String(bytes) => Some(bytes.as_utf8().to_string()),
+            _ => None,
+        }
+    }
+
     /// Cast Value to Date. Return None if value is not a valid date data type.
     pub fn as_date(&self) -> Option<Date> {
         match self {

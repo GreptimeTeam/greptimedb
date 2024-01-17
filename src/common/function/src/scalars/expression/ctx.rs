@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use chrono_tz::Tz;
 use common_query::error::Error;
+use common_time::timezone::get_timezone;
+use common_time::Timezone;
 
 pub struct EvalContext {
-    _tz: Tz,
+    pub timezone: Timezone,
     pub error: Option<Error>,
 }
 
 impl Default for EvalContext {
     fn default() -> Self {
-        let tz = "UTC".parse::<Tz>().unwrap();
         Self {
             error: None,
-            _tz: tz,
+            timezone: get_timezone(None).clone(),
         }
     }
 }

@@ -17,6 +17,4 @@ pub use client::{CachedMetaKvBackend, MetaKvBackend};
 mod client;
 mod manager;
 
-#[cfg(feature = "testing")]
-pub mod mock;
 pub use manager::KvBackendCatalogManager;

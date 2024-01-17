@@ -143,8 +143,12 @@ impl PhysicalPlan for PhysicalPlanAdapter {
         let stream = df_plan
             .execute(partition, context)
             .context(error::GeneralDataFusionSnafu)?;
-        let adapter = RecordBatchStreamAdapter::try_new_with_metrics(stream, baseline_metric)
-            .context(error::ConvertDfRecordBatchStreamSnafu)?;
+        let adapter = RecordBatchStreamAdapter::try_new_with_metrics_and_df_plan(
+            stream,
+            baseline_metric,
+            df_plan,
+        )
+        .context(error::ConvertDfRecordBatchStreamSnafu)?;
 
         Ok(Box::pin(adapter))
     }

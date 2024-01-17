@@ -20,8 +20,8 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::VectorRef;
 use datatypes::schema::SchemaRef;
 use snafu::{ensure, ResultExt};
-use table::engine::TableReference;
 use table::metadata::TableId;
+use table::table_reference::TableReference;
 
 use crate::error::{CreateVectorSnafu, Result, UnexpectedValuesLengthSnafu};
 use crate::util;

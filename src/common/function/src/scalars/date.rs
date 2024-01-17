@@ -14,9 +14,11 @@
 
 use std::sync::Arc;
 mod date_add;
+mod date_format;
 mod date_sub;
 
 use date_add::DateAddFunction;
+use date_format::DateFormatFunction;
 use date_sub::DateSubFunction;
 
 use crate::function_registry::FunctionRegistry;
@@ -27,5 +29,6 @@ impl DateFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(DateAddFunction));
         registry.register(Arc::new(DateSubFunction));
+        registry.register(Arc::new(DateFormatFunction));
     }
 }

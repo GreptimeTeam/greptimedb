@@ -163,6 +163,12 @@ pub enum Error {
         source: DataTypeError,
     },
 
+    #[snafu(display("Failed to execute function: {source}"))]
+    Execute {
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Invalid function args: {}", err_msg))]
     InvalidFuncArgs { err_msg: String, location: Location },
 }
@@ -201,6 +207,7 @@ impl ErrorExt for Error {
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
             Error::ExecutePhysicalPlan { source, .. } => source.status_code(),
+            Error::Execute { source, .. } => source.status_code(),
         }
     }
 
