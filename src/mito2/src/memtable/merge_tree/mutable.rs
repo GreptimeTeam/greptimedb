@@ -37,6 +37,8 @@ use crate::row_converter::{McmpRowCodec, RowCodec};
 /// Initial values builder capacity.
 const INITIAL_BUILDER_CAPACITY: usize = 8;
 
+// TODO(yingwen): Block without dictionary.
+
 /// Mutable part that buffers input data.
 pub(crate) struct MutablePart {
     blocks: Vec<DictBlock>,
@@ -129,7 +131,6 @@ struct Metrics {
     max_ts: i64,
 }
 
-// TODO(yingwen): Block without dictionary.
 /// A block contains a key dict and values.
 struct DictBlock {
     key_dict: KeyDict,
