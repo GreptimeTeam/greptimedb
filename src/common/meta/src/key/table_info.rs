@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
+use table::table_reference::TableReference;
 
 use super::{DeserializedValueWithBytes, TableMetaValue, TABLE_INFO_KEY_PREFIX};
 use crate::error::Result;

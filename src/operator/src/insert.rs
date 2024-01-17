@@ -35,8 +35,8 @@ use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::statements::insert::Insert;
-use table::engine::TableReference;
 use table::requests::InsertRequest as TableInsertRequest;
+use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{

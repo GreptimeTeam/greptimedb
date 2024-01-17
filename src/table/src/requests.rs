@@ -28,10 +28,10 @@ use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::storage::RegionNumber;
 
-use crate::engine::TableReference;
 use crate::error;
 use crate::error::ParseTableOptionSnafu;
 use crate::metadata::{TableId, TableVersion};
+use crate::table_reference::TableReference;
 
 pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";

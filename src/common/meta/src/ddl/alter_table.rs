@@ -33,9 +33,9 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnId, RegionId};
 use strum::AsRefStr;
-use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::requests::AlterKind;
+use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::handle_operate_region_error;

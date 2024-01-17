@@ -32,9 +32,9 @@ use object_store::ObjectStore;
 use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use table::engine::TableReference;
 use table::requests::CopyTableRequest;
 use table::table::adapter::DfTableProviderAdapter;
+use table::table_reference::TableReference;
 
 use crate::error::{self, BuildDfLogicalPlanSnafu, ExecLogicalPlanSnafu, Result};
 use crate::statement::StatementExecutor;
