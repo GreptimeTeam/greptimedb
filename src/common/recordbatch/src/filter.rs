@@ -93,7 +93,7 @@ impl SimpleFilterEvaluator {
         self.evaluate_datum(input)
     }
 
-    pub fn evaluate_vector(&self, input: VectorRef) -> Result<BooleanBuffer> {
+    pub fn evaluate_vector(&self, input: &VectorRef) -> Result<BooleanBuffer> {
         self.evaluate_datum(&input.to_arrow_array())
     }
 

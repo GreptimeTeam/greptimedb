@@ -560,11 +560,19 @@ impl ParquetReader {
         }
 
         let mut new_batches = VecDeque::new();
-        let mut batches = std::mem::take(&mut self.batches);
-        for batch in batches.drain(..) {
+        let batches = std::mem::take(&mut self.batches);
+        for batch in batches {
+            let num_rows_before_filter = batch.num_rows();
             let Some(batch_filtered) = self.precise_filter(batch)? else {
+                // the entire batch is filtered out
+                self.metrics.num_rows_precise_filtered += num_rows_before_filter;
                 continue;
             };
+
+            // update metric
+            let filtered_rows = num_rows_before_filter - batch_filtered.num_rows();
+            self.metrics.num_rows_precise_filtered += filtered_rows;
+
             if !batch_filtered.is_empty() {
                 new_batches.push_back(batch_filtered);
             }
@@ -575,6 +583,7 @@ impl ParquetReader {
     }
 
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
+    /// Return the filtered batch. If the entired batch is filtered out, return None.
     ///
     /// Supported filter expr type is defined in [SimpleFilterEvaluator].
     ///
@@ -628,13 +637,13 @@ impl ParquetReader {
                 SemanticType::Field => {
                     // Safety: both id and name are checked before.
                     let field_index = *field_id_map.get(&column_metadata.column_id).unwrap();
-                    let field_col = input.fields()[field_index].data.clone();
+                    let field_col = &input.fields()[field_index].data;
                     filter
                         .evaluate_vector(field_col)
                         .context(FilterRecordBatchSnafu)?
                 }
                 SemanticType::Timestamp => filter
-                    .evaluate_vector(input.timestamps().clone())
+                    .evaluate_vector(input.timestamps())
                     .context(FilterRecordBatchSnafu)?,
             };
 
