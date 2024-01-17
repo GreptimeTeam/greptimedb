@@ -249,6 +249,12 @@ pub enum Error {
         source: BoxedError,
         location: Location,
     },
+
+    #[snafu(display("Failed to build runtime"))]
+    BuildRuntime {
+        location: Location,
+        source: common_runtime::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -298,6 +304,8 @@ impl ErrorExt for Error {
             Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
 
             Error::Other { source, .. } => source.status_code(),
+
+            Error::BuildRuntime { source, .. } => source.status_code(),
         }
     }
 

@@ -1534,6 +1534,7 @@ dependencies = [
  "common-procedure",
  "common-query",
  "common-recordbatch",
+ "common-runtime",
  "common-telemetry",
  "common-test-util",
  "common-time",

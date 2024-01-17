@@ -25,7 +25,7 @@ use store_api::storage::RegionId;
 use crate::config::MitoConfig;
 use crate::error::{RegionTruncatedSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::RegionEdit;
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
@@ -181,19 +181,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             flushed_entry_id: Some(request.flushed_entry_id),
             flushed_sequence: Some(request.flushed_sequence),
         };
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        if let Err(e) = region.manifest_manager.update(action_list).await {
+        if let Err(e) = region.apply_edit(edit, &request.memtables_to_remove).await {
             error!(e; "Failed to write manifest, region: {}", region_id);
             request.on_failure(e);
             return;
         }
 
-        // Apply edit to region's version.
-        region.version_control.apply_edit(
-            edit,
-            &request.memtables_to_remove,
-            region.file_purger.clone(),
-        );
         region.update_flush_millis();
 
         // Delete wal.
