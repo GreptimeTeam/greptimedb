@@ -1455,6 +1455,7 @@ name = "client"
 version = "0.6.0"
 dependencies = [
  "api",
+ "arc-swap",
  "arrow-flight",
  "async-stream",
  "async-trait",
@@ -1915,6 +1916,7 @@ dependencies = [
 name = "common-recordbatch"
 version = "0.6.0"
 dependencies = [
+ "arc-swap",
  "common-error",
  "common-macro",
  "datafusion",
@@ -3635,7 +3637,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=2c1f17dce7af748c9a1255e82d6ceb7959f8919b#2c1f17dce7af748c9a1255e82d6ceb7959f8919b"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=65b008f018395f8fa917a7d3c7883b82f309cb74#65b008f018395f8fa917a7d3c7883b82f309cb74"
 dependencies = [
  "prost 0.12.3",
  "serde",
@@ -6914,6 +6916,8 @@ dependencies = [
  "greptime-proto",
  "humantime",
  "lazy_static",
+ "meter-core",
+ "meter-macros",
  "num",
  "num-traits",
  "object-store",
