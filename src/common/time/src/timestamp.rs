@@ -389,7 +389,7 @@ impl Timestamp {
     /// - `2022-09-20 14:16:43` (The given timezone, without T)
     /// - `2022-09-20 14:16:43.012345` (The given timezone, without T)
     #[allow(deprecated)]
-    pub fn from_str(s: &str, timezone: Option<Timezone>) -> Result<Self> {
+    pub fn from_str(s: &str, timezone: Option<&Timezone>) -> Result<Self> {
         // RFC3339 timestamp (with a T)
         let s = s.trim();
         if let Ok(ts) = DateTime::parse_from_rfc3339(s) {
@@ -430,7 +430,7 @@ impl Timestamp {
 fn naive_datetime_to_timestamp(
     s: &str,
     datetime: NaiveDateTime,
-    timezone: Option<Timezone>,
+    timezone: Option<&Timezone>,
 ) -> crate::error::Result<Timestamp> {
     if timezone.is_none() {
         return Timestamp::from_chrono_datetime(Utc.from_utc_datetime(&datetime).naive_utc())

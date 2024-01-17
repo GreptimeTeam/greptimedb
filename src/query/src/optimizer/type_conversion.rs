@@ -142,7 +142,7 @@ impl TypeConverter {
 
     /// Retrieve the timezone from query context.
     fn get_timezone(&self) -> Option<Timezone> {
-        Some(self.query_ctx.timezone())
+        Some(self.query_ctx.timezone().as_ref().clone())
     }
 
     fn cast_scalar_value(
@@ -296,7 +296,7 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
 }
 
 fn string_to_timestamp_ms(string: &str, timezone: Option<Timezone>) -> Result<ScalarValue> {
-    let ts = Timestamp::from_str(string, timezone)
+    let ts = Timestamp::from_str(string, timezone.as_ref())
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
     let value = Some(ts.value());

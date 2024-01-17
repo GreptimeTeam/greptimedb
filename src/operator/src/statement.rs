@@ -344,7 +344,7 @@ fn extract_timestamp(
 ) -> Result<Option<Timestamp>> {
     map.get(key)
         .map(|v| {
-            Timestamp::from_str(v, Some(query_ctx.timezone()))
+            Timestamp::from_str(v, Some(&query_ctx.timezone()))
                 .map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
         })
         .transpose()

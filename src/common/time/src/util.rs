@@ -33,7 +33,10 @@ pub fn local_datetime_to_utc(local: &NaiveDateTime) -> LocalResult<NaiveDateTime
     datetime_to_utc(local, get_timezone(None))
 }
 
-pub fn datetime_to_utc(datetime: &NaiveDateTime, timezone: Timezone) -> LocalResult<NaiveDateTime> {
+pub fn datetime_to_utc(
+    datetime: &NaiveDateTime,
+    timezone: &Timezone,
+) -> LocalResult<NaiveDateTime> {
     match timezone {
         crate::Timezone::Offset(offset) => {
             offset.from_local_datetime(datetime).map(|x| x.naive_utc())
