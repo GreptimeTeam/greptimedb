@@ -171,6 +171,8 @@ impl MitoRegion {
         edit: RegionEdit,
         memtables_to_remove: &[MemtableId],
     ) -> Result<()> {
+        info!("Applying {edit:?} to region {}", self.region_id);
+
         self.manifest_manager
             .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
                 edit.clone(),

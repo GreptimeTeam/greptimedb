@@ -161,7 +161,7 @@ impl AccessLayer {
 
         Ok(sst_info)
     }
-/// Return true when the file meta's path exists in object storage.
+    /// Returns whether the file exists in the object store.
     pub(crate) async fn is_exist(&self, file_meta: &FileMeta) -> Result<bool> {
         let path = location::sst_file_path(&self.region_dir, file_meta.file_id);
         self.object_store

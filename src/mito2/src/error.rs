@@ -536,9 +536,6 @@ pub enum Error {
         error: std::io::Error,
         location: Location,
     },
-
-    #[snafu(display("Failed to edit region, reason: {}", reason))]
-    EditRegion { reason: String, location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -593,9 +590,7 @@ impl ErrorExt for Error {
             | WorkerStopped { .. }
             | Recv { .. }
             | EncodeWal { .. }
-            | DecodeWal { .. }
-            | EditRegion { .. } => StatusCode::Internal,
-
+            | DecodeWal { .. } => StatusCode::Internal,
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),

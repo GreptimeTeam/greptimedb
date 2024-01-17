@@ -46,7 +46,9 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error::{EditRegionSnafu, JoinSnafu, RegionNotFoundSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{
+    InvalidRequestSnafu, JoinSnafu, RegionNotFoundSnafu, Result, WorkerStoppedSnafu,
+};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::manifest::action::RegionEdit;
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
@@ -660,8 +662,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let is_exist = region.access_layer.is_exist(file_meta).await?;
             ensure!(
                 is_exist,
-                EditRegionSnafu {
-                    reason: format!("file '{}' not exist", file_meta.file_id)
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: format!(
+                        "trying to add a not exist file '{}' when editing region",
+                        file_meta.file_id
+                    )
                 }
             );
         }
