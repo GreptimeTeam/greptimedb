@@ -14,35 +14,43 @@
 
 //! Mutable part of the merge tree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use api::v1::OpType;
 use bytes::Bytes;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
 use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::value::ValueRef;
 use datatypes::vectors::{
-    MutableVector, UInt16VectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder,
+    BinaryVectorBuilder, MutableVector, UInt16VectorBuilder, UInt64VectorBuilder,
+    UInt8VectorBuilder,
 };
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::SequenceNumber;
 
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::KeyValues;
 use crate::row_converter::{McmpRowCodec, RowCodec};
 
-/// Initial values builder capacity.
-const INITIAL_BUILDER_CAPACITY: usize = 8;
-
-// TODO(yingwen): Block without dictionary.
+/// Initial capacity allocated to store rows.
+const INITIAL_CAPACITY: usize = 8;
 
 /// Mutable part that buffers input data.
 pub(crate) struct MutablePart {
-    blocks: Vec<DictBlock>,
+    active_dict: KeyDict,
+    immutable_dicts: Vec<Arc<KeyDict>>,
+    interned_blocks: HashMap<DictIdType, InternedBlock>,
+    /// Stores rows without interning primary keys. If the region doesn't have primary key,
+    /// it also stores rows in this block.
+    plain_block: PlainBlock,
+    /// Next id of the dictionary.
+    next_dict_id: DictIdType,
+    /// Number of keys in a dictionary.
     dict_size: KeyIdType,
+    /// Maximum number of dictionaries in the part.
+    max_dict_num: usize,
     metrics: Metrics,
 }
 
@@ -64,35 +72,27 @@ impl MutablePart {
                     actual: kv.num_primary_keys(),
                 }
             );
-            // Encode primary key.
-            primary_key.clear();
-            row_codec.encode_to_vec(kv.primary_keys(), &mut primary_key)?;
-
-            if self.blocks.is_empty() {
-                self.blocks.push(DictBlock::new(metadata, self.dict_size));
-            }
-
-            // Update metrics first.
             // Safety: timestamp of kv must be both present and a valid timestamp value.
             let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
             self.metrics.min_ts = self.metrics.min_ts.min(ts);
             self.metrics.max_ts = self.metrics.max_ts.max(ts);
             self.metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
 
-            if self.find_blocks_to_insert(&primary_key, &kv) {
+            if metadata.primary_key.is_empty() {
+                // No primary key, write to the plain block.
+                self.write_plain(metadata, &kv, None);
                 continue;
             }
 
-            // A new key.
-            // TODO(yingwen): Also consider size of the block.
-            if self.blocks.last().unwrap().key_dict.is_full() {
-                self.blocks.push(DictBlock::new(metadata, self.dict_size));
-            }
-            let last = self.blocks.last_mut().unwrap();
+            // Encode primary key.
+            primary_key.clear();
+            row_codec.encode_to_vec(kv.primary_keys(), &mut primary_key)?;
 
-            self.metrics.key_bytes += primary_key.len();
-            // Safety: The block is not full.
-            last.insert_by_key(std::mem::take(&mut primary_key), &kv);
+            if self.is_dictionary_enabled() {
+                self.write_intern(metadata, &kv, &mut primary_key);
+            } else {
+                self.write_plain(metadata, &kv, Some(&mut primary_key));
+            }
         }
 
         self.metrics.value_bytes +=
@@ -101,21 +101,91 @@ impl MutablePart {
         Ok(())
     }
 
-    /// Finds a block that contains the key and insert the value, returns true the value
-    /// is inserted.
-    #[must_use]
-    fn find_blocks_to_insert(&mut self, primary_key: &[u8], key_value: &KeyValue) -> bool {
-        for block in &mut self.blocks {
-            let Some(key_id) = block.key_dict.get_key_id(&primary_key) else {
-                continue;
-            };
+    /// Returns true if the dictionary is enabled.
+    fn is_dictionary_enabled(&self) -> bool {
+        self.dict_size == 0
+    }
 
-            // The key belongs to this block
-            block.insert_by_id(key_id, &key_value);
-            return true;
+    /// Writes to the intern block and falls back to the plain block if it can't intern the key.
+    ///
+    /// The region must have a primary key.
+    fn write_intern(
+        &mut self,
+        metadata: &RegionMetadataRef,
+        key_value: &KeyValue,
+        primary_key: &mut Vec<u8>,
+    ) {
+        assert!(!metadata.primary_key.is_empty());
+
+        let Some((dict_id, key_id)) = self.maybe_intern(metadata, primary_key) else {
+            // Unable to intern the key, write to the plain block.
+            return self.write_plain(metadata, key_value, Some(primary_key));
+        };
+
+        let block = self
+            .interned_blocks
+            .entry(dict_id)
+            .or_insert_with(|| InternedBlock::new(dict_id, metadata, INITIAL_CAPACITY));
+        block.key.push(Some(key_id));
+        block.value.push(key_value);
+    }
+
+    /// Writes the `key_value` and the `primary_key` to the plain block.
+    fn write_plain(
+        &mut self,
+        metadata: &RegionMetadataRef,
+        key_value: &KeyValue,
+        primary_key: Option<&[u8]>,
+    ) {
+        if primary_key.is_some() {
+            // None means no primary key so we only push the key when it is `Some`.
+            self.plain_block.key.push(primary_key);
         }
 
-        false
+        self.plain_block.value.push(key_value);
+    }
+
+    /// Tries to intern the primary key, returns the id of the dictionary and the key.
+    fn maybe_intern(
+        &mut self,
+        metadata: &RegionMetadataRef,
+        primary_key: &mut Vec<u8>,
+    ) -> Option<(DictIdType, KeyIdType)> {
+        if let Some(key_id) = self.active_dict.get_key_id(&primary_key) {
+            return Some((self.active_dict.id, key_id));
+        }
+
+        for dict in &self.immutable_dicts {
+            if let Some(key_id) = dict.get_key_id(&primary_key) {
+                return Some((dict.id, key_id));
+            }
+        }
+
+        // A new key.
+        if self.active_dict.is_full() {
+            // Allocates a new dictionary.
+            let key_dict = self.allocate_dict()?;
+            let prev_dict = std::mem::replace(&mut self.active_dict, key_dict);
+            self.immutable_dicts.push(Arc::new(prev_dict));
+        }
+
+        // Intern the primary key.
+        let key = std::mem::take(primary_key);
+        self.metrics.key_bytes += key.len();
+        let key_id = self.active_dict.must_intern(key);
+        return Some((self.active_dict.id, key_id));
+    }
+
+    /// Allocates a new dictionary if possible.
+    fn allocate_dict(&mut self) -> Option<KeyDict> {
+        if self.immutable_dicts.len() + 1 >= self.max_dict_num {
+            return None;
+        }
+
+        let dict_id = self.next_dict_id;
+        self.next_dict_id = self.next_dict_id.checked_add(1)?;
+
+        Some(KeyDict::new(dict_id, self.dict_size))
     }
 }
 
@@ -131,44 +201,15 @@ struct Metrics {
     max_ts: i64,
 }
 
-/// A block contains a key dict and values.
-struct DictBlock {
-    key_dict: KeyDict,
-    values: ValuesBuilder,
-}
-
-impl DictBlock {
-    /// Creates a new block.
-    fn new(metadata: &RegionMetadataRef, dict_size: KeyIdType) -> DictBlock {
-        DictBlock {
-            key_dict: KeyDict::new(dict_size),
-            values: ValuesBuilder::new(metadata, INITIAL_BUILDER_CAPACITY),
-        }
-    }
-
-    /// Inserts the row by id.
-    fn insert_by_id(&mut self, key_id: KeyIdType, key_value: &KeyValue) {
-        self.values.push(
-            key_id,
-            key_value.timestamp(),
-            key_value.sequence(),
-            key_value.op_type(),
-            key_value.fields(),
-        );
-    }
-
-    /// Inserts the row by key.
-    fn insert_by_key(&mut self, key: Vec<u8>, key_value: &KeyValue) {
-        let key_id = self.key_dict.must_intern(key);
-        self.insert_by_id(key_id, key_value);
-    }
-}
-
 /// Id of the primary key.
 type KeyIdType = u16;
+/// Id of a [KeyDict].
+type DictIdType = u32;
 
 /// Sorted dictionary for primary keys.
 struct KeyDict {
+    /// Id of the dictionary.
+    id: DictIdType,
     /// The dictionary.
     dict: BTreeMap<Bytes, KeyIdType>,
     /// Interned keys.
@@ -179,12 +220,13 @@ struct KeyDict {
 
 impl KeyDict {
     /// Creates a new dictionary.
-    fn new(capacity: KeyIdType) -> Self {
+    fn new(id: DictIdType, capacity: KeyIdType) -> Self {
         Self {
+            id,
             dict: BTreeMap::new(),
             // We initialize the keys buffer with a small capacity to avoid
             // allocating too much memory.
-            keys: Vec::with_capacity(INITIAL_BUILDER_CAPACITY),
+            keys: Vec::with_capacity(INITIAL_CAPACITY),
             dict_size: capacity,
         }
     }
@@ -215,19 +257,57 @@ impl KeyDict {
     }
 }
 
-/// Mutable buffer for values.
-struct ValuesBuilder {
+/// A block that keys are interned in the [KeyDict].
+struct InternedBlock {
+    /// Id of the dictionary.
+    id: DictIdType,
+    /// Ids of keys.
     key: UInt16VectorBuilder,
+    /// Values of rows.
+    value: ValueBuilder,
+}
+
+impl InternedBlock {
+    /// Returns a new block.
+    fn new(id: DictIdType, metadata: &RegionMetadataRef, capacity: usize) -> InternedBlock {
+        InternedBlock {
+            id,
+            key: UInt16VectorBuilder::with_capacity(capacity),
+            value: ValueBuilder::new(metadata, capacity),
+        }
+    }
+
+    /// Inserts the row without primary key.
+    fn insert_no_key(&mut self, key_value: &KeyValue) {
+        self.value.push(key_value);
+    }
+
+    /// Inserts the row by id.
+    fn insert_by_id(&mut self, key_id: KeyIdType, key_value: &KeyValue) {
+        self.key.push(Some(key_id));
+        self.value.push(key_value);
+    }
+}
+
+/// A block that stores primary key directly.
+struct PlainBlock {
+    /// Primary keys. Empty if no primary key.
+    key: BinaryVectorBuilder,
+    /// Values of rows.
+    value: ValueBuilder,
+}
+
+/// Mutable buffer for values.
+struct ValueBuilder {
     timestamp: Box<dyn MutableVector>,
     sequence: UInt64VectorBuilder,
     op_type: UInt8VectorBuilder,
     fields: Vec<Box<dyn MutableVector>>,
 }
 
-impl ValuesBuilder {
+impl ValueBuilder {
     /// Creates a new builder with specific capacity.
     fn new(metadata: &RegionMetadataRef, capacity: usize) -> Self {
-        let key = UInt16VectorBuilder::with_capacity(capacity);
         let timestamp = metadata
             .time_index_column()
             .column_schema
@@ -241,7 +321,6 @@ impl ValuesBuilder {
             .collect();
 
         Self {
-            key,
             timestamp,
             sequence,
             op_type,
@@ -249,23 +328,15 @@ impl ValuesBuilder {
         }
     }
 
-    /// Pushes a row into the builder.
+    /// Pushes the value of a row into the builder.
     ///
     /// # Panics
     /// Panics if fields have unexpected types.
-    fn push<'a>(
-        &mut self,
-        key_id: KeyIdType,
-        ts: ValueRef,
-        sequence: SequenceNumber,
-        op_type: OpType,
-        fields: impl Iterator<Item = ValueRef<'a>>,
-    ) {
-        self.key.push(Some(key_id));
-        self.timestamp.push_value_ref(ts);
-        self.sequence.push(Some(sequence));
-        self.op_type.push(Some(op_type as u8));
-        for (idx, value) in fields.enumerate() {
+    fn push(&mut self, key_value: &KeyValue) {
+        self.timestamp.push_value_ref(key_value.timestamp());
+        self.sequence.push(Some(key_value.sequence()));
+        self.op_type.push(Some(key_value.op_type() as u8));
+        for (idx, value) in key_value.fields().enumerate() {
             self.fields[idx].push_value_ref(value);
         }
     }
