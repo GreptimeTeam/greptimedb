@@ -22,7 +22,9 @@ use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 
-use super::test_util::{check_unordered_output_stream, standalone, standalone_instance_case};
+use super::test_util::{
+    both_instances_cases, check_unordered_output_stream, distributed, standalone,
+};
 use crate::tests::test_util::MockInstance;
 
 #[allow(clippy::too_many_arguments)]
@@ -104,8 +106,7 @@ async fn create_insert_tql_assert(
     check_unordered_output_stream(query_output, expected).await;
 }
 
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn sql_insert_tql_query_ceil(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -152,8 +153,7 @@ async fn sql_insert_tql_query_ceil(instance: Arc<dyn MockInstance>) {
     .await;
 }
 
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn sql_insert_promql_query_ceil(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -235,8 +235,7 @@ fn unix_epoch_plus_100s() -> SystemTime {
 // eval instant at 50m SUM BY (group) (http_requests{job="api-server"})
 //   {group="canary"} 700
 //   {group="production"} 300
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_simple_sum(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -263,8 +262,7 @@ async fn aggregators_simple_sum(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m avg by (group) (http_requests{job="api-server"})
 //   {group="canary"} 350
 //   {group="production"} 150
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_simple_avg(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -291,8 +289,7 @@ async fn aggregators_simple_avg(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m count by (group) (http_requests{job="api-server"})
 //   {group="canary"} 2
 //   {group="production"} 2
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_simple_count(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -319,8 +316,7 @@ async fn aggregators_simple_count(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m sum without (instance) (http_requests{job="api-server"})
 //   {group="canary",job="api-server"} 700
 //   {group="production",job="api-server"} 300
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_simple_without(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -346,8 +342,7 @@ async fn aggregators_simple_without(instance: Arc<dyn MockInstance>) {
 // # Empty by.
 // eval instant at 50m sum by () (http_requests{job="api-server"})
 //   {} 1000
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_empty_by(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -372,8 +367,7 @@ async fn aggregators_empty_by(instance: Arc<dyn MockInstance>) {
 // # No by/without.
 // eval instant at 50m sum(http_requests{job="api-server"})
 //   {} 1000
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_no_by_without(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -399,8 +393,7 @@ async fn aggregators_no_by_without(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m sum without () (http_requests{job="api-server",group="production"})
 //   {group="production",job="api-server",instance="0"} 100
 //   {group="production",job="api-server",instance="1"} 200
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_empty_without(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -427,8 +420,7 @@ async fn aggregators_empty_without(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m sum(http_requests) by (job) + min(http_requests) by (job) + max(http_requests) by (job) + avg(http_requests) by (job)
 //   {job="app-server"} 4550
 //   {job="api-server"} 1750
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_complex_combined_aggrs(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -452,8 +444,7 @@ async fn aggregators_complex_combined_aggrs(instance: Arc<dyn MockInstance>) {
 }
 
 // This is not from prometheus test set. It's derived from `aggregators_complex_combined_aggrs()`
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn two_aggregators_combined_aggrs(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -479,8 +470,7 @@ async fn two_aggregators_combined_aggrs(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m stddev by (instance)(http_requests)
 //   {instance="0"} 223.60679774998
 //   {instance="1"} 223.60679774998
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 #[ignore = "TODO(ruihang): fix this case"]
 async fn stddev_by_label(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
@@ -505,8 +495,7 @@ async fn stddev_by_label(instance: Arc<dyn MockInstance>) {
 }
 
 // This is not derived from prometheus
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn binary_op_plain_columns(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
