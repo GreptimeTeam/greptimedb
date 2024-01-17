@@ -53,7 +53,6 @@ pub(crate) struct MutablePart {
     dict_key_num: KeyIdType,
     /// Maximum number of dictionaries in the part.
     max_dict_num: usize,
-    metrics: Metrics,
 }
 
 impl MutablePart {
@@ -79,7 +78,6 @@ impl MutablePart {
             next_dict_id: 1,
             dict_key_num,
             max_dict_num: config.max_dict_num,
-            metrics: Metrics::default(),
         }
     }
 
@@ -89,6 +87,7 @@ impl MutablePart {
         metadata: &RegionMetadataRef,
         row_codec: &McmpRowCodec,
         kvs: &KeyValues,
+        metrics: &mut WriteMetrics,
     ) -> Result<()> {
         let mut primary_key = Vec::new();
 
@@ -102,9 +101,9 @@ impl MutablePart {
             );
             // Safety: timestamp of kv must be both present and a valid timestamp value.
             let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
-            self.metrics.min_ts = self.metrics.min_ts.min(ts);
-            self.metrics.max_ts = self.metrics.max_ts.max(ts);
-            self.metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
+            metrics.min_ts = metrics.min_ts.min(ts);
+            metrics.max_ts = metrics.max_ts.max(ts);
+            metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
 
             if metadata.primary_key.is_empty() {
                 // No primary key, write to the plain block.
@@ -117,13 +116,13 @@ impl MutablePart {
             row_codec.encode_to_vec(kv.primary_keys(), &mut primary_key)?;
 
             if self.is_dictionary_enabled() {
-                self.write_intern(metadata, &kv, &mut primary_key);
+                self.write_intern(metadata, &kv, &mut primary_key, metrics);
             } else {
                 self.write_plain(metadata, &kv, Some(&mut primary_key));
             }
         }
 
-        self.metrics.value_bytes +=
+        metrics.value_bytes +=
             kvs.num_rows() * (std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>());
 
         Ok(())
@@ -142,10 +141,11 @@ impl MutablePart {
         metadata: &RegionMetadataRef,
         key_value: &KeyValue,
         primary_key: &mut Vec<u8>,
+        metrics: &mut WriteMetrics,
     ) {
         assert!(!metadata.primary_key.is_empty());
 
-        let Some((dict_id, key_id)) = self.maybe_intern(metadata, primary_key) else {
+        let Some((dict_id, key_id)) = self.maybe_intern(metadata, primary_key, metrics) else {
             // Unable to intern the key, write to the plain block.
             return self.write_plain(metadata, key_value, Some(primary_key));
         };
@@ -182,6 +182,7 @@ impl MutablePart {
         &mut self,
         metadata: &RegionMetadataRef,
         primary_key: &mut Vec<u8>,
+        metrics: &mut WriteMetrics,
     ) -> Option<(DictIdType, KeyIdType)> {
         if let Some(key_id) = self.active_dict.get_key_id(&primary_key) {
             return Some((self.active_dict.id, key_id));
@@ -203,7 +204,7 @@ impl MutablePart {
 
         // Intern the primary key.
         let key = std::mem::take(primary_key);
-        self.metrics.key_bytes += key.len();
+        metrics.key_bytes += key.len();
         let key_id = self.active_dict.must_intern(key);
         return Some((self.active_dict.id, key_id));
     }
@@ -221,19 +222,19 @@ impl MutablePart {
     }
 }
 
-/// Metrics of the mutable part.
-struct Metrics {
+/// Metrics of writing the mutable part.
+pub(crate) struct WriteMetrics {
     /// Size allocated by keys.
-    key_bytes: usize,
+    pub(crate) key_bytes: usize,
     /// Size allocated by values.
-    value_bytes: usize,
+    pub(crate) value_bytes: usize,
     /// Minimum timestamp.
-    min_ts: i64,
+    pub(crate) min_ts: i64,
     /// Maximum timestamp
-    max_ts: i64,
+    pub(crate) max_ts: i64,
 }
 
-impl Default for Metrics {
+impl Default for WriteMetrics {
     fn default() -> Self {
         Self {
             key_bytes: 0,
