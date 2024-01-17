@@ -567,7 +567,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 } => {
                     let result = self.edit_region(region_id, edit).await;
                     if let Err(Err(e)) = tx.send(result) {
-                        warn!("Failed to send edit region error '{e}' to caller!");
+                        warn!("Failed to send edit region error to caller, error: {e:?}");
                     }
                 }
                 // We receive a stop signal, but we still want to process remaining
@@ -656,7 +656,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
 
-        for file_meta in edit.files_to_add.iter() {
+        for file_meta in &edit.files_to_add {
             let is_exist = region.access_layer.is_exist(file_meta).await?;
             ensure!(
                 is_exist,
