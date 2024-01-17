@@ -9505,6 +9505,7 @@ dependencies = [
  "async-trait",
  "common-error",
  "common-macro",
+ "common-query",
  "datatypes",
  "derive_builder 0.12.0",
  "faker_rand",

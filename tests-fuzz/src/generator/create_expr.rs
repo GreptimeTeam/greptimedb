@@ -20,11 +20,11 @@ use snafu::{ensure, ResultExt};
 
 use super::Generator;
 use crate::error::{self, Error, Result};
-use crate::ir::create_expr::{
-    generate_random_value, Column, ColumnOption, CreateTableExprBuilder, PartibleColumn, TsColumn,
+use crate::ir::create_expr::{ColumnOption, CreateTableExprBuilder};
+use crate::ir::{
+    self, generate_random_value, Column, CreateTableExpr, PartibleColumn, TsColumn,
     PARTIBLE_DATA_TYPES,
 };
-use crate::ir::{self, CreateTableExpr};
 
 pub struct CreateTableExprGenerator {
     columns: usize,

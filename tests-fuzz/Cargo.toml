@@ -8,6 +8,7 @@ license.workspace = true
 async-trait = { workspace = true }
 common-error = { workspace = true }
 common-macro = { workspace = true }
+common-query = { workspace = true }
 datatypes = { workspace = true }
 derive_builder = { workspace = true }
 faker_rand = "0.1"
