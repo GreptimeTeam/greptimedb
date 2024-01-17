@@ -12,21 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod alter_expr;
-pub mod create_expr;
+use common_query::AddColumnLocation;
+use derive_builder::Builder;
 
-use std::fmt;
+use crate::ir::Column;
 
-use crate::error::Error;
-use crate::ir::{AlterTableExpr, CreateTableExpr};
+#[derive(Debug, Builder, Clone)]
+pub struct AlterTableExpr {
+    pub name: String,
+    pub alter_options: AlterTableOperation,
+}
 
-pub type CreateTableExprGenerator =
-    Box<dyn Generator<CreateTableExpr, Error = Error> + Sync + Send>;
-
-pub type AlterTableExprGenerator = Box<dyn Generator<AlterTableExpr, Error = Error> + Sync + Send>;
-
-pub(crate) trait Generator<T> {
-    type Error: Sync + Send + fmt::Debug;
-
-    fn generate(&self) -> Result<T, Self::Error>;
+#[derive(Debug, Clone)]
+pub enum AlterTableOperation {
+    /// `ADD [ COLUMN ] <column_def> [location]`
+    AddColumn {
+        column: Column,
+        location: Option<AddColumnLocation>,
+    },
+    /// `DROP COLUMN <name>`
+    DropColumn { name: String },
+    /// `RENAME <new_table_name>`
+    RenameTable { new_table_name: String },
 }

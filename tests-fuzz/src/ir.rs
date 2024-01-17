@@ -14,8 +14,10 @@
 
 //! The intermediate representation
 
+pub(crate) mod alter_expr;
 pub(crate) mod create_expr;
 
+pub use alter_expr::AlterTableExpr;
 pub use create_expr::CreateTableExpr;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
@@ -80,6 +82,18 @@ pub struct Column {
     pub options: Vec<ColumnOption>,
 }
 
+/// Returns droppable columns. i.e., non-primary key columns, non-ts columns.
+pub fn droppable_columns(columns: &[Column]) -> Vec<&Column> {
+    columns
+        .iter()
+        .filter(|column| {
+            !column.options.iter().any(|option| {
+                option == &ColumnOption::PrimaryKey || option == &ColumnOption::TimeIndex
+            })
+        })
+        .collect::<Vec<_>>()
+}
+
 impl Distribution<Column> for Standard {
     fn sample<R: rand::prelude::Rng + ?Sized>(&self, rng: &mut R) -> Column {
         let column_type = DATA_TYPES[rng.gen_range(0..DATA_TYPES.len())].clone();
@@ -132,5 +146,43 @@ impl Distribution<PartibleColumn> for Standard {
             column_type,
             options: vec![],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_droppable_columns() {
+        let columns = vec![
+            Column {
+                name: "hi".to_string(),
+                column_type: ConcreteDataType::uint64_datatype(),
+                options: vec![ColumnOption::PrimaryKey],
+            },
+            Column {
+                name: "foo".to_string(),
+                column_type: ConcreteDataType::uint64_datatype(),
+                options: vec![ColumnOption::TimeIndex],
+            },
+        ];
+        let droppable = droppable_columns(&columns);
+        assert!(droppable.is_empty());
+
+        let columns = vec![
+            Column {
+                name: "hi".to_string(),
+                column_type: ConcreteDataType::uint64_datatype(),
+                options: vec![],
+            },
+            Column {
+                name: "foo".to_string(),
+                column_type: ConcreteDataType::uint64_datatype(),
+                options: vec![],
+            },
+        ];
+        let droppable = droppable_columns(&columns);
+        assert_eq!(droppable.len(), 2);
     }
 }

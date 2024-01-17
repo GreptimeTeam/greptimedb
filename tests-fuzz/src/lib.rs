@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(extract_if)]
-
 pub(crate) mod context;
 pub(crate) mod error;
 pub(crate) mod executor;

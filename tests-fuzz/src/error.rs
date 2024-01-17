@@ -35,4 +35,7 @@ pub enum Error {
         error: CreateTableExprBuilderError,
         location: Location,
     },
+
+    #[snafu(display("No droppable columns"))]
+    DroppableColumns { location: Location },
 }

@@ -74,7 +74,7 @@ impl CreateTableExprGenerator {
     }
 
     /// Generates the [CreateTableExpr].
-    fn generate_inner(&self) -> Result<CreateTableExpr> {
+    pub fn generate(&self) -> Result<CreateTableExpr> {
         ensure!(
             self.columns != 0,
             error::UnexpectedSnafu {
@@ -90,12 +90,11 @@ impl CreateTableExprGenerator {
         // Generates columns.
         for i in 0..self.columns {
             let mut column = rng.gen::<Column>();
-            // Removes the primary key option.
-            let options = column
+            let is_primary_key = column
                 .options
-                .extract_if(|option| option == &ColumnOption::PrimaryKey)
-                .collect::<Vec<_>>();
-            if !options.is_empty() {
+                .iter()
+                .any(|option| option == &ColumnOption::PrimaryKey);
+            if is_primary_key {
                 primary_keys.push(i);
             }
             columns.push(column);
@@ -154,15 +153,6 @@ impl CreateTableExprGenerator {
     }
 }
 
-#[async_trait::async_trait]
-impl Generator<CreateTableExpr> for CreateTableExprGenerator {
-    type Error = Error;
-
-    async fn generate(&self) -> Result<CreateTableExpr> {
-        self.generate_inner()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,7 +164,7 @@ mod tests {
             .partitions(3)
             .create_is_not_exists(true)
             .engine("mito2")
-            .generate_inner()
+            .generate()
             .unwrap();
         assert_eq!(expr.engine, "mito2");
         assert!(expr.if_not_exists);
@@ -184,7 +174,7 @@ mod tests {
         let expr = CreateTableExprGenerator::default()
             .columns(10)
             .partitions(1)
-            .generate_inner()
+            .generate()
             .unwrap();
         assert_eq!(expr.columns.len(), 11);
         assert_eq!(expr.partitions.len(), 0);
