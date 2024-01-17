@@ -58,12 +58,14 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::sync::oneshot;
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
+use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
-use crate::region::{MitoRegionRef, RegionUsage};
+use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
 
@@ -111,7 +113,23 @@ impl MitoEngine {
         self.inner.handle_query(region_id, request)
     }
 
-    pub fn get_region(&self, id: RegionId) -> Option<MitoRegionRef> {
+    /// Edit region's metadata by [RegionEdit] directly. Use with care.
+    pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let request = WorkerRequest::EditRegion {
+            region_id,
+            edit,
+            tx,
+        };
+        self.inner
+            .workers
+            .submit_to_worker(region_id, request)
+            .await?;
+        rx.await.context(RecvSnafu)?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
         self.inner.workers.get_region(id)
     }
 }

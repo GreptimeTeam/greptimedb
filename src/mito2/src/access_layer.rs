@@ -161,6 +161,14 @@ impl AccessLayer {
 
         Ok(sst_info)
     }
+
+    pub(crate) async fn is_exist(&self, file_meta: &FileMeta) -> Result<bool> {
+        let path = location::sst_file_path(&self.region_dir, file_meta.file_id);
+        self.object_store
+            .is_exist(&path)
+            .await
+            .context(OpenDalSnafu)
+    }
 }
 
 /// Contents to build a SST.

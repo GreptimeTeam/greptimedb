@@ -166,7 +166,7 @@ impl MitoRegion {
         ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
     }
 
-    pub async fn apply_edit(
+    pub(crate) async fn apply_edit(
         &self,
         edit: RegionEdit,
         memtables_to_remove: &[MemtableId],

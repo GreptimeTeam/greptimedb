@@ -35,7 +35,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::storage::RegionId;
@@ -46,8 +46,9 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{EditRegionSnafu, JoinSnafu, RegionNotFoundSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
+use crate::manifest::action::RegionEdit;
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
@@ -559,6 +560,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::SetReadonlyGracefully { region_id, sender } => {
                     self.set_readonly_gracefully(region_id, sender).await;
                 }
+                WorkerRequest::EditRegion {
+                    region_id,
+                    edit,
+                    tx,
+                } => {
+                    let result = self.edit_region(region_id, edit).await;
+                    if let Err(Err(e)) = tx.send(result) {
+                        warn!("Failed to send edit region error '{e}' to caller!");
+                    }
+                }
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
                 // then exit.
@@ -637,6 +648,26 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         } else {
             let _ = sender.send(SetReadonlyResponse::NotFound);
         }
+    }
+
+    async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        let region = self
+            .regions
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+
+        for file_meta in edit.files_to_add.iter() {
+            let is_exist = region.access_layer.is_exist(file_meta).await?;
+            ensure!(
+                is_exist,
+                EditRegionSnafu {
+                    reason: format!("file '{}' not exist", file_meta.file_id)
+                }
+            );
+        }
+
+        // Applying region edit directly has nothing to do with memtables (at least for now).
+        region.apply_edit(edit, &[]).await
     }
 }
 
