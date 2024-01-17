@@ -14,7 +14,7 @@
 
 //! Parquet reader.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::BitAnd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -592,14 +592,6 @@ impl ParquetReader {
     fn precise_filter(&self, mut input: Batch) -> Result<Option<Batch>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
-        let field_id_map = self
-            .read_format
-            .metadata()
-            .field_columns()
-            .enumerate()
-            .map(|(i, f)| (f.column_id, i))
-            .collect::<HashMap<_, _>>();
-
         // Run filter one by one and combine them result
         // TODO(ruihang): run primary key filter first. It may short circuit other filters
         for filter in &self.predicate {
@@ -635,8 +627,12 @@ impl ParquetReader {
                     }
                 }
                 SemanticType::Field => {
-                    // Safety: both id and name are checked before.
-                    let field_index = *field_id_map.get(&column_metadata.column_id).unwrap();
+                    let Some(field_index) = self
+                        .read_format
+                        .field_index_by_id(column_metadata.column_id)
+                    else {
+                        continue;
+                    };
                     let field_col = &input.fields()[field_index].data;
                     filter
                         .evaluate_vector(field_col)
