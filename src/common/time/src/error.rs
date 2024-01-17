@@ -68,6 +68,14 @@ pub enum Error {
 
     #[snafu(display("Invalid timezone string {raw}"))]
     ParseTimezoneName { raw: String, location: Location },
+
+    #[snafu(display("Failed to format, pattern: {}", pattern))]
+    Format {
+        pattern: String,
+        #[snafu(source)]
+        error: std::fmt::Error,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -76,6 +84,7 @@ impl ErrorExt for Error {
             Error::ParseDateStr { .. }
             | Error::ParseTimestamp { .. }
             | Error::InvalidTimezoneOffset { .. }
+            | Error::Format { .. }
             | Error::ParseOffsetStr { .. }
             | Error::ParseTimezoneName { .. } => StatusCode::InvalidArguments,
             Error::TimestampOverflow { .. } => StatusCode::Internal,
@@ -93,6 +102,7 @@ impl ErrorExt for Error {
     fn location_opt(&self) -> Option<common_error::snafu::Location> {
         match self {
             Error::ParseTimestamp { location, .. }
+            | Error::Format { location, .. }
             | Error::TimestampOverflow { location, .. }
             | Error::ArithmeticOverflow { location, .. } => Some(*location),
             Error::ParseDateStr { .. }
