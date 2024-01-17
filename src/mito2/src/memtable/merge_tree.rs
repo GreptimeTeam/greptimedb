@@ -36,8 +36,25 @@ use crate::memtable::{
 };
 
 /// Config for the merge tree memtable.
-#[derive(Debug, Default, Clone)]
-pub struct MergeTreeConfig {}
+#[derive(Debug, Clone)]
+pub struct MergeTreeConfig {
+    /// Enable dictionary.
+    enable_dict: bool,
+    /// Number of keys in a dictionary.
+    dict_key_num: usize,
+    /// Max number of dictionaries.
+    max_dict_num: usize,
+}
+
+impl Default for MergeTreeConfig {
+    fn default() -> Self {
+        Self {
+            enable_dict: true,
+            dict_key_num: 50_000,
+            max_dict_num: 16,
+        }
+    }
+}
 
 /// Memtable based on a merge tree.
 pub struct MergeTreeMemtable {
@@ -54,11 +71,11 @@ impl MergeTreeMemtable {
         id: MemtableId,
         metadata: RegionMetadataRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
-        _config: &MergeTreeConfig,
+        config: &MergeTreeConfig,
     ) -> Self {
         Self {
             id,
-            tree: Arc::new(MergeTree::new(metadata)),
+            tree: Arc::new(MergeTree::new(metadata, config)),
             alloc_tracker: AllocTracker::new(write_buffer_manager),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),

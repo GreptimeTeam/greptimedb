@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use api::v1::OpType;
 use bytes::Bytes;
+use common_telemetry::warn;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
 use datatypes::scalars::ScalarVectorBuilder;
@@ -31,6 +32,7 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
+use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::KeyValues;
 use crate::row_converter::{McmpRowCodec, RowCodec};
 
@@ -48,7 +50,7 @@ pub(crate) struct MutablePart {
     /// Next id of the dictionary.
     next_dict_id: DictIdType,
     /// Number of keys in a dictionary.
-    dict_size: KeyIdType,
+    dict_key_num: KeyIdType,
     /// Maximum number of dictionaries in the part.
     max_dict_num: usize,
     metrics: Metrics,
@@ -56,18 +58,27 @@ pub(crate) struct MutablePart {
 
 impl MutablePart {
     /// Creates a new mutable part.
-    pub(crate) fn new(dict_size: usize, max_dict_num: usize) -> MutablePart {
-        let dict_size = dict_size.try_into().unwrap_or(KeyIdType::MAX);
+    pub(crate) fn new(config: &MergeTreeConfig) -> MutablePart {
+        let dict_key_num = config
+            .enable_dict
+            .then(|| {
+                config
+                    .dict_key_num
+                    .try_into()
+                    .inspect_err(|_| warn!("Sanitize dict key num to {}", KeyIdType::MAX))
+                    .unwrap_or(KeyIdType::MAX)
+            })
+            .unwrap_or(0);
 
         MutablePart {
-            active_dict: KeyDict::new(0, dict_size),
+            active_dict: KeyDict::new(0, dict_key_num),
             immutable_dicts: Vec::new(),
             interned_blocks: HashMap::new(),
             plain_block: None,
             // 0 is allocated by the first active dict.
             next_dict_id: 1,
-            dict_size,
-            max_dict_num,
+            dict_key_num,
+            max_dict_num: config.max_dict_num,
             metrics: Metrics::default(),
         }
     }
@@ -120,7 +131,7 @@ impl MutablePart {
 
     /// Returns true if the dictionary is enabled.
     fn is_dictionary_enabled(&self) -> bool {
-        self.dict_size == 0
+        self.dict_key_num == 0
     }
 
     /// Writes to the intern block and falls back to the plain block if it can't intern the key.
@@ -206,7 +217,7 @@ impl MutablePart {
         let dict_id = self.next_dict_id;
         self.next_dict_id = self.next_dict_id.checked_add(1)?;
 
-        Some(KeyDict::new(dict_id, self.dict_size))
+        Some(KeyDict::new(dict_id, self.dict_key_num))
     }
 }
 
@@ -247,7 +258,7 @@ struct KeyDict {
     /// Interned keys.
     keys: Vec<Bytes>,
     /// Capacity of the dictionary.
-    dict_size: KeyIdType,
+    dict_key_num: KeyIdType,
 }
 
 impl KeyDict {
@@ -257,7 +268,7 @@ impl KeyDict {
             id,
             dict: BTreeMap::new(),
             keys: Vec::new(),
-            dict_size: capacity,
+            dict_key_num: capacity,
         }
     }
 
@@ -268,7 +279,7 @@ impl KeyDict {
 
     /// Returns true if the dictionary is full.
     fn is_full(&self) -> bool {
-        self.keys.len() > usize::from(self.dict_size)
+        self.keys.len() > usize::from(self.dict_key_num)
     }
 
     /// Adds the key into the dictionary and returns the

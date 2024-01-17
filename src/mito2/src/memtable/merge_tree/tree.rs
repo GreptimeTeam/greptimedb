@@ -14,25 +14,32 @@
 
 //! Implementation of the memtable merge tree.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
+use crate::memtable::merge_tree::mutable::MutablePart;
+use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::KeyValues;
 
 /// The merge tree.
 pub(crate) struct MergeTree {
     /// Metadata of the region.
     pub(crate) metadata: RegionMetadataRef,
+    /// Mutable part of the tree.
+    mutable: RwLock<MutablePart>,
 }
 
 pub(crate) type MergeTreeRef = Arc<MergeTree>;
 
 impl MergeTree {
     /// Creates a new merge tree.
-    pub(crate) fn new(metadata: RegionMetadataRef) -> MergeTree {
-        MergeTree { metadata }
+    pub(crate) fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> MergeTree {
+        MergeTree {
+            metadata,
+            mutable: RwLock::new(MutablePart::new(&config)),
+        }
     }
 
     /// Write key-values into the tree.
