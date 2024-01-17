@@ -62,7 +62,7 @@ impl RegionUsage {
 /// - Only the region worker thread this region belongs to can modify the metadata.
 /// - Multiple reader threads are allowed to read a specific `version` of a region.
 #[derive(Debug)]
-pub struct MitoRegion {
+pub(crate) struct MitoRegion {
     /// Id of this region.
     ///
     /// Accessing region id from the version control is inconvenient so
