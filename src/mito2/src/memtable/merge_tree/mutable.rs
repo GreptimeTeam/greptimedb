@@ -145,7 +145,7 @@ impl MutablePart {
     ) {
         assert!(!metadata.primary_key.is_empty());
 
-        let Some((dict_id, key_id)) = self.maybe_intern(metadata, primary_key, metrics) else {
+        let Some((dict_id, key_id)) = self.maybe_intern(primary_key, metrics) else {
             // Unable to intern the key, write to the plain block.
             return self.write_plain(metadata, key_value, Some(primary_key));
         };
@@ -153,9 +153,8 @@ impl MutablePart {
         let block = self
             .interned_blocks
             .entry(dict_id)
-            .or_insert_with(|| InternedBlock::new(dict_id, metadata, INITIAL_BUILDER_CAPACITY));
-        block.key.push(Some(key_id));
-        block.value.push(key_value);
+            .or_insert_with(|| InternedBlock::new(metadata, INITIAL_BUILDER_CAPACITY));
+        block.insert_by_id(key_id, key_value);
     }
 
     /// Writes the `key_value` and the `primary_key` to the plain block.
@@ -180,7 +179,6 @@ impl MutablePart {
     /// Tries to intern the primary key, returns the id of the dictionary and the key.
     fn maybe_intern(
         &mut self,
-        metadata: &RegionMetadataRef,
         primary_key: &mut Vec<u8>,
         metrics: &mut WriteMetrics,
     ) -> Option<(DictIdType, KeyIdType)> {
@@ -301,8 +299,6 @@ impl KeyDict {
 
 /// A block that keys are interned in the [KeyDict].
 struct InternedBlock {
-    /// Id of the dictionary.
-    id: DictIdType,
     /// Ids of keys.
     key: UInt16VectorBuilder,
     /// Values of rows.
@@ -311,17 +307,11 @@ struct InternedBlock {
 
 impl InternedBlock {
     /// Returns a new block.
-    fn new(id: DictIdType, metadata: &RegionMetadataRef, capacity: usize) -> InternedBlock {
+    fn new(metadata: &RegionMetadataRef, capacity: usize) -> InternedBlock {
         InternedBlock {
-            id,
             key: UInt16VectorBuilder::with_capacity(capacity),
             value: ValueBuilder::new(metadata, capacity),
         }
-    }
-
-    /// Inserts the row without primary key.
-    fn insert_no_key(&mut self, key_value: &KeyValue) {
-        self.value.push(key_value);
     }
 
     /// Inserts the row by id.

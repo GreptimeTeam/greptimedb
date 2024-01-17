@@ -29,6 +29,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::merge_tree::mutable::WriteMetrics;
 use crate::memtable::merge_tree::tree::{MergeTree, MergeTreeRef};
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
@@ -65,24 +66,6 @@ pub struct MergeTreeMemtable {
     min_timestamp: AtomicI64,
 }
 
-impl MergeTreeMemtable {
-    /// Returns a new memtable.
-    pub fn new(
-        id: MemtableId,
-        metadata: RegionMetadataRef,
-        write_buffer_manager: Option<WriteBufferManagerRef>,
-        config: &MergeTreeConfig,
-    ) -> Self {
-        Self {
-            id,
-            tree: Arc::new(MergeTree::new(metadata, config)),
-            alloc_tracker: AllocTracker::new(write_buffer_manager),
-            max_timestamp: AtomicI64::new(i64::MIN),
-            min_timestamp: AtomicI64::new(i64::MAX),
-        }
-    }
-}
-
 impl fmt::Debug for MergeTreeMemtable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MergeTreeMemtable")
@@ -96,10 +79,15 @@ impl Memtable for MergeTreeMemtable {
         todo!()
     }
 
-    fn write(&self, _kvs: &KeyValues) -> Result<()> {
+    fn write(&self, kvs: &KeyValues) -> Result<()> {
         // TODO(yingwen): Validate schema while inserting rows.
 
-        todo!()
+        let mut metrics = WriteMetrics::default();
+        let res = self.tree.write(kvs, &mut metrics);
+
+        self.update_stats(&metrics);
+
+        res
     }
 
     fn iter(
@@ -143,6 +131,70 @@ impl Memtable for MergeTreeMemtable {
         MemtableStats {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
+        }
+    }
+}
+
+impl MergeTreeMemtable {
+    /// Returns a new memtable.
+    pub fn new(
+        id: MemtableId,
+        metadata: RegionMetadataRef,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        config: &MergeTreeConfig,
+    ) -> Self {
+        Self {
+            id,
+            tree: Arc::new(MergeTree::new(metadata, config)),
+            alloc_tracker: AllocTracker::new(write_buffer_manager),
+            max_timestamp: AtomicI64::new(i64::MIN),
+            min_timestamp: AtomicI64::new(i64::MAX),
+        }
+    }
+
+    /// Updates stats of the memtable.
+    fn update_stats(&self, metrics: &WriteMetrics) {
+        self.alloc_tracker
+            .on_allocation(metrics.key_bytes + metrics.value_bytes);
+
+        loop {
+            let current_min = self.min_timestamp.load(Ordering::Relaxed);
+            if metrics.min_ts >= current_min {
+                break;
+            }
+
+            let Err(updated) = self.min_timestamp.compare_exchange(
+                current_min,
+                metrics.min_ts,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) else {
+                break;
+            };
+
+            if updated == metrics.min_ts {
+                break;
+            }
+        }
+
+        loop {
+            let current_max = self.max_timestamp.load(Ordering::Relaxed);
+            if metrics.max_ts <= current_max {
+                break;
+            }
+
+            let Err(updated) = self.max_timestamp.compare_exchange(
+                current_max,
+                metrics.max_ts,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) else {
+                break;
+            };
+
+            if updated == metrics.max_ts {
+                break;
+            }
         }
     }
 }
