@@ -18,9 +18,7 @@ use std::cmp;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_config::utils::{get_cpus, get_sys_total_memory};
 use common_telemetry::warn;
-use lazy_static::lazy_static;
 use object_store::util::join_dir;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, NoneAsEmptyString};
@@ -34,12 +32,6 @@ const DEFAULT_MAX_BG_JOB: usize = 4;
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
 /// Default channel size for parallel scan task.
 const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
-
-lazy_static! {
-    /// Number of cpu cores.
-    pub static ref CPU_CORES: usize = get_cpus();
-
-}
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -107,46 +99,35 @@ pub struct MitoConfig {
 
 impl Default for MitoConfig {
     fn default() -> Self {
-        // Use 1/2 of cpu cores' number as workers' number.
-        let num_workers = divide_num_cpus(2);
-        // OS total memory size.
-        let sys_memory = get_sys_total_memory().unwrap_or(ReadableSize::gb(16));
-        // Use 1/64 of OS memory as global write buffer size, it shouldn't be greater than 1G in default mode.
-        // For example, if the OS memory size is 16GB, the global write buffer size is 256MB.
-        let global_write_buffer_size = cmp::min(sys_memory / 64, ReadableSize::gb(1));
-        // Use 2x of global write buffer size as global write buffer reject size.
-        let global_write_buffer_reject_size = global_write_buffer_size * 2;
-        // Use 1/256 of OS memory size as SST meta cache size, it shouldn't be greater than 128MB in default mode.
-        let sst_meta_cache_size = cmp::min(sys_memory / 256, ReadableSize::mb(128));
-        // Use 1/128 of OS memory size as mem cache size, it shouldn't be greater than 512MB in default mode.
-        let mem_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
-        // Use 1/128 of OS memory size as disk cache size, it shouldn't be greater than 512MB in default mode.
-        let disk_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
-        // Use 1/4 of cpu cores' number as parallel number.
-        let scan_parallelism = divide_num_cpus(4);
-
-        MitoConfig {
-            num_workers,
+        let mut mito_config = MitoConfig {
+            num_workers: divide_num_cpus(2),
             worker_channel_size: 128,
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
             compress_manifest: false,
             max_background_jobs: DEFAULT_MAX_BG_JOB,
             auto_flush_interval: Duration::from_secs(30 * 60),
-            global_write_buffer_size,
-            global_write_buffer_reject_size,
-            sst_meta_cache_size,
-            vector_cache_size: mem_cache_size,
-            page_cache_size: mem_cache_size,
+            global_write_buffer_size: ReadableSize::gb(1),
+            global_write_buffer_reject_size: ReadableSize::gb(2),
+            sst_meta_cache_size: ReadableSize::mb(128),
+            vector_cache_size: ReadableSize::mb(512),
+            page_cache_size: ReadableSize::mb(512),
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
-            experimental_write_cache_size: disk_cache_size,
+            experimental_write_cache_size: ReadableSize::mb(512),
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-            scan_parallelism,
+            scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
             inverted_index: InvertedIndexConfig::default(),
+        };
+
+        // Adjust buffer and cache size according to system memory if we can.
+        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+            mito_config.adjust_buffer_and_cache_size(sys_memory);
         }
+
+        mito_config
     }
 }
 
@@ -208,6 +189,26 @@ impl MitoConfig {
         self.inverted_index.sanitize(data_home)?;
 
         Ok(())
+    }
+
+    fn adjust_buffer_and_cache_size(&mut self, sys_memory: ReadableSize) {
+        // Use 1/64 of OS memory as global write buffer size, it shouldn't be greater than 1G in default mode.
+        let global_write_buffer_size = cmp::min(sys_memory / 64, ReadableSize::gb(1));
+        // Use 2x of global write buffer size as global write buffer reject size.
+        let global_write_buffer_reject_size = global_write_buffer_size * 2;
+        // Use 1/256 of OS memory size as SST meta cache size, it shouldn't be greater than 128MB in default mode.
+        let sst_meta_cache_size = cmp::min(sys_memory / 256, ReadableSize::mb(128));
+        // Use 1/128 of OS memory size as mem cache size, it shouldn't be greater than 512MB in default mode.
+        let mem_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
+        // Use 1/128 of OS memory size as disk cache size, it shouldn't be greater than 512MB in default mode.
+        let disk_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
+
+        self.global_write_buffer_size = global_write_buffer_size;
+        self.global_write_buffer_reject_size = global_write_buffer_reject_size;
+        self.sst_meta_cache_size = sst_meta_cache_size;
+        self.vector_cache_size = mem_cache_size;
+        self.page_cache_size = mem_cache_size;
+        self.experimental_write_cache_size = disk_cache_size;
     }
 
     /// Enable experimental write cache.
@@ -287,7 +288,7 @@ impl InvertedIndexConfig {
 /// Divide cpu num by a non-zero `divisor` and returns at least 1.
 fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(divisor > 0);
-    let cores = *CPU_CORES;
+    let cores = common_config::utils::get_cpus();
     debug_assert!(cores > 0);
 
     (cores + divisor - 1) / divisor

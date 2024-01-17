@@ -15,11 +15,6 @@
 use common_base::readable_size::ReadableSize;
 use sysinfo::System;
 
-pub struct SystemInfo {
-    pub cpu_cores: usize,
-    pub total_memory: ReadableSize,
-}
-
 /// Get the cpu cores number of system.
 pub fn get_cpus() -> usize {
     // This function will check cgroups
@@ -27,18 +22,21 @@ pub fn get_cpus() -> usize {
 }
 
 /// Get the total memory of the system.
+/// If `cgroup_limits` is enabled, it will also check it.
 pub fn get_sys_total_memory() -> Option<ReadableSize> {
     if sysinfo::IS_SUPPORTED_SYSTEM {
         let mut sys_info = System::new();
         sys_info.refresh_memory();
         let mut total_memory = sys_info.total_memory();
-        // Compare with cgrous memory limit, use smaller values
-        if let Some(cgrous_limits) = sys_info.cgroup_limits() {
-            total_memory = total_memory.min(cgrous_limits.total_memory)
+        // Compare with cgroups memory limit, use smaller values
+        // This method is only implemented for Linux. It always returns None for all other systems.
+        if let Some(cgroup_limits) = sys_info.cgroup_limits() {
+            total_memory = total_memory.min(cgroup_limits.total_memory)
         }
-        return Some(ReadableSize(total_memory));
+        Some(ReadableSize(total_memory))
+    } else {
+        None
     }
-    None
 }
 
 #[cfg(test)]
