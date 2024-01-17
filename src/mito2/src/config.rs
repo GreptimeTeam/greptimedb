@@ -61,17 +61,17 @@ pub struct MitoConfig {
     /// Interval to auto flush a region if it has not flushed yet (default 30 min).
     #[serde(with = "humantime_serde")]
     pub auto_flush_interval: Duration,
-    /// Global write buffer size threshold to trigger flush (default 1G).
+    /// Global write buffer size threshold to trigger flush.
     pub global_write_buffer_size: ReadableSize,
-    /// Global write buffer size threshold to reject write requests (default 2G).
+    /// Global write buffer size threshold to reject write requests.
     pub global_write_buffer_reject_size: ReadableSize,
 
     // Cache configs:
-    /// Cache size for SST metadata (default 128MB). Setting it to 0 to disable the cache.
+    /// Cache size for SST metadata. Setting it to 0 to disable the cache.
     pub sst_meta_cache_size: ReadableSize,
-    /// Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
+    /// Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
     pub vector_cache_size: ReadableSize,
-    /// Cache size for pages of SST row groups (default 512MB). Setting it to 0 to disable the cache.
+    /// Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
     pub page_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
