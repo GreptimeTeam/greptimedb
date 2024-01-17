@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp;
 use std::collections::BTreeMap;
 
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, StatusCode};
 use axum_test_helper::TestClient;
+use common_base::readable_size::ReadableSize;
 use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
 use servers::http::error_result::ErrorResponse;
@@ -647,6 +649,15 @@ pub async fn test_config_api(store_type: StorageType) {
 
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
+
+    // Get system memory size
+    let sys_memory = common_config::utils::get_sys_total_memory().unwrap();
+    let global_write_buffer_size = cmp::min(sys_memory / 64, ReadableSize::gb(1));
+    let global_write_buffer_reject_size = global_write_buffer_size * 2;
+    let sst_meta_cache_size = cmp::min(sys_memory / 256, ReadableSize::mb(128));
+    let mem_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
+    let disk_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
+
     let expected_toml_str = format!(
         r#"
 [procedure]
@@ -765,14 +776,14 @@ manifest_checkpoint_distance = 10
 compress_manifest = false
 max_background_jobs = 4
 auto_flush_interval = "30m"
-global_write_buffer_size = "1GiB"
-global_write_buffer_reject_size = "2GiB"
-sst_meta_cache_size = "128MiB"
-vector_cache_size = "512MiB"
-page_cache_size = "512MiB"
+global_write_buffer_size = "{global_write_buffer_size}"
+global_write_buffer_reject_size = "{global_write_buffer_reject_size}"
+sst_meta_cache_size = "{sst_meta_cache_size}"
+vector_cache_size = "{mem_cache_size}"
+page_cache_size = "{mem_cache_size}"
 enable_experimental_write_cache = false
 experimental_write_cache_path = ""
-experimental_write_cache_size = "512MiB"
+experimental_write_cache_size = "{disk_cache_size}"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 allow_stale_entries = false
