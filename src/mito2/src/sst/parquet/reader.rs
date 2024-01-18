@@ -596,13 +596,12 @@ impl ParquetReader {
         // TODO(ruihang): run primary key filter first. It may short circuit other filters
         for filter in &self.predicate {
             let column_name = filter.column_name();
-            let column_metadata = self
-                .read_format
-                .metadata()
-                .column_by_name(column_name)
-                .with_context(|| ColumnNotFoundSnafu {
-                    column: column_name,
-                })?;
+            let Some(column_metadata) = self.read_format.metadata().column_by_name(column_name)
+            else {
+                // column not found, skip
+                // in situation like an column is added later
+                continue;
+            };
             let result = match column_metadata.semantic_type {
                 SemanticType::Tag => {
                     let pk_values = self.codec.decode(input.primary_key())?;

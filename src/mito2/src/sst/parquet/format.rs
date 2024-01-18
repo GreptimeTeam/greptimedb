@@ -205,7 +205,7 @@ impl ReadFormat {
         );
 
         if self.field_id_to_projected_index.is_none() {
-            self.init_id_to_projected_index(record_batch)?;
+            self.init_id_to_projected_index(record_batch);
         }
 
         let mut fixed_pos_columns = record_batch
@@ -270,7 +270,7 @@ impl ReadFormat {
         Ok(())
     }
 
-    fn init_id_to_projected_index(&mut self, record_batch: &RecordBatch) -> Result<()> {
+    fn init_id_to_projected_index(&mut self, record_batch: &RecordBatch) {
         let mut name_to_projected_index = HashMap::new();
         for (index, field) in record_batch.schema().fields().iter().enumerate() {
             let Some(column) = self.metadata.column_by_name(field.name()) else {
@@ -281,7 +281,6 @@ impl ReadFormat {
             }
         }
         self.field_id_to_projected_index = Some(name_to_projected_index);
-        Ok(())
     }
 
     /// Returns min values of specific column in row groups.
