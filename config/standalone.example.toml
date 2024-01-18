@@ -88,7 +88,25 @@ enable = true
 # - "kafka"
 provider = "raft_engine"
 
-# There're none raft-engine wal config since meta srv only involves in remote wal currently.
+# Raft-engine wal options.
+# WAL data directory
+# dir = "/tmp/greptimedb/wal"
+# WAL file size in bytes.
+file_size = "256MB"
+# WAL purge threshold.
+purge_threshold = "4GB"
+# WAL purge interval in seconds.
+purge_interval = "10m"
+# WAL read batch size.
+read_batch_size = 128
+# Whether to sync log file after every write.
+sync_write = false
+# Whether to reuse logically truncated log files.
+enable_log_recycle = true
+# Whether to pre-create log files on start up
+prefill_log_files = false
+# Duration for fsyncing log files.
+sync_period = "1000ms"
 
 # Kafka wal options.
 # The broker endpoints of the Kafka cluster. ["127.0.0.1:9092"] by default.
@@ -124,25 +142,6 @@ provider = "raft_engine"
 # backoff_base = 2
 # The deadline of retries.
 # backoff_deadline = "5mins"
-
-# WAL data directory
-# dir = "/tmp/greptimedb/wal"
-# WAL file size in bytes.
-file_size = "256MB"
-# WAL purge threshold.
-purge_threshold = "4GB"
-# WAL purge interval in seconds.
-purge_interval = "10m"
-# WAL read batch size.
-read_batch_size = 128
-# Whether to sync log file after every write.
-sync_write = false
-# Whether to reuse logically truncated log files.
-enable_log_recycle = true
-# Whether to pre-create log files on start up
-prefill_log_files = false
-# Duration for fsyncing log files.
-sync_period = "1000ms"
 
 # Metadata storage options.
 [metadata_store]

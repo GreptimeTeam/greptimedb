@@ -14,8 +14,8 @@
 
 use clap::ArgMatches;
 use common_config::KvBackendConfig;
-use common_meta::wal::WalConfig as MetaSrvWalConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
+use common_wal::config::MetaSrvWalConfig;
 use config::{Config, Environment, File, FileFormat};
 use datanode::config::{DatanodeOptions, ProcedureConfig};
 use frontend::error::{Result as FeResult, TomlFormatSnafu};
@@ -173,8 +173,8 @@ impl Options {
 mod tests {
     use std::io::Write;
 
-    use common_config::WalConfig;
     use common_test_util::temp_dir::create_named_temp_file;
+    use common_wal::config::DatanodeWalConfig;
     use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 
     use super::*;
@@ -281,7 +281,7 @@ mod tests {
                 );
 
                 // Should be the values from config file, not environment variables.
-                let WalConfig::RaftEngine(raft_engine_config) = opts.wal else {
+                let DatanodeWalConfig::RaftEngine(raft_engine_config) = opts.wal else {
                     unreachable!()
                 };
                 assert_eq!(raft_engine_config.dir.unwrap(), "/tmp/greptimedb/wal");

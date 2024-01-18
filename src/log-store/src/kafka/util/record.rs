@@ -295,12 +295,12 @@ mod tests {
     use std::sync::Arc;
 
     use common_base::readable_size::ReadableSize;
-    use common_config::wal::KafkaConfig;
+    use common_wal::config::kafka::DatanodeKafkaConfig;
+    use common_wal::test_util::run_test_with_kafka_wal;
     use uuid::Uuid;
 
     use super::*;
     use crate::kafka::client_manager::ClientManager;
-    use crate::kafka::util::test_util::run_test_with_kafka_wal;
 
     // Implements some utility methods for testing.
     impl Default for Record {
@@ -555,7 +555,7 @@ mod tests {
                 };
                 let entry = new_test_entry([b'1'; 2000000], 0, ns.clone());
                 let producer = RecordProducer::new(ns.clone()).with_entries(vec![entry]);
-                let config = KafkaConfig {
+                let config = DatanodeKafkaConfig {
                     broker_endpoints,
                     max_batch_size: ReadableSize::mb(1),
                     ..Default::default()

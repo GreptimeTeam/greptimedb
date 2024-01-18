@@ -37,7 +37,7 @@ pub mod sequence;
 pub mod state_store;
 pub mod table_name;
 pub mod util;
-pub mod wal;
+pub mod wal_options_allocator;
 
 pub type ClusterId = u64;
 pub type DatanodeId = u64;

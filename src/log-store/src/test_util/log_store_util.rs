@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use common_base::readable_size::ReadableSize;
-use common_config::wal::RaftEngineConfig;
+use common_wal::config::raft_engine::RaftEngineConfig;
 
 use crate::raft_engine::log_store::RaftEngineLogStore;
 

@@ -21,13 +21,13 @@ use std::time::Duration;
 use auth::UserProviderRef;
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
-use common_config::WalConfig;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::warn;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_wal::config::DatanodeWalConfig;
 use datanode::config::{
     AzblobConfig, DatanodeOptions, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
     StorageConfig,
@@ -302,7 +302,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     default_store_type: StorageType,
     store_provider_types: Vec<StorageType>,
     name: &str,
-    wal_config: WalConfig,
+    wal_config: DatanodeWalConfig,
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
@@ -336,7 +336,7 @@ pub(crate) fn create_datanode_opts(
     default_store: ObjectStoreConfig,
     providers: Vec<ObjectStoreConfig>,
     home_dir: String,
-    wal_config: WalConfig,
+    wal_config: DatanodeWalConfig,
 ) -> DatanodeOptions {
     DatanodeOptions {
         node_id: Some(0),

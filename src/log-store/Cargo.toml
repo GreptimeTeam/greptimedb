@@ -23,6 +23,7 @@ common-meta.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+common-wal.workspace = true
 dashmap.workspace = true
 futures-util.workspace = true
 futures.workspace = true

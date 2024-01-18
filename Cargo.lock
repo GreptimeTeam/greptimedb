@@ -1539,6 +1539,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-version",
+ "common-wal",
  "config",
  "datanode",
  "datatypes",
@@ -1632,12 +1633,8 @@ dependencies = [
  "common-base",
  "humantime-serde",
  "num_cpus",
- "rskafka",
  "serde",
- "serde_json",
- "serde_with",
  "sysinfo",
- "toml 0.8.8",
 ]
 
 [[package]]
@@ -1825,7 +1822,6 @@ dependencies = [
  "bytes",
  "chrono",
  "common-catalog",
- "common-config",
  "common-error",
  "common-grpc-expr",
  "common-macro",
@@ -1834,6 +1830,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "common-wal",
  "datatypes",
  "derive_builder 0.12.0",
  "etcd-client",
@@ -1855,7 +1852,6 @@ dependencies = [
  "strum 0.25.0",
  "table",
  "tokio",
- "toml 0.8.8",
  "tonic 0.10.2",
  "uuid",
 ]
@@ -2012,6 +2008,21 @@ name = "common-version"
 version = "0.6.0"
 dependencies = [
  "build-data",
+]
+
+[[package]]
+name = "common-wal"
+version = "0.6.0"
+dependencies = [
+ "common-base",
+ "common-telemetry",
+ "futures-util",
+ "humantime-serde",
+ "rskafka",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "toml 0.8.8",
 ]
 
 [[package]]
@@ -2670,6 +2681,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-wal",
  "dashmap",
  "datafusion",
  "datafusion-common",
@@ -4519,6 +4531,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-wal",
  "dashmap",
  "futures",
  "futures-util",
@@ -4834,6 +4847,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "common-wal",
  "dashmap",
  "datatypes",
  "derive_builder 0.12.0",
@@ -4988,6 +5002,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-wal",
  "dashmap",
  "datafusion",
  "datafusion-common",
@@ -9106,12 +9121,12 @@ dependencies = [
  "async-trait",
  "bytes",
  "common-base",
- "common-config",
  "common-error",
  "common-macro",
  "common-query",
  "common-recordbatch",
  "common-time",
+ "common-wal",
  "datatypes",
  "derive_builder 0.12.0",
  "futures",
@@ -9544,6 +9559,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
+ "common-wal",
  "datafusion",
  "datafusion-expr",
  "datanode",

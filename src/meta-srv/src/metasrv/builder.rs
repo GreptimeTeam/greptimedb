@@ -30,7 +30,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal::WalOptionsAllocator;
+use common_meta::wal_options_allocator::WalOptionsAllocator;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;

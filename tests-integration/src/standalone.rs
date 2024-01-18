@@ -17,16 +17,17 @@ use std::sync::Arc;
 use cmd::options::MixOptions;
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_config::{KvBackendConfig, WalConfig};
+use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::{WalConfig as MetaWalConfig, WalOptionsAllocator};
+use common_meta::wal_options_allocator::WalOptionsAllocator;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
+use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
@@ -46,8 +47,8 @@ pub struct GreptimeDbStandalone {
 #[derive(Clone)]
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
-    wal_config: WalConfig,
-    meta_wal_config: MetaWalConfig,
+    wal_config: DatanodeWalConfig,
+    meta_wal_config: MetaSrvWalConfig,
     store_providers: Option<Vec<StorageType>>,
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
@@ -60,8 +61,8 @@ impl GreptimeDbStandaloneBuilder {
             store_providers: None,
             plugin: None,
             default_store: None,
-            wal_config: WalConfig::default(),
-            meta_wal_config: MetaWalConfig::default(),
+            wal_config: DatanodeWalConfig::default(),
+            meta_wal_config: MetaSrvWalConfig::default(),
         }
     }
 
@@ -92,13 +93,13 @@ impl GreptimeDbStandaloneBuilder {
     }
 
     #[must_use]
-    pub fn with_wal_config(mut self, wal_config: WalConfig) -> Self {
+    pub fn with_wal_config(mut self, wal_config: DatanodeWalConfig) -> Self {
         self.wal_config = wal_config;
         self
     }
 
     #[must_use]
-    pub fn with_meta_wal_config(mut self, wal_meta: MetaWalConfig) -> Self {
+    pub fn with_meta_wal_config(mut self, wal_meta: MetaSrvWalConfig) -> Self {
         self.meta_wal_config = wal_meta;
         self
     }

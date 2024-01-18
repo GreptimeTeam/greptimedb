@@ -16,7 +16,7 @@ use std::mem;
 use std::sync::Arc;
 
 use api::v1::{Mutation, OpType, Rows, WalEntry};
-use common_config::wal::WalOptions;
+use common_wal::options::WalOptions;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};

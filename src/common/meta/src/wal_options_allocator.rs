@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod kafka;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_config::{KafkaWalOptions, WalOptions};
+use common_wal::config::MetaSrvWalConfig;
+use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use snafu::ResultExt;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::{EncodeWalOptionsSnafu, Result};
 use crate::kv_backend::KvBackendRef;
-use crate::wal::kafka::TopicManager as KafkaTopicManager;
-use crate::wal::WalConfig;
+use crate::wal_options_allocator::kafka::topic_manager::TopicManager as KafkaTopicManager;
 
 /// Allocates wal options in region granularity.
 #[derive(Default)]
@@ -37,10 +39,10 @@ pub type WalOptionsAllocatorRef = Arc<WalOptionsAllocator>;
 
 impl WalOptionsAllocator {
     /// Creates a WalOptionsAllocator.
-    pub fn new(config: WalConfig, kv_backend: KvBackendRef) -> Self {
+    pub fn new(config: MetaSrvWalConfig, kv_backend: KvBackendRef) -> Self {
         match config {
-            WalConfig::RaftEngine => Self::RaftEngine,
-            WalConfig::Kafka(kafka_config) => {
+            MetaSrvWalConfig::RaftEngine => Self::RaftEngine,
+            MetaSrvWalConfig::Kafka(kafka_config) => {
                 Self::Kafka(KafkaTopicManager::new(kafka_config, kv_backend))
             }
         }
@@ -103,19 +105,31 @@ pub fn allocate_region_wal_options(
     Ok(regions.into_iter().zip(wal_options).collect())
 }
 
+/// Inserts wal options into options.
+pub fn prepare_wal_options(
+    options: &mut HashMap<String, String>,
+    region_id: RegionId,
+    region_wal_options: &HashMap<RegionNumber, String>,
+) {
+    if let Some(wal_options) = region_wal_options.get(&region_id.region_number()) {
+        options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use common_wal::config::kafka::MetaSrvKafkaConfig;
+    use common_wal::test_util::run_test_with_kafka_wal;
+
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::wal::kafka::test_util::run_test_with_kafka_wal;
-    use crate::wal::kafka::topic_selector::RoundRobinTopicSelector;
-    use crate::wal::kafka::KafkaConfig;
+    use crate::wal_options_allocator::kafka::topic_selector::RoundRobinTopicSelector;
 
-    // Tests the wal options allocator could successfully allocate raft-engine wal options.
+    // Tests that the wal options allocator could successfully allocate raft-engine wal options.
     #[tokio::test]
     async fn test_allocator_with_raft_engine() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-        let wal_config = WalConfig::RaftEngine;
+        let wal_config = MetaSrvWalConfig::RaftEngine;
         let allocator = WalOptionsAllocator::new(wal_config, kv_backend);
         allocator.start().await.unwrap();
 
@@ -141,7 +155,7 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 // Creates a topic manager.
-                let config = KafkaConfig {
+                let config = MetaSrvKafkaConfig {
                     replication_factor: broker_endpoints.len() as i16,
                     broker_endpoints,
                     ..Default::default()

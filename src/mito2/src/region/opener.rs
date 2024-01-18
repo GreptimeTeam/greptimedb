@@ -18,9 +18,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
-use common_config::wal::WalOptions;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
+use common_wal::options::WalOptions;
 use futures::StreamExt;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};

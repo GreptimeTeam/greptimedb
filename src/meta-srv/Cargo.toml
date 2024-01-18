@@ -26,6 +26,7 @@ common-procedure.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+common-wal.workspace = true
 dashmap.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
