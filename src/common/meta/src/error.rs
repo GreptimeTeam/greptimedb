@@ -112,14 +112,14 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to get procedure output"))]
+    ProcedureOutput { location: Location },
+
     #[snafu(display("Failed to convert RawTableInfo into TableInfo"))]
     ConvertRawTableInfo {
         location: Location,
         source: datatypes::Error,
     },
-
-    #[snafu(display("Failed to get procedure output"))]
-    ProcedureOutput { location: Location },
 
     #[snafu(display("Primary key '{key}' not found when creating region request"))]
     PrimaryKeyNotFound { key: String, location: Location },
@@ -357,6 +357,9 @@ pub enum Error {
 
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable { location: Location, err_msg: String },
+
+    #[snafu(display("The tasks of create tables cannot be empty"))]
+    EmptyCreateTableTasks { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -426,7 +429,7 @@ impl ErrorExt for Error {
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
 
-            InvalidNumTopics { .. } => StatusCode::InvalidArguments,
+            InvalidNumTopics { .. } | EmptyCreateTableTasks { .. } => StatusCode::InvalidArguments,
         }
     }
 

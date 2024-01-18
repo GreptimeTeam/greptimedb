@@ -197,6 +197,15 @@ impl TableMetadataAllocator {
             region_wal_options,
         })
     }
+
+    /// Sets table ids with all tasks and return the physical table info.
+    pub async fn set_table_ids_on_logic_create(&self, tasks: &mut [CreateTableTask]) -> Result<()> {
+        for task in tasks {
+            let table_id = self.allocate_table_id(task).await?;
+            task.table_info.ident.table_id = table_id;
+        }
+        Ok(())
+    }
 }
 
 pub type PeerAllocatorRef = Arc<dyn PeerAllocator>;

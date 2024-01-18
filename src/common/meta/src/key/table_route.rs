@@ -64,6 +64,10 @@ impl TableRouteValue {
         Self::Physical(PhysicalTableRouteValue::new(region_routes))
     }
 
+    pub fn logical(physical_table_id: TableId, region_ids: Vec<RegionId>) -> Self {
+        Self::Logical(LogicalTableRouteValue::new(physical_table_id, region_ids))
+    }
+
     /// Returns a new version [TableRouteValue] with `region_routes`.
     pub fn update(&self, region_routes: Vec<RegionRoute>) -> Result<Self> {
         ensure!(
@@ -231,7 +235,7 @@ impl TableRouteManager {
     }
 
     /// Builds a create table route transaction. it expected the `__table_route/{table_id}` wasn't occupied.
-    pub(crate) fn build_create_txn(
+    pub fn build_create_txn(
         &self,
         table_id: TableId,
         table_route_value: &TableRouteValue,

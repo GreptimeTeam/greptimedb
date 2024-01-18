@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -50,8 +50,10 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, InvalidPartitionColumnsSnafu, InvalidTableNameSnafu, ParseSqlSnafu,
-    Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    CreateLogicalTablesSnafu, CreateTableInfoSnafu, CreateTableWithMultiCatalogsSnafu,
+    CreateTableWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyCreateTableExprSnafu,
+    InvalidPartitionColumnsSnafu, InvalidTableNameSnafu, ParseSqlSnafu, Result,
+    SchemaNotFoundSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
@@ -113,12 +115,12 @@ impl StatementExecutor {
                 &create_table.table_name,
             )
             .await
-            .context(error::CatalogSnafu)?
+            .context(CatalogSnafu)?
         {
             return if create_table.create_if_not_exists {
                 Ok(table)
             } else {
-                error::TableAlreadyExistsSnafu {
+                TableAlreadyExistsSnafu {
                     table: format_full_table_name(
                         &create_table.catalog_name,
                         &create_table.schema_name,
@@ -149,7 +151,7 @@ impl StatementExecutor {
         let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
 
         let resp = self
-            .create_table_procedure(create_table, partitions, table_info.clone())
+            .create_table_procedure(create_table.clone(), partitions, table_info.clone())
             .await?;
 
         let table_id = resp.table_id.context(error::UnexpectedSnafu {
@@ -165,6 +167,99 @@ impl StatementExecutor {
         let table = DistTable::table(table_info);
 
         Ok(table)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn create_logical_tables(
+        &self,
+        create_table_exprs: &[CreateTableExpr],
+    ) -> Result<Vec<TableRef>> {
+        let _timer = crate::metrics::DIST_CREATE_TABLES.start_timer();
+        ensure!(!create_table_exprs.is_empty(), EmptyCreateTableExprSnafu);
+        ensure!(
+            create_table_exprs
+                .windows(2)
+                .all(|expr| expr[0].catalog_name == expr[1].catalog_name),
+            CreateTableWithMultiCatalogsSnafu {
+                catalog_names: create_table_exprs
+                    .iter()
+                    .map(|x| x.catalog_name.as_str())
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    .to_string()
+            }
+        );
+        let catalog_name = create_table_exprs[0].catalog_name.to_string();
+
+        ensure!(
+            create_table_exprs
+                .windows(2)
+                .all(|expr| expr[0].schema_name == expr[1].schema_name),
+            CreateTableWithMultiSchemasSnafu {
+                schema_names: create_table_exprs
+                    .iter()
+                    .map(|x| x.schema_name.as_str())
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    .to_string()
+            }
+        );
+        let schema_name = create_table_exprs[0].schema_name.to_string();
+
+        // Check table names
+        for create_table in create_table_exprs {
+            ensure!(
+                NAME_PATTERN_REG.is_match(&create_table.table_name),
+                InvalidTableNameSnafu {
+                    table_name: create_table.table_name.clone(),
+                }
+            );
+        }
+
+        let schema = self
+            .table_metadata_manager
+            .schema_manager()
+            .get(SchemaNameKey::new(&catalog_name, &schema_name))
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .context(SchemaNotFoundSnafu {
+                schema_info: &schema_name,
+            })?;
+
+        let mut raw_tables_info = create_table_exprs
+            .iter()
+            .map(|create| create_table_info(create, vec![], schema.clone()))
+            .collect::<Result<Vec<_>>>()?;
+        let tables_data = create_table_exprs
+            .iter()
+            .cloned()
+            .zip(raw_tables_info.iter().cloned())
+            .collect::<Vec<_>>();
+
+        let resp = self.create_logical_tables_procedure(tables_data).await?;
+
+        let table_ids = resp.table_ids;
+        ensure!(table_ids.len() == raw_tables_info.len(), CreateLogicalTablesSnafu {
+            reason: format!("The number of tables is inconsistent with the expected number to be created, expected: {}, actual: {}", raw_tables_info.len(), table_ids.len())
+        });
+        info!("Successfully created logical tables: {:?}", table_ids);
+
+        for (i, table_info) in raw_tables_info.iter_mut().enumerate() {
+            table_info.ident.table_id = table_ids[i];
+        }
+        let tables_info = raw_tables_info
+            .into_iter()
+            .map(|x| x.try_into().context(CreateTableInfoSnafu))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(tables_info
+            .into_iter()
+            .map(|x| DistTable::table(Arc::new(x)))
+            .collect())
     }
 
     #[tracing::instrument(skip_all)]
@@ -331,14 +426,28 @@ impl StatementExecutor {
 
     async fn create_table_procedure(
         &self,
-        create_table: &CreateTableExpr,
+        create_table: CreateTableExpr,
         partitions: Vec<Partition>,
         table_info: RawTableInfo,
     ) -> Result<SubmitDdlTaskResponse> {
         let partitions = partitions.into_iter().map(Into::into).collect();
 
         let request = SubmitDdlTaskRequest {
-            task: DdlTask::new_create_table(create_table.clone(), partitions, table_info),
+            task: DdlTask::new_create_table(create_table, partitions, table_info),
+        };
+
+        self.ddl_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    async fn create_logical_tables_procedure(
+        &self,
+        tables_data: Vec<(CreateTableExpr, RawTableInfo)>,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_create_logical_tables(tables_data),
         };
 
         self.ddl_executor

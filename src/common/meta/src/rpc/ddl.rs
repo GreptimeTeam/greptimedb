@@ -17,7 +17,8 @@ use std::result;
 use api::v1::meta::submit_ddl_task_request::Task;
 use api::v1::meta::{
     AlterTableTask as PbAlterTableTask, CreateTableTask as PbCreateTableTask,
-    DropTableTask as PbDropTableTask, Partition, SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
+    CreateTableTasks as PbCreateTableTasks, DropTableTask as PbDropTableTask, Partition,
+    SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
     SubmitDdlTaskResponse as PbSubmitDdlTaskResponse, TruncateTableTask as PbTruncateTableTask,
 };
 use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr};
@@ -38,6 +39,7 @@ pub enum DdlTask {
     DropTable(DropTableTask),
     AlterTable(AlterTableTask),
     TruncateTable(TruncateTableTask),
+    CreateLogicalTables(Vec<CreateTableTask>),
 }
 
 impl DdlTask {
@@ -47,6 +49,15 @@ impl DdlTask {
         table_info: RawTableInfo,
     ) -> Self {
         DdlTask::CreateTable(CreateTableTask::new(expr, partitions, table_info))
+    }
+
+    pub fn new_create_logical_tables(table_data: Vec<(CreateTableExpr, RawTableInfo)>) -> Self {
+        DdlTask::CreateLogicalTables(
+            table_data
+                .into_iter()
+                .map(|(expr, table_info)| CreateTableTask::new(expr, Vec::new(), table_info))
+                .collect(),
+        )
     }
 
     pub fn new_drop_table(
@@ -96,6 +107,33 @@ impl TryFrom<Task> for DdlTask {
             Task::TruncateTableTask(truncate_table) => {
                 Ok(DdlTask::TruncateTable(truncate_table.try_into()?))
             }
+            Task::CreateTableTasks(create_tables) => {
+                let tasks = create_tables
+                    .tasks
+                    .into_iter()
+                    .map(|task| task.try_into())
+                    .collect::<Result<Vec<_>>>()?;
+
+                Ok(DdlTask::CreateLogicalTables(tasks))
+            }
+            Task::DropTableTasks(drop_tables) => {
+                let tasks = drop_tables
+                    .tasks
+                    .into_iter()
+                    .map(|task| task.try_into())
+                    .collect::<Result<Vec<_>>>()?;
+
+                Ok(DdlTask::DropTable(tasks.into_iter().next().unwrap()))
+            }
+            Task::AlterTableTasks(alter_tables) => {
+                let tasks = alter_tables
+                    .tasks
+                    .into_iter()
+                    .map(|task| task.try_into())
+                    .collect::<Result<Vec<_>>>()?;
+
+                Ok(DdlTask::AlterTable(tasks.into_iter().next().unwrap()))
+            }
         }
     }
 }
@@ -135,6 +173,21 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
                     table_id: Some(api::v1::TableId { id: task.table_id }),
                 }),
             }),
+            DdlTask::CreateLogicalTables(tasks) => {
+                let tasks = tasks
+                    .into_iter()
+                    .map(|task| {
+                        Ok(PbCreateTableTask {
+                            table_info: serde_json::to_vec(&task.table_info)
+                                .context(error::SerdeJsonSnafu)?,
+                            create_table: Some(task.create_table),
+                            partitions: task.partitions,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                Task::CreateTableTasks(PbCreateTableTasks { tasks })
+            }
         };
 
         Ok(Self {
@@ -147,7 +200,11 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
 #[derive(Debug, Default)]
 pub struct SubmitDdlTaskResponse {
     pub key: Vec<u8>,
+    // For create physical table
+    // TODO(jeremy): remove it?
     pub table_id: Option<TableId>,
+    // For create multi logical tables
+    pub table_ids: Vec<TableId>,
 }
 
 impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
@@ -155,9 +212,11 @@ impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
 
     fn try_from(resp: PbSubmitDdlTaskResponse) -> Result<Self> {
         let table_id = resp.table_id.map(|t| t.id);
+        let table_ids = resp.table_ids.iter().map(|t| t.id).collect();
         Ok(Self {
             key: resp.key,
             table_id,
+            table_ids,
         })
     }
 }
