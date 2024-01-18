@@ -26,7 +26,7 @@ pub trait ExtensionAnalyzerRule {
     fn analyze(
         &self,
         plan: LogicalPlan,
-        ctx: &mut QueryEngineContext,
+        ctx: &QueryEngineContext,
         config: &ConfigOptions,
     ) -> Result<LogicalPlan>;
 

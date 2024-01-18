@@ -39,7 +39,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
     fn analyze(
         &self,
         plan: LogicalPlan,
-        ctx: &mut QueryEngineContext,
+        ctx: &QueryEngineContext,
         _config: &ConfigOptions,
     ) -> Result<LogicalPlan> {
         plan.transform(&|plan| match plan {
@@ -490,10 +490,10 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let mut context = QueryEngineContext::mock();
+        let context = QueryEngineContext::mock();
 
         let transformed_plan = TypeConversionRule
-            .analyze(plan, &mut context, &ConfigOptions::default())
+            .analyze(plan, &context, &ConfigOptions::default())
             .unwrap();
         let expected = String::from(
             "Aggregate: groupBy=[[]], aggr=[[COUNT(column1)]]\
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_reverse_non_ts_type() {
-        let mut context = QueryEngineContext::mock();
+        let context = QueryEngineContext::mock();
 
         let plan =
             LogicalPlanBuilder::values(vec![vec![Expr::Literal(ScalarValue::Float64(Some(1.0)))]])
@@ -524,7 +524,7 @@ mod tests {
                 .build()
                 .unwrap();
         let transformed_plan = TypeConversionRule
-            .analyze(plan, &mut context, &ConfigOptions::default())
+            .analyze(plan, &context, &ConfigOptions::default())
             .unwrap();
         let expected = String::from(
             "Filter: Utf8(\"1.2345\") < column1\
