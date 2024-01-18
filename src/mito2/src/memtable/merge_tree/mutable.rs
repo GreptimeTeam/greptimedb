@@ -51,6 +51,8 @@ pub(crate) struct MutablePart {
     next_dict_id: DictIdType,
     /// Number of keys in a dictionary.
     dict_key_num: KeyIdType,
+    /// Maximum bytes of keys in a dictionary.
+    dict_key_bytes: usize,
     /// Maximum number of dictionaries in the part.
     max_dict_num: usize,
 }
@@ -70,13 +72,14 @@ impl MutablePart {
             .unwrap_or(0);
 
         MutablePart {
-            active_dict: KeyDict::new(0, dict_key_num),
+            active_dict: KeyDict::new(0),
             immutable_dicts: Vec::new(),
             interned_blocks: HashMap::new(),
             plain_block: None,
             // 0 is allocated by the first active dict.
             next_dict_id: 1,
             dict_key_num,
+            dict_key_bytes: config.dict_key_bytes.as_bytes() as usize,
             max_dict_num: config.max_dict_num,
         }
     }
@@ -194,7 +197,10 @@ impl MutablePart {
         }
 
         // A new key.
-        if self.active_dict.is_full() {
+        if self
+            .active_dict
+            .is_full(self.dict_key_num, self.dict_key_bytes)
+        {
             // Allocates a new dictionary.
             let key_dict = self.allocate_dict()?;
             let prev_dict = std::mem::replace(&mut self.active_dict, key_dict);
@@ -217,7 +223,7 @@ impl MutablePart {
         let dict_id = self.next_dict_id;
         self.next_dict_id = self.next_dict_id.checked_add(1)?;
 
-        Some(KeyDict::new(dict_id, self.dict_key_num))
+        Some(KeyDict::new(dict_id))
     }
 }
 
@@ -257,18 +263,18 @@ struct KeyDict {
     dict: BTreeMap<Bytes, KeyIdType>,
     /// Interned keys.
     keys: Vec<Bytes>,
-    /// Capacity of the dictionary.
-    dict_key_num: KeyIdType,
+    /// Total bytes of keys in the dict.
+    key_bytes: usize,
 }
 
 impl KeyDict {
     /// Creates a new dictionary.
-    fn new(id: DictIdType, capacity: KeyIdType) -> Self {
+    fn new(id: DictIdType) -> Self {
         Self {
             id,
             dict: BTreeMap::new(),
             keys: Vec::new(),
-            dict_key_num: capacity,
+            key_bytes: 0,
         }
     }
 
@@ -278,8 +284,8 @@ impl KeyDict {
     }
 
     /// Returns true if the dictionary is full.
-    fn is_full(&self) -> bool {
-        self.keys.len() > usize::from(self.dict_key_num)
+    fn is_full(&self, dict_key_num: KeyIdType, max_key_bytes: usize) -> bool {
+        self.keys.len() >= dict_key_num.into() || self.key_bytes >= max_key_bytes
     }
 
     /// Adds the key into the dictionary and returns the
@@ -292,6 +298,7 @@ impl KeyDict {
         let key_id = self.keys.len().try_into().unwrap();
         let old = self.dict.insert(key.clone(), key_id);
         debug_assert!(old.is_none());
+        self.key_bytes += key.len();
         self.keys.push(key);
 
         key_id

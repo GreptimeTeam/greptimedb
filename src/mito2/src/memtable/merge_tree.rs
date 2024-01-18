@@ -23,6 +23,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common_base::readable_size::ReadableSize;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
@@ -43,6 +44,8 @@ pub struct MergeTreeConfig {
     enable_dict: bool,
     /// Number of keys in a dictionary.
     dict_key_num: usize,
+    /// Maximum bytes of keys in a dictionary.
+    dict_key_bytes: ReadableSize,
     /// Max number of dictionaries.
     max_dict_num: usize,
 }
@@ -52,6 +55,7 @@ impl Default for MergeTreeConfig {
         Self {
             enable_dict: true,
             dict_key_num: 50_000,
+            dict_key_bytes: ReadableSize::kb(32),
             max_dict_num: 16,
         }
     }
