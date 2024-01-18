@@ -32,6 +32,7 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-test-util = { workspace = true, optional = true }
 common-time.workspace = true
+common-wal.workspace = true
 dashmap.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
@@ -44,7 +45,6 @@ lazy_static = "1.4"
 log-store = { workspace = true, optional = true }
 memcomparable = "0.2"
 moka = { workspace = true, features = ["sync", "future"] }
-num_cpus = "1.13"
 object-store.workspace = true
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
@@ -55,7 +55,7 @@ puffin.workspace = true
 regex = "1.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json.workspace = true
-serde_with = "3"
+serde_with.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
 store-api.workspace = true

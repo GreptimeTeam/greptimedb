@@ -14,5 +14,3 @@
 
 pub mod offset;
 pub mod record;
-#[cfg(test)]
-mod test_util;

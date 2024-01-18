@@ -46,7 +46,7 @@ impl Session {
             schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
             user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
             conn_info: ConnInfo::new(addr, channel),
-            timezone: ArcSwap::new(Arc::new(get_timezone(None))),
+            timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
         }
     }
 

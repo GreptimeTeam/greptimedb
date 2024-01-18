@@ -15,14 +15,12 @@
 use std::env;
 use std::sync::Arc;
 
-use common_config::wal::KafkaConfig;
-use common_config::WalConfig;
-use common_meta::wal::kafka::KafkaConfig as MetaKafkaConfig;
-use common_meta::wal::WalConfig as MetaWalConfig;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::warn;
 use common_test_util::find_workspace_path;
+use common_wal::config::kafka::{DatanodeKafkaConfig, MetaSrvKafkaConfig};
+use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
@@ -163,11 +161,11 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
         .collect::<Vec<_>>();
     let test_name = uuid::Uuid::new_v4().to_string();
     let builder = GreptimeDbStandaloneBuilder::new(&test_name)
-        .with_wal_config(WalConfig::Kafka(KafkaConfig {
+        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
+        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
             num_topics: 3,
@@ -193,11 +191,11 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
     let test_name = uuid::Uuid::new_v4().to_string();
     let builder = GreptimeDbClusterBuilder::new(&test_name)
         .await
-        .with_wal_config(WalConfig::Kafka(KafkaConfig {
+        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
+        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
             num_topics: 3,

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{PrimitiveVector, PrimitiveVectorBuilder};
 use crate::types::{IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType};
+use crate::vectors::{PrimitiveVector, PrimitiveVectorBuilder};
 
 pub type IntervalYearMonthVector = PrimitiveVector<IntervalYearMonthType>;
 pub type IntervalYearMonthVectorBuilder = PrimitiveVectorBuilder<IntervalYearMonthType>;

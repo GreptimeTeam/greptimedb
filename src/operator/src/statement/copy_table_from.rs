@@ -42,8 +42,8 @@ use object_store::{Entry, EntryMode, ObjectStore};
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use table::engine::TableReference;
 use table::requests::{CopyTableRequest, InsertRequest};
+use table::table_reference::TableReference;
 use tokio::io::BufReader;
 
 use crate::error::{self, IntoVectorsSnafu, Result};

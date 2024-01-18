@@ -31,7 +31,7 @@ use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{Region, RegionRoute};
 use crate::sequence::SequenceRef;
-use crate::wal::{allocate_region_wal_options, WalOptionsAllocatorRef};
+use crate::wal_options_allocator::{allocate_region_wal_options, WalOptionsAllocatorRef};
 
 #[derive(Clone)]
 pub struct TableMetadataAllocator {

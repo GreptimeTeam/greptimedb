@@ -14,7 +14,7 @@
 
 use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
-use common_meta::wal::prepare_wal_option;
+use common_meta::wal_options_allocator::prepare_wal_options;
 use futures_util::future::BoxFuture;
 use store_api::path_utils::region_dir;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
@@ -34,7 +34,7 @@ impl HandlerContext {
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
             let region_id = Self::region_ident_to_region_id(&region_ident);
-            prepare_wal_option(&mut region_options, region_id, &region_wal_options);
+            prepare_wal_options(&mut region_options, region_id, &region_wal_options);
             let request = RegionRequest::Open(RegionOpenRequest {
                 engine: region_ident.engine,
                 region_dir: region_dir(&region_storage_path, region_id),

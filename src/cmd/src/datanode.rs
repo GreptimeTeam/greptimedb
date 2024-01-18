@@ -18,8 +18,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
-use common_config::WalConfig;
 use common_telemetry::{info, logging};
+use common_wal::config::DatanodeWalConfig;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::service::DatanodeServiceBuilder;
@@ -36,7 +36,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    fn new(datanode: Datanode) -> Self {
+    pub fn new(datanode: Datanode) -> Self {
         Self { datanode }
     }
 
@@ -174,7 +174,7 @@ impl StartCommand {
 
         // `wal_dir` only affects raft-engine config.
         if let Some(wal_dir) = &self.wal_dir
-            && let WalConfig::RaftEngine(raft_engine_config) = &mut opts.wal
+            && let DatanodeWalConfig::RaftEngine(raft_engine_config) = &mut opts.wal
         {
             if raft_engine_config
                 .dir
@@ -316,7 +316,7 @@ mod tests {
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!(Some(42), options.node_id);
 
-        let WalConfig::RaftEngine(raft_engine_config) = options.wal else {
+        let DatanodeWalConfig::RaftEngine(raft_engine_config) = options.wal else {
             unreachable!()
         };
         assert_eq!("/other/wal", raft_engine_config.dir.unwrap());
@@ -504,7 +504,7 @@ mod tests {
                 };
 
                 // Should be read from env, env > default values.
-                let WalConfig::RaftEngine(raft_engine_config) = opts.wal else {
+                let DatanodeWalConfig::RaftEngine(raft_engine_config) = opts.wal else {
                     unreachable!()
                 };
                 assert_eq!(raft_engine_config.read_batch_size, 100);

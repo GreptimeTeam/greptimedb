@@ -43,6 +43,7 @@ use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
     FlushRegionSnafu, InvalidRequestSnafu, Result,
 };
+use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::sst::file::FileMeta;
@@ -486,6 +487,13 @@ pub(crate) enum WorkerRequest {
 
     /// Notify a worker to stop.
     Stop,
+
+    /// Use [RegionEdit] to edit a region directly.
+    EditRegion {
+        region_id: RegionId,
+        edit: RegionEdit,
+        tx: Sender<Result<()>>,
+    },
 }
 
 impl WorkerRequest {

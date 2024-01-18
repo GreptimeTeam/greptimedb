@@ -7,8 +7,6 @@ license.workspace = true
 [dependencies]
 common-base.workspace = true
 humantime-serde.workspace = true
-rskafka.workspace = true
+num_cpus.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-serde_with = "3"
-toml.workspace = true
+sysinfo.workspace = true

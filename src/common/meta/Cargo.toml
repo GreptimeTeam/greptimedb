@@ -16,7 +16,6 @@ base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 common-catalog.workspace = true
-common-config.workspace = true
 common-error.workspace = true
 common-grpc-expr.workspace = true
 common-macro.workspace = true
@@ -25,6 +24,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+common-wal.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true
@@ -39,18 +39,18 @@ regex.workspace = true
 rskafka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_with = "3"
+serde_with.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true
-toml.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
 common-procedure = { workspace = true, features = ["testing"] }
+common-wal = { workspace = true, features = ["testing"] }
 datatypes.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 uuid.workspace = true

@@ -22,16 +22,18 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use common_config::wal::WalOptions;
 use common_telemetry::info;
 use common_time::util::current_time_millis;
+use common_wal::options::WalOptions;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
+use crate::memtable::MemtableId;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::OnFailure;
 use crate::sst::file_purger::FilePurgerRef;
@@ -162,6 +164,25 @@ impl MitoRegion {
     /// Use the memtables size to estimate the size of wal.
     fn estimated_wal_usage(&self, memtable_usage: u64) -> u64 {
         ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
+    }
+
+    pub(crate) async fn apply_edit(
+        &self,
+        edit: RegionEdit,
+        memtables_to_remove: &[MemtableId],
+    ) -> Result<()> {
+        info!("Applying {edit:?} to region {}", self.region_id);
+
+        self.manifest_manager
+            .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
+                edit.clone(),
+            )))
+            .await?;
+
+        // Apply edit to region's version.
+        self.version_control
+            .apply_edit(edit, memtables_to_remove, self.file_purger.clone());
+        Ok(())
     }
 }
 

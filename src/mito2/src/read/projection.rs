@@ -177,10 +177,14 @@ impl ProjectionMapper {
 
         // Skips decoding pk if we don't need to output it.
         let pk_values = if self.has_tags {
-            self.codec
-                .decode(batch.primary_key())
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
+            match batch.pk_values() {
+                Some(v) => v.to_vec(),
+                None => self
+                    .codec
+                    .decode(batch.primary_key())
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?,
+            }
         } else {
             Vec::new()
         };

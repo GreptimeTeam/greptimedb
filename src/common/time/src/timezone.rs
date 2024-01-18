@@ -43,13 +43,8 @@ pub fn set_default_timezone(tz_str: Option<&str>) -> Result<()> {
 #[inline(always)]
 /// If the `tz=Some(timezone)`, return `timezone` directly,
 /// or return current system timezone.
-pub fn get_timezone(tz: Option<Timezone>) -> Timezone {
-    tz.unwrap_or_else(|| {
-        DEFAULT_TIMEZONE
-            .get()
-            .cloned()
-            .unwrap_or(Timezone::Named(Tz::UTC))
-    })
+pub fn get_timezone(tz: Option<&Timezone>) -> &Timezone {
+    tz.unwrap_or_else(|| DEFAULT_TIMEZONE.get().unwrap_or(&Timezone::Named(Tz::UTC)))
 }
 
 #[inline(always)]

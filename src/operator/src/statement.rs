@@ -46,8 +46,8 @@ use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
 use sqlparser::ast::{Expr, ObjectName, Value};
-use table::engine::TableReference;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
+use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{

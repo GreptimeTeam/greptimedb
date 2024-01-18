@@ -516,7 +516,7 @@ mod tests {
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
-    use crate::wal::WalOptionsAllocator;
+    use crate::wal_options_allocator::WalOptionsAllocator;
 
     /// A dummy implemented [DatanodeManager].
     pub struct DummyDatanodeManager;

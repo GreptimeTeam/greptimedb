@@ -16,17 +16,20 @@ use std::any::Any;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Weak};
 
+use async_stream::try_stream;
 use common_catalog::consts::{DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef, Context};
 use common_meta::error::Result as MetaResult;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
+use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
-use futures_util::TryStreamExt;
+use futures_util::stream::BoxStream;
+use futures_util::{StreamExt, TryStreamExt};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use snafu::prelude::*;
 use table::dist_table::DistTable;
@@ -35,8 +38,8 @@ use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
 use crate::error::{
-    self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, Result as CatalogResult,
-    TableMetadataManagerSnafu,
+    self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, ListTablesSnafu,
+    Result as CatalogResult, TableMetadataManagerSnafu,
 };
 use crate::information_schema::InformationSchemaProvider;
 use crate::CatalogManager;
@@ -58,17 +61,25 @@ pub struct KvBackendCatalogManager {
     system_catalog: SystemCatalog,
 }
 
+fn make_table(table_info_value: TableInfoValue) -> CatalogResult<TableRef> {
+    let table_info = table_info_value
+        .table_info
+        .try_into()
+        .context(catalog_err::InvalidTableInfoInCatalogSnafu)?;
+    Ok(DistTable::table(Arc::new(table_info)))
+}
+
 #[async_trait::async_trait]
 impl CacheInvalidator for KvBackendCatalogManager {
-    async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> MetaResult<()> {
-        self.cache_invalidator
-            .invalidate_table_name(ctx, table_name)
-            .await
-    }
-
     async fn invalidate_table_id(&self, ctx: &Context, table_id: TableId) -> MetaResult<()> {
         self.cache_invalidator
             .invalidate_table_id(ctx, table_id)
+            .await
+    }
+
+    async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> MetaResult<()> {
+        self.cache_invalidator
+            .invalidate_table_name(ctx, table_name)
             .await
     }
 }
@@ -101,6 +112,10 @@ impl KvBackendCatalogManager {
 
 #[async_trait::async_trait]
 impl CatalogManager for KvBackendCatalogManager {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
         let stream = self
             .table_metadata_manager
@@ -135,18 +150,22 @@ impl CatalogManager for KvBackendCatalogManager {
     }
 
     async fn table_names(&self, catalog: &str, schema: &str) -> CatalogResult<Vec<String>> {
-        let mut tables = self
+        let stream = self
             .table_metadata_manager
             .table_name_manager()
             .tables(catalog, schema)
+            .await;
+        let mut tables = stream
+            .try_collect::<Vec<_>>()
             .await
-            .context(TableMetadataManagerSnafu)?
+            .map_err(BoxedError::new)
+            .context(ListTablesSnafu { catalog, schema })?
             .into_iter()
             .map(|(k, _)| k)
-            .collect::<Vec<String>>();
+            .collect::<Vec<_>>();
         tables.extend_from_slice(&self.system_catalog.table_names(schema));
 
-        Ok(tables)
+        Ok(tables.into_iter().collect())
     }
 
     async fn catalog_exists(&self, catalog: &str) -> CatalogResult<bool> {
@@ -215,17 +234,56 @@ impl CatalogManager for KvBackendCatalogManager {
         else {
             return Ok(None);
         };
-        let table_info = Arc::new(
-            table_info_value
-                .table_info
-                .try_into()
-                .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
-        );
-        Ok(Some(DistTable::table(table_info)))
+        make_table(table_info_value).map(Some)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    async fn tables<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+    ) -> BoxStream<'a, CatalogResult<TableRef>> {
+        let sys_tables = try_stream!({
+            // System tables
+            let sys_table_names = self.system_catalog.table_names(schema);
+            for table_name in sys_table_names {
+                if let Some(table) = self.system_catalog.table(catalog, schema, &table_name) {
+                    yield table;
+                }
+            }
+        });
+
+        let table_id_stream = self
+            .table_metadata_manager
+            .table_name_manager()
+            .tables(catalog, schema)
+            .await
+            .map_ok(|(_, v)| v.table_id());
+        const BATCH_SIZE: usize = 128;
+        let user_tables = try_stream!({
+            // Split table ids into chunks
+            let mut table_id_chunks = table_id_stream.ready_chunks(BATCH_SIZE);
+
+            while let Some(table_ids) = table_id_chunks.next().await {
+                let table_ids = table_ids
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(BoxedError::new)
+                    .context(ListTablesSnafu { catalog, schema })?;
+
+                let table_info_values = self
+                    .table_metadata_manager
+                    .table_info_manager()
+                    .batch_get(&table_ids)
+                    .await
+                    .context(TableMetadataManagerSnafu)?;
+
+                for table_info_value in table_info_values.into_values() {
+                    yield make_table(table_info_value)?;
+                }
+            }
+        });
+
+        Box::pin(sys_tables.chain(user_tables))
     }
 }
 

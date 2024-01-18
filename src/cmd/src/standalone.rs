@@ -18,7 +18,6 @@ use std::{fs, path};
 use async_trait::async_trait;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_config::wal::StandaloneWalConfig;
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
@@ -29,11 +28,12 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::{WalOptionsAllocator, WalOptionsAllocatorRef};
+use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use common_time::timezone::set_default_timezone;
+use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
@@ -497,8 +497,8 @@ mod tests {
 
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
-    use common_config::WalConfig;
     use common_test_util::temp_dir::create_named_temp_file;
+    use common_wal::config::DatanodeWalConfig;
     use datanode::config::{FileConfig, GcsConfig};
     use servers::Mode;
 
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
 
-        let WalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
+        let DatanodeWalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
             unreachable!()
         };
         assert_eq!("/tmp/greptimedb/test/wal", raft_engine_config.dir.unwrap());

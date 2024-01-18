@@ -33,7 +33,7 @@ use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::row::{RowConverter, SortField};
 use datatypes::prelude::{ConcreteDataType, DataType, ScalarVector};
 use datatypes::types::TimestampType;
-use datatypes::value::ValueRef;
+use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
     BooleanVector, Helper, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, UInt8Vector,
@@ -58,6 +58,8 @@ use crate::memtable::BoxedBatchIterator;
 pub struct Batch {
     /// Primary key encoded in a comparable form.
     primary_key: Vec<u8>,
+    /// Possibly decoded `primary_key` values. Some places would decode it in advance.
+    pk_values: Option<Vec<Value>>,
     /// Timestamps of rows, should be sorted and not null.
     timestamps: VectorRef,
     /// Sequences of rows
@@ -102,6 +104,22 @@ impl Batch {
     /// Returns primary key of the batch.
     pub fn primary_key(&self) -> &[u8] {
         &self.primary_key
+    }
+
+    /// Returns possibly decoded primary-key values.
+    pub fn pk_values(&self) -> Option<&[Value]> {
+        self.pk_values.as_deref()
+    }
+
+    /// Sets possibly decoded primary-key values.
+    pub fn set_pk_values(&mut self, pk_values: Vec<Value>) {
+        self.pk_values = Some(pk_values);
+    }
+
+    /// Removes possibly decoded primary-key values. For testing only.
+    #[cfg(any(test, feature = "test"))]
+    pub fn remove_pk_values(&mut self) {
+        self.pk_values = None;
     }
 
     /// Returns fields in the batch.
@@ -195,6 +213,7 @@ impl Batch {
             // Now we need to clone the primary key. We could try `Bytes` if
             // this becomes a bottleneck.
             primary_key: self.primary_key.clone(),
+            pk_values: self.pk_values.clone(),
             timestamps: self.timestamps.slice(offset, length),
             sequences: Arc::new(self.sequences.get_slice(offset, length)),
             op_types: Arc::new(self.op_types.get_slice(offset, length)),
@@ -653,6 +672,7 @@ impl BatchBuilder {
 
         Ok(Batch {
             primary_key: self.primary_key,
+            pk_values: None,
             timestamps,
             sequences,
             op_types,

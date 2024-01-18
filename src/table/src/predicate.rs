@@ -48,6 +48,11 @@ impl Predicate {
         Self { exprs }
     }
 
+    /// Returns the logical exprs.
+    pub fn exprs(&self) -> &[Expr] {
+        &self.exprs
+    }
+
     /// Builds physical exprs according to provided schema.
     pub fn to_physical_exprs(
         &self,

@@ -30,6 +30,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
+common-wal.workspace = true
 datanode = { workspace = true }
 datatypes.workspace = true
 dotenv = "0.15"
@@ -73,7 +74,6 @@ uuid.workspace = true
 datafusion-expr.workspace = true
 datafusion.workspace = true
 itertools.workspace = true
-num_cpus = "1.13"
 opentelemetry-proto.workspace = true
 partition.workspace = true
 paste.workspace = true

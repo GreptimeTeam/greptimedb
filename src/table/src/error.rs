@@ -43,12 +43,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Engine not found: {}", engine))]
-    EngineNotFound { engine: String, location: Location },
-
-    #[snafu(display("Engine exist: {}", engine))]
-    EngineExist { engine: String, location: Location },
-
     #[snafu(display("Table projection error"))]
     TableProjection {
         #[snafu(source)]
@@ -164,9 +158,7 @@ impl ErrorExt for Error {
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
-            Error::ParseTableOption { .. }
-            | Error::EngineNotFound { .. }
-            | Error::EngineExist { .. } => StatusCode::InvalidArguments,
+            Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
 
             Error::InvalidTable { .. } | Error::MissingTimeIndexColumn { .. } => {
                 StatusCode::Internal

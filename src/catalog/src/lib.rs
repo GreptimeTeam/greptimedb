@@ -20,6 +20,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
+use futures_util::stream::BoxStream;
 use table::metadata::TableId;
 use table::requests::CreateTableRequest;
 use table::TableRef;
@@ -56,6 +57,13 @@ pub trait CatalogManager: Send + Sync {
         schema: &str,
         table_name: &str,
     ) -> Result<Option<TableRef>>;
+
+    /// Returns all tables with a stream by catalog and schema.
+    async fn tables<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+    ) -> BoxStream<'a, Result<TableRef>>;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;

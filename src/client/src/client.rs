@@ -122,7 +122,7 @@ impl Client {
         self.inner.set_peers(urls);
     }
 
-    fn find_channel(&self) -> Result<(String, Channel)> {
+    pub fn find_channel(&self) -> Result<(String, Channel)> {
         let addr = self
             .inner
             .get_peer()

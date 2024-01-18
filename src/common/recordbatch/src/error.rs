@@ -107,6 +107,16 @@ pub enum Error {
         location: Location,
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Error occurs when performing arrow computation"))]
+    ArrowCompute {
+        #[snafu(source)]
+        error: datatypes::arrow::error::ArrowError,
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported operation: {}", reason))]
+    UnsupportedOperation { reason: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -120,9 +130,12 @@ impl ErrorExt for Error {
             | Error::Format { .. }
             | Error::InitRecordbatchStream { .. }
             | Error::ColumnNotExists { .. }
-            | Error::ProjectArrowRecordBatch { .. } => StatusCode::Internal,
+            | Error::ProjectArrowRecordBatch { .. }
+            | Error::ArrowCompute { .. } => StatusCode::Internal,
 
             Error::External { source, .. } => source.status_code(),
+
+            Error::UnsupportedOperation { .. } => StatusCode::Unsupported,
 
             Error::SchemaConversion { source, .. } | Error::CastVector { source, .. } => {
                 source.status_code()

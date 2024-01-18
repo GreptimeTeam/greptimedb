@@ -12,22 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(any(test, feature = "testing"))]
-pub mod test_util;
-pub mod topic_manager;
-pub mod topic_selector;
-
 use std::time::Duration;
 
-use common_config::wal::kafka::{kafka_backoff, KafkaBackoffConfig, TopicSelectorType};
+use common_base::readable_size::ReadableSize;
+use rskafka::client::partition::Compression;
 use serde::{Deserialize, Serialize};
 
-pub use crate::wal::kafka::topic_manager::TopicManager;
+use crate::config::kafka::common::{backoff_prefix, BackoffConfig};
+use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
 
-/// Configurations for kafka wal.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Kafka wal configurations for standalone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct KafkaConfig {
+pub struct StandaloneKafkaConfig {
     /// The broker endpoints of the Kafka cluster.
     pub broker_endpoints: Vec<String>,
     /// Number of topics to be created upon start.
@@ -43,25 +40,40 @@ pub struct KafkaConfig {
     /// The timeout of topic creation.
     #[serde(with = "humantime_serde")]
     pub create_topic_timeout: Duration,
+    /// The compression algorithm used to compress kafka records.
+    #[serde(skip)]
+    pub compression: Compression,
+    /// The max size of a single producer batch.
+    pub max_batch_size: ReadableSize,
+    /// The linger duration of a kafka batch producer.
+    #[serde(with = "humantime_serde")]
+    pub linger: Duration,
+    /// The consumer wait timeout.
+    #[serde(with = "humantime_serde")]
+    pub consumer_wait_timeout: Duration,
     /// The backoff config.
-    #[serde(flatten, with = "kafka_backoff")]
-    pub backoff: KafkaBackoffConfig,
+    #[serde(flatten, with = "backoff_prefix")]
+    pub backoff: BackoffConfig,
 }
 
-impl Default for KafkaConfig {
+impl Default for StandaloneKafkaConfig {
     fn default() -> Self {
-        let broker_endpoints = vec!["127.0.0.1:9092".to_string()];
+        let broker_endpoints = vec![BROKER_ENDPOINT.to_string()];
         let replication_factor = broker_endpoints.len() as i16;
-
         Self {
             broker_endpoints,
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_wal_topic".to_string(),
+            topic_name_prefix: TOPIC_NAME_PREFIX.to_string(),
             num_partitions: 1,
             replication_factor,
             create_topic_timeout: Duration::from_secs(30),
-            backoff: KafkaBackoffConfig::default(),
+            compression: Compression::NoCompression,
+            // Warning: Kafka has a default limit of 1MB per message in a topic.
+            max_batch_size: ReadableSize::mb(1),
+            linger: Duration::from_millis(200),
+            consumer_wait_timeout: Duration::from_millis(100),
+            backoff: BackoffConfig::default(),
         }
     }
 }

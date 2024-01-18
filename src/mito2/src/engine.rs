@@ -52,15 +52,17 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use object_store::manager::ObjectStoreManagerRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::sync::oneshot;
 
 use crate::config::MitoConfig;
-use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RecvSnafu, RegionNotFoundSnafu, Result};
+use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
 use crate::region::RegionUsage;
@@ -111,10 +113,52 @@ impl MitoEngine {
         self.inner.handle_query(region_id, request)
     }
 
+    /// Edit region's metadata by [RegionEdit] directly. Use with care.
+    /// Now we only allow adding files to region (the [RegionEdit] struct can only contain a non-empty "files_to_add" field).
+    /// Other region editing intention will result in an "invalid request" error.
+    /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
+    pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        ensure!(
+            is_valid_region_edit(&edit),
+            InvalidRequestSnafu {
+                region_id,
+                reason: "invalid region edit"
+            }
+        );
+
+        let (tx, rx) = oneshot::channel();
+        let request = WorkerRequest::EditRegion {
+            region_id,
+            edit,
+            tx,
+        };
+        self.inner
+            .workers
+            .submit_to_worker(region_id, request)
+            .await?;
+        rx.await.context(RecvSnafu)?
+    }
+
     #[cfg(test)]
     pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
         self.inner.workers.get_region(id)
     }
+}
+
+/// Check whether the region edit is valid. Only adding files to region is considered valid now.
+fn is_valid_region_edit(edit: &RegionEdit) -> bool {
+    !edit.files_to_add.is_empty()
+        && edit.files_to_remove.is_empty()
+        && matches!(
+            edit,
+            RegionEdit {
+                files_to_add: _,
+                files_to_remove: _,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+            }
+        )
 }
 
 /// Inner struct of [MitoEngine].
@@ -340,5 +384,72 @@ impl MitoEngine {
                 config,
             }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::sst::file::FileMeta;
+
+    #[test]
+    fn test_is_valid_region_edit() {
+        // Valid: has only "files_to_add"
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+        assert!(is_valid_region_edit(&edit));
+
+        // Invalid: "files_to_add" is empty
+        let edit = RegionEdit {
+            files_to_add: vec![],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+        assert!(!is_valid_region_edit(&edit));
+
+        // Invalid: "files_to_remove" is not empty
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![FileMeta::default()],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+        assert!(!is_valid_region_edit(&edit));
+
+        // Invalid: other fields are not all "None"s
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            compaction_time_window: Some(Duration::from_secs(1)),
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+        assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: Some(1),
+            flushed_sequence: None,
+        };
+        assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: Some(1),
+        };
+        assert!(!is_valid_region_edit(&edit));
     }
 }

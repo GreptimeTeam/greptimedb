@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_config::wal::KafkaConfig;
+use common_wal::config::kafka::DatanodeKafkaConfig;
 use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
 use rskafka::client::producer::aggregator::RecordAggregator;
 use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
@@ -45,7 +45,7 @@ pub(crate) struct Client {
 
 impl Client {
     /// Creates a Client from the raw client.
-    pub(crate) fn new(raw_client: Arc<PartitionClient>, config: &KafkaConfig) -> Self {
+    pub(crate) fn new(raw_client: Arc<PartitionClient>, config: &DatanodeKafkaConfig) -> Self {
         let record_aggregator = RecordAggregator::new(config.max_batch_size.as_bytes() as usize);
         let batch_producer = BatchProducerBuilder::new(raw_client.clone())
             .with_compression(config.compression)
@@ -62,7 +62,7 @@ impl Client {
 /// Manages client construction and accesses.
 #[derive(Debug)]
 pub(crate) struct ClientManager {
-    pub(crate) config: KafkaConfig,
+    pub(crate) config: DatanodeKafkaConfig,
     /// Top-level client in kafka. All clients are constructed by this client.
     client_factory: RsKafkaClient,
     /// A pool maintaining a collection of clients.
@@ -72,7 +72,7 @@ pub(crate) struct ClientManager {
 
 impl ClientManager {
     /// Tries to create a ClientManager.
-    pub(crate) async fn try_new(config: &KafkaConfig) -> Result<Self> {
+    pub(crate) async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let backoff_config = BackoffConfig {
             init_backoff: config.backoff.init,
@@ -136,7 +136,7 @@ impl ClientManager {
 
 #[cfg(test)]
 mod tests {
-    use common_meta::wal::kafka::test_util::run_test_with_kafka_wal;
+    use common_wal::test_util::run_test_with_kafka_wal;
     use tokio::sync::Barrier;
 
     use super::*;
@@ -155,7 +155,7 @@ mod tests {
         )
         .await;
 
-        let config = KafkaConfig {
+        let config = DatanodeKafkaConfig {
             broker_endpoints,
             ..Default::default()
         };

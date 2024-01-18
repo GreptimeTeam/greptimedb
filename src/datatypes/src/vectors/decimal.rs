@@ -23,7 +23,6 @@ use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECIS
 use common_decimal::Decimal128;
 use snafu::{OptionExt, ResultExt};
 
-use super::{MutableVector, Validity, Vector, VectorRef};
 use crate::arrow::datatypes::DataType as ArrowDataType;
 use crate::data_type::ConcreteDataType;
 use crate::error::{
@@ -33,6 +32,7 @@ use crate::prelude::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
 use crate::vectors;
+use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
 
 /// Decimal128Vector is a vector keep i128 values with precision and scale.
 #[derive(Debug, PartialEq)]

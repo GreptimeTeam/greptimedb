@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
-use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
+use table::table_reference::TableReference;
 
 use super::utils::handle_retry_error;
 use crate::cache_invalidator::Context;

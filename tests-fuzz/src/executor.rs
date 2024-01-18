@@ -12,24 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
+use std::fmt;
 
-use common_telemetry::warn;
-use futures_util::future::BoxFuture;
+#[async_trait::async_trait]
+pub(crate) trait DslExecutor<T, U> {
+    type Error: Sync + Send + fmt::Debug;
 
-pub async fn run_test_with_kafka_wal<F>(test: F)
-where
-    F: FnOnce(Vec<String>) -> BoxFuture<'static, ()>,
-{
-    let Ok(endpoints) = env::var("GT_KAFKA_ENDPOINTS") else {
-        warn!("The endpoints is empty, skipping the test");
-        return;
-    };
-
-    let endpoints = endpoints
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect::<Vec<_>>();
-
-    test(endpoints).await
+    async fn execute(&self, input: &T) -> Result<U, Self::Error>;
 }

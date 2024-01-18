@@ -15,8 +15,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_config::wal::kafka::TopicSelectorType;
 use common_telemetry::{error, info};
+use common_wal::config::kafka::MetaSrvKafkaConfig;
+use common_wal::TopicSelectorType;
 use rskafka::client::controller::ControllerClient;
 use rskafka::client::error::Error as RsKafkaError;
 use rskafka::client::error::ProtocolError::TopicAlreadyExists;
@@ -33,8 +34,9 @@ use crate::error::{
 };
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::PutRequest;
-use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, TopicSelectorRef};
-use crate::wal::kafka::KafkaConfig;
+use crate::wal_options_allocator::kafka::topic_selector::{
+    RoundRobinTopicSelector, TopicSelectorRef,
+};
 
 const CREATED_TOPICS_KEY: &str = "__created_wal_topics/kafka/";
 
@@ -44,7 +46,7 @@ const DEFAULT_PARTITION: i32 = 0;
 
 /// Manages topic initialization and selection.
 pub struct TopicManager {
-    config: KafkaConfig,
+    config: MetaSrvKafkaConfig,
     pub(crate) topic_pool: Vec<String>,
     pub(crate) topic_selector: TopicSelectorRef,
     kv_backend: KvBackendRef,
@@ -52,7 +54,7 @@ pub struct TopicManager {
 
 impl TopicManager {
     /// Creates a new topic manager.
-    pub fn new(config: KafkaConfig, kv_backend: KvBackendRef) -> Self {
+    pub fn new(config: MetaSrvKafkaConfig, kv_backend: KvBackendRef) -> Self {
         // Topics should be created.
         let topics = (0..config.num_topics)
             .map(|topic_id| format!("{}_{topic_id}", config.topic_name_prefix))
@@ -237,9 +239,10 @@ impl TopicManager {
 
 #[cfg(test)]
 mod tests {
+    use common_wal::test_util::run_test_with_kafka_wal;
+
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::wal::kafka::test_util::run_test_with_kafka_wal;
 
     // Tests that topics can be successfully persisted into the kv backend and can be successfully restored from the kv backend.
     #[tokio::test]
@@ -277,7 +280,7 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 // Creates a topic manager.
-                let config = KafkaConfig {
+                let config = MetaSrvKafkaConfig {
                     replication_factor: broker_endpoints.len() as i16,
                     broker_endpoints,
                     ..Default::default()
