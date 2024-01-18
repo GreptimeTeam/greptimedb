@@ -172,12 +172,7 @@ impl MutablePart {
             .plain_block
             .get_or_insert_with(|| PlainBlock::new(metadata, INITIAL_BUILDER_CAPACITY));
 
-        if primary_key.is_some() {
-            // None means no primary key so we only push the key when it is `Some`.
-            block.key.push(primary_key);
-        }
-
-        block.value.push(key_value);
+        block.insert_by_key(primary_key, key_value);
     }
 
     /// Tries to intern the primary key, returns the id of the dictionary and the key.
@@ -344,6 +339,16 @@ impl PlainBlock {
             key: BinaryVectorBuilder::with_capacity(capacity),
             value: ValueBuilder::new(metadata, capacity),
         }
+    }
+
+    /// Inserts the row by key.
+    fn insert_by_key(&mut self, primary_key: Option<&[u8]>, key_value: &KeyValue) {
+        if primary_key.is_some() {
+            // None means no primary key so we only push the key when it is `Some`.
+            self.key.push(primary_key);
+        }
+
+        self.value.push(key_value);
     }
 }
 
