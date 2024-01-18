@@ -20,99 +20,119 @@ use faker_rand::lorem::Word;
 use rand::{random, Rng};
 use snafu::ensure;
 
-use crate::error::{self, Result};
+use crate::context::TableContextRef;
+use crate::error::{self, Error, Result};
+use crate::generator::Generator;
 use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation};
 use crate::ir::{droppable_columns, Column};
 
-pub struct AlterTableExprGenerator {
-    name: String,
-    columns: Arc<Vec<Column>>,
-    ignore_no_droppable_column: bool,
+/// Generates the [AlterTableOperation::AddColumn] of [AlterTableExpr].
+pub struct AlterExprAddColumnGenerator {
+    table_ctx: TableContextRef,
+    location: bool,
 }
 
-impl AlterTableExprGenerator {
-    pub fn new(name: String, columns: Arc<Vec<Column>>) -> Self {
+impl AlterExprAddColumnGenerator {
+    /// Returns an [AlterExprAddColumnGenerator].
+    pub fn new(table_ctx: &TableContextRef) -> Self {
         Self {
-            name,
-            columns,
-            ignore_no_droppable_column: false,
+            table_ctx: table_ctx.clone(),
+            location: false,
         }
     }
 
-    /// If the `ignore_no_droppable_column` is true, it retries if there is no droppable column.
-    pub fn ignore_no_droppable_column(mut self, v: bool) -> Self {
-        self.ignore_no_droppable_column = v;
+    /// Sets true to generate alter expr with a specific location.
+    pub fn with_location(mut self, v: bool) -> Self {
+        self.location = v;
         self
     }
+}
 
-    fn generate_inner(&self) -> Result<AlterTableExpr> {
+impl Generator<AlterTableExpr> for AlterExprAddColumnGenerator {
+    type Error = Error;
+
+    fn generate(&self) -> Result<AlterTableExpr> {
         let mut rng = rand::thread_rng();
-        let idx = rng.gen_range(0..3);
-        // 0 -> AddColumn
-        // 1 -> DropColumn(invariant: We can't non-primary key columns, non-ts columns)
-        // 2 -> RenameTable
-        let alter_expr = match idx {
-            0 => {
-                let with_location = rng.gen::<bool>();
-                let location = if with_location {
-                    let use_first = rng.gen::<bool>();
-                    let location = if use_first {
-                        AddColumnLocation::First
-                    } else {
-                        AddColumnLocation::After {
-                            column_name: self.columns[rng.gen_range(0..self.columns.len())]
-                                .name
-                                .to_string(),
-                        }
-                    };
-                    Some(location)
-                } else {
-                    None
-                };
-                let column = rng.gen::<Column>();
-                AlterTableExpr {
-                    name: self.name.to_string(),
-                    alter_options: AlterTableOperation::AddColumn { column, location },
-                }
-            }
-            1 => {
-                let droppable = droppable_columns(&self.columns);
-                ensure!(!droppable.is_empty(), error::DroppableColumnsSnafu);
-                let name = droppable[rng.gen_range(0..droppable.len())]
+        let with_location = self.location && rng.gen::<bool>();
+        let location = if with_location {
+            let use_first = rng.gen::<bool>();
+            let location = if use_first {
+                AddColumnLocation::First
+            } else {
+                AddColumnLocation::After {
+                    column_name: self.table_ctx.columns
+                        [rng.gen_range(0..self.table_ctx.columns.len())]
                     .name
-                    .to_string();
-                AlterTableExpr {
-                    name: self.name.to_string(),
-                    alter_options: AlterTableOperation::DropColumn { name },
+                    .to_string(),
                 }
-            }
-            2 => {
-                let mut new_table_name = rng.gen::<Word>().to_string();
-                if new_table_name == self.name {
-                    new_table_name = format!("{}-{}", self.name, rng.gen::<u64>());
-                }
-                AlterTableExpr {
-                    name: self.name.to_string(),
-                    alter_options: AlterTableOperation::RenameTable { new_table_name },
-                }
-            }
-            _ => unreachable!(),
+            };
+            Some(location)
+        } else {
+            None
         };
 
-        Ok(alter_expr)
+        let column = rng.gen::<Column>();
+        Ok(AlterTableExpr {
+            name: self.table_ctx.name.to_string(),
+            alter_options: AlterTableOperation::AddColumn { column, location },
+        })
     }
+}
 
-    /// Generates the [AlterTableExpr].
-    pub fn generate(&self) -> Result<AlterTableExpr> {
-        match self.generate_inner() {
-            Ok(expr) => Ok(expr),
-            Err(err) => {
-                if matches!(err, error::Error::DroppableColumns { .. }) {
-                    return self.generate();
-                }
-                Err(err)
-            }
+/// Generates the [AlterTableOperation::DropColumn] of [AlterTableExpr].
+pub struct AlterExprDropColumnGenerator {
+    table_ctx: TableContextRef,
+}
+
+impl AlterExprDropColumnGenerator {
+    /// Returns an [AlterExprDropColumnGenerator].
+    pub fn new(table_ctx: &TableContextRef) -> Self {
+        Self {
+            table_ctx: table_ctx.clone(),
         }
+    }
+}
+
+impl Generator<AlterTableExpr> for AlterExprDropColumnGenerator {
+    type Error = Error;
+
+    fn generate(&self) -> Result<AlterTableExpr> {
+        let mut rng = rand::thread_rng();
+        let droppable = droppable_columns(&self.table_ctx.columns);
+        ensure!(!droppable.is_empty(), error::DroppableColumnsSnafu);
+        let name = droppable[rng.gen_range(0..droppable.len())]
+            .name
+            .to_string();
+        Ok(AlterTableExpr {
+            name: self.table_ctx.name.to_string(),
+            alter_options: AlterTableOperation::DropColumn { name },
+        })
+    }
+}
+
+pub struct AlterExprRenameGenerator {
+    table_ctx: TableContextRef,
+}
+
+impl AlterExprRenameGenerator {
+    /// Returns an [AlterExprRenameGenerator].
+    pub fn new(table_ctx: &TableContextRef) -> Self {
+        Self {
+            table_ctx: table_ctx.clone(),
+        }
+    }
+}
+
+impl Generator<AlterTableExpr> for AlterExprRenameGenerator {
+    type Error = Error;
+
+    fn generate(&self) -> Result<AlterTableExpr> {
+        let mut rng = rand::thread_rng();
+        let mut new_table_name = rng.gen::<Word>().to_string();
+        Ok(AlterTableExpr {
+            name: self.table_ctx.name.to_string(),
+            alter_options: AlterTableOperation::RenameTable { new_table_name },
+        })
     }
 }
 
@@ -120,7 +140,8 @@ impl AlterTableExprGenerator {
 mod tests {
     use std::sync::Arc;
 
-    use super::AlterTableExprGenerator;
+    use super::*;
+    use crate::context::TableContext;
     use crate::generator::create_expr::CreateTableExprGenerator;
     use crate::generator::Generator;
 
@@ -130,13 +151,18 @@ mod tests {
             .columns(10)
             .generate()
             .unwrap();
+        let table_ctx = Arc::new(TableContext::from(&create_expr));
 
-        let alter_expr = AlterTableExprGenerator::new(
-            create_expr.name.to_string(),
-            Arc::new(create_expr.columns),
-        )
-        .ignore_no_droppable_column(true)
-        .generate()
-        .unwrap();
+        let alter_expr = AlterExprAddColumnGenerator::new(&table_ctx)
+            .generate()
+            .unwrap();
+
+        let alter_expr = AlterExprRenameGenerator::new(&table_ctx)
+            .generate()
+            .unwrap();
+
+        let alter_expr = AlterExprDropColumnGenerator::new(&table_ctx)
+            .generate()
+            .unwrap();
     }
 }
