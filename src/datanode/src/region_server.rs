@@ -615,7 +615,7 @@ impl RegionServerInner {
 
         let table_provider = self
             .table_provider_factory
-            .create(region_id, region_status.into_engine(), &ctx)
+            .create(region_id, region_status.into_engine())
             .await?;
 
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
@@ -832,7 +832,6 @@ impl TableProviderFactory for DummyTableProviderFactory {
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
-        query_ctx: &QueryContextRef,
     ) -> Result<Arc<dyn TableProvider>> {
         let metadata =
             engine
@@ -846,10 +845,7 @@ impl TableProviderFactory for DummyTableProviderFactory {
             region_id,
             engine,
             metadata,
-            scan_request: Arc::new(Mutex::new(ScanRequest {
-                timezone: Some(query_ctx.timezone()),
-                ..Default::default()
-            })),
+            scan_request: Default::default(),
         }))
     }
 }
@@ -860,7 +856,6 @@ pub trait TableProviderFactory: Send + Sync {
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
-        query_ctx: &QueryContextRef,
     ) -> Result<Arc<dyn TableProvider>>;
 }
 

@@ -78,7 +78,6 @@ async fn test_scan_projection() {
         filters: Vec::new(),
         output_ordering: None,
         limit: None,
-        timezone: None,
     };
     let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
