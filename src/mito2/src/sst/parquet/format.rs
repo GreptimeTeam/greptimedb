@@ -125,7 +125,7 @@ pub(crate) struct ReadFormat {
     /// the schema of [Batch]).
     ///
     /// This field is set at the first call to [convert_record_batch](Self::convert_record_batch).
-    field_name_to_projected_index: Option<HashMap<ColumnId, usize>>,
+    field_id_to_projected_index: Option<HashMap<ColumnId, usize>>,
 }
 
 impl ReadFormat {
@@ -142,7 +142,7 @@ impl ReadFormat {
             metadata,
             arrow_schema,
             field_id_to_index,
-            field_name_to_projected_index: None,
+            field_id_to_projected_index: None,
         }
     }
 
@@ -204,8 +204,8 @@ impl ReadFormat {
             }
         );
 
-        if self.field_name_to_projected_index.is_none() {
-            self.init_name_to_projected_index(record_batch)?;
+        if self.field_id_to_projected_index.is_none() {
+            self.init_id_to_projected_index(record_batch)?;
         }
 
         let mut fixed_pos_columns = record_batch
@@ -270,7 +270,7 @@ impl ReadFormat {
         Ok(())
     }
 
-    fn init_name_to_projected_index(&mut self, record_batch: &RecordBatch) -> Result<()> {
+    fn init_id_to_projected_index(&mut self, record_batch: &RecordBatch) -> Result<()> {
         let mut name_to_projected_index = HashMap::new();
         for (index, field) in record_batch.schema().fields().iter().enumerate() {
             let Some(column) = self.metadata.column_by_name(field.name()) else {
@@ -280,7 +280,7 @@ impl ReadFormat {
                 name_to_projected_index.insert(column.column_id, index);
             }
         }
-        self.field_name_to_projected_index = Some(name_to_projected_index);
+        self.field_id_to_projected_index = Some(name_to_projected_index);
         Ok(())
     }
 
@@ -518,7 +518,7 @@ impl ReadFormat {
     /// [convert_record_batch](Self::convert_record_batch). Otherwise
     /// it always return `None`
     pub fn field_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
-        self.field_name_to_projected_index
+        self.field_id_to_projected_index
             .as_ref()
             .and_then(|m| m.get(&column_id).copied())
     }

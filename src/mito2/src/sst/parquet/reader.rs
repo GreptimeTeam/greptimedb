@@ -583,7 +583,7 @@ impl ParquetReader {
     }
 
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
-    /// Return the filtered batch. If the entired batch is filtered out, return None.
+    /// Return the filtered batch. If the entire batch is filtered out, return None.
     ///
     /// Supported filter expr type is defined in [SimpleFilterEvaluator].
     ///
