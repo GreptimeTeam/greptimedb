@@ -35,11 +35,19 @@ use crate::error;
 #[cfg(test)]
 mod stats;
 
-/// Assert the scalar value is not utf8.
-/// It should be converted to timestamp scalar value by `TypeConversionRule`.
-macro_rules! assert_not_utf8 {
+/// Assert the scalar value is not utf8. Returns `None` if it's utf8.
+/// In theory, it should be converted to a timestamp scalar value by `TypeConversionRule`.
+macro_rules! return_none_if_utf8 {
     ($lit: ident) => {
-        debug_assert!(!matches!($lit, ScalarValue::Utf8(_)));
+        if matches!($lit, ScalarValue::Utf8(_)) {
+            warn!(
+                "Unexpected ScalarValue::Utf8 in time range predicate: {:?}. Maybe it's an implicit bug, please report it to https://github.com/GreptimeTeam/greptimedb/issues",
+                $lit
+            );
+
+            // Make the predicate ineffective.
+            return None;
+        }
     };
 }
 
@@ -292,7 +300,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
             return None;
         }
 
-        assert_not_utf8!(lit);
+        return_none_if_utf8!(lit);
         scalar_value_to_timestamp(lit, None).map(|t| (t, reverse))
     }
 
@@ -316,8 +324,8 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 
         match (low, high) {
             (DfExpr::Literal(low), DfExpr::Literal(high)) => {
-                assert_not_utf8!(low);
-                assert_not_utf8!(high);
+                return_none_if_utf8!(low);
+                return_none_if_utf8!(high);
 
                 let low_opt = scalar_value_to_timestamp(low, None)
                     .and_then(|ts| ts.convert_to(self.ts_col_unit));
@@ -352,7 +360,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         let mut init_range = TimestampRange::empty();
         for expr in list {
             if let DfExpr::Literal(scalar) = expr {
-                assert_not_utf8!(scalar);
+                return_none_if_utf8!(scalar);
                 if let Some(timestamp) = scalar_value_to_timestamp(scalar, None) {
                     init_range = init_range.or(&TimestampRange::single(timestamp))
                 } else {
