@@ -187,7 +187,7 @@ impl AggregateFunc {
                 Ok(sum_accum_diffs::<I, f64, f64>(accum, value_diffs))
             }
 
-            AggregateFunc::Count => Ok(cout_accum_diff(accum, value_diffs)),
+            AggregateFunc::Count => Ok(count_accum_diff(accum, value_diffs)),
             _ => {
                 let values_only = value_diffs.into_iter().map(|e| e.0);
                 Ok(self.eval(values_only))
@@ -240,7 +240,7 @@ where
     }
 }
 
-fn cout_accum_diff<I>(accum: Option<Value>, value_diffs: I) -> Value
+fn count_accum_diff<I>(accum: Option<Value>, value_diffs: I) -> Value
 where
     I: IntoIterator<Item = (Value, Diff)>,
 {
