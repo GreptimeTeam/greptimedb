@@ -29,7 +29,6 @@ use datafusion_common::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
-use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
@@ -37,7 +36,6 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
-use tokio::io::BufReader;
 
 use crate::cache::CacheManagerRef;
 use crate::error::{
@@ -52,6 +50,7 @@ use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::SstIndexApplierRef;
 use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
@@ -136,15 +135,9 @@ impl ParquetReaderBuilder {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
-        // Now we create a reader to read the whole file.
-        let reader = self
-            .object_store
-            .reader(&file_path)
-            .await
-            .context(OpenDalSnafu)?;
-        let mut reader = BufReader::new(reader);
+        let file_size = self.file_handle.file_size();
         // Loads parquet metadata of the file.
-        let parquet_meta = self.read_parquet_metadata(&mut reader, &file_path).await?;
+        let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         let region_meta = Self::get_region_metadata(&file_path, key_value_meta)?;
@@ -247,8 +240,8 @@ impl ParquetReaderBuilder {
     /// Reads parquet metadata of specific file.
     async fn read_parquet_metadata(
         &self,
-        reader: &mut impl AsyncFileReader,
         file_path: &str,
+        file_size: u64,
     ) -> Result<Arc<ParquetMetaData>> {
         // Tries to get from global cache.
         if let Some(metadata) = self.cache_manager.as_ref().and_then(|cache| {
@@ -257,11 +250,11 @@ impl ParquetReaderBuilder {
             return Ok(metadata);
         }
 
-        // Cache miss, get from the reader.
-        let metadata = reader
-            .get_metadata()
-            .await
-            .context(ReadParquetSnafu { path: file_path })?;
+        // Cache miss, read directly.
+        let metadata_loader =
+            MetadataLoader::new(self.object_store.clone(), file_path, Some(file_size));
+        let metadata = metadata_loader.load().await?;
+        let metadata = Arc::new(metadata);
         // Cache the metadata.
         if let Some(cache) = &self.cache_manager {
             cache.put_parquet_meta_data(
