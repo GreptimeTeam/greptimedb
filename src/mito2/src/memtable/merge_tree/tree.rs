@@ -48,7 +48,7 @@ impl MergeTree {
         MergeTree {
             metadata,
             row_codec,
-            mutable: RwLock::new(MutablePart::new(&config)),
+            mutable: RwLock::new(MutablePart::new(config)),
         }
     }
 

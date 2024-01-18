@@ -122,7 +122,7 @@ impl MutablePart {
             if self.is_dictionary_enabled() {
                 self.write_intern(metadata, &kv, &mut primary_key, metrics);
             } else {
-                self.write_plain(metadata, &kv, Some(&mut primary_key));
+                self.write_plain(metadata, &kv, Some(&primary_key));
             }
         }
 
@@ -186,12 +186,12 @@ impl MutablePart {
         primary_key: &mut Vec<u8>,
         metrics: &mut WriteMetrics,
     ) -> Option<(DictIdType, KeyIdType)> {
-        if let Some(key_id) = self.active_dict.get_key_id(&primary_key) {
+        if let Some(key_id) = self.active_dict.get_key_id(primary_key) {
             return Some((self.active_dict.id, key_id));
         }
 
         for dict in &self.immutable_dicts {
-            if let Some(key_id) = dict.get_key_id(&primary_key) {
+            if let Some(key_id) = dict.get_key_id(primary_key) {
                 return Some((dict.id, key_id));
             }
         }
@@ -211,7 +211,7 @@ impl MutablePart {
         let key = std::mem::take(primary_key);
         metrics.key_bytes += key.len();
         let key_id = self.active_dict.must_intern(key);
-        return Some((self.active_dict.id, key_id));
+        Some((self.active_dict.id, key_id))
     }
 
     /// Allocates a new dictionary if possible.
