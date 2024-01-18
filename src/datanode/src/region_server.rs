@@ -596,6 +596,7 @@ impl RegionServerInner {
         } = request;
         let region_id = RegionId::from_u64(region_id);
 
+        // Build query context from gRPC header
         let ctx: QueryContextRef = header
             .as_ref()
             .map(|h| Arc::new(h.into()))
@@ -614,7 +615,7 @@ impl RegionServerInner {
 
         let table_provider = self
             .table_provider_factory
-            .create(region_id, region_status.into_engine())
+            .create(region_id, region_status.into_engine(), &ctx)
             .await?;
 
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
@@ -831,6 +832,7 @@ impl TableProviderFactory for DummyTableProviderFactory {
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
+        query_ctx: &QueryContextRef,
     ) -> Result<Arc<dyn TableProvider>> {
         let metadata =
             engine
@@ -844,7 +846,10 @@ impl TableProviderFactory for DummyTableProviderFactory {
             region_id,
             engine,
             metadata,
-            scan_request: Default::default(),
+            scan_request: Arc::new(Mutex::new(ScanRequest {
+                timezone: Some(query_ctx.timezone()),
+                ..Default::default()
+            })),
         }))
     }
 }
@@ -855,6 +860,7 @@ pub trait TableProviderFactory: Send + Sync {
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
+        query_ctx: &QueryContextRef,
     ) -> Result<Arc<dyn TableProvider>>;
 }
 

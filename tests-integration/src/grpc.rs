@@ -531,9 +531,10 @@ CREATE TABLE {table_name} (
         .collect::<HashMap<u32, u64>>();
         assert!(region_to_dn_map.len() <= instance.datanodes().len());
 
-        let stmt = QueryLanguageParser::parse_sql(&format!(
-            "SELECT ts, a, b FROM {table_name} ORDER BY ts"
-        ))
+        let stmt = QueryLanguageParser::parse_sql(
+            &format!("SELECT ts, a, b FROM {table_name} ORDER BY ts"),
+            &QueryContext::arc(),
+        )
         .unwrap();
         let LogicalPlan::DfPlan(plan) = instance
             .frontend()

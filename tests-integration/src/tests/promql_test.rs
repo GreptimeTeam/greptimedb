@@ -58,7 +58,8 @@ async fn create_insert_query_assert(
         query: promql.to_string(),
         ..PromQuery::default()
     };
-    let QueryStatement::Promql(mut eval_stmt) = QueryLanguageParser::parse_promql(&query).unwrap()
+    let QueryStatement::Promql(mut eval_stmt) =
+        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
     else {
         unreachable!()
     };

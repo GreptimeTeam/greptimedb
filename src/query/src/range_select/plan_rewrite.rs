@@ -526,7 +526,7 @@ mod test {
     }
 
     async fn do_query(sql: &str) -> Result<crate::plan::LogicalPlan> {
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
         engine.planner().plan(stmt, QueryContext::arc()).await
     }

@@ -70,7 +70,7 @@ use servers::server::{start_server, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
-use sql::parser::ParserContext;
+use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
@@ -252,8 +252,17 @@ impl FrontendInstance for Instance {
     }
 }
 
-fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
-    ParserContext::create_with_dialect(sql, dialect).context(ParseSqlSnafu)
+fn parse_stmt(
+    sql: &str,
+    dialect: &(dyn Dialect + Send + Sync),
+    query_ctx: &QueryContextRef,
+) -> Result<Vec<Statement>> {
+    ParserContext::create_with_dialect(
+        sql,
+        dialect,
+        ParseOptions::with_timezone(query_ctx.timezone().as_ref()),
+    )
+    .context(ParseSqlSnafu)
 }
 
 impl Instance {
@@ -284,7 +293,7 @@ impl SqlQueryHandler for Instance {
         let checker_ref = self.plugins.get::<PermissionCheckerRef>();
         let checker = checker_ref.as_ref();
 
-        match parse_stmt(query.as_ref(), query_ctx.sql_dialect())
+        match parse_stmt(query.as_ref(), query_ctx.sql_dialect(), &query_ctx)
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
             Ok(stmts) => {
@@ -414,8 +423,10 @@ impl PrometheusHandler for Instance {
             .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
             .context(AuthSnafu)?;
 
-        let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
-            query: query.clone(),
+        let stmt = QueryLanguageParser::parse_promql(query, &query_ctx).with_context(|_| {
+            ParsePromQLSnafu {
+                query: query.clone(),
+            }
         })?;
 
         let output = self
@@ -531,7 +542,7 @@ mod tests {
         CREATE DATABASE test_database;
         SHOW DATABASES;
         "#;
-        let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        let stmts = parse_stmt(sql, &GreptimeDbDialect {}, &query_ctx).unwrap();
         assert_eq!(stmts.len(), 4);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
@@ -542,7 +553,7 @@ mod tests {
         SHOW CREATE TABLE demo;
         ALTER TABLE demo ADD COLUMN new_col INT;
         "#;
-        let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        let stmts = parse_stmt(sql, &GreptimeDbDialect {}, &query_ctx).unwrap();
         assert_eq!(stmts.len(), 2);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
@@ -576,7 +587,7 @@ mod tests {
         }
 
         fn do_test(sql: &str, plugins: Plugins, query_ctx: &QueryContextRef, is_ok: bool) {
-            let stmt = &parse_stmt(sql, &GreptimeDbDialect {}).unwrap()[0];
+            let stmt = &parse_stmt(sql, &GreptimeDbDialect {}, query_ctx).unwrap()[0];
             let re = check_permission(plugins, stmt, query_ctx);
             if is_ok {
                 re.unwrap();
@@ -604,11 +615,11 @@ mod tests {
 
         // test show tables
         let sql = "SHOW TABLES FROM public";
-        let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        let stmt = parse_stmt(sql, &GreptimeDbDialect {}, &query_ctx).unwrap();
         check_permission(plugins.clone(), &stmt[0], &query_ctx).unwrap();
 
         let sql = "SHOW TABLES FROM private";
-        let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        let stmt = parse_stmt(sql, &GreptimeDbDialect {}, &query_ctx).unwrap();
         let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
         assert!(re.is_ok());
 

@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
+use common_time::Timezone;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
@@ -29,4 +32,6 @@ pub struct ScanRequest {
     /// If set, it contains the amount of rows needed by the caller,
     /// The data source should return *at least* this number of rows if available.
     pub limit: Option<usize>,
+    /// The session timezone
+    pub timezone: Option<Arc<Timezone>>,
 }

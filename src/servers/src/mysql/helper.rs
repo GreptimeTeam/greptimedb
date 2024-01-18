@@ -203,7 +203,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 #[cfg(test)]
 mod tests {
     use sql::dialect::MySqlDialect;
-    use sql::parser::ParserContext;
+    use sql::parser::{ParseOptions, ParserContext};
 
     use super::*;
 
@@ -232,7 +232,9 @@ mod tests {
     }
 
     fn parse_sql(sql: &str) -> Statement {
-        let mut stmts = ParserContext::create_with_dialect(sql, &MySqlDialect {}).unwrap();
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &MySqlDialect {}, ParseOptions::default())
+                .unwrap();
         stmts.remove(0)
     }
 
