@@ -35,7 +35,7 @@ use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
-use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
+use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
 use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
@@ -77,7 +77,7 @@ pub struct GreptimeDbClusterBuilder {
     store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
     wal_config: DatanodeWalConfig,
-    meta_wal_config: MetasrvWalConfig,
+    meta_wal_config: MetaSrvWalConfig,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
 }
@@ -106,7 +106,7 @@ impl GreptimeDbClusterBuilder {
             store_providers: None,
             datanodes: None,
             wal_config: DatanodeWalConfig::default(),
-            meta_wal_config: MetasrvWalConfig::default(),
+            meta_wal_config: MetaSrvWalConfig::default(),
             shared_home_dir: None,
             meta_selector: None,
         }
@@ -137,7 +137,7 @@ impl GreptimeDbClusterBuilder {
     }
 
     #[must_use]
-    pub fn with_meta_wal_config(mut self, wal_meta: MetasrvWalConfig) -> Self {
+    pub fn with_meta_wal_config(mut self, wal_meta: MetaSrvWalConfig) -> Self {
         self.meta_wal_config = wal_meta;
         self
     }

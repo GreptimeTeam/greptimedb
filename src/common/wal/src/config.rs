@@ -17,16 +17,16 @@ pub mod raft_engine;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig, StandaloneKafkaConfig};
+use crate::config::kafka::{DatanodeKafkaConfig, MetaSrvKafkaConfig, StandaloneKafkaConfig};
 use crate::config::raft_engine::RaftEngineConfig;
 
 /// Wal configurations for metasrv.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 #[serde(tag = "provider", rename_all = "snake_case")]
-pub enum MetasrvWalConfig {
+pub enum MetaSrvWalConfig {
     #[default]
     RaftEngine,
-    Kafka(MetasrvKafkaConfig),
+    Kafka(MetaSrvKafkaConfig),
 }
 
 /// Wal configurations for datanode.
@@ -57,11 +57,11 @@ impl Default for StandaloneWalConfig {
     }
 }
 
-impl From<StandaloneWalConfig> for MetasrvWalConfig {
+impl From<StandaloneWalConfig> for MetaSrvWalConfig {
     fn from(config: StandaloneWalConfig) -> Self {
         match config {
             StandaloneWalConfig::RaftEngine(_) => Self::RaftEngine,
-            StandaloneWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
+            StandaloneWalConfig::Kafka(config) => Self::Kafka(MetaSrvKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
                 num_topics: config.num_topics,
                 selector_type: config.selector_type,
@@ -100,7 +100,7 @@ mod tests {
 
     use super::*;
     use crate::config::kafka::common::BackoffConfig;
-    use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig, StandaloneKafkaConfig};
+    use crate::config::{DatanodeKafkaConfig, MetaSrvKafkaConfig, StandaloneKafkaConfig};
     use crate::TopicSelectorType;
 
     #[test]
@@ -109,8 +109,8 @@ mod tests {
         let toml_str = r#"
             provider = "raft_engine"
         "#;
-        let metasrv_wal_config: MetasrvWalConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(metasrv_wal_config, MetasrvWalConfig::RaftEngine);
+        let metasrv_wal_config: MetaSrvWalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(metasrv_wal_config, MetaSrvWalConfig::RaftEngine);
 
         let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
@@ -166,9 +166,9 @@ mod tests {
             backoff_deadline = "5mins"
         "#;
 
-        // Deserialized to MetasrvWalConfig.
-        let metasrv_wal_config: MetasrvWalConfig = toml::from_str(toml_str).unwrap();
-        let expected = MetasrvKafkaConfig {
+        // Deserialized to MetaSrvWalConfig.
+        let metasrv_wal_config: MetaSrvWalConfig = toml::from_str(toml_str).unwrap();
+        let expected = MetaSrvKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             num_topics: 32,
             selector_type: TopicSelectorType::RoundRobin,
@@ -183,7 +183,7 @@ mod tests {
                 deadline: Some(Duration::from_secs(60 * 5)),
             },
         };
-        assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
+        assert_eq!(metasrv_wal_config, MetaSrvWalConfig::Kafka(expected));
 
         // Deserialized to DatanodeWalConfig.
         let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();

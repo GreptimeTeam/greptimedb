@@ -24,7 +24,7 @@ use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::wal_options_allocator::prepare_wal_option;
+use common_meta::wal_options_allocator::prepare_wal_options;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
 use common_telemetry::{error, info, warn};
@@ -462,7 +462,7 @@ async fn open_all_regions(
         for region_number in table_value.regions {
             // Augments region options with wal options if a wal options is provided.
             let mut region_options = table_value.region_info.region_options.clone();
-            prepare_wal_option(
+            prepare_wal_options(
                 &mut region_options,
                 RegionId::new(table_value.table_id, region_number),
                 &table_value.region_info.region_wal_options,

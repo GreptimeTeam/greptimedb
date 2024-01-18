@@ -22,8 +22,8 @@ use common_query::Output;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::create_temp_dir;
-use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
-use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
+use common_wal::config::kafka::{DatanodeKafkaConfig, MetaSrvKafkaConfig};
+use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
 use futures::future::BoxFuture;
@@ -111,7 +111,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -241,7 +241,7 @@ pub async fn test_region_migration_multiple_regions(
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -378,7 +378,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -510,7 +510,7 @@ pub async fn test_region_migration_incorrect_from_peer(
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -585,7 +585,7 @@ pub async fn test_region_migration_incorrect_region_id(
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),

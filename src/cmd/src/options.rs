@@ -15,7 +15,7 @@
 use clap::ArgMatches;
 use common_config::KvBackendConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use common_wal::config::MetasrvWalConfig;
+use common_wal::config::MetaSrvWalConfig;
 use config::{Config, Environment, File, FileFormat};
 use datanode::config::{DatanodeOptions, ProcedureConfig};
 use frontend::error::{Result as FeResult, TomlFormatSnafu};
@@ -38,7 +38,7 @@ pub struct MixOptions {
     pub frontend: FrontendOptions,
     pub datanode: DatanodeOptions,
     pub logging: LoggingOptions,
-    pub wal_meta: MetasrvWalConfig,
+    pub wal_meta: MetaSrvWalConfig,
 }
 
 impl From<MixOptions> for FrontendOptions {

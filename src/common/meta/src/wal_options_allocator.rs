@@ -17,7 +17,7 @@ pub mod kafka;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_wal::config::MetasrvWalConfig;
+use common_wal::config::MetaSrvWalConfig;
 use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
@@ -39,10 +39,10 @@ pub type WalOptionsAllocatorRef = Arc<WalOptionsAllocator>;
 
 impl WalOptionsAllocator {
     /// Creates a WalOptionsAllocator.
-    pub fn new(config: MetasrvWalConfig, kv_backend: KvBackendRef) -> Self {
+    pub fn new(config: MetaSrvWalConfig, kv_backend: KvBackendRef) -> Self {
         match config {
-            MetasrvWalConfig::RaftEngine => Self::RaftEngine,
-            MetasrvWalConfig::Kafka(kafka_config) => {
+            MetaSrvWalConfig::RaftEngine => Self::RaftEngine,
+            MetaSrvWalConfig::Kafka(kafka_config) => {
                 Self::Kafka(KafkaTopicManager::new(kafka_config, kv_backend))
             }
         }
@@ -118,7 +118,7 @@ pub fn prepare_wal_options(
 
 #[cfg(test)]
 mod tests {
-    use common_wal::config::kafka::MetasrvKafkaConfig;
+    use common_wal::config::kafka::MetaSrvKafkaConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
 
     use super::*;
@@ -129,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn test_allocator_with_raft_engine() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-        let wal_config = MetasrvWalConfig::RaftEngine;
+        let wal_config = MetaSrvWalConfig::RaftEngine;
         let allocator = WalOptionsAllocator::new(wal_config, kv_backend);
         allocator.start().await.unwrap();
 
@@ -155,7 +155,7 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 // Creates a topic manager.
-                let config = MetasrvKafkaConfig {
+                let config = MetaSrvKafkaConfig {
                     replication_factor: broker_endpoints.len() as i16,
                     broker_endpoints,
                     ..Default::default()

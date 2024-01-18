@@ -48,7 +48,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
-use crate::wal_options_allocator::prepare_wal_option;
+use crate::wal_options_allocator::prepare_wal_options;
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -455,7 +455,7 @@ impl CreateRequestBuilder {
         request.region_id = region_id.as_u64();
         request.path = storage_path;
         // Stores the encoded wal options into the request options.
-        prepare_wal_option(&mut request.options, region_id, region_wal_options);
+        prepare_wal_options(&mut request.options, region_id, region_wal_options);
 
         if let Some(physical_table_id) = self.physical_table_id {
             // Logical table has the same region numbers with physical table, and they have a one-to-one mapping.
