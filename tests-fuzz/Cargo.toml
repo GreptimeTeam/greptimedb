@@ -15,5 +15,6 @@ faker_rand = "0.1"
 lazy_static = { workspace = true }
 partition = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }
 snafu = { workspace = true }
 sql = { workspace = true }

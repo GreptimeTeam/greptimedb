@@ -14,6 +14,7 @@
 
 use common_query::AddColumnLocation;
 use derive_builder::Builder;
+use serde::{Deserialize, Serialize};
 
 use crate::ir::Column;
 
@@ -23,7 +24,7 @@ pub struct AlterTableExpr {
     pub alter_options: AlterTableOperation,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlterTableOperation {
     /// `ADD [ COLUMN ] <column_def> [location]`
     AddColumn {

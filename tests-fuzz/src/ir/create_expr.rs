@@ -18,11 +18,12 @@ use std::fmt::Display;
 use datatypes::value::Value;
 use derive_builder::Builder;
 use partition::partition::PartitionDef;
+use serde::{Deserialize, Serialize};
 
 use crate::ir::Column;
 
 // The column options
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnOption {
     Null,
     NotNull,
@@ -46,7 +47,7 @@ impl Display for ColumnOption {
 }
 
 /// A naive create table expr builder.
-#[derive(Debug, Builder, Clone)]
+#[derive(Debug, Builder, Clone, Serialize, Deserialize)]
 pub struct CreateTableExpr {
     pub name: String,
     pub columns: Vec<Column>,

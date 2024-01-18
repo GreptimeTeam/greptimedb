@@ -9512,6 +9512,7 @@ dependencies = [
  "lazy_static",
  "partition",
  "rand",
+ "serde",
  "snafu",
  "sql",
 ]

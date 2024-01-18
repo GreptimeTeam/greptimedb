@@ -25,6 +25,7 @@ use derive_builder::Builder;
 use faker_rand::lorem::Word;
 use lazy_static::lazy_static;
 use rand::distributions::{Distribution, Standard};
+use serde::{Deserialize, Serialize};
 
 use crate::ir::create_expr::ColumnOption;
 
@@ -73,7 +74,7 @@ pub fn generate_random_value(datatype: &ConcreteDataType) -> Value {
 }
 
 /// The IR column.
-#[derive(Debug, Builder, Clone)]
+#[derive(Debug, Builder, Clone, Serialize, Deserialize)]
 pub struct Column {
     #[builder(setter(into))]
     pub name: String,
