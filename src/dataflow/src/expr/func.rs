@@ -25,7 +25,7 @@ pub enum UnaryFunc {
     IsNull,
     IsTrue,
     IsFalse,
-    // TODO: spec treat of cast
+    // TODO(discord9): spec treat of cast
     CastDatetimeToInt64,
     CastInt64ToFloat32,
 }
@@ -72,7 +72,7 @@ impl UnaryFunc {
     }
 }
 
-/// TODO: support more binary functions for more types
+/// TODO(discord9): support more binary functions for more types
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum BinaryFunc {
     Eq,

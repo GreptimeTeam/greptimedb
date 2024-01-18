@@ -88,7 +88,6 @@ impl ScalarExpr {
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
     pub fn permute(&mut self, permutation: &[usize]) {
-        #[allow(deprecated)]
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
                 *old_i = permutation[*old_i];
@@ -102,7 +101,6 @@ impl ScalarExpr {
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
     pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) {
-        #[allow(deprecated)]
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
                 *old_i = permutation[old_i];
@@ -112,7 +110,6 @@ impl ScalarExpr {
 
     pub fn support(&self) -> BTreeSet<usize> {
         let mut support = BTreeSet::new();
-        #[allow(deprecated)]
         self.visit_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(i) = e {
                 support.insert(*i);

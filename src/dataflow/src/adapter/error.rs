@@ -30,8 +30,6 @@ pub enum Error {
     TableNotFound { name: String },
     #[snafu(display("Table already exist: {}", name))]
     TableAlreadyExist { name: String },
-    #[snafu(display("Timely error: {}", inner))]
-    Timely { inner: String },
     #[snafu(display("Failed to join task"))]
     JoinTask {
         #[snafu(source)]
@@ -50,7 +48,6 @@ impl ErrorExt for Error {
             Self::Eval { .. }
             | &Self::TableNotFound { .. }
             | &Self::TableAlreadyExist { .. }
-            | &Self::Timely { .. }
             | &Self::JoinTask { .. }
             | &Self::InvalidQuery { .. } => StatusCode::Internal,
         }

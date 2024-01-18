@@ -68,7 +68,7 @@ impl AggregateFunc {
     where
         I: IntoIterator<Item = Value>,
     {
-        // TODO: impl more functions like min/max/sumTimestamp etc.
+        // TODO(discord9): impl more functions like min/max/sumTimestamp etc.
         match self {
             AggregateFunc::MaxInt16 => max_value::<I, i16>(values),
             AggregateFunc::MaxInt32 => max_value::<I, i32>(values),
@@ -110,7 +110,7 @@ impl AggregateFunc {
 
     /// Eval value, diff with accum
     ///
-    /// TODO: deal with overflow
+    /// TODO(discord9): deal with overflow
     pub fn eval_diff_accum<I>(
         &self,
         accum: Option<Value>,
@@ -119,7 +119,7 @@ impl AggregateFunc {
     where
         I: IntoIterator<Item = (Value, Diff)>,
     {
-        // TODO: sum
+        // TODO(discord9): sum
         match self {
             AggregateFunc::SumInt16 | AggregateFunc::SumInt32 | AggregateFunc::SumInt64 => {
                 let accum = if let Some(accum) = accum {
@@ -196,7 +196,7 @@ impl AggregateFunc {
     }
 }
 
-/// TODO: deal with overflow
+/// TODO(discord9): deal with overflow
 fn sum_accum_diffs<I, ValueType, ResultType>(accum: Option<ResultType>, value_diffs: I) -> Value
 where
     I: IntoIterator<Item = (Value, Diff)>,
