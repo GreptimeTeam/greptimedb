@@ -25,7 +25,7 @@ use common_time::datetime::DateTime;
 use common_time::interval::IntervalUnit;
 use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
-use common_time::{Duration, Interval};
+use common_time::{Duration, Interval, Timezone};
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -427,11 +427,15 @@ pub fn duration_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue
     }
 }
 
-/// Convert [ScalarValue] to [Timestamp].
+/// Convert [`ScalarValue`] to [`Timestamp`].
+/// If it's `ScalarValue::Utf8`, try to parse it with the given timezone.
 /// Return `None` if given scalar value cannot be converted to a valid timestamp.
-pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
+pub fn scalar_value_to_timestamp(
+    scalar: &ScalarValue,
+    timezone: Option<&Timezone>,
+) -> Option<Timestamp> {
     match scalar {
-        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str_utc(s) {
+        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s, timezone) {
             Ok(t) => Some(t),
             Err(e) => {
                 logging::error!(e;"Failed to convert string literal {s} to timestamp");

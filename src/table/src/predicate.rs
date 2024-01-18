@@ -19,6 +19,7 @@ use common_telemetry::{error, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use datafusion::common::ScalarValue;
 use datafusion::physical_optimizer::pruning::{PruningPredicate, PruningStatistics};
 use datafusion_common::ToDFSchema;
 use datafusion_expr::expr::InList;
@@ -33,6 +34,14 @@ use crate::error;
 
 #[cfg(test)]
 mod stats;
+
+/// Assert the scalar value is not utf8.
+/// It should be converted to timestamp scalar value by `TypeConversionRule`.
+macro_rules! assert_not_utf8 {
+    ($lit: ident) => {
+        debug_assert!(!matches!($lit, ScalarValue::Utf8(_)));
+    };
+}
 
 #[derive(Debug, Clone)]
 pub struct Predicate {
@@ -282,7 +291,9 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         if col.name != self.ts_col_name {
             return None;
         }
-        scalar_value_to_timestamp(lit).map(|t| (t, reverse))
+
+        assert_not_utf8!(lit);
+        scalar_value_to_timestamp(lit, None).map(|t| (t, reverse))
     }
 
     fn extract_from_between_expr(
@@ -305,9 +316,12 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 
         match (low, high) {
             (DfExpr::Literal(low), DfExpr::Literal(high)) => {
-                let low_opt =
-                    scalar_value_to_timestamp(low).and_then(|ts| ts.convert_to(self.ts_col_unit));
-                let high_opt = scalar_value_to_timestamp(high)
+                assert_not_utf8!(low);
+                assert_not_utf8!(high);
+
+                let low_opt = scalar_value_to_timestamp(low, None)
+                    .and_then(|ts| ts.convert_to(self.ts_col_unit));
+                let high_opt = scalar_value_to_timestamp(high, None)
                     .and_then(|ts| ts.convert_to_ceil(self.ts_col_unit));
                 Some(TimestampRange::new_inclusive(low_opt, high_opt))
             }
@@ -338,7 +352,8 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         let mut init_range = TimestampRange::empty();
         for expr in list {
             if let DfExpr::Literal(scalar) = expr {
-                if let Some(timestamp) = scalar_value_to_timestamp(scalar) {
+                assert_not_utf8!(scalar);
+                if let Some(timestamp) = scalar_value_to_timestamp(scalar, None) {
                     init_range = init_range.or(&TimestampRange::single(timestamp))
                 } else {
                     // TODO(hl): maybe we should raise an error here since cannot parse
