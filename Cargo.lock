@@ -4989,6 +4989,7 @@ dependencies = [
  "chrono",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-datasource",
  "common-decimal",
  "common-error",
