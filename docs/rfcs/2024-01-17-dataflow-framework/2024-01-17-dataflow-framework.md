@@ -16,6 +16,7 @@ Being able to do continuous aggregation is a very powerful tool. It allows you t
 In order to do those things while maintaining a low memory footprint, you need to be able to manage the data in a smart way. Hence, we only store necessary data in memory, and send/recv data deltas to/from the client.
 
 # Details
+
 ## System boundary / What it's and isn't
 - GreptimeFlow provides a way to perform continuous aggregation over time-series data.
 - It's not a complete streaming-processing system. Only a must subset functionalities are provided.
@@ -39,6 +40,9 @@ Hence, we choose the third option, and use a simple logical plan that's anagonis
 - It also persists results in the format of Rows to frontend.
 - The query plan uses Substrait as codec format. It's the same with GreptimeDB's query engine.
 - Greptime Flow needs a WAL for recovering. It's possible to reuse datanode's.
+
+The workflow is shown in the following diagram
+![Greptime Flow](./flow_workflow.png)
 
 ## Lifecycle of data
 - New data is inserted into frontend like before. Frontend will mirror insert request to Flow node if there is configured flow job.
