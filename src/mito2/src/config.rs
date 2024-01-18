@@ -252,6 +252,8 @@ pub struct InvertedIndexConfig {
     pub create_on_compaction: Mode,
     /// Whether to apply the index on query: automatically or never.
     pub apply_on_query: Mode,
+    /// Write buffer size for creating the index.
+    pub write_buffer_size: ReadableSize,
     /// Memory threshold for performing an external sort during index creation.
     /// `None` means all sorting will happen in memory.
     #[serde_as(as = "NoneAsEmptyString")]
@@ -266,6 +268,7 @@ impl Default for InvertedIndexConfig {
             create_on_flush: Mode::Auto,
             create_on_compaction: Mode::Auto,
             apply_on_query: Mode::Auto,
+            write_buffer_size: ReadableSize::mb(8),
             mem_threshold_on_create: Some(ReadableSize::mb(64)),
             intermediate_path: String::new(),
         }

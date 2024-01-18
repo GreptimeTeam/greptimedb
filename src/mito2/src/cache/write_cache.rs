@@ -110,6 +110,7 @@ impl WriteCache {
         let indexer = IndexerBuilder {
             create_inverted_index: write_request.create_inverted_index,
             mem_threshold_index_create: write_request.mem_threshold_index_create,
+            write_buffer_size: write_request.index_write_buffer_size,
             file_id,
             file_path: self.file_cache.cache_file_path(puffin_key),
             metadata: &write_request.metadata,
@@ -281,6 +282,7 @@ mod tests {
             storage: None,
             create_inverted_index: true,
             mem_threshold_index_create: None,
+            index_write_buffer_size: None,
             cache_manager: Default::default(),
         };
 

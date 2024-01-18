@@ -266,9 +266,21 @@ impl ParquetReaderBuilder {
             if self.file_handle.meta().inverted_index_available() {
                 match index_applier.apply(self.file_handle.file_id()).await {
                     Ok(row_groups) => row_group_ids = row_groups,
-                    Err(err) => warn!(
-                        err; "Failed to apply index, region_id: {}, file_id: {}", 
-                        self.file_handle.region_id(), self.file_handle.file_id()),
+                    Err(err) => {
+                        if cfg!(any(test, feature = "test")) {
+                            panic!(
+                                "Failed to apply index, region_id: {}, file_id: {}, err: {}",
+                                self.file_handle.region_id(),
+                                self.file_handle.file_id(),
+                                err
+                            );
+                        } else {
+                            warn!(
+                                err; "Failed to apply index, region_id: {}, file_id: {}",
+                                self.file_handle.region_id(), self.file_handle.file_id()
+                            );
+                        }
+                    }
                 }
             }
         }

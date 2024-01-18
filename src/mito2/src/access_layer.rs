@@ -135,6 +135,7 @@ impl AccessLayer {
             let indexer = IndexerBuilder {
                 create_inverted_index: request.create_inverted_index,
                 mem_threshold_index_create: request.mem_threshold_index_create,
+                write_buffer_size: request.index_write_buffer_size,
                 file_id,
                 file_path: index_file_path,
                 metadata: &request.metadata,
@@ -183,6 +184,8 @@ pub(crate) struct SstWriteRequest {
     pub(crate) create_inverted_index: bool,
     /// The threshold of memory size to create inverted index.
     pub(crate) mem_threshold_index_create: Option<usize>,
+    /// The size of write buffer for index.
+    pub(crate) index_write_buffer_size: Option<usize>,
 }
 
 /// Creates a fs object store with atomic write dir.
