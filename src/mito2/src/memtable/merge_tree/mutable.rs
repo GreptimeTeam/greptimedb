@@ -115,6 +115,7 @@ impl MutablePart {
             primary_key.clear();
             row_codec.encode_to_vec(kv.primary_keys(), &mut primary_key)?;
 
+            // TODO(yingwen): Freeze a block/dict if it is large enough (in bytes).
             if self.is_dictionary_enabled() {
                 self.write_intern(metadata, &kv, &mut primary_key, metrics);
             } else {
