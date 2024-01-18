@@ -36,7 +36,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    fn new(datanode: Datanode) -> Self {
+    pub fn new(datanode: Datanode) -> Self {
         Self { datanode }
     }
 

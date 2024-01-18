@@ -34,6 +34,8 @@ pub fn create_udf(func: FunctionRef) -> ScalarUdf {
 
     let func_cloned = func.clone();
     let fun: ScalarFunctionImplementation = Arc::new(move |args: &[ColumnarValue]| {
+        // FIXME(dennis): set the timezone into function context
+        // Question: how to get the timezone from the query context?
         let func_ctx = FunctionContext::default();
 
         let len = args

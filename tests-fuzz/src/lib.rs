@@ -12,28 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::error::Error;
-use common_time::timezone::get_timezone;
-use common_time::Timezone;
-
-pub struct EvalContext {
-    pub timezone: Timezone,
-    pub error: Option<Error>,
-}
-
-impl Default for EvalContext {
-    fn default() -> Self {
-        Self {
-            error: None,
-            timezone: get_timezone(None).clone(),
-        }
-    }
-}
-
-impl EvalContext {
-    pub fn set_error(&mut self, e: Error) {
-        if self.error.is_none() {
-            self.error = Some(e);
-        }
-    }
-}
+pub(crate) mod context;
+pub(crate) mod executor;
+pub(crate) mod generator;
+pub(crate) mod table_creator;
+pub(crate) mod translator;

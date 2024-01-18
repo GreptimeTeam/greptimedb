@@ -53,6 +53,7 @@ members = [
     "src/store-api",
     "src/table",
     "src/index",
+    "tests-fuzz",
     "tests-integration",
     "tests/runner",
 ]
@@ -92,13 +93,14 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2c1f17dce7af748c9a1255e82d6ceb7959f8919b" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "65b008f018395f8fa917a7d3c7883b82f309cb74" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
 mockall = "0.11.4"
 moka = "0.12"
+num_cpus = "1.16"
 once_cell = "1.18"
 opentelemetry-proto = { git = "https://github.com/waynexia/opentelemetry-rust.git", rev = "33841b38dda79b15f2024952be5f32533325ca02", features = [
     "gen-tonic",
@@ -126,6 +128,7 @@ serde_json = "1.0"
 serde_with = "3"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.7"
+sysinfo = "0.30"
 # on branch v0.38.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "6a93567ae38d42be5c8d08b13c8ff4dde26502ef", features = [
     "visitor",

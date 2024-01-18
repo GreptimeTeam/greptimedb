@@ -33,8 +33,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
-use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
+use table::table_reference::TableReference;
 
 use crate::ddl::utils::{handle_operate_region_error, handle_retry_error, region_storage_path};
 use crate::ddl::DdlContext;

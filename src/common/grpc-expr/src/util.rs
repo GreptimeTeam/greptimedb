@@ -20,8 +20,8 @@ use api::v1::{
 };
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
-use table::engine::TableReference;
 use table::metadata::TableId;
+use table::table_reference::TableReference;
 
 use crate::error::{
     DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu, MissingTimestampColumnSnafu, Result,

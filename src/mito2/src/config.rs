@@ -14,6 +14,7 @@
 
 //! Configurations.
 
+use std::cmp;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, NoneAsEmptyString};
 
 use crate::error::Result;
+use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 /// Default max running background job.
 const DEFAULT_MAX_BG_JOB: usize = 4;
@@ -59,17 +61,17 @@ pub struct MitoConfig {
     /// Interval to auto flush a region if it has not flushed yet (default 30 min).
     #[serde(with = "humantime_serde")]
     pub auto_flush_interval: Duration,
-    /// Global write buffer size threshold to trigger flush (default 1G).
+    /// Global write buffer size threshold to trigger flush.
     pub global_write_buffer_size: ReadableSize,
-    /// Global write buffer size threshold to reject write requests (default 2G).
+    /// Global write buffer size threshold to reject write requests.
     pub global_write_buffer_reject_size: ReadableSize,
 
     // Cache configs:
-    /// Cache size for SST metadata (default 128MB). Setting it to 0 to disable the cache.
+    /// Cache size for SST metadata. Setting it to 0 to disable the cache.
     pub sst_meta_cache_size: ReadableSize,
-    /// Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
+    /// Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
     pub vector_cache_size: ReadableSize,
-    /// Cache size for pages of SST row groups (default 512MB). Setting it to 0 to disable the cache.
+    /// Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
     pub page_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
@@ -97,7 +99,7 @@ pub struct MitoConfig {
 
 impl Default for MitoConfig {
     fn default() -> Self {
-        MitoConfig {
+        let mut mito_config = MitoConfig {
             num_workers: divide_num_cpus(2),
             worker_channel_size: 128,
             worker_request_batch_size: 64,
@@ -113,12 +115,19 @@ impl Default for MitoConfig {
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
             experimental_write_cache_size: ReadableSize::mb(512),
-            sst_write_buffer_size: ReadableSize::mb(8),
+            sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
             inverted_index: InvertedIndexConfig::default(),
+        };
+
+        // Adjust buffer and cache size according to system memory if we can.
+        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+            mito_config.adjust_buffer_and_cache_size(sys_memory);
         }
+
+        mito_config
     }
 }
 
@@ -180,6 +189,23 @@ impl MitoConfig {
         self.inverted_index.sanitize(data_home)?;
 
         Ok(())
+    }
+
+    fn adjust_buffer_and_cache_size(&mut self, sys_memory: ReadableSize) {
+        // Use 1/64 of OS memory as global write buffer size, it shouldn't be greater than 1G in default mode.
+        let global_write_buffer_size = cmp::min(sys_memory / 64, ReadableSize::gb(1));
+        // Use 2x of global write buffer size as global write buffer reject size.
+        let global_write_buffer_reject_size = global_write_buffer_size * 2;
+        // Use 1/256 of OS memory size as SST meta cache size, it shouldn't be greater than 128MB in default mode.
+        let sst_meta_cache_size = cmp::min(sys_memory / 256, ReadableSize::mb(128));
+        // Use 1/128 of OS memory size as mem cache size, it shouldn't be greater than 512MB in default mode.
+        let mem_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
+
+        self.global_write_buffer_size = global_write_buffer_size;
+        self.global_write_buffer_reject_size = global_write_buffer_reject_size;
+        self.sst_meta_cache_size = sst_meta_cache_size;
+        self.vector_cache_size = mem_cache_size;
+        self.page_cache_size = mem_cache_size;
     }
 
     /// Enable experimental write cache.
@@ -259,7 +285,7 @@ impl InvertedIndexConfig {
 /// Divide cpu num by a non-zero `divisor` and returns at least 1.
 fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(divisor > 0);
-    let cores = num_cpus::get();
+    let cores = common_config::utils::get_cpus();
     debug_assert!(cores > 0);
 
     (cores + divisor - 1) / divisor

@@ -309,30 +309,36 @@ impl Database {
                 );
                 Ok(Output::AffectedRows(rows))
             }
-            FlightMessage::Recordbatch(_) => IllegalFlightMessagesSnafu {
-                reason: "The first flight message cannot be a RecordBatch message",
+            FlightMessage::Recordbatch(_) | FlightMessage::Metrics(_) => {
+                IllegalFlightMessagesSnafu {
+                    reason: "The first flight message cannot be a RecordBatch or Metrics message",
+                }
+                .fail()
             }
-            .fail(),
             FlightMessage::Schema(schema) => {
                 let stream = Box::pin(stream!({
                     while let Some(flight_message) = flight_message_stream.next().await {
                         let flight_message = flight_message
                             .map_err(BoxedError::new)
                             .context(ExternalSnafu)?;
-                        let FlightMessage::Recordbatch(record_batch) = flight_message else {
-                            yield IllegalFlightMessagesSnafu {reason: "A Schema message must be succeeded exclusively by a set of RecordBatch messages"}
+                        match flight_message {
+                            FlightMessage::Recordbatch(record_batch) => yield Ok(record_batch),
+                            FlightMessage::Metrics(_) => {}
+                            FlightMessage::AffectedRows(_) | FlightMessage::Schema(_) => {
+                                yield IllegalFlightMessagesSnafu {reason: format!("A Schema message must be succeeded exclusively by a set of RecordBatch messages, flight_message: {:?}", flight_message)}
                                         .fail()
                                         .map_err(BoxedError::new)
                                         .context(ExternalSnafu);
-                            break;
-                        };
-                        yield Ok(record_batch);
+                                break;
+                            }
+                        }
                     }
                 }));
                 let record_batch_stream = RecordBatchStreamWrapper {
                     schema,
                     stream,
                     output_ordering: None,
+                    metrics: Default::default(),
                 };
                 Ok(Output::Stream(Box::pin(record_batch_stream)))
             }

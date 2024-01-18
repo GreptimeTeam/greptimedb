@@ -26,8 +26,8 @@ use base64::Engine as _;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
+use table::table_reference::TableReference;
 
 use crate::error::{self, Result};
 use crate::table_name::TableName;

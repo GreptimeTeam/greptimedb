@@ -1455,6 +1455,7 @@ name = "client"
 version = "0.6.0"
 dependencies = [
  "api",
+ "arc-swap",
  "arrow-flight",
  "async-stream",
  "async-trait",
@@ -1533,6 +1534,7 @@ dependencies = [
  "common-procedure",
  "common-query",
  "common-recordbatch",
+ "common-runtime",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -1630,7 +1632,9 @@ version = "0.6.0"
 dependencies = [
  "common-base",
  "humantime-serde",
+ "num_cpus",
  "serde",
+ "sysinfo",
 ]
 
 [[package]]
@@ -1911,6 +1915,7 @@ dependencies = [
 name = "common-recordbatch"
 version = "0.6.0"
 dependencies = [
+ "arc-swap",
  "common-error",
  "common-macro",
  "datafusion",
@@ -3647,7 +3652,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=2c1f17dce7af748c9a1255e82d6ceb7959f8919b#2c1f17dce7af748c9a1255e82d6ceb7959f8919b"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=65b008f018395f8fa917a7d3c7883b82f309cb74#65b008f018395f8fa917a7d3c7883b82f309cb74"
 dependencies = [
  "prost 0.12.3",
  "serde",
@@ -3975,7 +3980,7 @@ dependencies = [
  "iana-time-zone-haiku",
  "js-sys",
  "wasm-bindgen",
- "windows-core",
+ "windows-core 0.51.1",
 ]
 
 [[package]]
@@ -5009,7 +5014,6 @@ dependencies = [
  "log-store",
  "memcomparable",
  "moka",
- "num_cpus",
  "object-store",
  "parquet",
  "paste",
@@ -5298,6 +5302,15 @@ name = "normalize-line-endings"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
+
+[[package]]
+name = "ntapi"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8a3895c6391c39d7fe7ebc444a87eb2991b2a0bc718fdabd071eec617fc68e4"
+dependencies = [
+ "winapi",
+]
 
 [[package]]
 name = "nu-ansi-term"
@@ -6928,6 +6941,8 @@ dependencies = [
  "greptime-proto",
  "humantime",
  "lazy_static",
+ "meter-core",
+ "meter-macros",
  "num",
  "num-traits",
  "object-store",
@@ -8037,7 +8052,7 @@ dependencies = [
  "which",
  "widestring",
  "winapi",
- "windows",
+ "windows 0.39.0",
  "winreg 0.10.1",
 ]
 
@@ -9363,6 +9378,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2047c6ded9c721764247e62cd3b03c09ffc529b2ba5b10ec482ae507a4a70160"
 
 [[package]]
+name = "sysinfo"
+version = "0.30.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fb4f3438c8f6389c864e61221cbc97e9bca98b4daf39a5beb7bea660f528bb2"
+dependencies = [
+ "cfg-if 1.0.0",
+ "core-foundation-sys",
+ "libc",
+ "ntapi",
+ "once_cell",
+ "rayon",
+ "windows 0.52.0",
+]
+
+[[package]]
 name = "system-configuration"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9496,6 +9526,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3369f5ac52d5eb6ab48c6b4ffdc8efbcad6b89c765749064ba298f2c68a16a76"
 
 [[package]]
+name = "tests-fuzz"
+version = "0.6.0"
+dependencies = [
+ "async-trait",
+]
+
+[[package]]
 name = "tests-integration"
 version = "0.6.0"
 dependencies = [
@@ -9533,7 +9570,6 @@ dependencies = [
  "meta-client",
  "meta-srv",
  "mysql_async",
- "num_cpus",
  "object-store",
  "once_cell",
  "opentelemetry-proto 0.3.0",
@@ -10934,12 +10970,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48a53791691ab099e5e2ad123536d0fff50652600abaf43bbf952894110d0be"
+dependencies = [
+ "windows-core 0.52.0",
+ "windows-targets 0.52.0",
+]
+
+[[package]]
 name = "windows-core"
 version = "0.51.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1f8cf84f35d2db49a46868f947758c7a1138116f7fac3bc844f43ade1292e64"
 dependencies = [
  "windows-targets 0.48.5",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33ab640c8d7e35bf8ba19b884ba838ceb4fba93a4e8c65a9059d08afcfc683d9"
+dependencies = [
+ "windows-targets 0.52.0",
 ]
 
 [[package]]
