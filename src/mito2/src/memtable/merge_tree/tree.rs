@@ -14,30 +14,47 @@
 
 //! Implementation of the memtable merge tree.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
+use crate::memtable::merge_tree::mutable::{MutablePart, WriteMetrics};
+use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::KeyValues;
+use crate::row_converter::{McmpRowCodec, SortField};
 
 /// The merge tree.
 pub(crate) struct MergeTree {
     /// Metadata of the region.
     pub(crate) metadata: RegionMetadataRef,
+    /// Primary key codec.
+    row_codec: McmpRowCodec,
+    /// Mutable part of the tree.
+    mutable: RwLock<MutablePart>,
 }
 
-pub(crate) type MergeTreePtr = Arc<MergeTree>;
+pub(crate) type MergeTreeRef = Arc<MergeTree>;
 
 impl MergeTree {
     /// Creates a new merge tree.
-    pub(crate) fn new(metadata: RegionMetadataRef) -> MergeTree {
-        MergeTree { metadata }
+    pub(crate) fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> MergeTree {
+        let row_codec = McmpRowCodec::new(
+            metadata
+                .primary_key_columns()
+                .map(|c| SortField::new(c.column_schema.data_type.clone()))
+                .collect(),
+        );
+        MergeTree {
+            metadata,
+            row_codec,
+            mutable: RwLock::new(MutablePart::new(config)),
+        }
     }
 
     /// Write key-values into the tree.
-    #[allow(unused)]
-    pub(crate) fn write(&self, _kvs: &KeyValues) -> Result<()> {
-        todo!()
+    pub(crate) fn write(&self, kvs: &KeyValues, metrics: &mut WriteMetrics) -> Result<()> {
+        let mut part = self.mutable.write().unwrap();
+        part.write(&self.metadata, &self.row_codec, kvs, metrics)
     }
 }
