@@ -65,6 +65,21 @@ pub enum ScalarExpr {
 }
 
 impl ScalarExpr {
+    pub fn call_unary(self, func: UnaryFunc) -> Self {
+        ScalarExpr::CallUnary {
+            func,
+            expr: Box::new(self),
+        }
+    }
+
+    pub fn call_binary(func: BinaryFunc, expr1: Self, expr2: Self) -> Self {
+        ScalarExpr::CallBinary {
+            func,
+            expr1: Box::new(expr1),
+            expr2: Box::new(expr2),
+        }
+    }
+
     pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
         match self {
             ScalarExpr::Column(index) => Ok(values[*index].clone()),

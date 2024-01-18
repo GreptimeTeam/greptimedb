@@ -78,4 +78,28 @@ impl Row {
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
         self.inner.iter()
     }
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+#[test]
+fn test_row() {
+    let row = Row::empty();
+    let row_1 = Row::new(vec![]);
+    assert_eq!(row, row_1);
+    let mut row_2 = Row::new(vec![Value::Int32(1), Value::Int32(2)]);
+    assert_eq!(row_2.get(0), Some(&Value::Int32(1)));
+    row_2.clear();
+    assert_eq!(row_2.get(0), None);
+    row_2
+        .packer()
+        .extend(vec![Value::Int32(1), Value::Int32(2)]);
+    assert_eq!(row_2.get(0), Some(&Value::Int32(1)));
+    row_2.extend(vec![Value::Int32(1), Value::Int32(2)]);
+    assert_eq!(row_2.len(), 4);
+    let row_3 = Row::pack(row_2.into_iter());
+    assert_eq!(row_3.len(), 4);
+    let row_4 = Row::pack(row_3.iter().cloned());
+    assert_eq!(row_3, row_4);
 }

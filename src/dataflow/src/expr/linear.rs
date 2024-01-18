@@ -389,3 +389,51 @@ impl MfpPlan {
         self.mfp.mfp.is_identity() && self.lower_bounds.is_empty() && self.upper_bounds.is_empty()
     }
 }
+
+#[test]
+fn test_mfp() {
+    use super::BinaryFunc;
+    let mfp = MapFilterProject::new(3)
+        .map(vec![
+            ScalarExpr::call_binary(BinaryFunc::Lt, ScalarExpr::Column(0), ScalarExpr::Column(1)),
+            ScalarExpr::call_binary(BinaryFunc::Lt, ScalarExpr::Column(1), ScalarExpr::Column(2)),
+        ])
+        .project(vec![3, 4]);
+    assert!(!mfp.is_identity());
+    let mfp = MapFilterProject::compose(mfp, MapFilterProject::new(2));
+    {
+        let mfp_0 = mfp.as_map_filter_project();
+        let same = MapFilterProject::new(3)
+            .map(mfp_0.0)
+            .filter(mfp_0.1)
+            .project(mfp_0.2);
+        assert_eq!(mfp, same);
+    }
+    assert_eq!(mfp.demand().len(), 3);
+    let mut mfp = mfp;
+    mfp.permute(BTreeMap::from([(0, 2), (2, 0), (1, 1)]), 3);
+    assert_eq!(
+        mfp,
+        MapFilterProject::new(3)
+            .map(vec![
+                ScalarExpr::call_binary(
+                    BinaryFunc::Lt,
+                    ScalarExpr::Column(2),
+                    ScalarExpr::Column(1)
+                ),
+                ScalarExpr::call_binary(
+                    BinaryFunc::Lt,
+                    ScalarExpr::Column(1),
+                    ScalarExpr::Column(0)
+                )
+            ])
+            .project(vec![3, 4])
+    );
+    let safe_mfp = SafeMfpPlan { mfp };
+    let mut values = vec![Value::from(4), Value::from(2), Value::from(3)];
+    let ret = safe_mfp
+        .evaluate_into(&mut values, &mut Row::empty())
+        .unwrap()
+        .unwrap();
+    assert_eq!(ret, Row::pack(vec![Value::from(false), Value::from(true)]));
+}
