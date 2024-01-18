@@ -536,6 +536,12 @@ pub enum Error {
         error: std::io::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to filter record batch"))]
+    FilterRecordBatch {
+        source: common_recordbatch::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -632,6 +638,7 @@ impl ErrorExt for Error {
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
+            FilterRecordBatch { source, .. } => source.status_code(),
             Upload { .. } => StatusCode::StorageUnavailable,
         }
     }

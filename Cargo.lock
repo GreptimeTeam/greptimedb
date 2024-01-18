@@ -1916,6 +1916,7 @@ name = "common-recordbatch"
 version = "0.6.0"
 dependencies = [
  "arc-swap",
+ "common-base",
  "common-error",
  "common-macro",
  "datafusion",

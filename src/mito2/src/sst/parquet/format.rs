@@ -118,8 +118,14 @@ pub(crate) struct ReadFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
-    // Field column id to its index in `schema` (SST schema).
+    /// Field column id to its index in `schema` (SST schema).
+    /// In SST schema, fields are stored in the front of the schema.
     field_id_to_index: HashMap<ColumnId, usize>,
+    /// Field column id to their index in the projected schema (
+    /// the schema of [Batch]).
+    ///
+    /// This field is set at the first call to [convert_record_batch](Self::convert_record_batch).
+    field_id_to_projected_index: Option<HashMap<ColumnId, usize>>,
 }
 
 impl ReadFormat {
@@ -136,6 +142,7 @@ impl ReadFormat {
             metadata,
             arrow_schema,
             field_id_to_index,
+            field_id_to_projected_index: None,
         }
     }
 
@@ -180,7 +187,7 @@ impl ReadFormat {
     ///
     /// Note that the `record_batch` may only contains a subset of columns if it is projected.
     pub(crate) fn convert_record_batch(
-        &self,
+        &mut self,
         record_batch: &RecordBatch,
         batches: &mut VecDeque<Batch>,
     ) -> Result<()> {
@@ -196,6 +203,10 @@ impl ReadFormat {
                 ),
             }
         );
+
+        if self.field_id_to_projected_index.is_none() {
+            self.init_id_to_projected_index(record_batch);
+        }
 
         let mut fixed_pos_columns = record_batch
             .columns()
@@ -257,6 +268,19 @@ impl ReadFormat {
         }
 
         Ok(())
+    }
+
+    fn init_id_to_projected_index(&mut self, record_batch: &RecordBatch) {
+        let mut name_to_projected_index = HashMap::new();
+        for (index, field) in record_batch.schema().fields().iter().enumerate() {
+            let Some(column) = self.metadata.column_by_name(field.name()) else {
+                continue;
+            };
+            if column.semantic_type == SemanticType::Field {
+                name_to_projected_index.insert(column.column_id, index);
+            }
+        }
+        self.field_id_to_projected_index = Some(name_to_projected_index);
     }
 
     /// Returns min values of specific column in row groups.
@@ -478,14 +502,24 @@ impl ReadFormat {
         Some(Arc::new(UInt64Array::from_iter(values)))
     }
 
-    /// Field index of the primary key.
+    /// Index in SST of the primary key.
     fn primary_key_position(&self) -> usize {
         self.arrow_schema.fields.len() - 3
     }
 
-    /// Field index of the time index.
+    /// Index in SST of the time index.
     fn time_index_position(&self) -> usize {
         self.arrow_schema.fields.len() - FIXED_POS_COLUMN_NUM
+    }
+
+    /// Index of a field column by its column id.
+    /// This function is only available after the first call to
+    /// [convert_record_batch](Self::convert_record_batch). Otherwise
+    /// it always return `None`
+    pub fn field_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
+        self.field_id_to_projected_index
+            .as_ref()
+            .and_then(|m| m.get(&column_id).copied())
     }
 }
 
@@ -771,7 +805,7 @@ mod tests {
     fn test_convert_empty_record_batch() {
         let metadata = build_test_region_metadata();
         let arrow_schema = build_test_arrow_schema();
-        let read_format = ReadFormat::new(metadata);
+        let mut read_format = ReadFormat::new(metadata);
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -785,7 +819,7 @@ mod tests {
     #[test]
     fn test_convert_record_batch() {
         let metadata = build_test_region_metadata();
-        let read_format = ReadFormat::new(metadata);
+        let mut read_format = ReadFormat::new(metadata);
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1

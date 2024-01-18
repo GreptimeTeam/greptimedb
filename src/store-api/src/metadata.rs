@@ -254,7 +254,10 @@ impl RegionMetadata {
             .map(|id| self.column_by_id(*id).unwrap())
     }
 
-    /// Returns all field columns.
+    /// Returns all field columns before projection.
+    ///
+    /// **Use with caution**. On read path where might have projection, this method
+    /// can return columns that not present in data batch.
     pub fn field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         self.column_metadatas
             .iter()

@@ -14,6 +14,7 @@
 
 pub mod adapter;
 pub mod error;
+pub mod filter;
 mod recordbatch;
 pub mod util;
 
