@@ -106,7 +106,7 @@ pub fn allocate_region_wal_options(
 }
 
 /// Inserts wal options into options.
-pub fn prepare_wal_option(
+pub fn prepare_wal_options(
     options: &mut HashMap<String, String>,
     region_id: RegionId,
     region_wal_options: &HashMap<RegionNumber, String>,
