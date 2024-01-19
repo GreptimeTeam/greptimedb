@@ -21,7 +21,7 @@ use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_time::interval::NANOS_PER_MILLI;
 use common_time::timestamp::TimeUnit;
-use common_time::{Interval, Timestamp};
+use common_time::{Interval, Timestamp, Timezone};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
@@ -34,6 +34,7 @@ use datafusion_expr::{
 };
 use datatypes::prelude::ConcreteDataType;
 use promql_parser::util::parse_duration;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -55,6 +56,7 @@ pub struct RangeExprRewriter<'a> {
     /// Use `BTreeSet` to avoid in case like `avg(a) RANGE '5m' + avg(a) RANGE '5m'`, duplicate range expr `avg(a) RANGE '5m'` be calculate twice
     range_fn: BTreeSet<RangeFn>,
     sub_aggr: &'a Aggregate,
+    query_ctx: &'a QueryContextRef,
 }
 
 impl<'a> RangeExprRewriter<'a> {
@@ -133,7 +135,7 @@ fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
 /// 1. NOW: align to current execute time
 /// 2. Timestamp string: align to specific timestamp
 /// 3. leave empty (as Default Option): align to unix epoch 0
-fn parse_align_to(args: &[Expr], i: usize) -> DFResult<i64> {
+fn parse_align_to(args: &[Expr], i: usize, timezone: Option<&Timezone>) -> DFResult<i64> {
     let s = parse_str_expr(args, i)?;
     let upper = s.to_uppercase();
     match upper.as_str() {
@@ -142,8 +144,8 @@ fn parse_align_to(args: &[Expr], i: usize) -> DFResult<i64> {
         "" => return Ok(0),
         _ => (),
     }
-    // FIXME(dennis): respect timezone in query context
-    Timestamp::from_str_utc(s)
+
+    Timestamp::from_str(s, timezone)
         .map_err(|e| {
             DataFusionError::Plan(format!(
                 "Illegal `align to` argument `{}` in range select query, can't be parse as NOW/CALENDAR/Timestamp, error: {}",
@@ -206,7 +208,11 @@ impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
                     .map_err(|e| DataFusionError::Plan(e.to_string()))?;
                 let by = parse_expr_list(&func.args, 4, byc)?;
                 let align = parse_duration_expr(&func.args, byc + 4)?;
-                let align_to = parse_align_to(&func.args, byc + 5)?;
+                let align_to = parse_align_to(
+                    &func.args,
+                    byc + 5,
+                    Some(self.query_ctx.timezone().as_ref()),
+                )?;
                 let mut data_type = range_expr.get_type(self.input_plan.schema())?;
                 let mut need_cast = false;
                 let fill = Fill::try_from_str(parse_str_expr(&func.args, 2)?, &data_type)?;
@@ -247,11 +253,15 @@ impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
 /// collecting info we need to generate RangeSelect Query LogicalPlan and rewrite th original LogicalPlan.
 pub struct RangePlanRewriter {
     table_provider: DfTableSourceProvider,
+    query_ctx: QueryContextRef,
 }
 
 impl RangePlanRewriter {
-    pub fn new(table_provider: DfTableSourceProvider) -> Self {
-        Self { table_provider }
+    pub fn new(table_provider: DfTableSourceProvider, query_ctx: QueryContextRef) -> Self {
+        Self {
+            table_provider,
+            query_ctx,
+        }
     }
 
     pub async fn rewrite(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
@@ -295,6 +305,7 @@ impl RangePlanRewriter {
                     by: vec![],
                     range_fn: BTreeSet::new(),
                     sub_aggr: aggr_plan,
+                    query_ctx: &self.query_ctx,
                 };
                 let new_expr = expr
                     .iter()
@@ -747,15 +758,28 @@ mod test {
     fn test_parse_align_to() {
         // test NOW
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some("NOW".into())))];
-        let epsinon = parse_align_to(&args, 0).unwrap() - Timestamp::current_millis().value();
+        let epsinon = parse_align_to(&args, 0, None).unwrap() - Timestamp::current_millis().value();
         assert!(epsinon.abs() < 100);
         // test default
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some("".into())))];
-        assert!(parse_align_to(&args, 0).unwrap() == 0);
+        assert!(parse_align_to(&args, 0, None).unwrap() == 0);
         // test Timestamp
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some(
             "1970-01-01T00:00:00+08:00".into(),
         )))];
-        assert!(parse_align_to(&args, 0).unwrap() == -8 * 60 * 60 * 1000);
+        assert!(parse_align_to(&args, 0, None).unwrap() == -8 * 60 * 60 * 1000);
+        // timezone
+        let args = vec![Expr::Literal(ScalarValue::Utf8(Some(
+            "1970-01-01T00:00:00".into(),
+        )))];
+        assert!(
+            parse_align_to(
+                &args,
+                0,
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap()
+                == -8 * 60 * 60 * 1000
+        );
     }
 }

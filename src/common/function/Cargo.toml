@@ -19,6 +19,7 @@ num = "0.4"
 num-traits = "0.2"
 once_cell.workspace = true
 paste = "1.0"
+session.workspace = true
 snafu.workspace = true
 statrs = "0.16"
 

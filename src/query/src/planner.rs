@@ -81,7 +81,7 @@ impl DfLogicalPlanner {
         let result = sql_to_rel
             .statement_to_plan(df_stmt)
             .context(PlanSqlSnafu)?;
-        let plan = RangePlanRewriter::new(table_provider)
+        let plan = RangePlanRewriter::new(table_provider, query_ctx.clone())
             .rewrite(result)
             .await?;
 
