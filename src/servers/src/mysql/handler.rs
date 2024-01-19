@@ -208,7 +208,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let query_ctx = self.session.new_query_context();
         let (query, param_num) = replace_placeholders(raw_query);
 
-        let statement = validate_query(raw_query, &query_ctx).await?;
+        let statement = validate_query(raw_query).await?;
 
         // We have to transform the placeholder, because DataFusion only parses placeholders
         // in the form of "$i", it can't process "?" right now.
@@ -444,12 +444,9 @@ fn replace_params_with_values(
         .context(error::ReplacePreparedStmtParamsSnafu)
 }
 
-async fn validate_query(query: &str, query_ctx: &QueryContextRef) -> Result<Statement> {
-    let statement = ParserContext::create_with_dialect(
-        query,
-        &MySqlDialect {},
-        ParseOptions::with_timezone(query_ctx.timezone().as_ref()),
-    );
+async fn validate_query(query: &str) -> Result<Statement> {
+    let statement =
+        ParserContext::create_with_dialect(query, &MySqlDialect {}, ParseOptions::default());
     let mut statement = statement.map_err(|e| {
         InvalidPrepareStatementSnafu {
             err_msg: e.output_msg(),

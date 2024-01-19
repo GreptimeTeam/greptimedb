@@ -107,17 +107,14 @@ pub struct QueryLanguageParser {}
 
 impl QueryLanguageParser {
     /// Try to parse SQL with GreptimeDB dialect, return the statement when success.
-    pub fn parse_sql(sql: &str, query_ctx: &QueryContextRef) -> Result<QueryStatement> {
+    pub fn parse_sql(sql: &str, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
         let _timer = METRIC_PARSE_SQL_ELAPSED.start_timer();
-        let mut statement = ParserContext::create_with_dialect(
-            sql,
-            &GreptimeDbDialect {},
-            ParseOptions::with_timezone(query_ctx.timezone().as_ref()),
-        )
-        .map_err(BoxedError::new)
-        .context(QueryParseSnafu {
-            query: sql.to_string(),
-        })?;
+        let mut statement =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .map_err(BoxedError::new)
+                .context(QueryParseSnafu {
+                    query: sql.to_string(),
+                })?;
         if statement.len() != 1 {
             MultipleStatementsSnafu {
                 query: sql.to_string(),

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_time::Timezone;
 use snafu::ResultExt;
 use sqlparser::ast::Ident;
 use sqlparser::dialect::Dialect;
@@ -28,16 +27,7 @@ use crate::statements::transform_statements;
 
 /// SQL Parser options, such as session timezone etc.
 #[derive(Clone, Debug, Default)]
-pub struct ParseOptions<'a> {
-    pub timezone: Option<&'a Timezone>,
-}
-
-impl<'a> ParseOptions<'a> {
-    /// Create a [`ParseOptions`] with timezone.
-    pub fn with_timezone(tz: &'a Timezone) -> Self {
-        Self { timezone: Some(tz) }
-    }
-}
+pub struct ParseOptions {}
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {

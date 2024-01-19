@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use common_catalog::consts::default_engine;
+use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -409,7 +410,7 @@ impl<'a> ParserContext<'a> {
 
         let name = parser.parse_identifier()?;
         if name.quote_style.is_none() &&
-            // "ALL_KEYWORDS" are sorted.
+        // "ALL_KEYWORDS" are sorted.
             ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
         {
             return Err(ParserError::ParserError(format!(
@@ -726,6 +727,13 @@ fn ensure_value_lists_bounded_by_maxvalue(value_lists: Vec<&Vec<Value>>) -> Resu
     Ok(())
 }
 
+fn is_string_value(v: &SqlValue) -> bool {
+    matches!(
+        v,
+        SqlValue::DoubleQuotedString(_) | SqlValue::SingleQuotedString(_)
+    )
+}
+
 /// Ensure that value lists of partitions are strictly increasing.
 fn ensure_value_lists_strictly_increased<'a>(
     partitions: &'a Partitions,
@@ -753,6 +761,28 @@ fn ensure_value_lists_strictly_increased<'a>(
                 (false, false) => {
                     let column_name = &column.name.value;
                     let cdt = sql_data_type_to_concrete_data_type(&column.data_type)?;
+
+                    if matches!(
+                        cdt,
+                        ConcreteDataType::Timestamp(_)
+                            | ConcreteDataType::Date(_)
+                            | ConcreteDataType::DateTime(_)
+                    ) {
+                        // Date/Timestamp/Datetime need to be aware of timezone information
+                        // when converting from a string to a specific type.
+                        // If x and y have only one value type as a string,
+                        // comparison is not allowed.
+                        match (is_string_value(x), is_string_value(y)) {
+                            (true, false) | (false, true) => {
+                                return error::InvalidSqlSnafu {
+                                    msg: format!("Can't compare {:?} with {:?}", x, y),
+                                }
+                                .fail();
+                            }
+                            _ => {}
+                        }
+                    }
+
                     let x = sql_value_to_value(column_name, &cdt, x)?;
                     let y = sql_value_to_value(column_name, &cdt, y)?;
                     match x.cmp(&y) {
@@ -1456,6 +1486,23 @@ ENGINE=mito";
         } else {
             unreachable!("should be create table statement");
         }
+    }
+
+    #[test]
+    fn test_parse_partitions_with_invalid_comparison() {
+        let sql = r"
+CREATE TABLE rcx ( a INT, b STRING, c INT, ts timestamp time index)
+PARTITION BY RANGE COLUMNS(ts) (
+  PARTITION r0 VALUES LESS THAN (1000),
+  PARTITION r1 VALUES LESS THAN ('2024-01-19 00:00:00'),
+  PARTITION r3 VALUES LESS THAN (MAXVALUE),
+)
+ENGINE=mito";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        let err_msg = result.unwrap_err().output_msg();
+        assert!(err_msg.contains("Invalid SQL, error: Can't compare"));
     }
 
     #[test]

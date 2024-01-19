@@ -150,12 +150,9 @@ impl QueryParser for DefaultQueryParser {
     async fn parse_sql(&self, sql: &str, _types: &[Type]) -> PgWireResult<Self::Statement> {
         crate::metrics::METRIC_POSTGRES_PREPARED_COUNT.inc();
         let query_ctx = self.session.new_query_context();
-        let mut stmts = ParserContext::create_with_dialect(
-            sql,
-            &PostgreSqlDialect {},
-            ParseOptions::with_timezone(self.session.timezone().as_ref()),
-        )
-        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &PostgreSqlDialect {}, ParseOptions::default())
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         if stmts.len() != 1 {
             Err(PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
