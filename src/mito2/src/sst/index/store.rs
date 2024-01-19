@@ -30,12 +30,23 @@ use crate::error::{OpenDalSnafu, Result};
 pub(crate) struct InstrumentedStore {
     /// The underlying object store.
     object_store: ObjectStore,
+    /// The size of the write buffer.
+    write_buffer_size: Option<usize>,
 }
 
 impl InstrumentedStore {
     /// Create a new `InstrumentedStore`.
     pub fn new(object_store: ObjectStore) -> Self {
-        Self { object_store }
+        Self {
+            object_store,
+            write_buffer_size: None,
+        }
+    }
+
+    /// Set the size of the write buffer.
+    pub fn with_write_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
+        self.write_buffer_size = write_buffer_size.filter(|&size| size > 0);
+        self
     }
 
     /// Returns an [`InstrumentedAsyncRead`] for the given path.
@@ -67,7 +78,15 @@ impl InstrumentedStore {
         write_count: &'a IntCounter,
         flush_count: &'a IntCounter,
     ) -> Result<InstrumentedAsyncWrite<'a, object_store::Writer>> {
-        let writer = self.object_store.writer(path).await.context(OpenDalSnafu)?;
+        let writer = match self.write_buffer_size {
+            Some(size) => self
+                .object_store
+                .writer_with(path)
+                .buffer(size)
+                .await
+                .context(OpenDalSnafu)?,
+            None => self.object_store.writer(path).await.context(OpenDalSnafu)?,
+        };
         Ok(InstrumentedAsyncWrite::new(
             writer,
             write_byte_count,

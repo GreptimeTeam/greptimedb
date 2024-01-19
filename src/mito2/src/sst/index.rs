@@ -52,10 +52,17 @@ impl Indexer {
     pub async fn update(&mut self, batch: &Batch) {
         if let Some(creator) = self.inner.as_mut() {
             if let Err(err) = creator.update(batch).await {
-                warn!(
-                    err; "Failed to update index, skip creating index, region_id: {}, file_id: {}",
-                    self.region_id, self.file_id,
-                );
+                if cfg!(any(test, feature = "test")) {
+                    panic!(
+                        "Failed to update index, region_id: {}, file_id: {}, err: {}",
+                        self.region_id, self.file_id, err
+                    );
+                } else {
+                    warn!(
+                        err; "Failed to update index, skip creating index, region_id: {}, file_id: {}",
+                        self.region_id, self.file_id,
+                    );
+                }
 
                 // Skip index creation if error occurs.
                 self.inner = None;
@@ -76,10 +83,17 @@ impl Indexer {
                     return Some(byte_count);
                 }
                 Err(err) => {
-                    warn!(
-                        err; "Failed to create index, region_id: {}, file_id: {}",
-                        self.region_id, self.file_id,
-                    );
+                    if cfg!(any(test, feature = "test")) {
+                        panic!(
+                            "Failed to create index, region_id: {}, file_id: {}, err: {}",
+                            self.region_id, self.file_id, err
+                        );
+                    } else {
+                        warn!(
+                            err; "Failed to create index, region_id: {}, file_id: {}",
+                            self.region_id, self.file_id,
+                        );
+                    }
                 }
             }
         }
@@ -91,10 +105,17 @@ impl Indexer {
     pub async fn abort(&mut self) {
         if let Some(mut creator) = self.inner.take() {
             if let Err(err) = creator.abort().await {
-                warn!(
-                    err; "Failed to abort index, region_id: {}, file_id: {}",
-                    self.region_id, self.file_id,
-                );
+                if cfg!(any(test, feature = "test")) {
+                    panic!(
+                        "Failed to abort index, region_id: {}, file_id: {}, err: {}",
+                        self.region_id, self.file_id, err
+                    );
+                } else {
+                    warn!(
+                        err; "Failed to abort index, region_id: {}, file_id: {}",
+                        self.region_id, self.file_id,
+                    );
+                }
             }
         }
     }
@@ -103,6 +124,7 @@ impl Indexer {
 pub(crate) struct IndexerBuilder<'a> {
     pub(crate) create_inverted_index: bool,
     pub(crate) mem_threshold_index_create: Option<usize>,
+    pub(crate) write_buffer_size: Option<usize>,
     pub(crate) file_id: FileId,
     pub(crate) file_path: String,
     pub(crate) metadata: &'a RegionMetadataRef,
@@ -147,7 +169,8 @@ impl<'a> IndexerBuilder<'a> {
             self.intermediate_manager,
             self.mem_threshold_index_create,
             row_group_size,
-        );
+        )
+        .with_buffer_size(self.write_buffer_size);
 
         Indexer {
             file_id: self.file_id,
@@ -236,6 +259,7 @@ mod tests {
         let indexer = IndexerBuilder {
             create_inverted_index: true,
             mem_threshold_index_create: Some(1024),
+            write_buffer_size: None,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
@@ -254,6 +278,7 @@ mod tests {
         let indexer = IndexerBuilder {
             create_inverted_index: false,
             mem_threshold_index_create: Some(1024),
+            write_buffer_size: None,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
@@ -272,6 +297,7 @@ mod tests {
         let indexer = IndexerBuilder {
             create_inverted_index: true,
             mem_threshold_index_create: Some(1024),
+            write_buffer_size: None,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
@@ -290,6 +316,7 @@ mod tests {
         let indexer = IndexerBuilder {
             create_inverted_index: true,
             mem_threshold_index_create: Some(1024),
+            write_buffer_size: None,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,

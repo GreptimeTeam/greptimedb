@@ -321,6 +321,12 @@ impl RegionFlushTask {
                 .inverted_index
                 .mem_threshold_on_create
                 .map(|m| m.as_bytes() as _);
+            let index_write_buffer_size = Some(
+                self.engine_config
+                    .inverted_index
+                    .write_buffer_size
+                    .as_bytes() as usize,
+            );
 
             // Flush to level 0.
             let write_request = SstWriteRequest {
@@ -331,6 +337,7 @@ impl RegionFlushTask {
                 storage: version.options.storage.clone(),
                 create_inverted_index,
                 mem_threshold_index_create,
+                index_write_buffer_size,
             };
             let Some(sst_info) = self
                 .access_layer

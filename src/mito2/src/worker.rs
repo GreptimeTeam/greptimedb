@@ -123,7 +123,9 @@ impl WorkerGroup {
             config.global_write_buffer_size.as_bytes() as usize,
         ));
         let intermediate_manager =
-            IntermediateManager::init_fs(&config.inverted_index.intermediate_path).await?;
+            IntermediateManager::init_fs(&config.inverted_index.intermediate_path)
+                .await?
+                .with_buffer_size(Some(config.inverted_index.write_buffer_size.as_bytes() as _));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let write_cache = write_cache_from_config(
             &config,
@@ -233,7 +235,9 @@ impl WorkerGroup {
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let intermediate_manager =
-            IntermediateManager::init_fs(&config.inverted_index.intermediate_path).await?;
+            IntermediateManager::init_fs(&config.inverted_index.intermediate_path)
+                .await?
+                .with_buffer_size(Some(config.inverted_index.write_buffer_size.as_bytes() as _));
         let write_cache = write_cache_from_config(
             &config,
             object_store_manager.clone(),
