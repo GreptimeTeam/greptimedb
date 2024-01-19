@@ -12,12 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod greptime;
-
-use std::fmt;
-
-pub(crate) trait DslTranslator<T, U> {
-    type Error: Sync + Send + fmt::Debug;
-
-    fn translate(&self, input: &T) -> Result<U, Self::Error>;
-}
+pub mod create_expr;

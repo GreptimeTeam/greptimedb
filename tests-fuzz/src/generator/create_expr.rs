@@ -102,7 +102,7 @@ impl CreateTableExprGenerator {
 
         // Shuffles the primary keys.
         primary_keys.shuffle(&mut rng);
-        let partitions = if self.partition > 1 {
+        let partition = if self.partition > 1 {
             // Finds a partible primary keys.
             let partible_primary_keys = primary_keys
                 .iter()
@@ -115,7 +115,7 @@ impl CreateTableExprGenerator {
                 })
                 .collect::<Vec<_>>();
 
-            // Generates the partitions.
+            // Generates the partition.
             if partible_primary_keys.is_empty() {
                 columns.push(rng.gen::<PartibleColumn>().0);
                 primary_keys.push(columns.len() - 1);
@@ -133,12 +133,12 @@ impl CreateTableExprGenerator {
             }
             partition_bounds.push(PartitionBound::MaxValue);
 
-            vec![PartitionDef::new(
+            Some(PartitionDef::new(
                 vec![primary_column.name.to_string()],
                 partition_bounds,
-            )]
+            ))
         } else {
-            vec![]
+            None
         };
         // Generates ts column.
         columns.push(rng.gen::<TsColumn>().0);
@@ -148,7 +148,7 @@ impl CreateTableExprGenerator {
         builder.engine(self.engine.to_string());
         builder.if_not_exists(self.if_not_exists);
         builder.name(rng.gen::<Word>().to_string());
-        builder.partitions(partitions);
+        builder.partition(partition);
         builder.build().context(error::BuildCreateTableExprSnafu)
     }
 }
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(expr.engine, "mito2");
         assert!(expr.if_not_exists);
         assert!(expr.columns.len() >= 11);
-        assert_eq!(expr.partitions[0].partition_bounds().len(), 3);
+        assert_eq!(expr.partition.unwrap().partition_bounds().len(), 3);
 
         let expr = CreateTableExprGenerator::default()
             .columns(10)
@@ -177,6 +177,6 @@ mod tests {
             .generate()
             .unwrap();
         assert_eq!(expr.columns.len(), 11);
-        assert_eq!(expr.partitions.len(), 0);
+        assert!(expr.partition.is_none());
     }
 }
