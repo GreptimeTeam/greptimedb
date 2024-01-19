@@ -19,7 +19,7 @@ use sql::statements::concrete_data_type_to_sql_data_type;
 
 use crate::error::{Error, Result};
 use crate::ir::create_expr::ColumnOption;
-use crate::ir::CreateTableExpr;
+use crate::ir::{Column, CreateTableExpr};
 use crate::translator::DslTranslator;
 
 pub struct CreateTableExprTranslator;
@@ -51,22 +51,24 @@ impl CreateTableExprTranslator {
         let mut output =
             Vec::with_capacity(input.columns.len() + (!input.primary_keys.is_empty()) as usize);
         for column in &input.columns {
-            output.push(
-                vec![
-                    column.name.to_string(),
-                    Self::format_column_type(&column.column_type),
-                    Self::format_column_options(&column.options),
-                ]
-                .into_iter()
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join(" "),
-            );
+            output.push(Self::format_column(column));
         }
         if let Some(primary_keys) = Self::format_primary_keys(input) {
             output.push(primary_keys);
         }
         output.join(",\n")
+    }
+
+    fn format_column(column: &Column) -> String {
+        vec![
+            column.name.to_string(),
+            Self::format_column_type(&column.column_type),
+            Self::format_column_options(&column.options),
+        ]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
     }
 
     fn format_partition(input: &CreateTableExpr) -> Option<String> {
