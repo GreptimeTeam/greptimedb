@@ -23,9 +23,10 @@ use common_error::status_code::StatusCode;
 use promql_parser::parser::ast::{Extension as NodeExtension, ExtensionExpr};
 use promql_parser::parser::Expr::Extension;
 use promql_parser::parser::{EvalStmt, Expr, ValueType};
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::dialect::GreptimeDbDialect;
-use sql::parser::ParserContext;
+use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 
 use crate::error::{
@@ -101,16 +102,17 @@ impl Default for PromQuery {
     }
 }
 
+/// Query language parser, supports parsing SQL and PromQL
 pub struct QueryLanguageParser {}
 
 impl QueryLanguageParser {
-    pub fn parse_sql(sql: &str) -> Result<QueryStatement> {
+    /// Try to parse SQL with GreptimeDB dialect, return the statement when success.
+    pub fn parse_sql(sql: &str, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
         let _timer = METRIC_PARSE_SQL_ELAPSED.start_timer();
-        let mut statement = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .map_err(BoxedError::new)
-            .context(QueryParseSnafu {
-                query: sql.to_string(),
-            })?;
+        let mut statement =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .map_err(BoxedError::new)
+                .context(QueryParseSnafu { query: sql })?;
         if statement.len() != 1 {
             MultipleStatementsSnafu {
                 query: sql.to_string(),
@@ -121,7 +123,8 @@ impl QueryLanguageParser {
         }
     }
 
-    pub fn parse_promql(query: &PromQuery) -> Result<QueryStatement> {
+    /// Try to parse PromQL, return the statement when success.
+    pub fn parse_promql(query: &PromQuery, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
         let _timer = METRIC_PARSE_PROMQL_ELAPSED.start_timer();
 
         let expr = promql_parser::parser::parse(&query.query)
@@ -165,6 +168,7 @@ impl QueryLanguageParser {
     }
 
     fn parse_promql_timestamp(timestamp: &str) -> Result<SystemTime> {
+        // FIXME(dennis): aware of timezone
         // try rfc3339 format
         let rfc3339_result = DateTime::parse_from_rfc3339(timestamp)
             .context(ParseTimestampSnafu { raw: timestamp })
@@ -236,13 +240,15 @@ define_node_ast_extension!(Explain, ExplainExpr, Expr, EXPLAIN_NODE_NAME);
 
 #[cfg(test)]
 mod test {
+    use session::context::QueryContext;
+
     use super::*;
 
     // Detailed logic tests are covered in the parser crate.
     #[test]
     fn parse_sql_simple() {
         let sql = "select * from t1";
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let expected = String::from("Sql(Query(Query { \
             inner: Query { \
                 with: None, body: Select(Select { \
@@ -360,7 +366,7 @@ mod test {
             })",
         );
 
-        let result = QueryLanguageParser::parse_promql(&promql).unwrap();
+        let result = QueryLanguageParser::parse_promql(&promql, &QueryContext::arc()).unwrap();
         assert_eq!(format!("{result:?}"), expected);
     }
 }

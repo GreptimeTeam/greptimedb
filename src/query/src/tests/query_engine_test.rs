@@ -131,14 +131,20 @@ async fn test_query_validate() -> Result<()> {
     let factory = QueryEngineFactory::new_with_plugins(catalog_list, None, None, false, plugins);
     let engine = factory.query_engine();
 
-    let stmt = QueryLanguageParser::parse_sql("select number from public.numbers").unwrap();
+    let stmt =
+        QueryLanguageParser::parse_sql("select number from public.numbers", &QueryContext::arc())
+            .unwrap();
     assert!(engine
         .planner()
         .plan(stmt, QueryContext::arc())
         .await
         .is_ok());
 
-    let stmt = QueryLanguageParser::parse_sql("select number from wrongschema.numbers").unwrap();
+    let stmt = QueryLanguageParser::parse_sql(
+        "select number from wrongschema.numbers",
+        &QueryContext::arc(),
+    )
+    .unwrap();
     assert!(engine
         .planner()
         .plan(stmt, QueryContext::arc())

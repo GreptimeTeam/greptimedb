@@ -104,11 +104,14 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
 
     #[test]
     fn test_parse_alter_add_column() {
         let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null;";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -142,7 +145,9 @@ mod tests {
     #[test]
     fn test_parse_alter_add_column_with_first() {
         let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null FIRST;";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -176,7 +181,9 @@ mod tests {
     #[test]
     fn test_parse_alter_add_column_with_after() {
         let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null AFTER ts;";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -215,12 +222,16 @@ mod tests {
     #[test]
     fn test_parse_alter_drop_column() {
         let sql = "ALTER TABLE my_metric_1 DROP a";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
         let err = result.output_msg();
         assert!(err.contains("expect keyword COLUMN after ALTER TABLE DROP"));
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -245,12 +256,16 @@ mod tests {
     #[test]
     fn test_parse_alter_rename_table() {
         let sql = "ALTER TABLE test_table table_t";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
         let err = result.output_msg();
         assert!(err.contains("expect keyword ADD or DROP or RENAME after ALTER TABLE"));
 
         let sql = "ALTER TABLE test_table RENAME table_t";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);

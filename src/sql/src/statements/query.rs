@@ -54,13 +54,17 @@ mod test {
 
     use super::Query;
     use crate::dialect::GreptimeDbDialect;
-    use crate::parser::ParserContext;
+    use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::statement::Statement;
 
     fn create_query(sql: &str) -> Option<Box<Query>> {
-        match ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .remove(0)
+        match ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0)
         {
             Statement::Query(query) => Some(query),
             _ => None,

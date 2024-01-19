@@ -43,11 +43,13 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
 
     #[test]
     pub fn test_explain() {
         let sql = "EXPLAIN select * from foo";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 

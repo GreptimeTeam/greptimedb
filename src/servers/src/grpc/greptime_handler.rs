@@ -166,7 +166,7 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
     QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
-        .timezone(timezone)
+        .timezone(Arc::new(timezone))
         .build()
 }
 

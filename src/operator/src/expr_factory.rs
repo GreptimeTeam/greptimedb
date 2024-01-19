@@ -411,7 +411,7 @@ pub(crate) fn to_alter_expr(
 mod tests {
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
-    use sql::parser::ParserContext;
+    use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
 
     use super::*;
@@ -419,10 +419,11 @@ mod tests {
     #[test]
     fn test_create_to_expr() {
         let sql = "CREATE TABLE monitor (host STRING,ts TIMESTAMP,TIME INDEX (ts),PRIMARY KEY(host)) ENGINE=mito WITH(regions=1, ttl='3days', write_buffer_size='1024KB');";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .pop()
-            .unwrap();
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
 
         let Statement::CreateTable(create_table) = stmt else {
             unreachable!()

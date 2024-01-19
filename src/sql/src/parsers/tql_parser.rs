@@ -168,11 +168,14 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
     #[test]
     fn test_parse_tql_eval() {
         let sql = "TQL EVAL (1676887657, 1676887659, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
 
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -188,7 +191,9 @@ mod tests {
 
         let sql = "TQL EVAL (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
 
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -204,7 +209,9 @@ mod tests {
 
         let sql = "TQL EVALUATE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
 
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement2 = result.remove(0);
@@ -212,7 +219,9 @@ mod tests {
 
         let sql = "tql eval ('2015-07-01T20:10:30.781Z', '2015-07-01T20:11:00.781Z', '30s') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
 
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -231,7 +240,9 @@ mod tests {
     fn test_parse_tql_explain() {
         let sql = "TQL EXPLAIN http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
 
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -247,7 +258,9 @@ mod tests {
 
         let sql = "TQL EXPLAIN (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
 
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -265,7 +278,9 @@ mod tests {
     #[test]
     fn test_parse_tql_analyze() {
         let sql = "TQL ANALYZE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
         let statement = result.remove(0);
         match statement {
@@ -283,12 +298,16 @@ mod tests {
     fn test_parse_tql_error() {
         // Invalid duration
         let sql = "TQL EVAL (1676887657, 1676887659, 1m) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
         assert!(result.output_msg().contains("Expected ), found: m"));
 
         // missing end
         let sql = "TQL EVAL (1676887657, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
         assert!(result.output_msg().contains("Expected ,, found: )"));
     }
 }

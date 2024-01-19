@@ -167,7 +167,7 @@ mod tests {
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
-    use crate::parser::ParserContext;
+    use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::transform_statements;
 
     #[test]
@@ -265,7 +265,9 @@ mod tests {
 
     fn test_timestamp_alias(alias: &str, expected: &str) {
         let sql = format!("SELECT TIMESTAMP '2020-01-01 01:23:45.12345678'::{alias}");
-        let mut stmts = ParserContext::create_with_dialect(&sql, &GenericDialect {}).unwrap();
+        let mut stmts =
+            ParserContext::create_with_dialect(&sql, &GenericDialect {}, ParseOptions::default())
+                .unwrap();
         transform_statements(&mut stmts).unwrap();
 
         match &stmts[0] {
@@ -318,7 +320,9 @@ CREATE TABLE data_types (
   ts9 TimestampNanosecond DEFAULT CURRENT_TIMESTAMP TIME INDEX,
   PRIMARY KEY(s));"#;
 
-        let mut stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GenericDialect {}, ParseOptions::default())
+                .unwrap();
         transform_statements(&mut stmts).unwrap();
 
         match &stmts[0] {

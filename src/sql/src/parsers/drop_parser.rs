@@ -56,11 +56,13 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
 
     #[test]
     pub fn test_drop_table() {
         let sql = "DROP TABLE foo";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
@@ -68,7 +70,8 @@ mod tests {
         );
 
         let sql = "DROP TABLE IF EXISTS foo";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
@@ -76,7 +79,8 @@ mod tests {
         );
 
         let sql = "DROP TABLE my_schema.foo";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
@@ -87,7 +91,8 @@ mod tests {
         );
 
         let sql = "DROP TABLE my_catalog.my_schema.foo";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),

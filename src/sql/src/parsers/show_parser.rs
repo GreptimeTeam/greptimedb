@@ -194,12 +194,14 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
     use crate::statements::show::ShowDatabases;
 
     #[test]
     pub fn test_show_database_all() {
         let sql = "SHOW DATABASES";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -214,7 +216,8 @@ mod tests {
     #[test]
     pub fn test_show_database_like() {
         let sql = "SHOW DATABASES LIKE test_database";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -232,7 +235,8 @@ mod tests {
     #[test]
     pub fn test_show_database_where() {
         let sql = "SHOW DATABASES WHERE Database LIKE '%whatever1%' OR Database LIKE '%whatever2%'";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -251,7 +255,8 @@ mod tests {
     #[test]
     pub fn test_show_tables_all() {
         let sql = "SHOW TABLES";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -268,7 +273,8 @@ mod tests {
     #[test]
     pub fn test_show_tables_like() {
         let sql = "SHOW TABLES LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -285,7 +291,8 @@ mod tests {
         );
 
         let sql = "SHOW TABLES in test_db LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -305,7 +312,8 @@ mod tests {
     #[test]
     pub fn test_show_tables_where() {
         let sql = "SHOW TABLES where name like test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -319,7 +327,8 @@ mod tests {
         );
 
         let sql = "SHOW TABLES in test_db where name LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -336,7 +345,9 @@ mod tests {
     #[test]
     pub fn test_show_full_tables() {
         let sql = "SHOW FULL TABLES";
-        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, stmts.len());
         assert_matches!(&stmts[0], Statement::ShowTables { .. });
         match &stmts[0] {
@@ -352,7 +363,9 @@ mod tests {
     #[test]
     pub fn test_show_full_tables_where() {
         let sql = "SHOW FULL TABLES IN test_db WHERE Tables LIKE test_table";
-        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, stmts.len());
 
         assert_matches!(
@@ -368,7 +381,8 @@ mod tests {
     #[test]
     pub fn test_show_full_tables_like() {
         let sql = "SHOW FULL TABLES LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -385,7 +399,8 @@ mod tests {
         );
 
         let sql = "SHOW FULL TABLES in test_db LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -405,7 +420,8 @@ mod tests {
     #[test]
     pub fn test_show_variables() {
         let sql = "SHOW VARIABLES system_time_zone";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
         assert_eq!(

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use ::auth::UserProviderRef;
 use axum::extract::State;
 use axum::http::{self, Request, StatusCode};
@@ -62,7 +64,7 @@ pub async fn inner_auth<B>(
     let query_ctx = QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
-        .timezone(timezone)
+        .timezone(Arc::new(timezone))
         .build();
     let need_auth = need_auth(&req);
     let is_influxdb = req.uri().path().contains("influxdb");

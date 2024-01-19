@@ -33,7 +33,7 @@ mod tests {
     use common_error::ext::ErrorExt;
 
     use crate::dialect::GreptimeDbDialect;
-    use crate::parser::ParserContext;
+    use crate::parser::{ParseOptions, ParserContext};
 
     #[test]
     pub fn test_parse_query() {
@@ -42,13 +42,16 @@ mod tests {
            WHERE a > b AND b < 100 \
            ORDER BY a DESC, b";
 
-        let _ = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let _ =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
     }
 
     #[test]
     pub fn test_parse_invalid_query() {
         let sql = "SELECT * FROM table_1 WHERE";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

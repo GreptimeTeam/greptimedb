@@ -519,7 +519,7 @@ mod tests {
     use datatypes::vectors::{Helper, StringVectorBuilder, UInt32Vector, UInt64Vector, VectorRef};
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
-    use sql::parser::ParserContext;
+    use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::show::{ShowKind, ShowTables};
     use sql::statements::statement::Statement;
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
@@ -547,7 +547,7 @@ mod tests {
         let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
             .plan(stmt, QueryContext::arc())
@@ -569,7 +569,7 @@ mod tests {
         let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
             .plan(stmt, QueryContext::arc())
@@ -643,7 +643,7 @@ mod tests {
         let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
 
         let plan = engine
             .planner()
@@ -709,6 +709,7 @@ mod tests {
         let statement = ParserContext::create_with_dialect(
             "SHOW TABLES WHERE \"Tables\"='monitor'",
             &GreptimeDbDialect {},
+            ParseOptions::default(),
         )
         .unwrap()[0]
             .clone();
