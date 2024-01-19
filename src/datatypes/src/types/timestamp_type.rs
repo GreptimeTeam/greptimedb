@@ -201,8 +201,6 @@ impl_data_type_for_timestamp!(Microsecond);
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use common_time::timezone::set_default_timezone;
     use common_time::{Date, DateTime};
 
@@ -259,7 +257,7 @@ mod tests {
         assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1234567)));
 
         // Date -> TimestampMillisecond
-        let d = Value::Date(Date::from_str("1970-01-01").unwrap());
+        let d = Value::Date(Date::from_str_utc("1970-01-01").unwrap());
         let ts = ConcreteDataType::timestamp_millisecond_datatype()
             .try_cast(d)
             .unwrap();

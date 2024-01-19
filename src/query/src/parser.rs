@@ -124,7 +124,7 @@ impl QueryLanguageParser {
     }
 
     /// Try to parse PromQL, return the statement when success.
-    pub fn parse_promql(query: &PromQuery, query_ctx: &QueryContextRef) -> Result<QueryStatement> {
+    pub fn parse_promql(query: &PromQuery, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
         let _timer = METRIC_PARSE_PROMQL_ELAPSED.start_timer();
 
         let expr = promql_parser::parser::parse(&query.query)
@@ -133,13 +133,13 @@ impl QueryLanguageParser {
                 query: &query.query,
             })?;
 
-        let start = Self::parse_promql_timestamp(&query.start, &query_ctx)
+        let start = Self::parse_promql_timestamp(&query.start)
             .map_err(BoxedError::new)
             .context(QueryParseSnafu {
                 query: &query.query,
             })?;
 
-        let end = Self::parse_promql_timestamp(&query.end, &query_ctx)
+        let end = Self::parse_promql_timestamp(&query.end)
             .map_err(BoxedError::new)
             .context(QueryParseSnafu {
                 query: &query.query,
@@ -167,8 +167,7 @@ impl QueryLanguageParser {
         Ok(QueryStatement::Promql(eval_stmt))
     }
 
-    fn parse_promql_timestamp(timestamp: &str, query_ctx: &QueryContextRef) -> Result<SystemTime> {
-        // FIXME(dennis): aware of timezone
+    fn parse_promql_timestamp(timestamp: &str) -> Result<SystemTime> {
         // try rfc3339 format
         let rfc3339_result = DateTime::parse_from_rfc3339(timestamp)
             .context(ParseTimestampSnafu { raw: timestamp })

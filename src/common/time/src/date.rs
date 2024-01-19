@@ -13,16 +13,16 @@
 // limitations under the License.
 
 use std::fmt::{Display, Formatter, Write};
-use std::str::FromStr;
 
-use chrono::{Datelike, Days, Months, NaiveDate, NaiveTime, TimeZone};
+use chrono::{Datelike, Days, LocalResult, Months, NaiveDate, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ResultExt;
 
-use crate::error::{Error, ParseDateStrSnafu, Result};
+use crate::error::{InvalidDateStrSnafu, ParseDateStrSnafu, Result};
 use crate::interval::Interval;
 use crate::timezone::get_timezone;
+use crate::util::datetime_to_utc;
 use crate::Timezone;
 
 const UNIX_EPOCH_FROM_CE: i32 = 719_163;
@@ -37,16 +37,6 @@ pub struct Date(i32);
 impl From<Date> for Value {
     fn from(d: Date) -> Self {
         Value::String(d.to_string())
-    }
-}
-
-impl FromStr for Date {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        let s = s.trim();
-        let date = NaiveDate::parse_from_str(s, "%F").context(ParseDateStrSnafu { raw: s })?;
-        Ok(Self(date.num_days_from_ce() - UNIX_EPOCH_FROM_CE))
     }
 }
 
@@ -74,6 +64,27 @@ impl Display for Date {
 }
 
 impl Date {
+    /// Try parsing a string into [`Date`] with UTC timezone.
+    pub fn from_str_utc(s: &str) -> Result<Self> {
+        Self::from_str(s, None)
+    }
+
+    /// Try parsing a string into [`Date`] with given timezone.
+    pub fn from_str(s: &str, timezone: Option<&Timezone>) -> Result<Self> {
+        let s = s.trim();
+        let date = NaiveDate::parse_from_str(s, "%F").context(ParseDateStrSnafu { raw: s })?;
+        if timezone.is_none() {
+            return Ok(Self(date.num_days_from_ce() - UNIX_EPOCH_FROM_CE));
+        }
+
+        // Safety: already check timezone above
+        let datetime = date.and_time(NaiveTime::default());
+        match datetime_to_utc(&datetime, timezone.unwrap()) {
+            LocalResult::None => InvalidDateStrSnafu { raw: s }.fail(),
+            LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => Ok(Date::from(utc.date())),
+        }
+    }
+
     pub fn new(val: i32) -> Self {
         Self(val)
     }
@@ -168,23 +179,64 @@ mod tests {
     pub fn test_date_parse() {
         assert_eq!(
             "1970-01-01",
-            Date::from_str("1970-01-01").unwrap().to_string()
+            Date::from_str("1970-01-01", None).unwrap().to_string()
         );
 
         assert_eq!(
             "1969-01-01",
-            Date::from_str("1969-01-01").unwrap().to_string()
+            Date::from_str("1969-01-01", None).unwrap().to_string()
         );
 
         assert_eq!(
             "1969-01-01",
-            Date::from_str("     1969-01-01       ")
+            Date::from_str("     1969-01-01       ", None)
                 .unwrap()
                 .to_string()
         );
 
         let now = Utc::now().date_naive().format("%F").to_string();
-        assert_eq!(now, Date::from_str(&now).unwrap().to_string());
+        assert_eq!(now, Date::from_str(&now, None).unwrap().to_string());
+
+        // with timezone
+        assert_eq!(
+            "1969-12-31",
+            Date::from_str(
+                "1970-01-01",
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap()
+            .to_string()
+        );
+
+        assert_eq!(
+            "1969-12-31",
+            Date::from_str(
+                "1970-01-01",
+                Some(&Timezone::from_tz_string("+16:00").unwrap())
+            )
+            .unwrap()
+            .to_string()
+        );
+
+        assert_eq!(
+            "1970-01-01",
+            Date::from_str(
+                "1970-01-01",
+                Some(&Timezone::from_tz_string("-8:00").unwrap())
+            )
+            .unwrap()
+            .to_string()
+        );
+
+        assert_eq!(
+            "1970-01-01",
+            Date::from_str(
+                "1970-01-01",
+                Some(&Timezone::from_tz_string("-16:00").unwrap())
+            )
+            .unwrap()
+            .to_string()
+        );
     }
 
     #[test]
@@ -201,9 +253,9 @@ mod tests {
 
     #[test]
     pub fn test_min_max() {
-        let mut date = Date::from_str("9999-12-31").unwrap();
+        let mut date = Date::from_str("9999-12-31", None).unwrap();
         date.0 += 1000;
-        assert_eq!(date, Date::from_str(&date.to_string()).unwrap());
+        assert_eq!(date, Date::from_str(&date.to_string(), None).unwrap());
     }
 
     #[test]
@@ -245,11 +297,11 @@ mod tests {
 
     #[test]
     fn test_to_secs() {
-        let d = Date::from_str("1970-01-01").unwrap();
+        let d = Date::from_str("1970-01-01", None).unwrap();
         assert_eq!(d.to_secs(), 0);
-        let d = Date::from_str("1970-01-02").unwrap();
+        let d = Date::from_str("1970-01-02", None).unwrap();
         assert_eq!(d.to_secs(), 24 * 3600);
-        let d = Date::from_str("1970-01-03").unwrap();
+        let d = Date::from_str("1970-01-03", None).unwrap();
         assert_eq!(d.to_secs(), 2 * 24 * 3600);
     }
 }
