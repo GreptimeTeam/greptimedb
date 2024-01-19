@@ -73,35 +73,35 @@ impl<'a> MetadataLoader<'a> {
 
         if file_size < FOOTER_SIZE as u64 {
             return error::InvalidParquetSnafu {
-                file: path.to_string(),
-                reason: "file size is smaller than footer size".to_string(),
+                file: path,
+                reason: "file size is smaller than footer size",
             }
             .fail();
         }
 
         // Prefetch bytes for metadata from the end and process the footer
-        let prefetch_size = DEFAULT_PREFETCH_SIZE.min(file_size);
+        let buffer_start = file_size.saturating_sub(DEFAULT_PREFETCH_SIZE);
         let buffer = object_store
             .read_with(path)
-            .range((file_size - prefetch_size)..file_size)
+            .range(buffer_start..file_size)
             .await
             .context(error::OpenDalSnafu)?;
         let buffer_len = buffer.len();
 
         let mut footer = [0; 8];
-        footer.copy_from_slice(&buffer[(buffer_len - FOOTER_SIZE)..]);
+        footer.copy_from_slice(&buffer[buffer_len - FOOTER_SIZE..]);
 
-        let metadata_len = decode_footer(&footer).map_err(|_| {
+        let metadata_len = decode_footer(&footer).map_err(|e| {
             error::InvalidParquetSnafu {
-                file: path.to_string(),
-                reason: "failed to decode footer".to_string(),
+                file: path,
+                reason: format!("failed to decode footer, {e}"),
             }
             .build()
         })? as u64;
 
         if metadata_len + FOOTER_SIZE as u64 > file_size {
             return error::InvalidParquetSnafu {
-                file: path.to_string(),
+                file: path,
                 reason: format!(
                     "the sum of Metadata length {} and Footer size {} is larger than file size {}",
                     metadata_len, FOOTER_SIZE, file_size
@@ -110,31 +110,31 @@ impl<'a> MetadataLoader<'a> {
             .fail();
         }
 
-        let footer_len = metadata_len + FOOTER_SIZE as u64;
-        if (footer_len as usize) <= buffer_len {
+        if (metadata_len as usize) <= buffer_len - FOOTER_SIZE {
             // The whole metadata is in the first read
-            let offset = buffer_len - footer_len as usize;
-            let metadata = decode_metadata(&buffer[offset..]).map_err(|_| {
-                error::InvalidParquetSnafu {
-                    file: path.to_string(),
-                    reason: "failed to decode metadata".to_string(),
-                }
-                .build()
-            })?;
+            let metadata_start = buffer_len - metadata_len as usize - FOOTER_SIZE;
+            let metadata = decode_metadata(&buffer[metadata_start..buffer_len - FOOTER_SIZE])
+                .map_err(|e| {
+                    error::InvalidParquetSnafu {
+                        file: path,
+                        reason: format!("failed to decode metadata, {e}"),
+                    }
+                    .build()
+                })?;
             Ok(metadata)
         } else {
             // The metadata is out of buffer, need to make a second read
-            let mut data = object_store
+            let metadata_start = file_size - metadata_len - FOOTER_SIZE as u64;
+            let data = object_store
                 .read_with(path)
-                .range((file_size - footer_len)..(file_size - buffer_len as u64))
+                .range(metadata_start..(file_size - FOOTER_SIZE as u64))
                 .await
                 .context(error::OpenDalSnafu)?;
-            data.extend(buffer);
 
-            let metadata = decode_metadata(&data).map_err(|_| {
+            let metadata = decode_metadata(&data).map_err(|e| {
                 error::InvalidParquetSnafu {
-                    file: path.to_string(),
-                    reason: "failed to decode metadata".to_string(),
+                    file: path,
+                    reason: format!("failed to decode metadata, {e}"),
                 }
                 .build()
             })?;
