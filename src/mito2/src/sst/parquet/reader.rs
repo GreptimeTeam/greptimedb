@@ -135,7 +135,7 @@ impl ParquetReaderBuilder {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
-        let file_size = self.file_handle.file_size();
+        let file_size = self.file_handle.meta().file_size;
         // Loads parquet metadata of the file.
         let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
         // Decodes region metadata.
@@ -251,8 +251,7 @@ impl ParquetReaderBuilder {
         }
 
         // Cache miss, read directly.
-        let metadata_loader =
-            MetadataLoader::new(self.object_store.clone(), file_path, Some(file_size));
+        let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
         let metadata = metadata_loader.load().await?;
         let metadata = Arc::new(metadata);
         // Cache the metadata.

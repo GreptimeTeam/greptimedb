@@ -23,20 +23,19 @@ use crate::error::{self, Result};
 /// The estimated size of the footer and metadata need to read from the end of parquet file.
 const DEFAULT_PREFETCH_SIZE: u64 = 64 * 1024;
 
+/// Load the metadata of parquet file in an async way.
 pub(crate) struct MetadataLoader<'a> {
+    // An object store that supports async read
     object_store: ObjectStore,
-
+    // The path of parquet file
     file_path: &'a str,
-
-    file_size: Option<u64>,
+    // The size of parquet file
+    file_size: u64,
 }
 
 impl<'a> MetadataLoader<'a> {
-    pub fn new(
-        object_store: ObjectStore,
-        file_path: &'a str,
-        file_size: Option<u64>,
-    ) -> MetadataLoader {
+    /// Create a new parquet metadata loader.
+    pub fn new(object_store: ObjectStore, file_path: &'a str, file_size: u64) -> MetadataLoader {
         Self {
             object_store,
             file_path,
@@ -44,7 +43,7 @@ impl<'a> MetadataLoader<'a> {
         }
     }
 
-    /// Load the metadata of parquet file.
+    /// Async load the metadata of parquet file.
     ///
     /// Read [DEFAULT_PREFETCH_SIZE] from the end of parquet file at first, if File Metadata is in the
     /// read range, decode it and return [ParquetMetaData], otherwise, read again to get the rest of the metadata.
@@ -66,17 +65,11 @@ impl<'a> MetadataLoader<'a> {
     /// └───────────────────────────────────┘
     /// ```
     ///
+    /// Refer to https://github.com/apache/arrow-rs/blob/093a10e46203be1a0e94ae117854701bf58d4c79/parquet/src/arrow/async_reader/metadata.rs#L55-L106
     pub async fn load(&self) -> Result<ParquetMetaData> {
         let object_store = &self.object_store;
         let path = self.file_path;
-        let file_size = match self.file_size {
-            Some(n) => n,
-            None => object_store
-                .stat(path)
-                .await
-                .context(error::OpenDalSnafu)?
-                .content_length(),
-        };
+        let file_size = self.get_file_size().await?;
 
         if file_size < FOOTER_SIZE as u64 {
             return error::InvalidParquetSnafu {
@@ -96,7 +89,8 @@ impl<'a> MetadataLoader<'a> {
         let buffer_len = buffer.len();
 
         let mut footer = [0; 8];
-        footer.copy_from_slice(&buffer[(buffer_len - FOOTER_SIZE as usize)..]);
+        footer.copy_from_slice(&buffer[(buffer_len - FOOTER_SIZE)..]);
+
         let metadata_len = decode_footer(&footer).map_err(|_| {
             error::InvalidParquetSnafu {
                 file: path.to_string(),
@@ -129,7 +123,7 @@ impl<'a> MetadataLoader<'a> {
             })?;
             Ok(metadata)
         } else {
-            // The metadata is out of buffer, need to read the rest
+            // The metadata is out of buffer, need to make a second read
             let mut data = object_store
                 .read_with(path)
                 .range((file_size - footer_len)..(file_size - buffer_len as u64))
@@ -146,5 +140,19 @@ impl<'a> MetadataLoader<'a> {
             })?;
             Ok(metadata)
         }
+    }
+
+    /// Get the size of parquet file.
+    async fn get_file_size(&self) -> Result<u64> {
+        let file_size = match self.file_size {
+            0 => self
+                .object_store
+                .stat(self.file_path)
+                .await
+                .context(error::OpenDalSnafu)?
+                .content_length(),
+            n => n,
+        };
+        Ok(file_size)
     }
 }

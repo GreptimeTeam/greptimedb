@@ -178,10 +178,6 @@ impl FileHandle {
     pub fn meta(&self) -> FileMeta {
         self.inner.meta.clone()
     }
-
-    pub fn file_size(&self) -> u64 {
-        self.inner.meta.file_size
-    }
 }
 
 /// Inner data of [FileHandle].
