@@ -112,9 +112,7 @@ impl QueryLanguageParser {
         let mut statement =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .map_err(BoxedError::new)
-                .context(QueryParseSnafu {
-                    query: sql,
-                })?;
+                .context(QueryParseSnafu { query: sql })?;
         if statement.len() != 1 {
             MultipleStatementsSnafu {
                 query: sql.to_string(),
