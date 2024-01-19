@@ -24,7 +24,6 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_runtime::Builder as RuntimeBuilder;
-use common_telemetry::warn;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use common_wal::config::DatanodeWalConfig;
@@ -35,7 +34,6 @@ use datanode::config::{
 use frontend::frontend::TomlSerializable;
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
-use futures::future::BoxFuture;
 use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
@@ -258,6 +256,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
     }
 }
 
+#[derive(Clone)]
 pub enum TempDirGuard {
     None,
     S3(TempFolder),
@@ -266,21 +265,26 @@ pub enum TempDirGuard {
     Gcs(TempFolder),
 }
 
+#[derive(Clone)]
 pub struct TestGuard {
     pub home_guard: FileDirGuard,
     pub storage_guards: Vec<StorageGuard>,
 }
 
+#[derive(Clone)]
 pub struct FileDirGuard {
-    pub temp_dir: TempDir,
+    pub temp_dir: Arc<TempDir>,
 }
 
 impl FileDirGuard {
     pub fn new(temp_dir: TempDir) -> Self {
-        Self { temp_dir }
+        Self {
+            temp_dir: Arc::new(temp_dir),
+        }
     }
 }
 
+#[derive(Clone)]
 pub struct StorageGuard(pub TempDirGuard);
 
 impl TestGuard {
@@ -432,7 +436,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
             instance.instance.clone(),
         ))
         .with_script_handler(instance.instance.clone())
-        .with_greptime_config_options(instance.mix_options.to_toml().unwrap());
+        .with_greptime_config_options(instance.mix_opts.to_toml().unwrap());
 
     if let Some(user_provider) = user_provider {
         http_server.with_user_provider(user_provider);
@@ -663,21 +667,4 @@ pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
         .unwrap();
 }
 
-pub async fn run_test_with_kafka_wal<F>(test: F)
-where
-    F: FnOnce(Vec<String>) -> BoxFuture<'static, ()>,
-{
-    let _ = dotenv::dotenv();
-    let endpoints = env::var("GT_KAFKA_ENDPOINTS").unwrap_or_default();
-    if endpoints.is_empty() {
-        warn!("The endpoints is empty, skipping the test");
-        return;
-    }
-
-    let endpoints = endpoints
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect::<Vec<_>>();
-
-    test(endpoints).await
-}
+pub struct StaticContext {}

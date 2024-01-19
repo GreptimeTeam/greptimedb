@@ -55,7 +55,7 @@ macro_rules! region_migration_test {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
                             common_telemetry::init_default_ut_logging();
-                            tests_integration::test_util::run_test_with_kafka_wal(|endpoints| {
+                            common_wal::test_util::run_test_with_kafka_wal(|endpoints| {
                                 Box::pin(async move { $crate::region_migration::$test(store_type, endpoints).await })
                             })
                             .await

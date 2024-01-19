@@ -22,10 +22,14 @@ use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
+use common_meta::state_store::KvStateStore;
 use common_meta::wal_options_allocator::WalOptionsAllocator;
+use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
+use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
 use datanode::config::DatanodeOptions;
@@ -33,6 +37,8 @@ use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
+use log_store::raft_engine::RaftEngineBackend;
+use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::Mode;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -40,8 +46,18 @@ use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, Test
 pub struct GreptimeDbStandalone {
     pub instance: Arc<Instance>,
     pub datanode_opts: DatanodeOptions,
-    pub mix_options: MixOptions,
+    pub mix_opts: MixOptions,
     pub guard: TestGuard,
+}
+
+/// Static state that will be preserved across rebuilds.
+#[derive(Clone)]
+struct StaticState {
+    kv_backend: KvBackendRef,
+    // It's actually no need to preserve the `datanode_opts` across rebuilds since it could be reconstructed from the `guard`.
+    // However, preserving it could simplify coding.
+    datanode_opts: DatanodeOptions,
+    guard: TestGuard,
 }
 
 #[derive(Clone)]
@@ -49,9 +65,12 @@ pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
     datanode_wal_config: DatanodeWalConfig,
     metasrv_wal_config: MetaSrvWalConfig,
+    kv_backend_config: KvBackendConfig,
     store_providers: Option<Vec<StorageType>>,
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
+    // The builder retrieves and reuses the static state if the `static_state` is not None.
+    static_state: Option<StaticState>,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -61,8 +80,36 @@ impl GreptimeDbStandaloneBuilder {
             store_providers: None,
             plugin: None,
             default_store: None,
+            static_state: None,
             datanode_wal_config: DatanodeWalConfig::default(),
             metasrv_wal_config: MetaSrvWalConfig::default(),
+            kv_backend_config: KvBackendConfig::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_static_state(self) -> Self {
+        let (opts, guard) = self.build_datanode_opts_and_guard();
+
+        let kv_backend = Arc::new(
+            RaftEngineBackend::try_open_with_cfg(Config {
+                dir: format!("{}/kv", &opts.storage.data_home),
+                purge_threshold: ReadableSize(self.kv_backend_config.purge_threshold.0),
+                recovery_mode: RecoveryMode::TolerateTailCorruption,
+                batch_compression_threshold: ReadableSize::kb(8),
+                target_file_size: ReadableSize(self.kv_backend_config.file_size.0),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+
+        Self {
+            static_state: Some(StaticState {
+                kv_backend,
+                datanode_opts: opts,
+                guard,
+            }),
+            ..self
         }
     }
 
@@ -105,26 +152,33 @@ impl GreptimeDbStandaloneBuilder {
     }
 
     pub async fn build(self) -> GreptimeDbStandalone {
-        let default_store_type = self.default_store.unwrap_or(StorageType::File);
-        let store_types = self.store_providers.unwrap_or_default();
-
-        let (opts, guard) = create_tmp_dir_and_datanode_opts(
-            Mode::Standalone,
-            default_store_type,
-            store_types,
-            &self.instance_name,
-            self.datanode_wal_config.clone(),
-        );
-
         let procedure_config = ProcedureConfig::default();
-        let kv_backend_config = KvBackendConfig::default();
-        let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
-            format!("{}/kv", &opts.storage.data_home),
-            kv_backend_config.clone(),
-            procedure_config.clone(),
-        )
-        .await
-        .unwrap();
+
+        let (kv_backend, opts, guard, procedure_manager) = match self.static_state {
+            Some(state) => {
+                let procedure_manager =
+                    Self::build_procedure_manager(state.kv_backend.clone(), &procedure_config);
+
+                (
+                    state.kv_backend,
+                    state.datanode_opts,
+                    state.guard,
+                    procedure_manager,
+                )
+            }
+            None => {
+                let (opts, guard) = self.build_datanode_opts_and_guard();
+                let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
+                    format!("{}/kv", &opts.storage.data_home),
+                    self.kv_backend_config.clone(),
+                    procedure_config.clone(),
+                )
+                .await
+                .unwrap();
+
+                (kv_backend, opts, guard, procedure_manager)
+            }
+        };
 
         let plugins = self.plugin.unwrap_or_default();
 
@@ -184,10 +238,10 @@ impl GreptimeDbStandaloneBuilder {
         GreptimeDbStandalone {
             instance: Arc::new(instance),
             datanode_opts: opts.clone(),
-            mix_options: MixOptions {
+            mix_opts: MixOptions {
                 data_home: opts.storage.data_home.to_string(),
                 procedure: procedure_config,
-                metadata_store: kv_backend_config,
+                metadata_store: self.kv_backend_config,
                 frontend: FrontendOptions::default(),
                 datanode: opts,
                 logging: LoggingOptions::default(),
@@ -195,5 +249,31 @@ impl GreptimeDbStandaloneBuilder {
             },
             guard,
         }
+    }
+
+    fn build_datanode_opts_and_guard(&self) -> (DatanodeOptions, TestGuard) {
+        let default_store_type = self.default_store.unwrap_or(StorageType::File);
+        let store_types = self.store_providers.clone().unwrap_or_default();
+        let (opts, guard) = create_tmp_dir_and_datanode_opts(
+            Mode::Standalone,
+            default_store_type,
+            store_types,
+            &self.instance_name,
+            self.datanode_wal_config.clone(),
+        );
+        (opts, guard)
+    }
+
+    fn build_procedure_manager(
+        kv_backend: KvBackendRef,
+        procedure_config: &ProcedureConfig,
+    ) -> ProcedureManagerRef {
+        let state_store = Arc::new(KvStateStore::new(kv_backend));
+        let manager_config = ManagerConfig {
+            max_retry_times: procedure_config.max_retry_times,
+            retry_delay: procedure_config.retry_delay,
+            ..Default::default()
+        };
+        Arc::new(LocalManager::new(manager_config, state_store))
     }
 }

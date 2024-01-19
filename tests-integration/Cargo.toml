@@ -36,6 +36,7 @@ datatypes.workspace = true
 dotenv = "0.15"
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
+log-store.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 mysql_async = { version = "0.33", default-features = false, features = [
@@ -45,6 +46,7 @@ object-store.workspace = true
 once_cell.workspace = true
 operator.workspace = true
 query.workspace = true
+raft-engine.workspace = true
 rand.workspace = true
 rstest = "0.17"
 rstest_reuse = "0.5"
@@ -71,6 +73,7 @@ tower = "0.4"
 uuid.workspace = true
 
 [dev-dependencies]
+common-wal = { workspace = true, features = ["testing"] }
 datafusion-expr.workspace = true
 datafusion.workspace = true
 itertools.workspace = true

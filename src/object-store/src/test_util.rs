@@ -17,6 +17,7 @@ use std::env;
 use crate::{ObjectStore, Result};
 
 /// Temp folder for object store test
+#[derive(Clone)]
 pub struct TempFolder {
     store: ObjectStore,
     // The path under root.
