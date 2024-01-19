@@ -250,6 +250,8 @@ impl ParquetReaderBuilder {
             return Ok(metadata);
         }
 
+        // TODO(QuenKar): should also check write cache to get parquet metadata.
+
         // Cache miss, load metadata directly.
         let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
         let metadata = metadata_loader.load().await?;
