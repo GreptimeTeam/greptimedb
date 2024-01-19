@@ -12,67 +12,68 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use faker_rand::lorem::Word;
+use derive_builder::Builder;
 use partition::partition::{PartitionBound, PartitionDef};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use snafu::{ensure, ResultExt};
 
-use crate::error::{self, Result};
-use crate::ir::create_expr::{ColumnOption, CreateTableExprBuilder};
+use super::Generator;
+use crate::error::{self, Error, Result};
+use crate::fake::{random_capitalize_map, MapWordGenerator};
+use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random};
+use crate::ir::create_expr::CreateTableExprBuilder;
 use crate::ir::{
-    generate_random_value, Column, CreateTableExpr, PartibleColumn, TsColumn, PARTIBLE_DATA_TYPES,
+    column_options_generator, generate_columns, generate_random_value,
+    partible_column_options_generator, ts_column_options_generator, ColumnTypeGenerator,
+    CreateTableExpr, PartibleColumnTypeGenerator, TsColumnTypeGenerator,
 };
 
-pub struct CreateTableExprGenerator {
+#[derive(Builder)]
+#[builder(default, pattern = "owned")]
+pub struct CreateTableExprGenerator<R: Rng + 'static> {
     columns: usize,
+    #[builder(setter(into))]
     engine: String,
     partition: usize,
     if_not_exists: bool,
+    #[builder(setter(into))]
+    name: String,
+    name_generator: Box<dyn Random<String, R>>,
+    ts_column_type_generator: ConcreteDataTypeGenerator<R>,
+    column_type_generator: ConcreteDataTypeGenerator<R>,
+    partible_column_type_generator: ConcreteDataTypeGenerator<R>,
+    partible_column_options_generator: ColumnOptionGenerator<R>,
+    column_options_generator: ColumnOptionGenerator<R>,
+    ts_column_options_generator: ColumnOptionGenerator<R>,
 }
 
 const DEFAULT_ENGINE: &str = "mito";
 
-impl Default for CreateTableExprGenerator {
+impl<R: Rng + 'static> Default for CreateTableExprGenerator<R> {
     fn default() -> Self {
         Self {
             columns: 0,
             engine: DEFAULT_ENGINE.to_string(),
             if_not_exists: false,
             partition: 0,
+            name: String::new(),
+            name_generator: Box::new(MapWordGenerator::new(Box::new(random_capitalize_map))),
+            ts_column_type_generator: Box::new(TsColumnTypeGenerator),
+            column_type_generator: Box::new(ColumnTypeGenerator),
+            partible_column_type_generator: Box::new(PartibleColumnTypeGenerator),
+            partible_column_options_generator: Box::new(partible_column_options_generator),
+            column_options_generator: Box::new(column_options_generator),
+            ts_column_options_generator: Box::new(ts_column_options_generator),
         }
     }
 }
 
-impl CreateTableExprGenerator {
-    /// Sets column num.
-    pub fn columns(mut self, columns: usize) -> Self {
-        self.columns = columns;
-        self
-    }
-
-    /// Sets the `if_not_exists`.
-    pub fn create_is_not_exists(mut self, v: bool) -> Self {
-        self.if_not_exists = v;
-        self
-    }
-
-    /// Sets the `engine`.
-    pub fn engine(mut self, engine: &str) -> Self {
-        self.engine = engine.to_string();
-        self
-    }
-
-    /// Sets the partition num.
-    /// If there is no primary key column,
-    /// it appends a primary key atomically.
-    pub fn partitions(mut self, partition: usize) -> Self {
-        self.partition = partition;
-        self
-    }
+impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerator<R> {
+    type Error = Error;
 
     /// Generates the [CreateTableExpr].
-    pub fn generate(&self) -> Result<CreateTableExpr> {
+    fn generate(&self, rng: &mut R) -> Result<CreateTableExpr> {
         ensure!(
             self.columns != 0,
             error::UnexpectedSnafu {
@@ -81,100 +82,153 @@ impl CreateTableExprGenerator {
         );
 
         let mut builder = CreateTableExprBuilder::default();
-        let mut columns = Vec::with_capacity(self.columns + 1);
+        let mut columns = Vec::with_capacity(self.columns);
         let mut primary_keys = vec![];
-        let mut rng = rand::thread_rng();
+        let need_partible_column = self.partition > 1;
+        let mut column_names = self.name_generator.choose(rng, self.columns);
 
-        // Generates columns.
-        for i in 0..self.columns {
-            let column = rng.gen::<Column>();
-            let is_primary_key = column
-                .options
-                .iter()
-                .any(|option| option == &ColumnOption::PrimaryKey);
-            if is_primary_key {
-                primary_keys.push(i);
+        if self.columns == 1 {
+            // Generates the ts column.
+            // Safety: columns must large than 0.
+            let name = column_names.pop().unwrap();
+            let column = generate_columns(
+                rng,
+                vec![name.to_string()],
+                self.ts_column_type_generator.as_ref(),
+                self.ts_column_options_generator.as_ref(),
+            )
+            .remove(0);
+
+            if need_partible_column {
+                // Generates partition bounds.
+                let mut partition_bounds = Vec::with_capacity(self.partition);
+                for _ in 0..self.partition - 1 {
+                    partition_bounds.push(PartitionBound::Value(generate_random_value(
+                        rng,
+                        &column.column_type,
+                    )));
+                    partition_bounds.sort();
+                }
+                partition_bounds.push(PartitionBound::MaxValue);
+                builder.partition(PartitionDef::new(vec![name], partition_bounds));
             }
+
             columns.push(column);
+        } else {
+            // Generates the partible column.
+            if need_partible_column {
+                // Safety: columns must large than 0.
+                let name = column_names.pop().unwrap();
+                let column = generate_columns(
+                    rng,
+                    vec![name.to_string()],
+                    self.partible_column_type_generator.as_ref(),
+                    self.partible_column_options_generator.as_ref(),
+                )
+                .remove(0);
+
+                // Generates partition bounds.
+                let mut partition_bounds = Vec::with_capacity(self.partition);
+                for _ in 0..self.partition - 1 {
+                    partition_bounds.push(PartitionBound::Value(generate_random_value(
+                        rng,
+                        &column.column_type,
+                    )));
+                    partition_bounds.sort();
+                }
+                partition_bounds.push(PartitionBound::MaxValue);
+                builder.partition(PartitionDef::new(vec![name], partition_bounds));
+                columns.push(column);
+            }
+            // Generates the ts column.
+            // Safety: columns must large than 1.
+            let name = column_names.pop().unwrap();
+            columns.extend(generate_columns(
+                rng,
+                vec![name],
+                self.ts_column_type_generator.as_ref(),
+                self.ts_column_options_generator.as_ref(),
+            ));
+            // Generates rest columns
+            columns.extend(generate_columns(
+                rng,
+                column_names,
+                self.column_type_generator.as_ref(),
+                self.column_options_generator.as_ref(),
+            ));
         }
 
+        for (idx, column) in columns.iter().enumerate() {
+            if column.is_primary_key() {
+                primary_keys.push(idx);
+            }
+        }
         // Shuffles the primary keys.
-        primary_keys.shuffle(&mut rng);
-        let partition = if self.partition > 1 {
-            // Finds a partible primary keys.
-            let partible_primary_keys = primary_keys
-                .iter()
-                .flat_map(|i| {
-                    if PARTIBLE_DATA_TYPES.contains(&columns[*i].column_type) {
-                        Some(*i)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            // Generates the partition.
-            if partible_primary_keys.is_empty() {
-                columns.push(rng.gen::<PartibleColumn>().0);
-                primary_keys.push(columns.len() - 1);
-            }
-            let primary_key_idx = primary_keys[rng.gen_range(0..primary_keys.len())];
-            let primary_column = &columns[primary_key_idx];
-
-            // Generates partition bounds.
-            let mut partition_bounds = Vec::with_capacity(self.partition);
-            for _ in 0..self.partition - 1 {
-                partition_bounds.push(PartitionBound::Value(generate_random_value(
-                    &primary_column.column_type,
-                )));
-                partition_bounds.sort();
-            }
-            partition_bounds.push(PartitionBound::MaxValue);
-
-            Some(PartitionDef::new(
-                vec![primary_column.name.to_string()],
-                partition_bounds,
-            ))
-        } else {
-            None
-        };
-        // Generates ts column.
-        columns.push(rng.gen::<TsColumn>().0);
+        primary_keys.shuffle(rng);
 
         builder.columns(columns);
         builder.primary_keys(primary_keys);
         builder.engine(self.engine.to_string());
         builder.if_not_exists(self.if_not_exists);
-        builder.name(rng.gen::<Word>().to_string());
-        builder.partition(partition);
+        if self.name.is_empty() {
+            builder.name(self.name_generator.gen(rng));
+        } else {
+            builder.name(self.name.to_string());
+        }
         builder.build().context(error::BuildCreateTableExprSnafu)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rand::SeedableRng;
+
     use super::*;
 
     #[test]
     fn test_create_table_expr_generator() {
-        let expr = CreateTableExprGenerator::default()
+        let mut rng = rand::thread_rng();
+
+        let expr = CreateTableExprGeneratorBuilder::default()
             .columns(10)
-            .partitions(3)
-            .create_is_not_exists(true)
+            .partition(3)
+            .if_not_exists(true)
             .engine("mito2")
-            .generate()
+            .build()
+            .unwrap()
+            .generate(&mut rng)
             .unwrap();
         assert_eq!(expr.engine, "mito2");
         assert!(expr.if_not_exists);
-        assert!(expr.columns.len() >= 11);
+        assert_eq!(expr.columns.len(), 10);
         assert_eq!(expr.partition.unwrap().partition_bounds().len(), 3);
 
-        let expr = CreateTableExprGenerator::default()
+        let expr = CreateTableExprGeneratorBuilder::default()
             .columns(10)
-            .partitions(1)
-            .generate()
+            .partition(1)
+            .build()
+            .unwrap()
+            .generate(&mut rng)
             .unwrap();
-        assert_eq!(expr.columns.len(), 11);
+        assert_eq!(expr.columns.len(), 10);
         assert!(expr.partition.is_none());
+    }
+
+    #[test]
+    fn test_create_table_expr_generator_deterministic() {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
+        let expr = CreateTableExprGeneratorBuilder::default()
+            .columns(10)
+            .partition(3)
+            .if_not_exists(true)
+            .engine("mito2")
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+
+        let serialized = serde_json::to_string(&expr).unwrap();
+        let expected = r#"{"name":"iN","columns":[{"name":"CUlpa","column_type":{"Int16":{}},"options":["PrimaryKey","NotNull"]},{"name":"dEBiTiS","column_type":{"Timestamp":{"Second":null}},"options":["TimeIndex"]},{"name":"HArum","column_type":{"Int16":{}},"options":["NotNull"]},{"name":"NObIS","column_type":{"Int32":{}},"options":["PrimaryKey"]},{"name":"IMPEDiT","column_type":{"Int16":{}},"options":[{"DefaultValue":{"Int16":-25151}}]},{"name":"bLanDITIis","column_type":{"Boolean":null},"options":[{"DefaultValue":{"Boolean":true}}]},{"name":"Dolores","column_type":{"Float32":{}},"options":["PrimaryKey"]},{"name":"eSt","column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.9152612}}]},{"name":"INVentORE","column_type":{"Int64":{}},"options":["PrimaryKey"]},{"name":"aDIpiSci","column_type":{"Float64":{}},"options":["Null"]}],"if_not_exists":true,"partition":{"partition_columns":["CUlpa"],"partition_bounds":[{"Value":{"Int16":15966}},{"Value":{"Int16":31925}},"MaxValue"]},"engine":"mito2","options":{},"primary_keys":[6,0,8,3]}"#;
+        assert_eq!(expected, serialized);
     }
 }

@@ -12,44 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::marker::PhantomData;
+
 use common_query::AddColumnLocation;
-use faker_rand::lorem::Word;
+use derive_builder::Builder;
 use rand::Rng;
 use snafu::ensure;
 
 use crate::context::TableContextRef;
 use crate::error::{self, Error, Result};
-use crate::generator::Generator;
+use crate::fake::WordGenerator;
+use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Generator, Random};
 use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation};
-use crate::ir::{droppable_columns, Column};
+use crate::ir::{
+    column_options_generator, droppable_columns, generate_columns, ColumnTypeGenerator,
+};
 
 /// Generates the [AlterTableOperation::AddColumn] of [AlterTableExpr].
-pub struct AlterExprAddColumnGenerator {
+#[derive(Builder)]
+#[builder(pattern = "owned")]
+pub struct AlterExprAddColumnGenerator<R: Rng + 'static> {
     table_ctx: TableContextRef,
+    #[builder(default)]
     location: bool,
+    #[builder(default = "Box::new(WordGenerator)")]
+    name_generator: Box<dyn Random<String, R>>,
+    #[builder(default = "Box::new(column_options_generator)")]
+    column_options_generator: ColumnOptionGenerator<R>,
+    #[builder(default = "Box::new(ColumnTypeGenerator)")]
+    column_type_generator: ConcreteDataTypeGenerator<R>,
 }
 
-impl AlterExprAddColumnGenerator {
-    /// Returns an [AlterExprAddColumnGenerator].
-    pub fn new(table_ctx: &TableContextRef) -> Self {
-        Self {
-            table_ctx: table_ctx.clone(),
-            location: false,
-        }
-    }
-
-    /// Sets true to generate alter expr with a specific location.
-    pub fn with_location(mut self, v: bool) -> Self {
-        self.location = v;
-        self
-    }
-}
-
-impl Generator<AlterTableExpr> for AlterExprAddColumnGenerator {
+impl<R: Rng + 'static> Generator<AlterTableExpr, R> for AlterExprAddColumnGenerator<R> {
     type Error = Error;
 
-    fn generate(&self) -> Result<AlterTableExpr> {
-        let mut rng = rand::thread_rng();
+    fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
         let with_location = self.location && rng.gen::<bool>();
         let location = if with_location {
             let use_first = rng.gen::<bool>();
@@ -68,7 +65,14 @@ impl Generator<AlterTableExpr> for AlterExprAddColumnGenerator {
             None
         };
 
-        let column = rng.gen::<Column>();
+        let name = self.name_generator.gen(rng);
+        let column = generate_columns(
+            rng,
+            vec![name],
+            self.column_type_generator.as_ref(),
+            self.column_options_generator.as_ref(),
+        )
+        .remove(0);
         Ok(AlterTableExpr {
             name: self.table_ctx.name.to_string(),
             alter_options: AlterTableOperation::AddColumn { column, location },
@@ -77,24 +81,18 @@ impl Generator<AlterTableExpr> for AlterExprAddColumnGenerator {
 }
 
 /// Generates the [AlterTableOperation::DropColumn] of [AlterTableExpr].
-pub struct AlterExprDropColumnGenerator {
+#[derive(Builder)]
+#[builder(pattern = "owned")]
+pub struct AlterExprDropColumnGenerator<R> {
     table_ctx: TableContextRef,
+    #[builder(default)]
+    _phantom: PhantomData<R>,
 }
 
-impl AlterExprDropColumnGenerator {
-    /// Returns an [AlterExprDropColumnGenerator].
-    pub fn new(table_ctx: &TableContextRef) -> Self {
-        Self {
-            table_ctx: table_ctx.clone(),
-        }
-    }
-}
-
-impl Generator<AlterTableExpr> for AlterExprDropColumnGenerator {
+impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprDropColumnGenerator<R> {
     type Error = Error;
 
-    fn generate(&self) -> Result<AlterTableExpr> {
-        let mut rng = rand::thread_rng();
+    fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
         let droppable = droppable_columns(&self.table_ctx.columns);
         ensure!(!droppable.is_empty(), error::DroppableColumnsSnafu);
         let name = droppable[rng.gen_range(0..droppable.len())]
@@ -107,25 +105,20 @@ impl Generator<AlterTableExpr> for AlterExprDropColumnGenerator {
     }
 }
 
-pub struct AlterExprRenameGenerator {
+/// Generates the [AlterTableOperation::RenameTable] of [AlterTableExpr].
+#[derive(Builder)]
+#[builder(pattern = "owned")]
+pub struct AlterExprRenameGenerator<R: Rng> {
     table_ctx: TableContextRef,
+    #[builder(default = "Box::new(WordGenerator)")]
+    name_generator: Box<dyn Random<String, R>>,
 }
 
-impl AlterExprRenameGenerator {
-    /// Returns an [AlterExprRenameGenerator].
-    pub fn new(table_ctx: &TableContextRef) -> Self {
-        Self {
-            table_ctx: table_ctx.clone(),
-        }
-    }
-}
-
-impl Generator<AlterTableExpr> for AlterExprRenameGenerator {
+impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprRenameGenerator<R> {
     type Error = Error;
 
-    fn generate(&self) -> Result<AlterTableExpr> {
-        let mut rng = rand::thread_rng();
-        let new_table_name = rng.gen::<Word>().to_string();
+    fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
+        let new_table_name = self.name_generator.gen(rng);
         Ok(AlterTableExpr {
             name: self.table_ctx.name.to_string(),
             alter_options: AlterTableOperation::RenameTable { new_table_name },
@@ -137,29 +130,53 @@ impl Generator<AlterTableExpr> for AlterExprRenameGenerator {
 mod tests {
     use std::sync::Arc;
 
+    use rand::SeedableRng;
+
     use super::*;
     use crate::context::TableContext;
-    use crate::generator::create_expr::CreateTableExprGenerator;
+    use crate::generator::create_expr::CreateTableExprGeneratorBuilder;
     use crate::generator::Generator;
 
     #[test]
-    fn test_alter_table_expr_generator() {
-        let create_expr = CreateTableExprGenerator::default()
+    fn test_alter_table_expr_generator_deterministic() {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
+        let create_expr = CreateTableExprGeneratorBuilder::default()
             .columns(10)
-            .generate()
+            .build()
+            .unwrap()
+            .generate(&mut rng)
             .unwrap();
         let table_ctx = Arc::new(TableContext::from(&create_expr));
 
-        let _ = AlterExprAddColumnGenerator::new(&table_ctx)
-            .generate()
+        let expr = AlterExprAddColumnGeneratorBuilder::default()
+            .table_ctx(table_ctx.clone())
+            .build()
+            .unwrap()
+            .generate(&mut rng)
             .unwrap();
+        let serialized = serde_json::to_string(&expr).unwrap();
+        let expected = r#"{"name":"DigNissIMOS","alter_options":{"AddColumn":{"column":{"name":"sit","column_type":{"Boolean":null},"options":["PrimaryKey"]},"location":null}}}"#;
+        assert_eq!(expected, serialized);
 
-        let _ = AlterExprRenameGenerator::new(&table_ctx)
-            .generate()
+        let expr = AlterExprRenameGeneratorBuilder::default()
+            .table_ctx(table_ctx.clone())
+            .build()
+            .unwrap()
+            .generate(&mut rng)
             .unwrap();
+        let serialized = serde_json::to_string(&expr).unwrap();
+        let expected = r#"{"name":"DigNissIMOS","alter_options":{"RenameTable":{"new_table_name":"excepturi"}}}"#;
+        assert_eq!(expected, serialized);
 
-        let _ = AlterExprDropColumnGenerator::new(&table_ctx)
-            .generate()
+        let expr = AlterExprDropColumnGeneratorBuilder::default()
+            .table_ctx(table_ctx)
+            .build()
+            .unwrap()
+            .generate(&mut rng)
             .unwrap();
+        let serialized = serde_json::to_string(&expr).unwrap();
+        let expected =
+            r#"{"name":"DigNissIMOS","alter_options":{"DropColumn":{"name":"INVentORE"}}}"#;
+        assert_eq!(expected, serialized);
     }
 }
