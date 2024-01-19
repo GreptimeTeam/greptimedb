@@ -248,6 +248,36 @@ mod tests {
                 .unwrap()
                 .val()
         );
+
+        assert_eq!(
+            0,
+            DateTime::from_str(
+                "1970-01-01 08:00:00",
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap()
+            .val()
+        );
+
+        assert_eq!(
+            -28800000,
+            DateTime::from_str(
+                "1970-01-01 00:00:00",
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap()
+            .val()
+        );
+
+        assert_eq!(
+            28800000,
+            DateTime::from_str(
+                "1970-01-01 00:00:00",
+                Some(&Timezone::from_tz_string("-8:00").unwrap())
+            )
+            .unwrap()
+            .val()
+        );
     }
 
     #[test]
@@ -255,6 +285,15 @@ mod tests {
         let ts = DateTime::from_str("1970-01-01 08:00:00+0000", None)
             .unwrap()
             .val();
+        assert_eq!(28800000, ts);
+
+        // the string has the time zone info, the argument doesn't change the result
+        let ts = DateTime::from_str(
+            "1970-01-01 08:00:00+0000",
+            Some(&Timezone::from_tz_string("-8:00").unwrap()),
+        )
+        .unwrap()
+        .val();
         assert_eq!(28800000, ts);
     }
 
