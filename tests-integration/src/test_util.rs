@@ -302,7 +302,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     default_store_type: StorageType,
     store_provider_types: Vec<StorageType>,
     name: &str,
-    wal_config: DatanodeWalConfig,
+    datanode_wal_config: DatanodeWalConfig,
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
@@ -320,7 +320,13 @@ pub fn create_tmp_dir_and_datanode_opts(
         store_providers.push(store);
         storage_guards.push(StorageGuard(data_tmp_dir))
     }
-    let opts = create_datanode_opts(mode, default_store, store_providers, home_dir, wal_config);
+    let opts = create_datanode_opts(
+        mode,
+        default_store,
+        store_providers,
+        home_dir,
+        datanode_wal_config,
+    );
 
     (
         opts,
@@ -336,7 +342,7 @@ pub(crate) fn create_datanode_opts(
     default_store: ObjectStoreConfig,
     providers: Vec<ObjectStoreConfig>,
     home_dir: String,
-    wal_config: DatanodeWalConfig,
+    datanode_wal_config: DatanodeWalConfig,
 ) -> DatanodeOptions {
     DatanodeOptions {
         node_id: Some(0),
@@ -348,7 +354,7 @@ pub(crate) fn create_datanode_opts(
             ..Default::default()
         },
         mode,
-        wal: wal_config,
+        wal: datanode_wal_config,
         ..Default::default()
     }
 }
