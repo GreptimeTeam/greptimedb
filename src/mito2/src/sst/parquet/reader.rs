@@ -40,7 +40,7 @@ use table::predicate::Predicate;
 use crate::cache::CacheManagerRef;
 use crate::error::{
     ArrowReaderSnafu, FieldTypeMismatchSnafu, FilterRecordBatchSnafu, InvalidMetadataSnafu,
-    InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu, Result,
+    InvalidParquetSnafu, ReadParquetSnafu, Result,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
@@ -250,7 +250,7 @@ impl ParquetReaderBuilder {
             return Ok(metadata);
         }
 
-        // Cache miss, read directly.
+        // Cache miss, load metadata directly.
         let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
         let metadata = metadata_loader.load().await?;
         let metadata = Arc::new(metadata);

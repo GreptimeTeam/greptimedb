@@ -151,7 +151,7 @@ impl<'a> MetadataLoader<'a> {
                 .await
                 .context(error::OpenDalSnafu)?
                 .content_length(),
-            n => n,
+            other => other,
         };
         Ok(file_size)
     }
