@@ -666,5 +666,3 @@ pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
         .await
         .unwrap();
 }
-
-pub struct StaticContext {}
