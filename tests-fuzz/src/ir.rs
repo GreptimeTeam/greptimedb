@@ -131,7 +131,7 @@ impl Distribution<TsColumn> for Standard {
         TsColumn(Column {
             name: rng.gen::<Word>().to_string(),
             column_type,
-            options: vec![],
+            options: vec![ColumnOption::TimeIndex],
         })
     }
 }

@@ -25,7 +25,7 @@ pub type CreateTableExprGenerator =
 
 pub type AlterTableExprGenerator = Box<dyn Generator<AlterTableExpr, Error = Error> + Sync + Send>;
 
-pub(crate) trait Generator<T> {
+pub trait Generator<T> {
     type Error: Sync + Send + fmt::Debug;
 
     fn generate(&self) -> Result<T, Self::Error>;

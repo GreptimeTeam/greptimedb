@@ -18,12 +18,10 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use snafu::{ensure, ResultExt};
 
-use super::Generator;
-use crate::error::{self, Error, Result};
+use crate::error::{self, Result};
 use crate::ir::create_expr::{ColumnOption, CreateTableExprBuilder};
 use crate::ir::{
-    self, generate_random_value, Column, CreateTableExpr, PartibleColumn, TsColumn,
-    PARTIBLE_DATA_TYPES,
+    generate_random_value, Column, CreateTableExpr, PartibleColumn, TsColumn, PARTIBLE_DATA_TYPES,
 };
 
 pub struct CreateTableExprGenerator {
@@ -89,7 +87,7 @@ impl CreateTableExprGenerator {
 
         // Generates columns.
         for i in 0..self.columns {
-            let mut column = rng.gen::<Column>();
+            let column = rng.gen::<Column>();
             let is_primary_key = column
                 .options
                 .iter()

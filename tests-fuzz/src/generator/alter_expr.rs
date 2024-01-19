@@ -12,12 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::f64::consts::E;
-use std::sync::Arc;
-
 use common_query::AddColumnLocation;
 use faker_rand::lorem::Word;
-use rand::{random, Rng};
+use rand::Rng;
 use snafu::ensure;
 
 use crate::context::TableContextRef;
@@ -128,7 +125,7 @@ impl Generator<AlterTableExpr> for AlterExprRenameGenerator {
 
     fn generate(&self) -> Result<AlterTableExpr> {
         let mut rng = rand::thread_rng();
-        let mut new_table_name = rng.gen::<Word>().to_string();
+        let new_table_name = rng.gen::<Word>().to_string();
         Ok(AlterTableExpr {
             name: self.table_ctx.name.to_string(),
             alter_options: AlterTableOperation::RenameTable { new_table_name },
@@ -153,15 +150,15 @@ mod tests {
             .unwrap();
         let table_ctx = Arc::new(TableContext::from(&create_expr));
 
-        let alter_expr = AlterExprAddColumnGenerator::new(&table_ctx)
+        let _ = AlterExprAddColumnGenerator::new(&table_ctx)
             .generate()
             .unwrap();
 
-        let alter_expr = AlterExprRenameGenerator::new(&table_ctx)
+        let _ = AlterExprRenameGenerator::new(&table_ctx)
             .generate()
             .unwrap();
 
-        let alter_expr = AlterExprDropColumnGenerator::new(&table_ctx)
+        let _ = AlterExprDropColumnGenerator::new(&table_ctx)
             .generate()
             .unwrap();
     }
