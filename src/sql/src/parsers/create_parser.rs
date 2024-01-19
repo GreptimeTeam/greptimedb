@@ -775,7 +775,10 @@ fn ensure_value_lists_strictly_increased<'a>(
                         match (is_string_value(x), is_string_value(y)) {
                             (true, false) | (false, true) => {
                                 return error::InvalidSqlSnafu {
-                                    msg: format!("Can't compare {:?} with {:?}", x, y),
+                                    msg: format!(
+                                        "Can't compare {:?} with {:?} in partition rules",
+                                        x, y
+                                    ),
                                 }
                                 .fail();
                             }

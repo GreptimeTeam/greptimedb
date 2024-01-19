@@ -25,7 +25,7 @@ use crate::parsers::tql_parser;
 use crate::statements::statement::Statement;
 use crate::statements::transform_statements;
 
-/// SQL Parser options, such as session timezone etc.
+/// SQL Parser options.
 #[derive(Clone, Debug, Default)]
 pub struct ParseOptions {}
 
