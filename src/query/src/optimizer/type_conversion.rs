@@ -140,11 +140,6 @@ impl TypeConverter {
         None
     }
 
-    /// Retrieve the timezone from query context.
-    fn get_timezone(&self) -> Option<Timezone> {
-        Some(self.query_ctx.timezone().as_ref().clone())
-    }
-
     fn cast_scalar_value(
         &self,
         value: &ScalarValue,
@@ -152,7 +147,7 @@ impl TypeConverter {
     ) -> Result<ScalarValue> {
         match (target_type, value) {
             (DataType::Timestamp(_, _), ScalarValue::Utf8(Some(v))) => {
-                string_to_timestamp_ms(v, self.get_timezone())
+                string_to_timestamp_ms(v, Some(self.query_ctx.timezone().as_ref()))
             }
             (DataType::Boolean, ScalarValue::Utf8(Some(v))) => match v.to_lowercase().as_str() {
                 "true" => Ok(ScalarValue::Boolean(Some(true))),
@@ -295,8 +290,8 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
     Expr::Literal(ScalarValue::TimestampMillisecond(Some(timestamp), None))
 }
 
-fn string_to_timestamp_ms(string: &str, timezone: Option<Timezone>) -> Result<ScalarValue> {
-    let ts = Timestamp::from_str(string, timezone.as_ref())
+fn string_to_timestamp_ms(string: &str, timezone: Option<&Timezone>) -> Result<ScalarValue> {
+    let ts = Timestamp::from_str(string, timezone)
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
     let value = Some(ts.value());
@@ -336,7 +331,7 @@ mod tests {
         assert_eq!(
             string_to_timestamp_ms(
                 "2009-02-13 23:31:30",
-                Some(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
             )
             .unwrap(),
             ScalarValue::TimestampSecond(Some(1234567890 - 8 * 3600), None)
@@ -345,7 +340,7 @@ mod tests {
         assert_eq!(
             string_to_timestamp_ms(
                 "2009-02-13 23:31:30",
-                Some(Timezone::from_tz_string("-8:00").unwrap())
+                Some(&Timezone::from_tz_string("-8:00").unwrap())
             )
             .unwrap(),
             ScalarValue::TimestampSecond(Some(1234567890 + 8 * 3600), None)
