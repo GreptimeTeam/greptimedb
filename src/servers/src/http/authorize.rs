@@ -30,7 +30,7 @@ use secrecy::SecretString;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
+use super::header::{GreptimeDbName, GREPTIME_PHYSICAL_TABLE_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use super::{ResponseFormat, PUBLIC_APIS};
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
@@ -58,12 +58,20 @@ pub async fn inner_auth<B>(
 ) -> std::result::Result<Request<B>, Response> {
     // 1. prepare
     let (catalog, schema) = extract_catalog_and_schema(&req);
+    // TODO(ruihang): move this out of auth module
     let timezone = extract_timezone(&req);
-    let query_ctx = QueryContextBuilder::default()
+    let physical_table = extract_physical_table(&req);
+    let mut query_ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
-        .timezone(timezone)
-        .build();
+        .timezone(timezone);
+
+    if let Some(physical_table) = physical_table {
+        query_ctx_builder = query_ctx_builder
+            .set_extension(GREPTIME_PHYSICAL_TABLE_NAME.to_string(), physical_table);
+    }
+
+    let query_ctx = query_ctx_builder.build();
     let need_auth = need_auth(&req);
     let is_influxdb = req.uri().path().contains("influxdb");
 
@@ -158,6 +166,15 @@ fn extract_timezone<B>(request: &Request<B>) -> Timezone {
         .and_then(|header| header.to_str().ok())
         .unwrap_or("");
     parse_timezone(Some(timezone))
+}
+
+/// parse physical table from header
+fn extract_physical_table<B>(request: &Request<B>) -> Option<String> {
+    request
+        .headers()
+        .get(&GREPTIME_PHYSICAL_TABLE_NAME)
+        .and_then(|header| header.to_str().ok())
+        .map(|t| t.to_string())
 }
 
 fn get_influxdb_credentials<B>(request: &Request<B>) -> Result<Option<(Username, Password)>> {

@@ -17,9 +17,16 @@ use headers::{Header, HeaderName, HeaderValue};
 pub const GREPTIME_DB_HEADER_FORMAT: &str = "x-greptime-format";
 pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
 
+/// Header key of `db-name`. Example format of the header value is `greptime-public`.
 pub static GREPTIME_DB_HEADER_NAME: HeaderName = HeaderName::from_static("x-greptime-db-name");
+/// Header key of query specific timezone.
+/// Example format of the header value is `Asia/Shanghai` or `+08:00`.
 pub static GREPTIME_TIMEZONE_HEADER_NAME: HeaderName =
     HeaderName::from_static("x-greptime-timezone");
+/// Header key of physical table name. This only takes efforts on prometheus remote write request.
+/// Example format of the header value is `prom_phy`.
+pub static GREPTIME_PHYSICAL_TABLE_NAME: HeaderName =
+    HeaderName::from_static("x-greptime-physical-table");
 
 pub struct GreptimeDbName(Option<String>);
 

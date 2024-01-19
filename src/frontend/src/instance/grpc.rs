@@ -195,6 +195,23 @@ impl Instance {
             .context(TableOperationSnafu)
     }
 
+    pub async fn handle_metric_row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        physical_table: String,
+    ) -> Result<Output> {
+        self.inserter
+            .handle_metric_row_inserts(
+                requests,
+                ctx,
+                self.statement_executor.as_ref(),
+                physical_table,
+            )
+            .await
+            .context(TableOperationSnafu)
+    }
+
     pub async fn handle_deletes(
         &self,
         requests: DeleteRequests,

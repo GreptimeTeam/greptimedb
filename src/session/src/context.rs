@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -41,6 +42,8 @@ pub struct QueryContext {
     #[builder(setter(custom))]
     timezone: ArcSwap<Timezone>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
+    #[builder(default)]
+    extension: HashMap<String, String>,
 }
 
 impl QueryContextBuilder {
@@ -71,6 +74,7 @@ impl From<&RegionRequestHeader> for QueryContext {
             // for request send to datanode, all timestamp have converted to UTC, so timezone is not important
             timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
             sql_dialect: Box::new(GreptimeDbDialect {}),
+            extension: Default::default(),
         }
     }
 }
@@ -139,6 +143,14 @@ impl QueryContext {
         let _ = self.timezone.swap(Arc::new(timezone));
     }
 
+    pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
+        self.extension.insert(key.into(), value.into());
+    }
+
+    pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
+        self.extension.get(key.as_ref()).map(|v| v.as_str())
+    }
+
     /// SQL like `set variable` may change timezone or other info in `QueryContext`.
     /// We need persist these change in `Session`.
     pub fn update_session(&self, session: &SessionRef) {
@@ -167,7 +179,15 @@ impl QueryContextBuilder {
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),
+            extension: self.extension.unwrap_or_default(),
         })
+    }
+
+    pub fn set_extension(mut self, key: String, value: String) -> Self {
+        self.extension
+            .get_or_insert_with(HashMap::new)
+            .insert(key, value);
+        self
     }
 }
 

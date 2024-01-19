@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
+use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
@@ -27,6 +28,7 @@ use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use prost::Message;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
+use servers::http::header::GREPTIME_PHYSICAL_TABLE_NAME;
 use servers::prom_store::{self, Metrics};
 use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
@@ -159,9 +161,13 @@ impl PromStoreProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
             .context(AuthSnafu)?;
+        let physical_table = ctx
+            .extension(GREPTIME_PHYSICAL_TABLE_NAME.as_str())
+            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+            .to_string();
         let (requests, samples) = prom_store::to_grpc_row_insert_requests(request)?;
         let _ = self
-            .handle_row_inserts(requests, ctx)
+            .handle_metric_row_inserts(requests, ctx, physical_table)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
@@ -242,7 +248,12 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
     async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> ServerResult<()> {
         let (requests, _) = prom_store::to_grpc_row_insert_requests(request)?;
         self.inserter
-            .handle_row_inserts(requests, ctx, self.statement_executor.as_ref())
+            .handle_metric_row_inserts(
+                requests,
+                ctx,
+                self.statement_executor.as_ref(),
+                GREPTIME_PHYSICAL_TABLE.to_string(),
+            )
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
