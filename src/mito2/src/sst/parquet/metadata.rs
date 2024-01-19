@@ -99,7 +99,7 @@ impl<'a> MetadataLoader<'a> {
             .build()
         })? as u64;
 
-        if file_size - FOOTER_SIZE as u64 < metadata_len {
+        if file_size - (FOOTER_SIZE as u64) < metadata_len {
             return error::InvalidParquetSnafu {
                 file: path,
                 reason: format!(
