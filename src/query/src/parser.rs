@@ -113,7 +113,7 @@ impl QueryLanguageParser {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .map_err(BoxedError::new)
                 .context(QueryParseSnafu {
-                    query: sql.to_string(),
+                    query: sql,
                 })?;
         if statement.len() != 1 {
             MultipleStatementsSnafu {
