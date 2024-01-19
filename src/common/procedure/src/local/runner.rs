@@ -16,14 +16,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
-use bytes::Bytes;
 use common_telemetry::logging;
 use tokio::time;
 
 use super::rwlock::OwnedKeyRwLockGuard;
 use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
-use crate::procedure::StringKey;
+use crate::procedure::{Output, StringKey};
 use crate::store::ProcedureStore;
 use crate::ProcedureState::Retrying;
 use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
@@ -482,7 +481,7 @@ impl Runner {
         Ok(())
     }
 
-    fn done(&self, output: Option<Bytes>) {
+    fn done(&self, output: Option<Output>) {
         // TODO(yingwen): Add files to remove list.
         logging::info!(
             "Procedure {}-{} done",

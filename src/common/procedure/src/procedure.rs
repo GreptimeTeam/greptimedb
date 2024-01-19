@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
@@ -25,6 +25,8 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::watcher::Watcher;
+
+pub type Output = Arc<dyn Any + Send + Sync>;
 
 /// Procedure execution status.
 #[derive(Debug)]
@@ -41,7 +43,7 @@ pub enum Status {
         persist: bool,
     },
     /// the procedure is done.
-    Done { output: Option<Bytes> },
+    Done { output: Option<Output> },
 }
 
 impl Status {
@@ -56,9 +58,9 @@ impl Status {
     }
 
     /// Returns a [Status::Done] with output.
-    pub fn done_with_output(bytes: Bytes) -> Status {
+    pub fn done_with_output(output: Output) -> Status {
         Status::Done {
-            output: Some(bytes),
+            output: Some(output),
         }
     }
     /// Returns `true` if the procedure is done.
@@ -268,7 +270,7 @@ pub enum ProcedureState {
     #[default]
     Running,
     /// The procedure is finished.
-    Done { output: Option<Bytes> },
+    Done { output: Option<Output> },
     /// The procedure is failed and can be retried.
     Retrying { error: Arc<Error> },
     /// The procedure is failed and cannot proceed anymore.

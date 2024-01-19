@@ -1863,7 +1863,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "backon",
- "bytes",
  "common-error",
  "common-macro",
  "common-runtime",
