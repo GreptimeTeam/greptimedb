@@ -275,7 +275,7 @@ async fn test_on_datanode_drop_regions() {
     });
 
     let status = procedure.on_datanode_drop_regions().await.unwrap();
-    assert!(matches!(status, Status::Done));
+    assert!(status.is_done());
 
     handle.await.unwrap();
 

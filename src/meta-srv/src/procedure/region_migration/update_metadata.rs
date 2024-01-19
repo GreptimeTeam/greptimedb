@@ -58,7 +58,7 @@ impl State for UpdateMetadata {
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!("Failed to broadcast the invalidate table cache message during the upgrade candidate, error: {err:?}");
                 };
-                Ok((Box::new(RegionMigrationEnd), Status::Done))
+                Ok((Box::new(RegionMigrationEnd), Status::done()))
             }
             UpdateMetadata::Rollback => {
                 self.rollback_downgraded_region(ctx).await?;

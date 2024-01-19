@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::Bytes;
 use common_telemetry::debug;
 use snafu::ResultExt;
 use tokio::sync::watch::Receiver;
@@ -23,13 +24,13 @@ use crate::procedure::ProcedureState;
 pub type Watcher = Receiver<ProcedureState>;
 
 /// Wait the [Watcher] until the [ProcedureState] is done.
-pub async fn wait(watcher: &mut Watcher) -> Result<()> {
+pub async fn wait(watcher: &mut Watcher) -> Result<Option<Bytes>> {
     loop {
         watcher.changed().await.context(WaitWatcherSnafu)?;
         match &*watcher.borrow() {
             ProcedureState::Running => (),
-            ProcedureState::Done => {
-                return Ok(());
+            ProcedureState::Done { output } => {
+                return Ok(output.clone());
             }
             ProcedureState::Failed { error } => {
                 return Err(error.clone()).context(ProcedureExecSnafu);
@@ -89,7 +90,7 @@ mod tests {
                     self.error = !self.error;
                     Err(Error::retry_later(MockError::new(StatusCode::Internal)))
                 } else {
-                    Ok(Status::Done)
+                    Ok(Status::done_with_output(Bytes::from_static(b"hello")))
                 }
             }
 
@@ -111,6 +112,7 @@ mod tests {
             .await
             .unwrap();
 
-        wait(&mut watcher).await.unwrap();
+        let output = wait(&mut watcher).await.unwrap().unwrap();
+        assert_eq!(&output[..], b"hello");
     }
 }

@@ -511,7 +511,7 @@ mod tests {
             let pc = &mut ctx.persistent_ctx;
 
             if pc.cluster_id == 2 {
-                Ok((Box::new(RegionMigrationEnd), Status::Done))
+                Ok((Box::new(RegionMigrationEnd), Status::done()))
             } else {
                 pc.cluster_id += 1;
                 Ok((Box::new(MockState), Status::executing(false)))
@@ -540,7 +540,7 @@ mod tests {
         for _ in 0..3 {
             status = Some(procedure.execute(&ctx).await.unwrap());
         }
-        assert_matches!(status.unwrap(), Status::Done);
+        assert!(status.unwrap().is_done());
 
         let ctx = TestingEnv::procedure_context();
         let mut procedure = new_mock_procedure(&env);
@@ -557,7 +557,7 @@ mod tests {
             status = Some(procedure.execute(&ctx).await.unwrap());
         }
         assert_eq!(procedure.context.persistent_ctx.cluster_id, 2);
-        assert_matches!(status.unwrap(), Status::Done);
+        assert!(status.unwrap().is_done());
     }
 
     #[tokio::test]

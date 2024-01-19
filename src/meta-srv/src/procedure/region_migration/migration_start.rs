@@ -55,14 +55,14 @@ impl State for RegionMigrationStart {
         let from_peer = &ctx.persistent_ctx.from_peer;
 
         if self.has_migrated(&region_route, to_peer)? {
-            Ok((Box::new(RegionMigrationEnd), Status::Done))
+            Ok((Box::new(RegionMigrationEnd), Status::done()))
         } else if self.invalid_leader_peer(&region_route, from_peer)? {
             Ok((
                 Box::new(RegionMigrationAbort::new(&format!(
                     "Invalid region leader peer: {from_peer:?}, expected: {:?}",
                     region_route.leader_peer.as_ref().unwrap(),
                 ))),
-                Status::Done,
+                Status::done(),
             ))
         } else if self.check_candidate_region_on_peer(&region_route, to_peer) {
             Ok((Box::new(UpdateMetadata::Downgrade), Status::executing(true)))

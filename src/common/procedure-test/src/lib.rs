@@ -60,7 +60,7 @@ pub async fn execute_procedure_until_done(procedure: &mut dyn Procedure) {
                 subprocedures.is_empty(),
                 "Executing subprocedure is unsupported"
             ),
-            Status::Done => break,
+            Status::Done { .. } => break,
         }
     }
 }
@@ -87,7 +87,7 @@ pub async fn execute_procedure_once(
             );
             false
         }
-        Status::Done => true,
+        Status::Done { .. } => true,
     }
 }
 
@@ -108,7 +108,7 @@ pub async fn execute_until_suspended_or_done(
         match procedure.execute(&ctx).await.unwrap() {
             Status::Executing { .. } => (),
             Status::Suspended { subprocedures, .. } => return Some(subprocedures),
-            Status::Done => break,
+            Status::Done { .. } => break,
         }
     }
 

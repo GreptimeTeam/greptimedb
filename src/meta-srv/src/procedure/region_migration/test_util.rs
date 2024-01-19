@@ -520,7 +520,7 @@ pub(crate) fn assert_no_persist(status: Status) {
 
 /// Asserts the [Status] should be [Status::Done].
 pub(crate) fn assert_done(status: Status) {
-    assert_matches!(status, Status::Done)
+    assert!(status.is_done());
 }
 
 /// Asserts the [State] should be [OpenCandidateRegion].

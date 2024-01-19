@@ -31,6 +31,6 @@ impl State for RegionFailoverEnd {
     }
 
     fn status(&self) -> Status {
-        Status::Done
+        Status::done()
     }
 }

@@ -333,7 +333,7 @@ impl AlterTableProcedure {
                 .await?;
         };
 
-        Ok(Status::Done)
+        Ok(Status::done())
     }
 
     fn lock_key_inner(&self) -> Vec<StringKey> {
