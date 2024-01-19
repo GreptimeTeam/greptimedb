@@ -12,11 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod alter_expr;
+pub mod create_expr;
+
 use std::fmt;
 
-#[async_trait::async_trait]
+use crate::error::Error;
+use crate::ir::{AlterTableExpr, CreateTableExpr};
+
+pub type CreateTableExprGenerator =
+    Box<dyn Generator<CreateTableExpr, Error = Error> + Sync + Send>;
+
+pub type AlterTableExprGenerator = Box<dyn Generator<AlterTableExpr, Error = Error> + Sync + Send>;
+
 pub(crate) trait Generator<T> {
     type Error: Sync + Send + fmt::Debug;
 
-    async fn generate(&self) -> Result<T, Self::Error>;
+    fn generate(&self) -> Result<T, Self::Error>;
 }

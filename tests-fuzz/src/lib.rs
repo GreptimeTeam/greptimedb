@@ -13,7 +13,11 @@
 // limitations under the License.
 
 pub(crate) mod context;
+pub(crate) mod error;
 pub(crate) mod executor;
+// TODO(weny): removes it.
+#[allow(unused)]
 pub(crate) mod generator;
+pub(crate) mod ir;
 pub(crate) mod table_creator;
 pub(crate) mod translator;

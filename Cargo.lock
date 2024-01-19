@@ -2875,6 +2875,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "deunicode"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae2a35373c5c74340b79ae6780b498b2b183915ec5dacf263aac5a099bf485a"
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3144,6 +3150,17 @@ checksum = "fe5e43d0f78a42ad591453aedb1d7ae631ce7ee445c7643691055a9ed8d3b01c"
 dependencies = [
  "log",
  "once_cell",
+ "rand",
+]
+
+[[package]]
+name = "faker_rand"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300d2ddbf2245b5b5e723995e0961033121b4fc2be9045fb661af82bd739ffb6"
+dependencies = [
+ "deunicode",
+ "lazy_static",
  "rand",
 ]
 
@@ -9532,6 +9549,18 @@ name = "tests-fuzz"
 version = "0.6.0"
 dependencies = [
  "async-trait",
+ "common-error",
+ "common-macro",
+ "common-query",
+ "datatypes",
+ "derive_builder 0.12.0",
+ "faker_rand",
+ "lazy_static",
+ "partition",
+ "rand",
+ "serde",
+ "snafu",
+ "sql",
 ]
 
 [[package]]
