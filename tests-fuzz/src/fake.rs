@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use lazy_static::lazy_static;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::Rng;
@@ -66,15 +68,80 @@ pub fn random_capitalize_map<R: Rng + 'static>(rng: &mut R, s: String) -> String
     v.into_iter().collect::<String>()
 }
 
-/// Add backticks if it contains uppercase chars.
-pub fn auto_backtick_map<R: Rng + 'static>(_rng: &mut R, s: String) -> String {
-    let need_backtick = s.chars().any(|c| c.is_uppercase());
+lazy_static! {
+    static ref KEYWORDS_SET: HashSet<&'static str> = sqlparser::keywords::ALL_KEYWORDS
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+}
 
-    if need_backtick {
+/// Returns true if it's a keyword.
+pub fn is_keyword(word: impl AsRef<str>) -> bool {
+    KEYWORDS_SET.contains(word.as_ref())
+}
+
+/// Returns true if it contains uppercase char.
+pub fn contain_uppercase_char(s: &str) -> bool {
+    s.chars().any(|c| c.is_uppercase())
+}
+
+/// Returns true if it's a keyword or contains uppercase char.
+pub fn is_keyword_or_contain_uppercase(s: &str) -> bool {
+    is_keyword(s.to_uppercase()) || contain_uppercase_char(s)
+}
+
+pub fn make_backtick_map<R: Rng + 'static, F: Fn(&str) -> bool>(
+    f: F,
+) -> impl Fn(&mut R, String) -> String {
+    move |_rng, s| -> String {
+        let need = f(&s);
+
+        if need {
+            format!("`{s}`")
+        } else {
+            s
+        }
+    }
+}
+
+pub fn make_quote_map<R: Rng + 'static, F: Fn(&str) -> bool>(
+    f: F,
+) -> impl Fn(&mut R, String) -> String {
+    move |_rng, s| -> String {
+        let need = f(&s);
+
+        if need {
+            format!("\"{s}\"")
+        } else {
+            s
+        }
+    }
+}
+
+/// Adds backticks if it contains uppercase chars.
+pub fn auto_backtick_map<R: Rng + 'static>(_rng: &mut R, s: String) -> String {
+    let need = s.chars().any(|c| c.is_uppercase());
+
+    if need {
         format!("`{s}`")
     } else {
         s
     }
+}
+
+/// Adds backticks if it contains uppercase chars.
+pub fn uppercase_and_keyword_backtick_map<R: Rng + 'static>(rng: &mut R, s: String) -> String {
+    make_backtick_map(is_keyword_or_contain_uppercase)(rng, s)
+}
+
+/// Adds quotes if it contains uppercase chars.
+pub fn auto_quote_map<R: Rng + 'static>(rng: &mut R, s: String) -> String {
+    make_quote_map(contain_uppercase_char)(rng, s)
+}
+
+/// Adds quotes if it contains uppercase chars.
+pub fn uppercase_and_keyword_quote_map<R: Rng + 'static>(rng: &mut R, s: String) -> String {
+    make_quote_map(is_keyword_or_contain_uppercase)(rng, s)
 }
 
 pub fn merge_two_word_map_fn<R: Rng>(
