@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use sqlparser::ast::DataType as SqlDataType;
+
+pub mod alter_expr;
 pub mod create_expr;
 
 pub fn sql_data_type_to_postgres_data_type(data_type: SqlDataType) -> String {

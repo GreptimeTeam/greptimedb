@@ -67,8 +67,8 @@ impl CreateTableExprTranslator {
     }
 
     fn format_column_type(column_type: &ConcreteDataType) -> String {
-        // Safety: We don't use the `Dictionary` type
         sql_data_type_to_postgres_data_type(
+            // Safety: We don't use the `Dictionary` type
             concrete_data_type_to_sql_data_type(column_type).unwrap(),
         )
     }
