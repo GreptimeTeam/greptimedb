@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::marker::PhantomData;
 
 use lazy_static::lazy_static;
 use rand::seq::{IteratorRandom, SliceRandom};
@@ -50,11 +51,16 @@ faker_impl_from_values!(Word, LOREM_WORDS);
 pub struct WordGenerator;
 impl_random!(String, WordGenerator, LOREM_WORDS);
 
-pub type WordMapFn<R> = Box<dyn Fn(&mut R, String) -> String>;
-
-pub struct MapWordGenerator<R: Rng> {
-    base: WordGenerator,
-    map: WordMapFn<R>,
+pub struct MappedGenerator<T, F, R, V>
+where
+    T: Random<V, R>,
+    F: Fn(&mut R, V) -> V,
+    R: Rng,
+{
+    base: T,
+    map: F,
+    _r: PhantomData<R>,
+    _v: PhantomData<V>,
 }
 
 pub fn random_capitalize_map<R: Rng + 'static>(rng: &mut R, s: String) -> String {
@@ -154,17 +160,29 @@ pub fn merge_two_word_map_fn<R: Rng>(
     }
 }
 
-impl<R: Rng> MapWordGenerator<R> {
-    pub fn new(map: WordMapFn<R>) -> Self {
+impl<T, F, R, V> MappedGenerator<T, F, R, V>
+where
+    T: Random<V, R>,
+    F: Fn(&mut R, V) -> V,
+    R: Rng,
+{
+    pub fn new(base: T, map: F) -> Self {
         Self {
-            base: WordGenerator,
+            base,
             map,
+            _r: Default::default(),
+            _v: Default::default(),
         }
     }
 }
 
-impl<R: Rng> Random<String, R> for MapWordGenerator<R> {
-    fn choose(&self, rng: &mut R, amount: usize) -> Vec<String> {
+impl<T, F, R, V> Random<V, R> for MappedGenerator<T, F, R, V>
+where
+    T: Random<V, R>,
+    F: Fn(&mut R, V) -> V,
+    R: Rng,
+{
+    fn choose(&self, rng: &mut R, amount: usize) -> Vec<V> {
         self.base
             .choose(rng, amount)
             .into_iter()

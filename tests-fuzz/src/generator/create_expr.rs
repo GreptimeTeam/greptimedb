@@ -20,7 +20,7 @@ use snafu::{ensure, ResultExt};
 
 use super::Generator;
 use crate::error::{self, Error, Result};
-use crate::fake::{random_capitalize_map, MapWordGenerator};
+use crate::fake::{random_capitalize_map, MappedGenerator, WordGenerator};
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random};
 use crate::ir::create_expr::CreateTableExprBuilder;
 use crate::ir::{
@@ -58,7 +58,7 @@ impl<R: Rng + 'static> Default for CreateTableExprGenerator<R> {
             if_not_exists: false,
             partition: 0,
             name: String::new(),
-            name_generator: Box::new(MapWordGenerator::new(Box::new(random_capitalize_map))),
+            name_generator: Box::new(MappedGenerator::new(WordGenerator, random_capitalize_map)),
             ts_column_type_generator: Box::new(TsColumnTypeGenerator),
             column_type_generator: Box::new(ColumnTypeGenerator),
             partible_column_type_generator: Box::new(PartibleColumnTypeGenerator),
