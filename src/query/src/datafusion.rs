@@ -26,7 +26,6 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_function::scalars::udf::create_udf;
 use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
@@ -264,10 +263,6 @@ impl QueryEngine for DatafusionQueryEngine {
         }
     }
 
-    fn register_udf(&self, udf: ScalarUdf) {
-        self.state.register_udf(udf);
-    }
-
     /// Note in SQL queries, aggregate names are looked up using
     /// lowercase unless the query uses quotes. For example,
     ///
@@ -279,8 +274,15 @@ impl QueryEngine for DatafusionQueryEngine {
         self.state.register_aggregate_function(func);
     }
 
+    /// Register a [`ScalarUdf`].
+    fn register_udf(&self, udf: ScalarUdf) {
+        self.state.register_udf(udf);
+    }
+
+    /// Register an UDF function.
+    /// Will override if the function with same name is already registered.
     fn register_function(&self, func: FunctionRef) {
-        self.state.register_udf(create_udf(func));
+        self.state.register_function(func);
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {

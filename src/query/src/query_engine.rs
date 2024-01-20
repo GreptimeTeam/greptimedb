@@ -76,9 +76,13 @@ pub trait QueryEngine: Send + Sync {
     fn register_udf(&self, udf: ScalarUdf);
 
     /// Register an aggregate function.
+    ///
+    /// # Panics
+    /// Will panic if the function with same name is already registered.
     fn register_aggregate_function(&self, func: AggregateFunctionMetaRef);
 
     /// Register a SQL function.
+    /// Will override if the function with same name is already registered.
     fn register_function(&self, func: FunctionRef);
 
     /// Create a DataFrame from a table.
@@ -132,6 +136,7 @@ impl QueryEngineFactory {
     }
 }
 
+/// Register all functions implememented by GreptimeDB
 fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
     for func in FUNCTION_REGISTRY.functions() {
         query_engine.register_function(func);

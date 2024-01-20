@@ -19,9 +19,11 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
+use common_telemetry::warn;
 use datafusion::catalog::MemoryCatalogList;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
@@ -58,6 +60,7 @@ pub struct QueryEngineState {
     df_context: SessionContext,
     catalog_manager: CatalogManagerRef,
     table_mutation_handler: Option<TableMutationHandlerRef>,
+    udf_functions: Arc<RwLock<HashMap<String, FunctionRef>>>,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
@@ -118,6 +121,7 @@ impl QueryEngineState {
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
             plugins,
+            udf_functions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -138,18 +142,42 @@ impl QueryEngineState {
             })
     }
 
-    /// Register a udf function
-    // TODO(dennis): manage UDFs by ourself.
-    pub fn register_udf(&self, udf: ScalarUdf) {
-        self.df_context.register_udf(udf.into_df_udf());
+    /// Register an udf function.
+    /// Will override if the function with same name is already registered.
+    pub fn register_function(&self, func: FunctionRef) {
+        let name = func.name().to_string();
+        let x = self
+            .udf_functions
+            .write()
+            .unwrap()
+            .insert(name.clone(), func);
+
+        if x.is_some() {
+            warn!("Already registered udf function '{name}'");
+        }
     }
 
+    /// Retrieve the udf function by name
+    pub fn udf_function(&self, function_name: &str) -> Option<FunctionRef> {
+        self.udf_functions
+            .read()
+            .unwrap()
+            .get(function_name)
+            .cloned()
+    }
+
+    /// Retrieve the aggregate function by name
     pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
         self.aggregate_functions
             .read()
             .unwrap()
             .get(function_name)
             .cloned()
+    }
+
+    /// Register a [`ScalarUdf`].
+    pub fn register_udf(&self, udf: ScalarUdf) {
+        self.df_context.register_udf(udf.into());
     }
 
     /// Register an aggregate function.
