@@ -136,7 +136,7 @@ impl QueryEngineFactory {
     }
 }
 
-/// Register all functions implememented by GreptimeDB
+/// Register all functions implemented by GreptimeDB
 fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
     for func in FUNCTION_REGISTRY.functions() {
         query_engine.register_function(func);
