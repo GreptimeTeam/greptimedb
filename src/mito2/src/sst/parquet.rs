@@ -16,6 +16,7 @@
 
 mod format;
 pub(crate) mod helper;
+mod metadata;
 mod page_reader;
 pub mod reader;
 pub mod row_group;
