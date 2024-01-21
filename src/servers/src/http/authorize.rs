@@ -61,7 +61,7 @@ pub async fn inner_auth<B>(
     // 1. prepare
     let (catalog, schema) = extract_catalog_and_schema(&req);
     // TODO(ruihang): move this out of auth module
-    let timezone = extract_timezone(&req);
+    let timezone = Arc::new(extract_timezone(&req));
     let query_ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
