@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::prom_store::remote::{ReadRequest, WriteRequest};
 use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use hyper::Body;
 use prost::Message;
 use schemars::JsonSchema;
@@ -25,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 
+use super::header::GREPTIME_PHYSICAL_TABLE_NAME;
 use crate::error::{self, Result};
 use crate::prom_store::snappy_decompress;
 use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -32,12 +36,16 @@ use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DatabaseQuery {
     pub db: Option<String>,
+    /// Specify which physical table to use for storing metrics.
+    /// This only works on remote write requests.
+    pub physical_table: Option<String>,
 }
 
 impl Default for DatabaseQuery {
     fn default() -> DatabaseQuery {
         Self {
             db: Some(DEFAULT_SCHEMA_NAME.to_string()),
+            physical_table: Some(GREPTIME_PHYSICAL_TABLE.to_string()),
         }
     }
 }
@@ -46,11 +54,16 @@ impl Default for DatabaseQuery {
 pub async fn remote_write(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<DatabaseQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<(StatusCode, ())> {
     let request = decode_remote_write_request(body).await?;
     let db = params.db.clone().unwrap_or_default();
+    if let Some(physical_table) = params.physical_table {
+        let mut new_query_ctx = query_ctx.as_ref().clone();
+        new_query_ctx.set_extension(GREPTIME_PHYSICAL_TABLE_NAME.as_str(), physical_table);
+        query_ctx = Arc::new(new_query_ctx);
+    }
 
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
