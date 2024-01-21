@@ -758,9 +758,9 @@ impl From<ValueBuilder> for Values {
                 if let Some(v) = v {
                     v.to_vector()
                 } else {
-                    let mut single_null = value.field_types[i].create_mutable_vector(1);
-                    single_null.push_null();
-                    Arc::new(ConstantVector::new(single_null.to_vector(), num_rows))
+                    let mut single_null = value.field_types[i].create_mutable_vector(num_rows);
+                    single_null.push_nulls(num_rows);
+                    single_null.to_vector()
                 }
             })
             .collect::<Vec<_>>();
