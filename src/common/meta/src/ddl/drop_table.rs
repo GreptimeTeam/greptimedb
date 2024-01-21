@@ -100,7 +100,7 @@ impl DropTableProcedure {
             .await?;
 
         if !exist && self.data.task.drop_if_exists {
-            return Ok(Status::Done);
+            return Ok(Status::done());
         }
 
         ensure!(
@@ -236,7 +236,7 @@ impl DropTableProcedure {
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Status::Done)
+        Ok(Status::done())
     }
 }
 

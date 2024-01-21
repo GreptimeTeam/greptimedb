@@ -17,19 +17,19 @@ use snafu::ResultExt;
 use tokio::sync::watch::Receiver;
 
 use crate::error::{ProcedureExecSnafu, Result, WaitWatcherSnafu};
-use crate::procedure::ProcedureState;
+use crate::procedure::{Output, ProcedureState};
 
 /// Watcher to watch procedure state.
 pub type Watcher = Receiver<ProcedureState>;
 
 /// Wait the [Watcher] until the [ProcedureState] is done.
-pub async fn wait(watcher: &mut Watcher) -> Result<()> {
+pub async fn wait(watcher: &mut Watcher) -> Result<Option<Output>> {
     loop {
         watcher.changed().await.context(WaitWatcherSnafu)?;
         match &*watcher.borrow() {
             ProcedureState::Running => (),
-            ProcedureState::Done => {
-                return Ok(());
+            ProcedureState::Done { output } => {
+                return Ok(output.clone());
             }
             ProcedureState::Failed { error } => {
                 return Err(error.clone()).context(ProcedureExecSnafu);
@@ -89,7 +89,7 @@ mod tests {
                     self.error = !self.error;
                     Err(Error::retry_later(MockError::new(StatusCode::Internal)))
                 } else {
-                    Ok(Status::Done)
+                    Ok(Status::done_with_output(Arc::new("hello")))
                 }
             }
 
@@ -111,6 +111,8 @@ mod tests {
             .await
             .unwrap();
 
-        wait(&mut watcher).await.unwrap();
+        let output = wait(&mut watcher).await.unwrap().unwrap();
+        let output = output.downcast::<&str>().unwrap();
+        assert_eq!(output.as_ref(), &"hello");
     }
 }

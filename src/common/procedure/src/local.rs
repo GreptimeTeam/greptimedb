@@ -662,7 +662,7 @@ mod tests {
         assert!(ctx.contains_procedure(meta.id));
 
         assert!(ctx.state(meta.id).unwrap().is_running());
-        meta.set_state(ProcedureState::Done);
+        meta.set_state(ProcedureState::Done { output: None });
         assert!(ctx.state(meta.id).unwrap().is_done());
     }
 
@@ -723,7 +723,7 @@ mod tests {
         }
 
         async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
-            Ok(Status::Done)
+            Ok(Status::done())
         }
 
         fn dump(&self) -> Result<String> {

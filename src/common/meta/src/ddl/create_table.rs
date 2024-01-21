@@ -123,7 +123,7 @@ impl CreateTableProcedure {
                 }
             );
 
-            return Ok(Status::Done);
+            return Ok(Status::done());
         }
 
         self.creator.data.state = CreateTableState::DatanodeCreateRegions;
@@ -313,7 +313,7 @@ impl CreateTableProcedure {
             .await?;
         info!("Created table metadata for table {table_id}");
 
-        Ok(Status::Done)
+        Ok(Status::done())
     }
 }
 

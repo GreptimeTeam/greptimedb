@@ -22,7 +22,7 @@ use tokio::time;
 use super::rwlock::OwnedKeyRwLockGuard;
 use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
-use crate::procedure::StringKey;
+use crate::procedure::{Output, StringKey};
 use crate::store::ProcedureStore;
 use crate::ProcedureState::Retrying;
 use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
@@ -288,13 +288,13 @@ impl Runner {
                     Status::Suspended { subprocedures, .. } => {
                         self.on_suspended(subprocedures).await;
                     }
-                    Status::Done => {
+                    Status::Done { output } => {
                         if let Err(e) = self.commit_procedure().await {
                             self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                             return ExecResult::RetryLater;
                         }
 
-                        self.done();
+                        self.done(output);
                         return ExecResult::Done;
                     }
                 }
@@ -481,7 +481,7 @@ impl Runner {
         Ok(())
     }
 
-    fn done(&self) {
+    fn done(&self, output: Option<Output>) {
         // TODO(yingwen): Add files to remove list.
         logging::info!(
             "Procedure {}-{} done",
@@ -490,7 +490,7 @@ impl Runner {
         );
 
         // Mark the state of this procedure to done.
-        self.meta.set_state(ProcedureState::Done);
+        self.meta.set_state(ProcedureState::Done { output });
     }
 }
 
@@ -610,7 +610,7 @@ mod tests {
                 if times == 1 {
                     Ok(Status::Executing { persist })
                 } else {
-                    Ok(Status::Done)
+                    Ok(Status::done())
                 }
             }
             .boxed()
@@ -703,7 +703,7 @@ mod tests {
                     time::sleep(Duration::from_millis(200)).await;
                     Ok(Status::Executing { persist: true })
                 } else {
-                    Ok(Status::Done)
+                    Ok(Status::done())
                 }
             }
             .boxed()
@@ -764,7 +764,7 @@ mod tests {
                         }
                     }
                     if all_child_done {
-                        Ok(Status::Done)
+                        Ok(Status::done())
                     } else {
                         // Return suspended to wait for notify.
                         Ok(Status::Suspended {
@@ -923,7 +923,7 @@ mod tests {
                 if times == 1 {
                     Err(Error::retry_later(MockError::new(StatusCode::Unexpected)))
                 } else {
-                    Ok(Status::Done)
+                    Ok(Status::done())
                 }
             }
             .boxed()

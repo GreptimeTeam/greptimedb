@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -24,6 +25,8 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::watcher::Watcher;
+
+pub type Output = Arc<dyn Any + Send + Sync>;
 
 /// Procedure execution status.
 #[derive(Debug)]
@@ -40,7 +43,7 @@ pub enum Status {
         persist: bool,
     },
     /// the procedure is done.
-    Done,
+    Done { output: Option<Output> },
 }
 
 impl Status {
@@ -49,13 +52,29 @@ impl Status {
         Status::Executing { persist }
     }
 
+    /// Returns a [Status::Done] without output.
+    pub fn done() -> Status {
+        Status::Done { output: None }
+    }
+
+    /// Returns a [Status::Done] with output.
+    pub fn done_with_output(output: Output) -> Status {
+        Status::Done {
+            output: Some(output),
+        }
+    }
+    /// Returns `true` if the procedure is done.
+    pub fn is_done(&self) -> bool {
+        matches!(self, Status::Done { .. })
+    }
+
     /// Returns `true` if the procedure needs the framework to persist its intermediate state.
     pub fn need_persist(&self) -> bool {
         // If the procedure is done, the framework doesn't need to persist the procedure
         // anymore. It only needs to mark the procedure as committed.
         match self {
             Status::Executing { persist } | Status::Suspended { persist, .. } => *persist,
-            Status::Done => false,
+            Status::Done { .. } => false,
         }
     }
 }
@@ -251,7 +270,7 @@ pub enum ProcedureState {
     #[default]
     Running,
     /// The procedure is finished.
-    Done,
+    Done { output: Option<Output> },
     /// The procedure is failed and can be retried.
     Retrying { error: Arc<Error> },
     /// The procedure is failed and cannot proceed anymore.
@@ -276,7 +295,7 @@ impl ProcedureState {
 
     /// Returns true if the procedure state is done.
     pub fn is_done(&self) -> bool {
-        matches!(self, ProcedureState::Done)
+        matches!(self, ProcedureState::Done { .. })
     }
 
     /// Returns true if the procedure state failed.
@@ -360,7 +379,7 @@ mod tests {
         };
         assert!(status.need_persist());
 
-        let status = Status::Done;
+        let status = Status::done();
         assert!(!status.need_persist());
     }
 
@@ -415,7 +434,7 @@ mod tests {
     fn test_procedure_state() {
         assert!(ProcedureState::Running.is_running());
         assert!(ProcedureState::Running.error().is_none());
-        assert!(ProcedureState::Done.is_done());
+        assert!(ProcedureState::Done { output: None }.is_done());
 
         let state = ProcedureState::failed(Arc::new(Error::external(MockError::new(
             StatusCode::Unexpected,
