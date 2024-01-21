@@ -23,7 +23,7 @@ mod tests {
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use frontend::instance::Instance;
     use prost::Message;
-    use servers::http::header::GREPTIME_PHYSICAL_TABLE_NAME;
+    use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
     use servers::prom_store;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::PromStoreProtocolHandler;
@@ -93,10 +93,7 @@ mod tests {
 
         // set physical table if provided
         if let Some(physical_table) = &physical_table {
-            ctx.set_extension(
-                GREPTIME_PHYSICAL_TABLE_NAME.to_string(),
-                physical_table.clone(),
-            );
+            ctx.set_extension(PHYSICAL_TABLE_PARAM.to_string(), physical_table.clone());
         }
         let ctx = Arc::new(ctx);
 

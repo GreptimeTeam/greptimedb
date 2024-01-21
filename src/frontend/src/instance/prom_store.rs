@@ -28,7 +28,7 @@ use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use prost::Message;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
-use servers::http::header::GREPTIME_PHYSICAL_TABLE_NAME;
+use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::prom_store::{self, Metrics};
 use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
@@ -162,7 +162,7 @@ impl PromStoreProtocolHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
             .context(AuthSnafu)?;
         let physical_table = ctx
-            .extension(&GREPTIME_PHYSICAL_TABLE_NAME)
+            .extension(PHYSICAL_TABLE_PARAM)
             .unwrap_or(GREPTIME_PHYSICAL_TABLE)
             .to_string();
         let (requests, samples) = prom_store::to_grpc_row_insert_requests(request)?;

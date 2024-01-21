@@ -28,10 +28,11 @@ use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 
-use super::header::GREPTIME_PHYSICAL_TABLE_NAME;
 use crate::error::{self, Result};
 use crate::prom_store::snappy_decompress;
 use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
+
+pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DatabaseQuery {
@@ -61,7 +62,7 @@ pub async fn remote_write(
     let db = params.db.clone().unwrap_or_default();
     if let Some(physical_table) = params.physical_table {
         let mut new_query_ctx = query_ctx.as_ref().clone();
-        new_query_ctx.set_extension(GREPTIME_PHYSICAL_TABLE_NAME.as_str(), physical_table);
+        new_query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
         query_ctx = Arc::new(new_query_ctx);
     }
 
