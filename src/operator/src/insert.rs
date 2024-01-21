@@ -144,8 +144,8 @@ impl Inserter {
         )
         .await?;
         let inserts = RowToRegion::new(
-            self.catalog_manager.as_ref(),
-            self.partition_manager.as_ref(),
+           & self.catalog_manager,
+           &self.partition_manager,
             &ctx,
         )
         .convert(requests)
@@ -295,7 +295,7 @@ impl Inserter {
         }
 
         let table_reference = TableReference::full(catalog_name, schema_name, &physical_table);
-        info!("Physical metric table {table_reference} does not exist, try create table");
+        info!("Physical metric table `{table_reference}` does not exist, try creating table");
 
         // schema with timestamp and field column
         let default_schema = vec![
@@ -423,7 +423,7 @@ impl Inserter {
             );
         }
 
-        info!("Table {table_ref} does not exist, try create table",);
+        info!("Table `{table_ref}` does not exist, try creating table",);
 
         // TODO(weny): multiple regions table.
         let res = statement_executor

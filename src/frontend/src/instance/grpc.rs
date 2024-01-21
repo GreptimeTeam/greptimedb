@@ -205,7 +205,7 @@ impl Instance {
             .handle_metric_row_inserts(
                 requests,
                 ctx,
-                self.statement_executor.as_ref(),
+                &self.statement_executor,
                 physical_table,
             )
             .await

@@ -162,7 +162,7 @@ impl PromStoreProtocolHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
             .context(AuthSnafu)?;
         let physical_table = ctx
-            .extension(GREPTIME_PHYSICAL_TABLE_NAME.as_str())
+            .extension(&GREPTIME_PHYSICAL_TABLE_NAME)
             .unwrap_or(GREPTIME_PHYSICAL_TABLE)
             .to_string();
         let (requests, samples) = prom_store::to_grpc_row_insert_requests(request)?;
@@ -251,7 +251,7 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
             .handle_metric_row_inserts(
                 requests,
                 ctx,
-                self.statement_executor.as_ref(),
+                &self.statement_executor,
                 GREPTIME_PHYSICAL_TABLE.to_string(),
             )
             .await
