@@ -45,6 +45,12 @@ impl IntermediateManager {
         Ok(Self { store })
     }
 
+    /// Set the write buffer size for the store.
+    pub fn with_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
+        self.store = self.store.with_write_buffer_size(write_buffer_size);
+        self
+    }
+
     /// Returns the store to access to intermediate files.
     pub(crate) fn store(&self) -> &InstrumentedStore {
         &self.store

@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::Output;
+use session::context::{QueryContext, QueryContextRef};
 
 #[async_trait]
 pub trait Script {
@@ -57,8 +58,18 @@ pub trait ScriptEngine {
 }
 
 /// Evaluate script context
-#[derive(Debug, Default)]
-pub struct EvalContext {}
+#[derive(Debug)]
+pub struct EvalContext {
+    pub query_ctx: QueryContextRef,
+}
+
+impl Default for EvalContext {
+    fn default() -> Self {
+        Self {
+            query_ctx: QueryContext::arc(),
+        }
+    }
+}
 
 /// Compile script context
 #[derive(Debug, Default)]

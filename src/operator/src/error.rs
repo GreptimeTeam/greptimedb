@@ -351,8 +351,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to read parquet file"))]
-    ReadParquet {
+    #[snafu(display("Failed to read parquet file metadata"))]
+    ReadParquetMetadata {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
         location: Location,
@@ -587,9 +587,9 @@ impl ErrorExt for Error {
 
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
-            Error::ReadObject { .. } | Error::ReadParquet { .. } | Error::ReadOrc { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            Error::ReadObject { .. }
+            | Error::ReadParquetMetadata { .. }
+            | Error::ReadOrc { .. } => StatusCode::StorageUnavailable,
 
             Error::ListObjects { source, .. }
             | Error::ParseUrl { source, .. }

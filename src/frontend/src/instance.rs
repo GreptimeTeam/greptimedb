@@ -70,7 +70,7 @@ use servers::server::{start_server, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
-use sql::parser::ParserContext;
+use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
@@ -253,7 +253,7 @@ impl FrontendInstance for Instance {
 }
 
 fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
-    ParserContext::create_with_dialect(sql, dialect).context(ParseSqlSnafu)
+    ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).context(ParseSqlSnafu)
 }
 
 impl Instance {
@@ -414,8 +414,10 @@ impl PrometheusHandler for Instance {
             .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
             .context(AuthSnafu)?;
 
-        let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
-            query: query.clone(),
+        let stmt = QueryLanguageParser::parse_promql(query, &query_ctx).with_context(|_| {
+            ParsePromQLSnafu {
+                query: query.clone(),
+            }
         })?;
 
         let output = self

@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use common_catalog::consts::default_engine;
+use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -409,7 +410,7 @@ impl<'a> ParserContext<'a> {
 
         let name = parser.parse_identifier()?;
         if name.quote_style.is_none() &&
-            // "ALL_KEYWORDS" are sorted.
+        // "ALL_KEYWORDS" are sorted.
             ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
         {
             return Err(ParserError::ParserError(format!(
@@ -726,6 +727,13 @@ fn ensure_value_lists_bounded_by_maxvalue(value_lists: Vec<&Vec<Value>>) -> Resu
     Ok(())
 }
 
+fn is_string_value(v: &SqlValue) -> bool {
+    matches!(
+        v,
+        SqlValue::DoubleQuotedString(_) | SqlValue::SingleQuotedString(_)
+    )
+}
+
 /// Ensure that value lists of partitions are strictly increasing.
 fn ensure_value_lists_strictly_increased<'a>(
     partitions: &'a Partitions,
@@ -753,6 +761,31 @@ fn ensure_value_lists_strictly_increased<'a>(
                 (false, false) => {
                     let column_name = &column.name.value;
                     let cdt = sql_data_type_to_concrete_data_type(&column.data_type)?;
+
+                    if matches!(
+                        cdt,
+                        ConcreteDataType::Timestamp(_)
+                            | ConcreteDataType::Date(_)
+                            | ConcreteDataType::DateTime(_)
+                    ) {
+                        // Date/Timestamp/Datetime need to be aware of timezone information
+                        // when converting from a string to a specific type.
+                        // If x and y have only one value type as a string,
+                        // comparison is not allowed.
+                        match (is_string_value(x), is_string_value(y)) {
+                            (true, false) | (false, true) => {
+                                return error::InvalidSqlSnafu {
+                                    msg: format!(
+                                        "Can't compare {:?} with {:?} in partition rules",
+                                        x, y
+                                    ),
+                                }
+                                .fail();
+                            }
+                            _ => {}
+                        }
+                    }
+
                     let x = sql_value_to_value(column_name, &cdt, x)?;
                     let y = sql_value_to_value(column_name, &cdt, y)?;
                     match x.cmp(&y) {
@@ -847,6 +880,7 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
 
     #[test]
     fn test_validate_external_table_options() {
@@ -859,7 +893,8 @@ mod tests {
             PRIMARY KEY(ts, host)
         ) with(location='/var/data/city.csv',format='csv',foo='bar');";
 
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(matches!(
             result,
             Err(error::Error::InvalidTableOption { .. })
@@ -900,8 +935,12 @@ mod tests {
         ];
 
         for test in tests {
-            let stmts =
-                ParserContext::create_with_dialect(test.sql, &GreptimeDbDialect {}).unwrap();
+            let stmts = ParserContext::create_with_dialect(
+                test.sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
             assert_eq!(1, stmts.len());
             match &stmts[0] {
                 Statement::CreateExternalTable(c) => {
@@ -931,7 +970,9 @@ mod tests {
             ("format".to_string(), "csv".to_string()),
         ]);
 
-        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, stmts.len());
         match &stmts[0] {
             Statement::CreateExternalTable(c) => {
@@ -967,14 +1008,17 @@ mod tests {
     #[test]
     fn test_parse_create_database() {
         let sql = "create database";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("Unexpected token while parsing SQL statement"));
 
         let sql = "create database prometheus";
-        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
 
         assert_eq!(1, stmts.len());
         match &stmts[0] {
@@ -986,7 +1030,9 @@ mod tests {
         }
 
         let sql = "create database if not exists prometheus";
-        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
 
         assert_eq!(1, stmts.len());
         match &stmts[0] {
@@ -1008,7 +1054,8 @@ PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let _ = result.unwrap();
 
         let sql = r"
@@ -1019,7 +1066,8 @@ PARTITION BY RANGE COLUMNS(b, x) (
   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result
             .unwrap_err()
             .to_string()
@@ -1034,7 +1082,8 @@ PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r1 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result
             .unwrap_err()
             .to_string()
@@ -1048,7 +1097,8 @@ PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result
             .unwrap_err()
             .to_string()
@@ -1089,7 +1139,11 @@ PARTITION BY RANGE COLUMNS(b, a) (
 ENGINE=mito",
         ];
         for sql in cases {
-            let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+            let result = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            );
             assert!(result
                 .unwrap_err()
                 .to_string()
@@ -1104,7 +1158,8 @@ PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r3 VALUES LESS THAN (MAXVALUE, 9999),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result
             .unwrap_err()
             .to_string()
@@ -1130,7 +1185,9 @@ PARTITION BY RANGE COLUMNS(idc, host_id) (
   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(result.len(), 1);
         match &result[0] {
             Statement::CreateTable(c) => {
@@ -1196,7 +1253,12 @@ CREATE TABLE monitor (
   PRIMARY KEY (host),
 )
 ENGINE=mito";
-        let result1 = ParserContext::create_with_dialect(sql1, &GreptimeDbDialect {}).unwrap();
+        let result1 = ParserContext::create_with_dialect(
+            sql1,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
 
         if let Statement::CreateTable(c) = &result1[0] {
             assert_eq!(c.constraints.len(), 2);
@@ -1231,7 +1293,12 @@ CREATE TABLE monitor (
   PRIMARY KEY (host),
 )
 ENGINE=mito";
-        let result2 = ParserContext::create_with_dialect(sql2, &GreptimeDbDialect {}).unwrap();
+        let result2 = ParserContext::create_with_dialect(
+            sql2,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
 
         assert_eq!(result1, result2);
 
@@ -1248,7 +1315,12 @@ CREATE TABLE monitor (
 )
 ENGINE=mito";
 
-        let result3 = ParserContext::create_with_dialect(sql3, &GreptimeDbDialect {}).unwrap();
+        let result3 = ParserContext::create_with_dialect(
+            sql3,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
 
         assert_ne!(result1, result3);
 
@@ -1263,7 +1335,11 @@ CREATE TABLE monitor (
   PRIMARY KEY (host),
 )
 ENGINE=mito";
-        let result1 = ParserContext::create_with_dialect(sql1, &GreptimeDbDialect {});
+        let result1 = ParserContext::create_with_dialect(
+            sql1,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        );
 
         assert!(result1
             .unwrap_err()
@@ -1284,7 +1360,9 @@ CREATE TABLE monitor (
   PRIMARY KEY (host),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
 
         assert_eq!(result.len(), 1);
         if let Statement::CreateTable(c) = &result[0] {
@@ -1307,7 +1385,12 @@ CREATE TABLE monitor (
 )
 ENGINE=mito";
 
-        let result1 = ParserContext::create_with_dialect(sql1, &GreptimeDbDialect {}).unwrap();
+        let result1 = ParserContext::create_with_dialect(
+            sql1,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
         assert_eq!(result, result1);
 
         let sql2 = r"
@@ -1322,7 +1405,12 @@ CREATE TABLE monitor (
 )
 ENGINE=mito";
 
-        let result2 = ParserContext::create_with_dialect(sql2, &GreptimeDbDialect {}).unwrap();
+        let result2 = ParserContext::create_with_dialect(
+            sql2,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
         assert_eq!(result, result2);
 
         let sql3 = r"
@@ -1337,7 +1425,11 @@ CREATE TABLE monitor (
 )
 ENGINE=mito";
 
-        let result3 = ParserContext::create_with_dialect(sql3, &GreptimeDbDialect {});
+        let result3 = ParserContext::create_with_dialect(
+            sql3,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        );
         assert!(result3.is_err());
 
         let sql4 = r"
@@ -1352,7 +1444,11 @@ CREATE TABLE monitor (
 )
 ENGINE=mito";
 
-        let result4 = ParserContext::create_with_dialect(sql4, &GreptimeDbDialect {});
+        let result4 = ParserContext::create_with_dialect(
+            sql4,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        );
         assert!(result4.is_err());
 
         let sql = r"
@@ -1367,7 +1463,9 @@ CREATE TABLE monitor (
 )
 ENGINE=mito";
 
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
 
         if let Statement::CreateTable(c) = &result[0] {
             let tc = c.constraints[0].clone();
@@ -1394,6 +1492,23 @@ ENGINE=mito";
     }
 
     #[test]
+    fn test_parse_partitions_with_invalid_comparison() {
+        let sql = r"
+CREATE TABLE rcx ( a INT, b STRING, c INT, ts timestamp time index)
+PARTITION BY RANGE COLUMNS(ts) (
+  PARTITION r0 VALUES LESS THAN (1000),
+  PARTITION r1 VALUES LESS THAN ('2024-01-19 00:00:00'),
+  PARTITION r3 VALUES LESS THAN (MAXVALUE),
+)
+ENGINE=mito";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        let err_msg = result.unwrap_err().output_msg();
+        assert!(err_msg.contains("Invalid SQL, error: Can't compare"));
+    }
+
+    #[test]
     fn test_parse_partitions_with_error_syntax() {
         let sql = r"
 CREATE TABLE rcx ( a INT, b STRING, c INT )
@@ -1403,7 +1518,8 @@ PARTITION RANGE COLUMNS(b, a) (
   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result
             .unwrap_err()
             .output_msg()
@@ -1417,7 +1533,8 @@ PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result
             .unwrap_err()
             .output_msg()
@@ -1431,7 +1548,8 @@ PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALU),
 )
 ENGINE=mito";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result
             .unwrap_err()
             .output_msg()
@@ -1454,7 +1572,9 @@ ENGINE=mito";
                              PRIMARY KEY(ts, host)) engine=mito
                              with(regions=1);
          ";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
         match &result[0] {
             Statement::CreateTable(c) => {
@@ -1503,7 +1623,8 @@ ENGINE=mito";
                              PRIMARY KEY(ts, host)) engine=mito
                              with(regions=1);
          ";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
         assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
     }
@@ -1520,7 +1641,8 @@ ENGINE=mito";
                              PRIMARY KEY(ts, host)) engine=mito
                              with(regions=1);
          ";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
         assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
 
@@ -1534,7 +1656,8 @@ ENGINE=mito";
                              PRIMARY KEY(ts, host)) engine=mito
                              with(regions=1);
          ";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
         assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
     }
@@ -1542,7 +1665,8 @@ ENGINE=mito";
     #[test]
     fn test_invalid_column_name() {
         let sql = "create table foo(user string, i timestamp time index)";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let err = result.unwrap_err().output_msg();
         assert!(err.contains("Cannot use keyword 'user' as column name"));
 
@@ -1550,7 +1674,8 @@ ENGINE=mito";
         let sql = r#"
             create table foo("user" string, i timestamp time index)
         "#;
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let _ = result.unwrap();
     }
 }

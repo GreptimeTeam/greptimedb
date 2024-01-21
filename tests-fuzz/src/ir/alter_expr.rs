@@ -12,25 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-
-use common_procedure::Status;
+use common_query::AddColumnLocation;
+use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
-use crate::procedure::region_migration::{Context, State};
+use crate::ir::Column;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RegionMigrationEnd;
+#[derive(Debug, Builder, Clone)]
+pub struct AlterTableExpr {
+    pub name: String,
+    pub alter_options: AlterTableOperation,
+}
 
-#[async_trait::async_trait]
-#[typetag::serde]
-impl State for RegionMigrationEnd {
-    async fn next(&mut self, _: &mut Context) -> Result<(Box<dyn State>, Status)> {
-        Ok((Box::new(RegionMigrationEnd), Status::done()))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AlterTableOperation {
+    /// `ADD [ COLUMN ] <column_def> [location]`
+    AddColumn {
+        column: Column,
+        location: Option<AddColumnLocation>,
+    },
+    /// `DROP COLUMN <name>`
+    DropColumn { name: String },
+    /// `RENAME <new_table_name>`
+    RenameTable { new_table_name: String },
 }

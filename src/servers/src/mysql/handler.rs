@@ -39,7 +39,7 @@ use session::context::{Channel, QueryContextRef};
 use session::{Session, SessionRef};
 use snafu::{ensure, ResultExt};
 use sql::dialect::MySqlDialect;
-use sql::parser::ParserContext;
+use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
@@ -445,7 +445,8 @@ fn replace_params_with_values(
 }
 
 async fn validate_query(query: &str) -> Result<Statement> {
-    let statement = ParserContext::create_with_dialect(query, &MySqlDialect {});
+    let statement =
+        ParserContext::create_with_dialect(query, &MySqlDialect {}, ParseOptions::default());
     let mut statement = statement.map_err(|e| {
         InvalidPrepareStatementSnafu {
             err_msg: e.output_msg(),

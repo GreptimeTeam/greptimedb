@@ -222,7 +222,7 @@ pub struct CreateExternalTable {
 mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::error::Error::InvalidTableOption;
-    use crate::parser::ParserContext;
+    use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::statement::Statement;
 
     #[test]
@@ -243,7 +243,9 @@ mod tests {
                        engine=mito
                        with(regions=1, ttl='7d', storage='File');
          ";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         match &result[0] {
@@ -273,8 +275,12 @@ WITH(
                     &new_sql
                 );
 
-                let new_result =
-                    ParserContext::create_with_dialect(&new_sql, &GreptimeDbDialect {}).unwrap();
+                let new_result = ParserContext::create_with_dialect(
+                    &new_sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap();
                 assert_eq!(result, new_result);
             }
             _ => unreachable!(),
@@ -292,7 +298,9 @@ WITH(
             PRIMARY KEY(ts, host)
             );
         ";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         match &result[0] {
@@ -313,8 +321,12 @@ ENGINE=mito
                     &new_sql
                 );
 
-                let new_result =
-                    ParserContext::create_with_dialect(&new_sql, &GreptimeDbDialect {}).unwrap();
+                let new_result = ParserContext::create_with_dialect(
+                    &new_sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap();
                 assert_eq!(result, new_result);
             }
             _ => unreachable!(),
@@ -339,7 +351,8 @@ ENGINE=mito
       engine=mito
       with(regions=1, ttl='7d', hello='world');
 ";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(matches!(result, Err(InvalidTableOption { .. })))
     }
 }

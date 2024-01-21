@@ -596,6 +596,7 @@ impl RegionServerInner {
         } = request;
         let region_id = RegionId::from_u64(region_id);
 
+        // Build query context from gRPC header
         let ctx: QueryContextRef = header
             .as_ref()
             .map(|h| Arc::new(h.into()))

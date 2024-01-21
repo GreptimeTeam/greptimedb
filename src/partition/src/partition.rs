@@ -50,7 +50,7 @@ pub enum PartitionBound {
     MaxValue,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionDef {
     partition_columns: Vec<String>,
     partition_bounds: Vec<PartitionBound>,

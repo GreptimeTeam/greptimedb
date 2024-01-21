@@ -777,6 +777,7 @@ allow_stale_entries = false
 create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
+write_buffer_size = "8MiB"
 mem_threshold_on_create = "64.0MiB"
 intermediate_path = ""
 

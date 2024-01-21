@@ -27,6 +27,7 @@ use rustpython_vm::scope::Scope;
 use rustpython_vm::{vm, AsObject, Interpreter, PyObjectRef, PyPayload, VirtualMachine};
 use snafu::{OptionExt, ResultExt};
 
+use crate::engine::EvalContext;
 use crate::python::error::{ensure, ret_other_error_with, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::py_recordbatch::PyRecordBatch;
@@ -44,6 +45,7 @@ pub(crate) fn rspy_exec_parsed(
     copr: &Coprocessor,
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
+    eval_ctx: &EvalContext,
 ) -> Result<RecordBatch> {
     let _t = metric::METRIC_RSPY_EXEC_TOTAL_ELAPSED.start_timer();
     // 3. get args from `rb`, and cast them into PyVector
@@ -57,7 +59,7 @@ pub(crate) fn rspy_exec_parsed(
     };
     let interpreter = init_interpreter();
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
-    exec_with_cached_vm(copr, rb, args, params, &interpreter)
+    exec_with_cached_vm(copr, rb, args, params, &interpreter, eval_ctx)
 }
 
 /// set arguments with given name and values in python scopes
@@ -100,6 +102,7 @@ pub(crate) fn exec_with_cached_vm(
     args: Vec<PyVector>,
     params: &HashMap<String, String>,
     vm: &Rc<Interpreter>,
+    eval_ctx: &EvalContext,
 ) -> Result<RecordBatch> {
     vm.enter(|vm| -> Result<RecordBatch> {
         let _t = metric::METRIC_RSPY_EXEC_ELAPSED.start_timer();
@@ -116,7 +119,8 @@ pub(crate) fn exec_with_cached_vm(
         }
 
         if let Some(engine) = &copr.query_engine {
-            let query_engine = PyQueryEngine::from_weakref(engine.clone());
+            let query_engine =
+                PyQueryEngine::from_weakref(engine.clone(), eval_ctx.query_ctx.clone());
 
             // put a object named with query of class PyQueryEngine in scope
             set_query_engine_in_scope(&scope, vm, "__query__", query_engine)?;

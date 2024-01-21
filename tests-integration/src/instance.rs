@@ -226,7 +226,11 @@ mod tests {
         .collect::<HashMap<u32, u64>>();
         assert!(region_to_dn_map.len() <= instance.datanodes().len());
 
-        let stmt = QueryLanguageParser::parse_sql("SELECT ts, host FROM demo ORDER BY ts").unwrap();
+        let stmt = QueryLanguageParser::parse_sql(
+            "SELECT ts, host FROM demo ORDER BY ts",
+            &QueryContext::arc(),
+        )
+        .unwrap();
         let LogicalPlan::DfPlan(plan) = instance
             .frontend()
             .statement_executor()

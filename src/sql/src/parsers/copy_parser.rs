@@ -185,14 +185,25 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
     use crate::statements::statement::Statement::Copy;
 
     #[test]
     fn test_parse_copy_table() {
         let sql0 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet'";
         let sql1 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'parquet')";
-        let result0 = ParserContext::create_with_dialect(sql0, &GreptimeDbDialect {}).unwrap();
-        let result1 = ParserContext::create_with_dialect(sql1, &GreptimeDbDialect {}).unwrap();
+        let result0 = ParserContext::create_with_dialect(
+            sql0,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let result1 = ParserContext::create_with_dialect(
+            sql1,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
 
         for mut result in [result0, result1] {
             assert_eq!(1, result.len());
@@ -238,7 +249,10 @@ mod tests {
             "COPY catalog0.schema0.tbl FROM 'tbl_file.parquet' WITH (FORMAT = 'parquet')",
         ]
         .iter()
-        .map(|sql| ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap())
+        .map(|sql| {
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+        })
         .collect::<Vec<_>>();
 
         for mut result in results {
@@ -298,8 +312,12 @@ mod tests {
         ];
 
         for test in tests {
-            let mut result =
-                ParserContext::create_with_dialect(test.sql, &GreptimeDbDialect {}).unwrap();
+            let mut result = ParserContext::create_with_dialect(
+                test.sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
             assert_eq!(1, result.len());
 
             let statement = result.remove(0);
@@ -344,8 +362,12 @@ mod tests {
         ];
 
         for test in tests {
-            let mut result =
-                ParserContext::create_with_dialect(test.sql, &GreptimeDbDialect {}).unwrap();
+            let mut result = ParserContext::create_with_dialect(
+                test.sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
             assert_eq!(1, result.len());
 
             let statement = result.remove(0);
@@ -367,10 +389,11 @@ mod tests {
     #[test]
     fn test_copy_database_to() {
         let sql = "COPY DATABASE catalog0.schema0 TO 'tbl_file.parquet' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .pop()
-            .unwrap();
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
 
         let Copy(crate::statements::copy::Copy::CopyDatabase(stmt)) = stmt else {
             unreachable!()

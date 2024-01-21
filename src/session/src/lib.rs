@@ -74,8 +74,8 @@ impl Session {
     }
 
     #[inline]
-    pub fn timezone(&self) -> Timezone {
-        self.timezone.load().as_ref().clone()
+    pub fn timezone(&self) -> Arc<Timezone> {
+        self.timezone.load().clone()
     }
 
     #[inline]

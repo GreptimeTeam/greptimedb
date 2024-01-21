@@ -47,8 +47,8 @@ pub struct QueryContext {
 }
 
 impl QueryContextBuilder {
-    pub fn timezone(mut self, tz: Timezone) -> Self {
-        self.timezone = Some(ArcSwap::new(Arc::new(tz)));
+    pub fn timezone(mut self, tz: Arc<Timezone>) -> Self {
+        self.timezone = Some(ArcSwap::new(tz));
         self
     }
 }
@@ -168,7 +168,7 @@ impl QueryContext {
     /// We need persist these change in `Session`.
     pub fn update_session(&self, session: &SessionRef) {
         let tz = self.timezone();
-        if session.timezone() != *tz {
+        if *session.timezone() != *tz {
             session.set_timezone(tz.as_ref().clone())
         }
     }
