@@ -22,12 +22,12 @@ use common_query::Output;
 use common_telemetry::{debug, error, info, tracing};
 use object_store::Entry;
 use regex::Regex;
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 
 use crate::error;
-use crate::error::{CatalogSnafu, InvalidCopyParameterSnafu};
+use crate::error::{CatalogSnafu, InvalidCopyDatabasePathSnafu};
 use crate::statement::StatementExecutor;
 
 pub(crate) const COPY_DATABASE_TIME_START_KEY: &str = "start_time";
@@ -36,12 +36,15 @@ pub(crate) const CONTINUE_ON_ERROR_KEY: &str = "continue_on_error";
 
 impl StatementExecutor {
     #[tracing::instrument(skip_all)]
-    pub(crate) async fn copy_database_to(&self, req: CopyDatabaseRequest) -> error::Result<Output> {
+    pub(crate) async fn copy_database_to(
+        &self,
+        req: CopyDatabaseRequest,
+        ctx: QueryContextRef,
+    ) -> error::Result<Output> {
         // location must end with / so that every table is exported to a file.
         ensure!(
             req.location.ends_with('/'),
-            InvalidCopyParameterSnafu {
-                key: "location",
+            InvalidCopyDatabasePathSnafu {
                 value: req.location,
             }
         );
@@ -62,6 +65,7 @@ impl StatementExecutor {
 
         let mut exported_rows = 0;
         for table_name in table_names {
+            // TODO(hl): also handles tables with metric engine.
             // TODO(hl): remove this hardcode once we've removed numbers table.
             if table_name == "numbers" {
                 continue;
@@ -87,7 +91,7 @@ impl StatementExecutor {
                         direction: CopyDirection::Export,
                         timestamp_range: req.time_range,
                     },
-                    QueryContextBuilder::default().build(),
+                    ctx.clone(),
                 )
                 .await?;
             exported_rows += exported;
@@ -105,8 +109,7 @@ impl StatementExecutor {
         // location must end with /
         ensure!(
             req.location.ends_with('/'),
-            InvalidCopyParameterSnafu {
-                key: "location",
+            InvalidCopyDatabasePathSnafu {
                 value: req.location,
             }
         );

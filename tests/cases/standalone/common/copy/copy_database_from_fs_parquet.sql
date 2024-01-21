@@ -4,11 +4,19 @@ INSERT INTO demo(host, cpu, memory, ts) values ('host1', 66.6, 1024, 16552765570
 
 COPY DATABASE public TO '/tmp/demo/export/parquet/' WITH (FORMAT="parquet");
 
+COPY DATABASE public TO '/tmp/demo/export/parquet_range/' WITH (FORMAT="parquet", start_time='2022-06-15 07:02:37.000Z', end_time='2022-06-15 07:02:37.1Z');
+
 DELETE FROM demo;
 
 SELECT * FROM demo ORDER BY ts;
 
 COPY DATABASE public FROM '/tmp/demo/export/parquet/';
+
+SELECT * FROM demo ORDER BY ts;
+
+DELETE FROM demo;
+
+COPY DATABASE public FROM '/tmp/demo/export/parquet_range/';
 
 SELECT * FROM demo ORDER BY ts;
 

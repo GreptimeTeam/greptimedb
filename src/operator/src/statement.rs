@@ -134,8 +134,11 @@ impl StatementExecutor {
             Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_database)) => {
                 match copy_database {
                     CopyDatabase::To(arg) => {
-                        self.copy_database_to(to_copy_database_request(arg, &query_ctx)?)
-                            .await
+                        self.copy_database_to(
+                            to_copy_database_request(arg, &query_ctx)?,
+                            query_ctx.clone(),
+                        )
+                        .await
                     }
                     CopyDatabase::From(arg) => {
                         self.copy_database_from(
