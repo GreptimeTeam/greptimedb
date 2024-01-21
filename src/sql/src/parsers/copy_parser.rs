@@ -404,10 +404,11 @@ mod tests {
     #[test]
     fn test_copy_database_from() {
         let sql = "COPY DATABASE catalog0.schema0 FROM '/a/b/c/' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .pop()
-            .unwrap();
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
 
         let Copy(crate::statements::copy::Copy::CopyDatabase(stmt)) = stmt else {
             unreachable!()

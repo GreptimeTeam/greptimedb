@@ -70,7 +70,7 @@ use servers::server::{start_server, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
-use sql::parser::{ParseOptions, ParserContext, ParserContext};
+use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
