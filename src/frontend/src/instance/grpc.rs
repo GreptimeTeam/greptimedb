@@ -202,12 +202,7 @@ impl Instance {
         physical_table: String,
     ) -> Result<Output> {
         self.inserter
-            .handle_metric_row_inserts(
-                requests,
-                ctx,
-                &self.statement_executor,
-                physical_table,
-            )
+            .handle_metric_row_inserts(requests, ctx, &self.statement_executor, physical_table)
             .await
             .context(TableOperationSnafu)
     }
