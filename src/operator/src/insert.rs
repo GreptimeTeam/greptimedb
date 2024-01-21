@@ -143,13 +143,10 @@ impl Inserter {
             statement_executor,
         )
         .await?;
-        let inserts = RowToRegion::new(
-           & self.catalog_manager,
-           &self.partition_manager,
-            &ctx,
-        )
-        .convert(requests)
-        .await?;
+        let inserts =
+            RowToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, &ctx)
+                .convert(requests)
+                .await?;
 
         let affected_rows = self.do_request(inserts, &ctx).await?;
         Ok(Output::AffectedRows(affected_rows as _))
