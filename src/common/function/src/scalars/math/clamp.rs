@@ -119,6 +119,18 @@ impl Function for ClampFunction {
                         err_msg: "The third arg should not be none",
                     }
                 })?;
+
+            // ensure min <= max
+            ensure!(
+                min <= max,
+                    InvalidFuncArgsSnafu {
+                        err_msg: format!(
+                        "The second arg should be less than or equal to the third arg, have: {:?}, {:?}",
+                        columns[1], columns[2]
+                    ),
+                }
+            );
+
             clamp_impl::<$S, true, true>(input, min, max)
         },{
             unreachable!()
@@ -151,4 +163,221 @@ fn clamp_impl<T: LogicalPrimitiveType, const CLAMP_MIN: bool, const CLAMP_MAX: b
     });
     let result = PrimitiveArray::<T::ArrowPrimitive>::from_iter(result);
     Ok(Arc::new(PrimitiveVector::<T>::from(result)))
+}
+
+#[cfg(test)]
+mod test {
+
+    use datatypes::vectors::{Float64Vector, Int64Vector, StringVector, UInt64Vector};
+
+    use super::*;
+    use crate::function::FunctionContext;
+
+    #[test]
+    fn clamp_i64() {
+        let inputs = [
+            (
+                vec![Some(-3), Some(-2), Some(-1), Some(0), Some(1), Some(2)],
+                -1,
+                10,
+                vec![Some(-1), Some(-1), Some(-1), Some(0), Some(1), Some(2)],
+            ),
+            (
+                vec![Some(-3), Some(-2), Some(-1), Some(0), Some(1), Some(2)],
+                0,
+                0,
+                vec![Some(0), Some(0), Some(0), Some(0), Some(0), Some(0)],
+            ),
+            (
+                vec![Some(-3), None, Some(-1), None, None, Some(2)],
+                -2,
+                1,
+                vec![Some(-2), None, Some(-1), None, None, Some(1)],
+            ),
+            (
+                vec![None, None, None, None, None],
+                0,
+                1,
+                vec![None, None, None, None, None],
+            ),
+        ];
+
+        let func = ClampFunction;
+        for (in_data, min, max, expected) in inputs {
+            let args = [
+                Arc::new(Int64Vector::from(in_data)) as _,
+                Arc::new(Int64Vector::from_vec(vec![min])) as _,
+                Arc::new(Int64Vector::from_vec(vec![max])) as _,
+            ];
+            let result = func
+                .eval(FunctionContext::default(), args.as_slice())
+                .unwrap();
+            let expected: VectorRef = Arc::new(Int64Vector::from(expected));
+            assert_eq!(expected, result);
+        }
+    }
+
+    #[test]
+    fn clamp_u64() {
+        let inputs = [
+            (
+                vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)],
+                1,
+                3,
+                vec![Some(1), Some(1), Some(2), Some(3), Some(3), Some(3)],
+            ),
+            (
+                vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)],
+                0,
+                0,
+                vec![Some(0), Some(0), Some(0), Some(0), Some(0), Some(0)],
+            ),
+            (
+                vec![Some(0), None, Some(2), None, None, Some(5)],
+                1,
+                3,
+                vec![Some(1), None, Some(2), None, None, Some(3)],
+            ),
+            (
+                vec![None, None, None, None, None],
+                0,
+                1,
+                vec![None, None, None, None, None],
+            ),
+        ];
+
+        let func = ClampFunction;
+        for (in_data, min, max, expected) in inputs {
+            let args = [
+                Arc::new(UInt64Vector::from(in_data)) as _,
+                Arc::new(UInt64Vector::from_vec(vec![min])) as _,
+                Arc::new(UInt64Vector::from_vec(vec![max])) as _,
+            ];
+            let result = func
+                .eval(FunctionContext::default(), args.as_slice())
+                .unwrap();
+            let expected: VectorRef = Arc::new(UInt64Vector::from(expected));
+            assert_eq!(expected, result);
+        }
+    }
+
+    #[test]
+    fn clamp_f64() {
+        let inputs = [
+            (
+                vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)],
+                -1.0,
+                10.0,
+                vec![Some(-1.0), Some(-1.0), Some(-1.0), Some(0.0), Some(1.0)],
+            ),
+            (
+                vec![Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)],
+                0.0,
+                0.0,
+                vec![Some(0.0), Some(0.0), Some(0.0), Some(0.0)],
+            ),
+            (
+                vec![Some(-3.0), None, Some(-1.0), None, None, Some(2.0)],
+                -2.0,
+                1.0,
+                vec![Some(-2.0), None, Some(-1.0), None, None, Some(1.0)],
+            ),
+            (
+                vec![None, None, None, None, None],
+                0.0,
+                1.0,
+                vec![None, None, None, None, None],
+            ),
+        ];
+
+        let func = ClampFunction;
+        for (in_data, min, max, expected) in inputs {
+            let args = [
+                Arc::new(Float64Vector::from(in_data)) as _,
+                Arc::new(Float64Vector::from_vec(vec![min])) as _,
+                Arc::new(Float64Vector::from_vec(vec![max])) as _,
+            ];
+            let result = func
+                .eval(FunctionContext::default(), args.as_slice())
+                .unwrap();
+            let expected: VectorRef = Arc::new(Float64Vector::from(expected));
+            assert_eq!(expected, result);
+        }
+    }
+
+    #[test]
+    fn clamp_invalid_min_max() {
+        let input = vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)];
+        let min = 10.0;
+        let max = -1.0;
+
+        let func = ClampFunction;
+        let args = [
+            Arc::new(Float64Vector::from(input)) as _,
+            Arc::new(Float64Vector::from_vec(vec![min])) as _,
+            Arc::new(Float64Vector::from_vec(vec![max])) as _,
+        ];
+        let result = func.eval(FunctionContext::default(), args.as_slice());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn clamp_type_not_match() {
+        let input = vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)];
+        let min = -1;
+        let max = 10;
+
+        let func = ClampFunction;
+        let args = [
+            Arc::new(Float64Vector::from(input)) as _,
+            Arc::new(Int64Vector::from_vec(vec![min])) as _,
+            Arc::new(UInt64Vector::from_vec(vec![max])) as _,
+        ];
+        let result = func.eval(FunctionContext::default(), args.as_slice());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn clamp_min_is_not_scalar() {
+        let input = vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)];
+        let min = -10.0;
+        let max = 1.0;
+
+        let func = ClampFunction;
+        let args = [
+            Arc::new(Float64Vector::from(input)) as _,
+            Arc::new(Float64Vector::from_vec(vec![min, min])) as _,
+            Arc::new(Float64Vector::from_vec(vec![max])) as _,
+        ];
+        let result = func.eval(FunctionContext::default(), args.as_slice());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn clamp_no_max() {
+        let input = vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)];
+        let min = -10.0;
+
+        let func = ClampFunction;
+        let args = [
+            Arc::new(Float64Vector::from(input)) as _,
+            Arc::new(Float64Vector::from_vec(vec![min])) as _,
+        ];
+        let result = func.eval(FunctionContext::default(), args.as_slice());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn clamp_on_string() {
+        let input = vec![Some("foo"), Some("foo"), Some("foo"), Some("foo")];
+
+        let func = ClampFunction;
+        let args = [
+            Arc::new(StringVector::from(input)) as _,
+            Arc::new(StringVector::from_vec(vec!["bar"])) as _,
+            Arc::new(StringVector::from_vec(vec!["baz"])) as _,
+        ];
+        let result = func.eval(FunctionContext::default(), args.as_slice());
+        assert!(result.is_err());
+    }
 }
