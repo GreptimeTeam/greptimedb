@@ -23,7 +23,7 @@ use common_telemetry::{debug, error, info, tracing};
 use object_store::Entry;
 use regex::Regex;
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 
 use crate::error;
@@ -179,11 +179,8 @@ fn parse_file_name_to_copy(e: &Entry) -> error::Result<String> {
         .file_stem()
         .and_then(|os_str| os_str.to_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| {
-            error::InvalidTableNameSnafu {
-                table_name: e.name().to_string(),
-            }
-            .build()
+        .context(error::InvalidTableNameSnafu {
+            table_name: e.name().to_string(),
         })
 }
 
