@@ -193,15 +193,18 @@ compress_manifest = false
 max_background_jobs = 4
 # Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
-# Global write buffer size for all regions.
+# Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
 global_write_buffer_size = "1GB"
-# Global write buffer size threshold to reject write requests (default 2G).
+# Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`
 global_write_buffer_reject_size = "2GB"
-# Cache size for SST metadata (default 128MB). Setting it to 0 to disable the cache.
+# Cache size for SST metadata. Setting it to 0 to disable the cache.
+# If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
 sst_meta_cache_size = "128MB"
-# Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
+# Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
+# If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
 vector_cache_size = "512MB"
-# Cache size for pages of SST row groups (default 512MB). Setting it to 0 to disable the cache.
+# Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
+# If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
 page_cache_size = "512MB"
 # Buffer size for SST writing.
 sst_write_buffer_size = "8MB"

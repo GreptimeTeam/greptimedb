@@ -418,6 +418,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid COPY DATABASE location, must end with '/': {}", value))]
+    InvalidCopyDatabasePath { value: String, location: Location },
+
     #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
@@ -596,7 +599,9 @@ impl ErrorExt for Error {
             | Error::BuildBackend { source, .. } => source.status_code(),
 
             Error::ExecuteDdl { source, .. } => source.status_code(),
-            Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
+            Error::InvalidCopyParameter { .. } | Error::InvalidCopyDatabasePath { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             Error::ReadRecordBatch { source, .. } | Error::BuildColumnVectors { source, .. } => {
                 source.status_code()

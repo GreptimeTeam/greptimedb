@@ -30,6 +30,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
+use moka::sync::Cache;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use snafu::prelude::*;
 use table::dist_table::DistTable;
@@ -84,6 +85,8 @@ impl CacheInvalidator for KvBackendCatalogManager {
     }
 }
 
+const DEFAULT_CACHED_CATALOG: u64 = 128;
+
 impl KvBackendCatalogManager {
     pub fn new(backend: KvBackendRef, cache_invalidator: CacheInvalidatorRef) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
@@ -92,6 +95,7 @@ impl KvBackendCatalogManager {
             cache_invalidator,
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),
+                catalog_cache: Cache::new(DEFAULT_CACHED_CATALOG),
                 information_schema_provider: Arc::new(InformationSchemaProvider::new(
                     // The catalog name is not used in system_catalog, so let it empty
                     String::default(),
@@ -296,6 +300,7 @@ impl CatalogManager for KvBackendCatalogManager {
 #[derive(Clone)]
 struct SystemCatalog {
     catalog_manager: Weak<KvBackendCatalogManager>,
+    catalog_cache: Cache<String, Arc<InformationSchemaProvider>>,
     information_schema_provider: Arc<InformationSchemaProvider>,
 }
 
@@ -331,7 +336,12 @@ impl SystemCatalog {
     fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Option<TableRef> {
         if schema == INFORMATION_SCHEMA_NAME {
             let information_schema_provider =
-                InformationSchemaProvider::new(catalog.to_string(), self.catalog_manager.clone());
+                self.catalog_cache.get_with_by_ref(catalog, move || {
+                    Arc::new(InformationSchemaProvider::new(
+                        catalog.to_string(),
+                        self.catalog_manager.clone(),
+                    ))
+                });
             information_schema_provider.table(table_name)
         } else if schema == DEFAULT_SCHEMA_NAME && table_name == NUMBERS_TABLE_NAME {
             Some(NumbersTable::table(NUMBERS_TABLE_ID))
