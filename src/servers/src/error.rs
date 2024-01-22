@@ -430,6 +430,11 @@ pub enum Error {
 
     #[snafu(display("Missing query context"))]
     MissingQueryContext { location: Location },
+
+    #[snafu(display(
+        "Invalid parameter, physical_table is not expected when metric engine is disabled"
+    ))]
+    UnexpectedPhysicalTable { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -488,7 +493,8 @@ impl ErrorExt for Error {
             | UrlDecode { .. }
             | IncompatibleSchema { .. }
             | MissingQueryContext { .. }
-            | MysqlValueConversion { .. } => StatusCode::InvalidArguments,
+            | MysqlValueConversion { .. }
+            | UnexpectedPhysicalTable { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }

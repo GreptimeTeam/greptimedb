@@ -57,6 +57,9 @@ enable = true
 # Prometheus remote storage options, see `standalone.example.toml`.
 [prom_store]
 enable = true
+# Whether to store the data from Prometheus remote write in metric engine.
+# true by default
+with_metric_engine = true
 
 # Metasrv client options, see `datanode.example.toml`.
 [meta_client]

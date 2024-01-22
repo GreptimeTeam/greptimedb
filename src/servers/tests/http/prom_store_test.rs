@@ -56,7 +56,7 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl PromStoreProtocolHandler for DummyInstance {
-    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()> {
+    async fn write(&self, request: WriteRequest, ctx: QueryContextRef, _: bool) -> Result<()> {
         let _ = self
             .tx
             .send((ctx.current_schema().to_owned(), request.encode_to_vec()))
