@@ -60,13 +60,22 @@ use crate::test_util::{
 };
 
 pub struct GreptimeDbCluster {
-    pub storage_guards: Vec<StorageGuard>,
+    pub _storage_guards: Vec<StorageGuard>,
     pub _dir_guards: Vec<FileDirGuard>,
 
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
     pub kv_backend: KvBackendRef,
     pub meta_srv: MetaSrv,
     pub frontend: Arc<FeInstance>,
+}
+
+/// Static state that will be preserved across rebuilds.
+#[derive(Clone)]
+struct StateState {
+    // The actual atanode opts for a datanode will override the `node_id` field while derive all other fields.
+    datanode_opts: Vec<DatanodeOptions>,
+    storage_guards: Vec<StorageGuard>,
+    dir_guards: Vec<FileDirGuard>,
 }
 
 #[derive(Clone)]
@@ -80,6 +89,7 @@ pub struct GreptimeDbClusterBuilder {
     metasrv_wal_config: MetaSrvWalConfig,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
+    static_state: Option<StateState>,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -92,7 +102,7 @@ impl GreptimeDbClusterBuilder {
             let endpoints = endpoints
                 .split(',')
                 .map(|s| s.to_string())
-                .collect::<Vec<String>>();
+                .collect::<Vec<_>>();
             let backend = EtcdStore::with_endpoints(endpoints)
                 .await
                 .expect("malformed endpoints");
@@ -109,6 +119,41 @@ impl GreptimeDbClusterBuilder {
             metasrv_wal_config: MetaSrvWalConfig::default(),
             shared_home_dir: None,
             meta_selector: None,
+            static_state: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_static_state(self) -> Self {
+        let datanodes = self.datanodes.unwrap_or(4) as usize;
+
+        let mut datanode_opts = Vec::with_capacity(datanodes);
+        let mut storage_guards = Vec::with_capacity(datanodes);
+        let mut dir_guards = Vec::with_capacity(datanodes);
+
+        for i in 0..datanodes {
+            let datanode_id = i as u64 + 1;
+            let (mut opts, guard) = create_tmp_dir_and_datanode_opts(
+                Mode::Distributed,
+                StorageType::File,
+                self.store_providers.clone().unwrap_or_default(),
+                &format!("{}-dn-{}", self.cluster_name, datanode_id),
+                self.datanode_wal_config.clone(),
+            );
+            opts.node_id = Some(datanode_id);
+
+            datanode_opts.push(opts);
+            storage_guards.push(guard.storage_guards);
+            dir_guards.push(guard.home_guard);
+        }
+
+        Self {
+            static_state: Some(StateState {
+                datanode_opts,
+                storage_guards: storage_guards.into_iter().flatten().collect(),
+                dir_guards,
+            }),
+            ..self
         }
     }
 
@@ -160,7 +205,7 @@ impl GreptimeDbClusterBuilder {
         let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
         let datanode_clients = Arc::new(DatanodeClients::new(channel_config));
 
-        let opt = MetaSrvOptions {
+        let opts = MetaSrvOptions {
             procedure: ProcedureConfig {
                 // Due to large network delay during cross data-center.
                 // We only make max_retry_times and retry_delay large than the default in tests.
@@ -172,7 +217,7 @@ impl GreptimeDbClusterBuilder {
         };
 
         let meta_srv = meta_srv::mocks::mock(
-            opt,
+            opts,
             self.kv_backend.clone(),
             self.meta_selector.clone(),
             Some(datanode_clients.clone()),
@@ -180,7 +225,17 @@ impl GreptimeDbClusterBuilder {
         .await;
 
         let (datanode_instances, storage_guards, dir_guards) =
-            self.build_datanodes(meta_srv.clone(), datanodes).await;
+            if let Some(state) = self.static_state.clone() {
+                let mut instances = HashMap::with_capacity(state.datanode_opts.len());
+                for opts in state.datanode_opts {
+                    let datanode_id = opts.node_id.unwrap();
+                    let datanode = self.create_datanode(opts, meta_srv.clone()).await;
+                    instances.insert(datanode_id, datanode);
+                }
+                (instances, state.storage_guards, state.dir_guards)
+            } else {
+                self.build_datanodes(meta_srv.clone(), datanodes).await
+            };
 
         build_datanode_clients(datanode_clients.clone(), &datanode_instances, datanodes).await;
 
@@ -196,7 +251,7 @@ impl GreptimeDbClusterBuilder {
         frontend.start().await.unwrap();
 
         GreptimeDbCluster {
-            storage_guards,
+            _storage_guards: storage_guards,
             _dir_guards: dir_guards,
             datanode_instances,
             kv_backend: self.kv_backend.clone(),
