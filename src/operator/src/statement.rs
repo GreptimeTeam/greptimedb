@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod backup;
+mod copy_database;
 mod copy_table_from;
 mod copy_table_to;
 mod ddl;
@@ -41,7 +41,7 @@ use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
@@ -55,7 +55,7 @@ use crate::error::{
     PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
-use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
+use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 use crate::table::table_idents_to_full_name;
 
 #[derive(Clone)]
@@ -131,9 +131,23 @@ impl StatementExecutor {
                 }
             }
 
-            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(arg)) => {
-                self.copy_database(to_copy_database_request(arg, &query_ctx)?)
-                    .await
+            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_database)) => {
+                match copy_database {
+                    CopyDatabase::To(arg) => {
+                        self.copy_database_to(
+                            to_copy_database_request(arg, &query_ctx)?,
+                            query_ctx.clone(),
+                        )
+                        .await
+                    }
+                    CopyDatabase::From(arg) => {
+                        self.copy_database_from(
+                            to_copy_database_request(arg, &query_ctx)?,
+                            query_ctx,
+                        )
+                        .await
+                    }
+                }
             }
 
             Statement::CreateTable(stmt) => {

@@ -111,15 +111,17 @@ impl StatementExecutor {
         let table_provider = Arc::new(DfTableProviderAdapter::new(table));
         let table_source = Arc::new(DefaultTableSource::new(table_provider));
 
-        let plan = LogicalPlanBuilder::scan_with_filters(
+        let mut builder = LogicalPlanBuilder::scan_with_filters(
             df_table_ref.to_owned_reference(),
             table_source,
             None,
-            filters,
+            filters.clone(),
         )
-        .context(BuildDfLogicalPlanSnafu)?
-        .build()
         .context(BuildDfLogicalPlanSnafu)?;
+        for f in filters {
+            builder = builder.filter(f).context(BuildDfLogicalPlanSnafu)?;
+        }
+        let plan = builder.build().context(BuildDfLogicalPlanSnafu)?;
 
         let output = self
             .query_engine

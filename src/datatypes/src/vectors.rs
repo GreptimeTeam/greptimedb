@@ -211,8 +211,15 @@ pub trait MutableVector: Send + Sync {
         });
     }
 
-    // Push null to this mutable vector.
+    /// Push null to this mutable vector.
     fn push_null(&mut self);
+
+    /// Push nulls to this mutable vector.
+    fn push_nulls(&mut self, num_nulls: usize) {
+        for _ in 0..num_nulls {
+            self.push_null();
+        }
+    }
 
     /// Extend this mutable vector by slice of `vector`.
     ///
