@@ -363,7 +363,6 @@ impl MetricEngineInner {
             .for_each(|metadata| {
                 if metadata.semantic_type == SemanticType::Tag {
                     metadata.semantic_type = SemanticType::Field;
-                    metadata.column_schema.is_nullable();
                 }
             });
 
