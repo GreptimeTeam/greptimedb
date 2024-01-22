@@ -201,7 +201,8 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
             topic_name_prefix: test_name.to_string(),
             num_topics: 3,
             ..Default::default()
-        }));
+        }))
+        .with_static_state();
     let instance = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
     Some(Box::new(instance))
 }
