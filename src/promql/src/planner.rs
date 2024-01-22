@@ -557,6 +557,7 @@ impl PromPlanner {
         name: &Option<String>,
     ) -> Result<Matchers> {
         self.ctx.reset();
+
         let metric_name;
         if let Some(name) = name.clone() {
             metric_name = Some(name);
@@ -581,7 +582,7 @@ impl PromPlanner {
                     .field_column_matcher
                     .get_or_insert_default()
                     .push(matcher.clone());
-            } else {
+            } else if matcher.name != METRIC_NAME {
                 let _ = matchers.insert(matcher.clone());
             }
         }
