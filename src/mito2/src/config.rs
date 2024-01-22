@@ -33,11 +33,11 @@ const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
 /// Default channel size for parallel scan task.
 const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 
-// Use 1/8 of OS memory as global write buffer size in default mode
+// Use `1/GLOBAL_WRITE_BUFFER_SIZE_FACTOR` of OS memory as global write buffer size in default mode
 const GLOBAL_WRITE_BUFFER_SIZE_FACTOR: u64 = 8;
-/// Use 1/32 of OS memory size as SST meta cache size in default mode
+/// Use `1/SST_META_CACHE_SIZE_FACTOR` of OS memory size as SST meta cache size in default mode
 const SST_META_CACHE_SIZE_FACTOR: u64 = 32;
-/// Use 1/16 of OS memory size as mem cache size in default mode
+/// Use `1/MEM_CACHE_SIZE_FACTOR` of OS memory size as mem cache size in default mode
 const MEM_CACHE_SIZE_FACTOR: u64 = 16;
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
