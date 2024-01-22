@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnexpectedPhysicalTableSnafu};
 use crate::prom_store::snappy_decompress;
 use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
 
@@ -64,6 +64,11 @@ pub async fn route_write_without_metric_engine(
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
+
+    // reject if physical table is specified when metric engine is disabled
+    if params.physical_table.is_some() {
+        return UnexpectedPhysicalTableSnafu {}.fail();
+    }
 
     handler.write(request, query_ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
