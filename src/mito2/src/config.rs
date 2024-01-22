@@ -192,13 +192,13 @@ impl MitoConfig {
     }
 
     fn adjust_buffer_and_cache_size(&mut self, sys_memory: ReadableSize) {
-        // Use 1/64 of OS memory as global write buffer size, it shouldn't be greater than 1G in default mode.
+        // Use 1/8 of OS memory as global write buffer size, it shouldn't be greater than 1G in default mode.
         let global_write_buffer_size = cmp::min(sys_memory / 8, ReadableSize::gb(1));
         // Use 2x of global write buffer size as global write buffer reject size.
         let global_write_buffer_reject_size = global_write_buffer_size * 2;
-        // Use 1/256 of OS memory size as SST meta cache size, it shouldn't be greater than 128MB in default mode.
+        // Use 1/32 of OS memory size as SST meta cache size, it shouldn't be greater than 128MB in default mode.
         let sst_meta_cache_size = cmp::min(sys_memory / 32, ReadableSize::mb(128));
-        // Use 1/128 of OS memory size as mem cache size, it shouldn't be greater than 512MB in default mode.
+        // Use 1/16 of OS memory size as mem cache size, it shouldn't be greater than 512MB in default mode.
         let mem_cache_size = cmp::min(sys_memory / 16, ReadableSize::mb(512));
 
         self.global_write_buffer_size = global_write_buffer_size;
