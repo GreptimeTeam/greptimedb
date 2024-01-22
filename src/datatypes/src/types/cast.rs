@@ -290,7 +290,7 @@ mod tests {
 
         // datetime -> other types
         test_can_cast!(
-            Value::DateTime(DateTime::from_str_local("2021-01-01 00:00:00").unwrap()),
+            Value::DateTime(DateTime::from_str_system("2021-01-01 00:00:00").unwrap()),
             null_datatype,
             int64_datatype,
             timestamp_second_datatype,

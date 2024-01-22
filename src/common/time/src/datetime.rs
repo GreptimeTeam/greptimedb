@@ -75,7 +75,7 @@ impl From<Date> for DateTime {
 impl DateTime {
     /// Try parsing a string into [`DateTime`] with the system timezone.
     /// See `DateTime::from_str`.
-    pub fn from_str_local(s: &str) -> Result<Self> {
+    pub fn from_str_system(s: &str) -> Result<Self> {
         Self::from_str(s, None)
     }
 

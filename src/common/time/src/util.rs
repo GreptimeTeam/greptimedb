@@ -29,7 +29,7 @@ pub fn format_utc_datetime(utc: &NaiveDateTime, pattern: &str) -> String {
     }
 }
 
-pub fn local_datetime_to_utc(local: &NaiveDateTime) -> LocalResult<NaiveDateTime> {
+pub fn system_datetime_to_utc(local: &NaiveDateTime) -> LocalResult<NaiveDateTime> {
     datetime_to_utc(local, get_timezone(None))
 }
 

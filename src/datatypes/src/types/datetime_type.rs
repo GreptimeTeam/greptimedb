@@ -52,7 +52,7 @@ impl DataType for DateTimeType {
         match from {
             Value::Int64(v) => Some(Value::DateTime(DateTime::from(v))),
             Value::Timestamp(v) => v.to_chrono_datetime().map(|d| Value::DateTime(d.into())),
-            Value::String(v) => DateTime::from_str_local(v.as_utf8())
+            Value::String(v) => DateTime::from_str_system(v.as_utf8())
                 .map(Value::DateTime)
                 .ok(),
             _ => None,
@@ -119,7 +119,7 @@ mod tests {
         let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
         assert_eq!(
             dt,
-            Value::DateTime(DateTime::from_str_local("1970-01-01 00:00:00+0800").unwrap())
+            Value::DateTime(DateTime::from_str_system("1970-01-01 00:00:00+0800").unwrap())
         );
 
         // cast from Timestamp
@@ -127,7 +127,7 @@ mod tests {
         let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
         assert_eq!(
             dt,
-            Value::DateTime(DateTime::from_str_local("2020-09-08 21:42:29+0800").unwrap())
+            Value::DateTime(DateTime::from_str_system("2020-09-08 21:42:29+0800").unwrap())
         );
     }
 }

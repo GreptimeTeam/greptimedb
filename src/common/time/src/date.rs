@@ -77,7 +77,6 @@ impl Date {
             return Ok(Self(date.num_days_from_ce() - UNIX_EPOCH_FROM_CE));
         };
 
-        // Safety: already check timezone above
         let datetime = date.and_time(NaiveTime::default());
         match datetime_to_utc(&datetime, timezone) {
             LocalResult::None => InvalidDateStrSnafu { raw: s }.fail(),

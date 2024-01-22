@@ -84,7 +84,7 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::DateTime(_) => {
-            if let Ok(datetime) = common_time::datetime::DateTime::from_str_local(&s) {
+            if let Ok(datetime) = common_time::datetime::DateTime::from_str_system(&s) {
                 Ok(Value::DateTime(datetime))
             } else {
                 ParseSqlValueSnafu {

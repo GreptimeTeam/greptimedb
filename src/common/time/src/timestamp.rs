@@ -432,13 +432,12 @@ fn naive_datetime_to_timestamp(
     datetime: NaiveDateTime,
     timezone: Option<&Timezone>,
 ) -> crate::error::Result<Timestamp> {
-    if timezone.is_none() {
+    let Some(timezone) = timezone else {
         return Timestamp::from_chrono_datetime(Utc.from_utc_datetime(&datetime).naive_utc())
             .context(ParseTimestampSnafu { raw: s });
-    }
+    };
 
-    // Safety: already check timezone above
-    match datetime_to_utc(&datetime, timezone.unwrap()) {
+    match datetime_to_utc(&datetime, timezone) {
         LocalResult::None => ParseTimestampSnafu { raw: s }.fail(),
         LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => {
             Timestamp::from_chrono_datetime(utc).context(ParseTimestampSnafu { raw: s })
