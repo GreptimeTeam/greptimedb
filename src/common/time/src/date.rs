@@ -73,13 +73,13 @@ impl Date {
     pub fn from_str(s: &str, timezone: Option<&Timezone>) -> Result<Self> {
         let s = s.trim();
         let date = NaiveDate::parse_from_str(s, "%F").context(ParseDateStrSnafu { raw: s })?;
-        if timezone.is_none() {
+        let Some(timezone) = timezone else {
             return Ok(Self(date.num_days_from_ce() - UNIX_EPOCH_FROM_CE));
-        }
+        };
 
         // Safety: already check timezone above
         let datetime = date.and_time(NaiveTime::default());
-        match datetime_to_utc(&datetime, timezone.unwrap()) {
+        match datetime_to_utc(&datetime, timezone) {
             LocalResult::None => InvalidDateStrSnafu { raw: s }.fail(),
             LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => Ok(Date::from(utc.date())),
         }
