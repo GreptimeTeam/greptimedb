@@ -37,6 +37,6 @@ mod tests {
     fn test_prom_store_options() {
         let default = PromStoreOptions::default();
         assert!(default.enable);
-        assert!(!default.with_metric_engine)
+        assert!(default.with_metric_engine)
     }
 }
