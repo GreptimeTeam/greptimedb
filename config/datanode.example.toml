@@ -14,7 +14,7 @@ require_lease_before_startup = false
 
 # Initialize all regions in the background during the startup.
 # By default, it provides services after all regions have been initialized.
-initialize_region_in_background = false
+init_regions_in_background = false
 
 [heartbeat]
 # Interval for sending heartbeat messages to the Metasrv, 3 seconds by default.
