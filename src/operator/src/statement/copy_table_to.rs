@@ -44,7 +44,7 @@ use crate::statement::StatementExecutor;
 const WRITE_BUFFER_THRESHOLD: ReadableSize = ReadableSize::mb(8);
 
 /// Default number of concurrent write, it only works on object store backend(e.g., S3).
-const WRITE_CONCURRENT: usize = 8;
+const WRITE_CONCURRENCY: usize = 8;
 
 impl StatementExecutor {
     async fn stream_to_file(
@@ -62,7 +62,7 @@ impl StatementExecutor {
                 object_store,
                 path,
                 threshold,
-                WRITE_CONCURRENT,
+                WRITE_CONCURRENCY,
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),
@@ -71,7 +71,7 @@ impl StatementExecutor {
                 object_store,
                 path,
                 threshold,
-                WRITE_CONCURRENT,
+                WRITE_CONCURRENCY,
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),
@@ -80,7 +80,7 @@ impl StatementExecutor {
                 object_store,
                 path,
                 threshold,
-                WRITE_CONCURRENT,
+                WRITE_CONCURRENCY,
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),
