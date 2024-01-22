@@ -609,7 +609,6 @@ struct ValueBuilder {
     op_type: UInt8VectorBuilder,
     fields: Vec<Option<Box<dyn MutableVector>>>,
     field_types: Vec<ConcreteDataType>,
-    region_metadata: RegionMetadataRef,
 }
 
 impl ValueBuilder {
@@ -634,7 +633,6 @@ impl ValueBuilder {
             op_type,
             fields,
             field_types,
-            region_metadata: region_metadata.clone(),
         }
     }
 
