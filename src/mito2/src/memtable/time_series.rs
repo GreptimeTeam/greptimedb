@@ -651,14 +651,8 @@ impl ValueBuilder {
                 self.fields[idx]
                     .get_or_insert_with(|| {
                         // lazy initialize on first non-null value
-                        let mut mutable_vector = self
-                            .region_metadata
-                            .field_columns()
-                            .nth(idx)
-                            .unwrap()
-                            .column_schema
-                            .data_type
-                            .create_mutable_vector(num_rows);
+                        let mut mutable_vector =
+                            self.field_types[idx].create_mutable_vector(num_rows);
                         // fill previous rows with nulls
                         mutable_vector.push_nulls(num_rows - 1);
                         mutable_vector
