@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::result;
 use std::sync::Arc;
 
@@ -31,7 +29,7 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::future::BoxFuture;
 use futures::StreamExt;
-use object_store::{ObjectStore, Reader};
+use object_store::{ObjectStore, Reader, Writer};
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
@@ -171,22 +169,33 @@ pub struct BufferedWriter {
 type InnerBufferedWriter = LazyBufferedWriter<
     object_store::Writer,
     ArrowWriter<SharedBuffer>,
-    Box<
-        dyn FnMut(
-                String,
-            )
-                -> Pin<Box<dyn Future<Output = error::Result<object_store::Writer>> + Send>>
-            + Send,
-    >,
+    impl Fn(String) -> BoxFuture<'static, Result<Writer>>,
 >;
 
 impl BufferedWriter {
+    fn make_write_factory(
+        store: ObjectStore,
+        concurrent: usize,
+    ) -> impl Fn(String) -> BoxFuture<'static, Result<Writer>> {
+        move |path| {
+            let store = store.clone();
+            Box::pin(async move {
+                store
+                    .writer_with(&path)
+                    .concurrent(concurrent)
+                    .await
+                    .context(error::WriteObjectSnafu { path })
+            })
+        }
+    }
+
     pub async fn try_new(
         path: String,
         store: ObjectStore,
         arrow_schema: SchemaRef,
         props: Option<WriterProperties>,
         buffer_threshold: usize,
+        concurrent: usize,
     ) -> error::Result<Self> {
         let buffer = SharedBuffer::with_capacity(buffer_threshold);
 
@@ -199,15 +208,7 @@ impl BufferedWriter {
                 buffer,
                 arrow_writer,
                 &path,
-                Box::new(move |path| {
-                    let store = store.clone();
-                    Box::pin(async move {
-                        store
-                            .writer(&path)
-                            .await
-                            .context(error::WriteObjectSnafu { path })
-                    })
-                }),
+                Self::make_write_factory(store, concurrent),
             ),
         })
     }
@@ -236,6 +237,7 @@ pub async fn stream_to_parquet(
     store: ObjectStore,
     path: &str,
     threshold: usize,
+    concurrent: usize,
 ) -> Result<usize> {
     let write_props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
@@ -247,6 +249,7 @@ pub async fn stream_to_parquet(
         schema,
         Some(write_props),
         threshold,
+        concurrent,
     )
     .await?;
     let mut rows_written = 0;

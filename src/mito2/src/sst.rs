@@ -25,3 +25,6 @@ pub(crate) mod version;
 
 /// Default write buffer size, it should be greater than the default minimum upload part of S3 (5mb).
 pub const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(8);
+
+/// Default number of concurrent write, it only works on object store backend(e.g., S3).
+pub const DEFAULT_WRITE_CONCURRENT: usize = 8;

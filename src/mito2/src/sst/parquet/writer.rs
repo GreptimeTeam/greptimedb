@@ -35,6 +35,7 @@ use crate::sst::index::Indexer;
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
+use crate::sst::DEFAULT_WRITE_CONCURRENT;
 
 /// Parquet SST writer.
 pub struct ParquetWriter {
@@ -90,6 +91,7 @@ impl ParquetWriter {
             write_format.arrow_schema(),
             Some(writer_props),
             opts.write_buffer_size.as_bytes() as usize,
+            DEFAULT_WRITE_CONCURRENT,
         )
         .await
         .context(WriteBufferSnafu)?;

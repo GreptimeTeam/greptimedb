@@ -193,8 +193,9 @@ pub async fn stream_to_csv(
     store: ObjectStore,
     path: &str,
     threshold: usize,
+    concurrent: usize,
 ) -> Result<usize> {
-    stream_to_file(stream, store, path, threshold, |buffer| {
+    stream_to_file(stream, store, path, threshold, concurrent, |buffer| {
         csv::Writer::new(buffer)
     })
     .await

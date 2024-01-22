@@ -193,13 +193,15 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
     store: ObjectStore,
     path: &str,
     threshold: usize,
+    concurrent: usize,
     encoder_factory: U,
 ) -> Result<usize> {
     let buffer = SharedBuffer::with_capacity(threshold);
     let encoder = encoder_factory(buffer.clone());
     let mut writer = LazyBufferedWriter::new(threshold, buffer, encoder, path, |path| async {
         store
-            .writer(&path)
+            .writer_with(&path)
+            .concurrent(concurrent)
             .await
             .context(error::WriteObjectSnafu { path })
     });

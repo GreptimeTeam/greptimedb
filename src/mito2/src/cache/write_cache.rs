@@ -30,7 +30,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::IndexerBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
-use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENT};
 
 /// A cache for uploading files to remote object stores.
 ///
@@ -180,6 +180,7 @@ impl WriteCache {
         let mut writer = remote_store
             .writer_with(upload_path)
             .buffer(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .concurrent(DEFAULT_WRITE_CONCURRENT)
             .await
             .context(error::OpenDalSnafu)?;
 
