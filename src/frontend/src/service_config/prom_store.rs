@@ -24,7 +24,7 @@ impl Default for PromStoreOptions {
     fn default() -> Self {
         Self {
             enable: true,
-            with_metric_engine: false,
+            with_metric_engine: true,
         }
     }
 }
