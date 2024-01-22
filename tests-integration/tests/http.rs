@@ -706,6 +706,7 @@ enable = true
 
 [frontend.prom_store]
 enable = true
+with_metric_engine = false
 
 [frontend.otlp]
 enable = true

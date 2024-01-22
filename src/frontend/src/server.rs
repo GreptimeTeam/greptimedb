@@ -136,6 +136,8 @@ impl Services {
                 let _ = http_server_builder
                     .with_prom_handler(instance.clone())
                     .with_prometheus_handler(instance.clone());
+                http_server_builder
+                    .set_prom_store_with_metric_engine(opts.prom_store.with_metric_engine);
             }
 
             if opts.otlp.enable {

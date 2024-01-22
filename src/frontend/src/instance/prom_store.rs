@@ -161,16 +161,21 @@ impl PromStoreProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
             .context(AuthSnafu)?;
-        let physical_table = ctx
-            .extension(PHYSICAL_TABLE_PARAM)
-            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-            .to_string();
+
         let (requests, samples) = prom_store::to_grpc_row_insert_requests(request)?;
-        let _ = self
-            .handle_metric_row_inserts(requests, ctx, physical_table)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)?;
+        if let Some(physical_table) = ctx.extension(PHYSICAL_TABLE_PARAM) {
+            let _ = self
+                .handle_metric_row_inserts(requests, ctx.clone(), physical_table.to_string())
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
+        } else {
+            let _ = self
+                .handle_row_inserts(requests, ctx.clone())
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
+        }
 
         PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
         Ok(())

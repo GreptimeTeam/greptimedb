@@ -51,6 +51,24 @@ impl Default for DatabaseQuery {
     }
 }
 
+/// Same with [remote_write] but won't store data to metric engine.
+#[axum_macros::debug_handler]
+pub async fn route_write_without_metric_engine(
+    State(handler): State<PromStoreProtocolHandlerRef>,
+    Query(params): Query<DatabaseQuery>,
+    Extension(query_ctx): Extension<QueryContextRef>,
+    RawBody(body): RawBody,
+) -> Result<(StatusCode, ())> {
+    let request = decode_remote_write_request(body).await?;
+    let db = params.db.clone().unwrap_or_default();
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
+
+    handler.write(request, query_ctx).await?;
+    Ok((StatusCode::NO_CONTENT, ()))
+}
+
 #[axum_macros::debug_handler]
 pub async fn remote_write(
     State(handler): State<PromStoreProtocolHandlerRef>,

@@ -99,9 +99,9 @@ pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"]
 
 #[derive(Default)]
 pub struct HttpServer {
+    // server handlers
     sql_handler: Option<ServerSqlQueryHandlerRef>,
     grpc_handler: Option<ServerGrpcQueryHandlerRef>,
-    options: HttpOptions,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
     prom_handler: Option<PromStoreProtocolHandlerRef>,
@@ -111,8 +111,14 @@ pub struct HttpServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
     metrics_handler: Option<MetricsHandler>,
-    greptime_config_options: Option<String>,
+
+    // plugins
     plugins: Plugins,
+
+    // server configs
+    options: HttpOptions,
+    greptime_config_options: Option<String>,
+    prom_store_with_metric_engine: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +427,7 @@ impl HttpServerBuilder {
                 shutdown_tx: Mutex::new(None),
                 greptime_config_options: None,
                 plugins: Default::default(),
+                prom_store_with_metric_engine: false,
             },
         }
     }
@@ -482,6 +489,11 @@ impl HttpServerBuilder {
 
     pub fn with_greptime_config_options(&mut self, opts: String) -> &mut Self {
         self.inner.greptime_config_options = Some(opts);
+        self
+    }
+
+    pub fn set_prom_store_with_metric_engine(&mut self, with_metric_engine: bool) -> &mut Self {
+        self.inner.prom_store_with_metric_engine = with_metric_engine;
         self
     }
 
@@ -674,10 +686,16 @@ impl HttpServer {
     }
 
     fn route_prom<S>(&self, prom_handler: PromStoreProtocolHandlerRef) -> Router<S> {
-        Router::new()
-            .route("/write", routing::post(prom_store::remote_write))
-            .route("/read", routing::post(prom_store::remote_read))
-            .with_state(prom_handler)
+        let mut router = Router::new().route("/read", routing::post(prom_store::remote_read));
+        if self.prom_store_with_metric_engine {
+            router = router.route("/write", routing::post(prom_store::remote_write));
+        } else {
+            router = router.route(
+                "/write",
+                routing::post(prom_store::route_write_without_metric_engine),
+            );
+        }
+        router.with_state(prom_handler)
     }
 
     fn route_influxdb<S>(&self, influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
