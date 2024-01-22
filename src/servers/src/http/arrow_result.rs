@@ -61,11 +61,11 @@ async fn write_arrow_bytes(
 
 impl ArrowResponse {
     pub async fn from_output(mut outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
-        if outputs.len() > 1 {
+        if outputs.len() != 1 {
             return HttpResponse::Error(ErrorResponse::from_error_message(
                 ResponseFormat::Arrow,
                 StatusCode::InvalidArguments,
-                "Multi-statements are not allowed".to_string(),
+                "Multi-statements and empty query are not allowed".to_string(),
             ));
         }
 
