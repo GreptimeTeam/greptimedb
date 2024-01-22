@@ -19,6 +19,5 @@ use crate::QueryEngineContext;
 /// Logical plan optimizer, rewrite the [`LogicalPlan`] in some way.
 pub trait LogicalOptimizer {
     /// Optimize the `plan`
-    fn optimize(&self, context: &mut QueryEngineContext, plan: &LogicalPlan)
-        -> Result<LogicalPlan>;
+    fn optimize(&self, context: &QueryEngineContext, plan: &LogicalPlan) -> Result<LogicalPlan>;
 }

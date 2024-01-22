@@ -166,12 +166,9 @@ impl Function for PyUDF {
                 query_ctx: func_ctx.query_ctx.clone(),
             },
         )
-        .map_err(|err| {
-            PyUdfSnafu {
-                msg: format!("{err:#?}"),
-            }
-            .build()
-        })?;
+        .map_err(BoxedError::new)
+        .context(common_query::error::ExecuteSnafu)?;
+
         let len = res.columns().len();
         if len == 0 {
             return PyUdfSnafu {

@@ -86,10 +86,10 @@ impl DfLogicalPlanner {
             .await?;
 
         // Optimize logical plan by extension rules
-        let mut context = QueryEngineContext::new(self.session_state.clone(), query_ctx);
+        let context = QueryEngineContext::new(self.session_state.clone(), query_ctx);
         let plan = self
             .engine_state
-            .optimize_by_extension_rules(plan, &mut context)
+            .optimize_by_extension_rules(plan, &context)
             .context(DataFusionSnafu)?;
 
         Ok(LogicalPlan::DfPlan(plan))

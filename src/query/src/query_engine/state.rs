@@ -133,7 +133,7 @@ impl QueryEngineState {
     pub fn optimize_by_extension_rules(
         &self,
         plan: DfLogicalPlan,
-        context: &mut QueryEngineContext,
+        context: &QueryEngineContext,
     ) -> DfResult<DfLogicalPlan> {
         self.extension_rules
             .iter()

@@ -169,7 +169,7 @@ impl Repl {
                 .context(PlanStatementSnafu)?;
 
             let LogicalPlan::DfPlan(plan) = query_engine
-                .optimize(&mut query_engine.engine_context(query_ctx), &plan)
+                .optimize(&query_engine.engine_context(query_ctx), &plan)
                 .context(PlanStatementSnafu)?;
 
             let plan = DFLogicalSubstraitConvertor {}

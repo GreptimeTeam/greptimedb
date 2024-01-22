@@ -246,8 +246,8 @@ impl QueryEngine for DatafusionQueryEngine {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<DescribeResult> {
-        let mut ctx = self.engine_context(query_ctx);
-        let optimised_plan = self.optimize(&mut ctx, &plan)?;
+        let ctx = self.engine_context(query_ctx);
+        let optimised_plan = self.optimize(&ctx, &plan)?;
         Ok(DescribeResult {
             schema: optimised_plan.schema()?,
             logical_plan: optimised_plan,
@@ -302,11 +302,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
 impl LogicalOptimizer for DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
-    fn optimize(
-        &self,
-        context: &mut QueryEngineContext,
-        plan: &LogicalPlan,
-    ) -> Result<LogicalPlan> {
+    fn optimize(&self, context: &QueryEngineContext, plan: &LogicalPlan) -> Result<LogicalPlan> {
         let _timer = metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
