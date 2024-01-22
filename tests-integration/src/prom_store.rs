@@ -107,7 +107,10 @@ mod tests {
         .unwrap()
         .is_ok());
 
-        instance.write(write_request, ctx.clone()).await.unwrap();
+        instance
+            .write(write_request, ctx.clone(), true)
+            .await
+            .unwrap();
 
         let read_request = ReadRequest {
             queries: vec![

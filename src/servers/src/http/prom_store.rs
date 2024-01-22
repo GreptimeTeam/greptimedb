@@ -70,7 +70,7 @@ pub async fn route_write_without_metric_engine(
         return UnexpectedPhysicalTableSnafu {}.fail();
     }
 
-    handler.write(request, query_ctx).await?;
+    handler.write(request, query_ctx, false).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -93,7 +93,7 @@ pub async fn remote_write(
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    handler.write(request, query_ctx).await?;
+    handler.write(request, query_ctx, true).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 

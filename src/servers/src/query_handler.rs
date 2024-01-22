@@ -89,7 +89,12 @@ pub struct PromStoreResponse {
 #[async_trait]
 pub trait PromStoreProtocolHandler {
     /// Handling prometheus remote write requests
-    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()>;
+    async fn write(
+        &self,
+        request: WriteRequest,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> Result<()>;
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
     /// Handling push gateway requests

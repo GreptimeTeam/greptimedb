@@ -155,7 +155,12 @@ impl Instance {
 
 #[async_trait]
 impl PromStoreProtocolHandler for Instance {
-    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> ServerResult<()> {
+    async fn write(
+        &self,
+        request: WriteRequest,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<()> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -163,7 +168,11 @@ impl PromStoreProtocolHandler for Instance {
             .context(AuthSnafu)?;
 
         let (requests, samples) = prom_store::to_grpc_row_insert_requests(request)?;
-        if let Some(physical_table) = ctx.extension(PHYSICAL_TABLE_PARAM) {
+        if with_metric_engine {
+            let physical_table = ctx
+                .extension(PHYSICAL_TABLE_PARAM)
+                .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+                .to_string();
             let _ = self
                 .handle_metric_row_inserts(requests, ctx.clone(), physical_table.to_string())
                 .await
@@ -250,7 +259,12 @@ impl ExportMetricHandler {
 
 #[async_trait]
 impl PromStoreProtocolHandler for ExportMetricHandler {
-    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> ServerResult<()> {
+    async fn write(
+        &self,
+        request: WriteRequest,
+        ctx: QueryContextRef,
+        _: bool,
+    ) -> ServerResult<()> {
         let (requests, _) = prom_store::to_grpc_row_insert_requests(request)?;
         self.inserter
             .handle_metric_row_inserts(
