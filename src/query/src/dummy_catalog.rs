@@ -23,25 +23,27 @@ use common_query::DfPhysicalPlan;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::datasource::TableProvider;
-use datafusion::error::Result;
 use datafusion::execution::context::SessionState;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
 use store_api::storage::{RegionId, ScanRequest};
 use table::table::scan::StreamScanAdapter;
 
+use crate::error::{GetRegionMetadataSnafu, Result};
+
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
 #[derive(Clone)]
-struct DummyCatalogList {
+pub struct DummyCatalogList {
     catalog: DummyCatalogProvider,
 }
 
 impl DummyCatalogList {
     /// Creates a new catalog list with the given table provider.
-    fn with_table_provider(table_provider: Arc<dyn TableProvider>) -> Self {
+    pub fn with_table_provider(table_provider: Arc<dyn TableProvider>) -> Self {
         let schema_provider = DummySchemaProvider {
             table: table_provider,
         };
@@ -112,7 +114,10 @@ impl SchemaProvider for DummySchemaProvider {
         vec![]
     }
 
-    async fn table(&self, _name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
+    async fn table(
+        &self,
+        _name: &str,
+    ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
         Ok(Some(self.table.clone()))
     }
 
@@ -151,7 +156,7 @@ impl TableProvider for DummyTableProvider {
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
-    ) -> Result<Arc<dyn DfPhysicalPlan>> {
+    ) -> datafusion::error::Result<Arc<dyn DfPhysicalPlan>> {
         let mut request = self.scan_request.lock().unwrap().clone();
         request.projection = match projection {
             Some(x) if !x.is_empty() => Some(x.clone()),
@@ -176,7 +181,7 @@ impl TableProvider for DummyTableProvider {
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
-    ) -> Result<Vec<TableProviderFilterPushDown>> {
+    ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
         Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 }
@@ -190,10 +195,14 @@ impl TableProviderFactory for DummyTableProviderFactory {
         region_id: RegionId,
         engine: RegionEngineRef,
     ) -> Result<Arc<dyn TableProvider>> {
-        let metadata = engine
-            .get_metadata(region_id)
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let metadata =
+            engine
+                .get_metadata(region_id)
+                .await
+                .with_context(|_| GetRegionMetadataSnafu {
+                    engine: engine.name(),
+                    region_id,
+                })?;
         Ok(Arc::new(DummyTableProvider {
             region_id,
             engine,

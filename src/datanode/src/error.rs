@@ -248,6 +248,7 @@ pub enum Error {
         location: Location,
     },
 
+    // TODO(yingwen): remove it.
     #[snafu(display(
         "Failed to get metadata from engine {} for region_id {}",
         engine,
