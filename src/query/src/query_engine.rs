@@ -56,22 +56,40 @@ pub trait QueryEngine: Send + Sync {
     /// so that it can be downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
+    /// Returns the logical planner
     fn planner(&self) -> Arc<dyn LogicalPlanner>;
 
+    /// Returns the query engine name.
     fn name(&self) -> &str;
 
-    async fn describe(&self, plan: LogicalPlan) -> Result<DescribeResult>;
+    /// Describe the given [`LogicalPlan`].
+    async fn describe(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<DescribeResult>;
 
+    /// Execute the given [`LogicalPlan`].
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output>;
 
+    /// Register a [`ScalarUdf`].
     fn register_udf(&self, udf: ScalarUdf);
 
+    /// Register an aggregate function.
+    ///
+    /// # Panics
+    /// Will panic if the function with same name is already registered.
     fn register_aggregate_function(&self, func: AggregateFunctionMetaRef);
 
+    /// Register a SQL function.
+    /// Will override if the function with same name is already registered.
     fn register_function(&self, func: FunctionRef);
 
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
+
+    /// Create a [`QueryEngineContext`].
+    fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext;
 }
 
 pub struct QueryEngineFactory {
@@ -118,6 +136,7 @@ impl QueryEngineFactory {
     }
 }
 
+/// Register all functions implemented by GreptimeDB
 fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
     for func in FUNCTION_REGISTRY.functions() {
         query_engine.register_function(func);

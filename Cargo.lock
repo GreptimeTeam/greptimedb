@@ -1710,6 +1710,7 @@ dependencies = [
  "paste",
  "ron",
  "serde",
+ "session",
  "snafu",
  "statrs",
 ]

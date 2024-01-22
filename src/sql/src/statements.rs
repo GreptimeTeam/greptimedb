@@ -74,7 +74,7 @@ fn parse_string_to_value(
     match data_type {
         ConcreteDataType::String(_) => Ok(Value::String(s.into())),
         ConcreteDataType::Date(_) => {
-            if let Ok(date) = common_time::date::Date::from_str(&s) {
+            if let Ok(date) = common_time::date::Date::from_str_utc(&s) {
                 Ok(Value::Date(date))
             } else {
                 ParseSqlValueSnafu {
@@ -84,7 +84,7 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::DateTime(_) => {
-            if let Ok(datetime) = common_time::datetime::DateTime::from_str(&s) {
+            if let Ok(datetime) = common_time::datetime::DateTime::from_str_system(&s) {
                 Ok(Value::DateTime(datetime))
             } else {
                 ParseSqlValueSnafu {
@@ -94,7 +94,7 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::Timestamp(t) => {
-            if let Ok(ts) = Timestamp::from_str(&s) {
+            if let Ok(ts) = Timestamp::from_str_utc(&s) {
                 Ok(Value::Timestamp(ts.convert_to(t.unit()).context(
                     TimestampOverflowSnafu {
                         timestamp: ts,

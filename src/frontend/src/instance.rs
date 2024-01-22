@@ -374,11 +374,11 @@ impl SqlQueryHandler for Instance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(QueryStatement::Sql(stmt), query_ctx)
+                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
             self.query_engine
-                .describe(plan)
+                .describe(plan, query_ctx)
                 .await
                 .map(Some)
                 .context(error::DescribeStatementSnafu)

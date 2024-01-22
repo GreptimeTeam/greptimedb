@@ -115,6 +115,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid timestamp `{}`", raw))]
+    InvalidTimestamp { raw: String, location: Location },
+
     #[snafu(display("Failed to parse float number `{}`", raw))]
     ParseFloat {
         raw: String,
@@ -271,6 +274,7 @@ impl ErrorExt for Error {
             | UnknownTable { .. }
             | TimeIndexNotFound { .. }
             | ParseTimestamp { .. }
+            | InvalidTimestamp { .. }
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::fmt;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
@@ -31,16 +30,17 @@ pub struct ToUnixtimeFunction;
 
 const NAME: &str = "to_unixtime";
 
-fn convert_to_seconds(arg: &str) -> Option<i64> {
-    if let Ok(dt) = DateTime::from_str(arg) {
+fn convert_to_seconds(arg: &str, func_ctx: &FunctionContext) -> Option<i64> {
+    let timezone = &func_ctx.query_ctx.timezone();
+    if let Ok(dt) = DateTime::from_str(arg, Some(timezone)) {
         return Some(dt.val() / 1000);
     }
 
-    if let Ok(ts) = Timestamp::from_str(arg) {
+    if let Ok(ts) = Timestamp::from_str(arg, Some(timezone)) {
         return Some(ts.split().0);
     }
 
-    if let Ok(date) = Date::from_str(arg) {
+    if let Ok(date) = Date::from_str(arg, Some(timezone)) {
         return Some(date.to_secs());
     }
 
@@ -92,7 +92,7 @@ impl Function for ToUnixtimeFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -108,7 +108,7 @@ impl Function for ToUnixtimeFunction {
         match columns[0].data_type() {
             ConcreteDataType::String(_) => Ok(Arc::new(Int64Vector::from(
                 (0..vector.len())
-                    .map(|i| convert_to_seconds(&vector.get(i).to_string()))
+                    .map(|i| convert_to_seconds(&vector.get(i).to_string(), &func_ctx))
                     .collect::<Vec<_>>(),
             ))),
             ConcreteDataType::Int64(_) | ConcreteDataType::Int32(_) => {

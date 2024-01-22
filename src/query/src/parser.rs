@@ -168,7 +168,6 @@ impl QueryLanguageParser {
     }
 
     fn parse_promql_timestamp(timestamp: &str) -> Result<SystemTime> {
-        // FIXME(dennis): aware of timezone
         // try rfc3339 format
         let rfc3339_result = DateTime::parse_from_rfc3339(timestamp)
             .context(ParseTimestampSnafu { raw: timestamp })
