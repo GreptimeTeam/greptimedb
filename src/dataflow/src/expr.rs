@@ -29,7 +29,7 @@ pub(crate) use relation::{AggregateExpr, AggregateFunc};
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::error::EvalError;
-pub(crate) use crate::expr::func::{BinaryFunc, UnaryFunc, VariadicFunc};
+pub(crate) use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScalarExpr {
@@ -38,6 +38,11 @@ pub enum ScalarExpr {
     /// A literal value.
     /// Extra type info to know original type even when it is null
     Literal(Result<Value, EvalError>, ConcreteDataType),
+    /// A call to an unmaterializable function.
+    ///
+    /// These functions cannot be evaluated by `ScalarExpr::eval`. They must
+    /// be transformed away by a higher layer.
+    CallUnmaterializable(UnmaterializableFunc),
     CallUnary {
         func: UnaryFunc,
         expr: Box<ScalarExpr>,
@@ -84,6 +89,9 @@ impl ScalarExpr {
         match self {
             ScalarExpr::Column(index) => Ok(values[*index].clone()),
             ScalarExpr::Literal(row_res, _ty) => row_res.clone(),
+            ScalarExpr::CallUnmaterializable(f) => Err(EvalError::Optimize(format!(
+                "Can't eval unmaterializable function: {f:?}"
+            ))),
             ScalarExpr::CallUnary { func, expr } => func.eval(values, expr),
             ScalarExpr::CallBinary { func, expr1, expr2 } => func.eval(values, expr1, expr2),
             ScalarExpr::CallVariadic { func, exprs } => func.eval(values, exprs),
@@ -185,7 +193,9 @@ impl ScalarExpr {
         F: FnMut(&Self),
     {
         match self {
-            ScalarExpr::Column(_) | ScalarExpr::Literal(_, _) => (),
+            ScalarExpr::Column(_)
+            | ScalarExpr::Literal(_, _)
+            | ScalarExpr::CallUnmaterializable(_) => (),
             ScalarExpr::CallUnary { func, expr } => f(expr),
             ScalarExpr::CallBinary { func, expr1, expr2 } => {
                 f(expr1);
@@ -217,7 +227,9 @@ impl ScalarExpr {
         F: FnMut(&mut Self),
     {
         match self {
-            ScalarExpr::Column(_) | ScalarExpr::Literal(_, _) => (),
+            ScalarExpr::Column(_)
+            | ScalarExpr::Literal(_, _)
+            | ScalarExpr::CallUnmaterializable(_) => (),
             ScalarExpr::CallUnary { func, expr } => f(expr),
             ScalarExpr::CallBinary { func, expr1, expr2 } => {
                 f(expr1);

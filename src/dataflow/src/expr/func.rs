@@ -19,6 +19,15 @@ use super::ScalarExpr;
 // TODO(discord9): more function & eval
 use crate::{adapter::error::EvalError, repr::Row};
 
+#[derive(
+    Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash
+)]
+pub enum UnmaterializableFunc {
+    Now,
+    CurrentDatabase,
+    CurrentSchema,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum UnaryFunc {
     Not,
