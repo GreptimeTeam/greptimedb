@@ -232,7 +232,7 @@ impl DatanodeBuilder {
         let open_all_regions =
             open_all_regions(region_server.clone(), table_values, !controlled_by_metasrv);
 
-        if self.opts.initialize_region_in_background {
+        if self.opts.init_regions_in_background {
             // Opens regions in background.
             common_runtime::spawn_bg(async move {
                 if let Err(err) = open_all_regions.await {
