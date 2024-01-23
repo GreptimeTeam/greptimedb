@@ -171,7 +171,8 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
             num_topics: 3,
             ..Default::default()
         }))
-        .with_static_state();
+        .with_static_state()
+        .await;
     let instance = TestContext::new(MockInstanceBuilder::Standalone(builder)).await;
     Some(Box::new(instance))
 }

@@ -25,9 +25,7 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::state_store::KvStateStore;
 use common_meta::wal_options_allocator::WalOptionsAllocator;
-use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
@@ -37,8 +35,6 @@ use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
-use log_store::raft_engine::RaftEngineBackend;
-use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::Mode;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -54,10 +50,10 @@ pub struct GreptimeDbStandalone {
 #[derive(Clone)]
 struct StaticState {
     kv_backend: KvBackendRef,
-    // It's actually no need to preserve the `datanode_opts` across rebuilds since it could be reconstructed from the `guard`.
-    // However, preserving it could simplify coding.
-    datanode_opts: DatanodeOptions,
     guard: TestGuard,
+    // The following state are actually no need to be perserved across rebuilds.
+    procedure_manager: ProcedureManagerRef,
+    datanode_opts: DatanodeOptions,
 }
 
 #[derive(Clone)]
@@ -66,6 +62,7 @@ pub struct GreptimeDbStandaloneBuilder {
     datanode_wal_config: DatanodeWalConfig,
     metasrv_wal_config: MetaSrvWalConfig,
     kv_backend_config: KvBackendConfig,
+    procedure_config: ProcedureConfig,
     store_providers: Option<Vec<StorageType>>,
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
@@ -84,24 +81,26 @@ impl GreptimeDbStandaloneBuilder {
             datanode_wal_config: DatanodeWalConfig::default(),
             metasrv_wal_config: MetaSrvWalConfig::default(),
             kv_backend_config: KvBackendConfig::default(),
+            procedure_config: ProcedureConfig::default(),
         }
     }
 
     #[must_use]
-    pub fn with_static_state(self) -> Self {
+    pub async fn with_static_state(self) -> Self {
         let (opts, guard) = self.build_datanode_opts_and_guard();
 
         let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
-             format!("{}/kv", &opts.storage.data_home),
-             kv_backend_config.clone(),
-             procedure_config.clone(),
-         )
-         .await
-         .unwrap();
+            format!("{}/kv", &opts.storage.data_home),
+            self.kv_backend_config.clone(),
+            self.procedure_config.clone(),
+        )
+        .await
+        .unwrap();
 
         Self {
             static_state: Some(StaticState {
                 kv_backend,
+                procedure_manager,
                 datanode_opts: opts,
                 guard,
             }),
@@ -151,17 +150,12 @@ impl GreptimeDbStandaloneBuilder {
         let procedure_config = ProcedureConfig::default();
 
         let (kv_backend, opts, guard, procedure_manager) = match self.static_state {
-            Some(state) => {
-                let procedure_manager =
-                    Self::build_procedure_manager(state.kv_backend.clone(), &procedure_config);
-
-                (
-                    state.kv_backend,
-                    state.datanode_opts,
-                    state.guard,
-                    procedure_manager,
-                )
-            }
+            Some(state) => (
+                state.kv_backend,
+                state.datanode_opts,
+                state.guard,
+                state.procedure_manager,
+            ),
             None => {
                 let (opts, guard) = self.build_datanode_opts_and_guard();
                 let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
@@ -258,18 +252,5 @@ impl GreptimeDbStandaloneBuilder {
             self.datanode_wal_config.clone(),
         );
         (opts, guard)
-    }
-
-    fn build_procedure_manager(
-        kv_backend: KvBackendRef,
-        procedure_config: &ProcedureConfig,
-    ) -> ProcedureManagerRef {
-        let state_store = Arc::new(KvStateStore::new(kv_backend));
-        let manager_config = ManagerConfig {
-            max_retry_times: procedure_config.max_retry_times,
-            retry_delay: procedure_config.retry_delay,
-            ..Default::default()
-        };
-        Arc::new(LocalManager::new(manager_config, state_store))
     }
 }
