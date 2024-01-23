@@ -16,7 +16,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::error::EvalError;
+use crate::adapter::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
 use crate::repr::Diff;
 
 /// sum(i*)->i64, sum(u*)->u64
@@ -124,10 +124,11 @@ impl AggregateFunc {
             AggregateFunc::SumInt16 | AggregateFunc::SumInt32 | AggregateFunc::SumInt64 => {
                 let accum = if let Some(accum) = accum {
                     accum.as_value_ref().as_i64().map_err(|err| {
-                        EvalError::TypeMismatch(format!(
-                            "Type Mismatch for accumulator, expect i64, got {}",
-                            err
-                        ))
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::int64_datatype(),
+                            actual: accum.data_type(),
+                        }
+                        .build()
                     })?
                 } else {
                     None
@@ -144,10 +145,11 @@ impl AggregateFunc {
             AggregateFunc::SumUInt16 | AggregateFunc::SumUInt32 | AggregateFunc::SumUInt64 => {
                 let accum = if let Some(accum) = accum {
                     accum.as_value_ref().as_u64().map_err(|err| {
-                        EvalError::TypeMismatch(format!(
-                            "Type Mismatch for accumulator, expect i64, got {}",
-                            err
-                        ))
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::uint64_datatype(),
+                            actual: accum.data_type(),
+                        }
+                        .build()
                     })?
                 } else {
                     None
@@ -163,10 +165,11 @@ impl AggregateFunc {
             AggregateFunc::SumFloat32 => {
                 let accum = if let Some(accum) = accum {
                     accum.as_value_ref().as_f32().map_err(|err| {
-                        EvalError::TypeMismatch(format!(
-                            "Type Mismatch for accumulator, expect i64, got {}",
-                            err
-                        ))
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::float32_datatype(),
+                            actual: accum.data_type(),
+                        }
+                        .build()
                     })?
                 } else {
                     None
@@ -176,10 +179,11 @@ impl AggregateFunc {
             AggregateFunc::SumFloat64 => {
                 let accum = if let Some(accum) = accum {
                     accum.as_value_ref().as_f64().map_err(|err| {
-                        EvalError::TypeMismatch(format!(
-                            "Type Mismatch for accumulator, expect i64, got {}",
-                            err
-                        ))
+                        TypeMismatchSnafu {
+                            expected: ConcreteDataType::float64_datatype(),
+                            actual: accum.data_type(),
+                        }
+                        .build()
                     })?
                 } else {
                     None

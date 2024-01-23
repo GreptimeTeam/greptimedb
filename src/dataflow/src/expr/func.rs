@@ -13,12 +13,18 @@
 // limitations under the License.
 
 use common_time::DateTime;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
+use hydroflow::bincode::Error;
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
 use super::ScalarExpr;
 // TODO(discord9): more function & eval
-use crate::{adapter::error::EvalError, repr::Row};
+use crate::{
+    adapter::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu},
+    repr::Row,
+};
 
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub enum UnmaterializableFunc {
@@ -58,10 +64,11 @@ impl UnaryFunc {
                 let bool = if let Value::Boolean(bool) = arg {
                     Ok(bool)
                 } else {
-                    Err(EvalError::TypeMismatch(format!(
-                        "cannot cast {:?} to bool",
-                        arg
-                    )))
+                    TypeMismatchSnafu {
+                        expected: ConcreteDataType::boolean_datatype(),
+                        actual: arg.data_type(),
+                    }
+                    .fail()?
                 }?;
                 Ok(Value::from(!bool))
             }
@@ -70,10 +77,11 @@ impl UnaryFunc {
                 let bool = if let Value::Boolean(bool) = arg {
                     Ok(bool)
                 } else {
-                    Err(EvalError::TypeMismatch(format!(
-                        "cannot cast {:?} to bool",
-                        arg
-                    )))
+                    TypeMismatchSnafu {
+                        expected: ConcreteDataType::boolean_datatype(),
+                        actual: arg.data_type(),
+                    }
+                    .fail()?
                 }?;
                 Ok(Value::from(bool))
             }
@@ -81,10 +89,11 @@ impl UnaryFunc {
                 let bool = if let Value::Boolean(bool) = arg {
                     Ok(bool)
                 } else {
-                    Err(EvalError::TypeMismatch(format!(
-                        "cannot cast {:?} to bool",
-                        arg
-                    )))
+                    TypeMismatchSnafu {
+                        expected: ConcreteDataType::boolean_datatype(),
+                        actual: arg.data_type(),
+                    }
+                    .fail()?
                 }?;
                 Ok(Value::from(!bool))
             }
@@ -93,20 +102,22 @@ impl UnaryFunc {
                     let datetime = DateTime::from(datetime.val() + 1);
                     Ok(Value::from(datetime))
                 } else {
-                    Err(EvalError::TypeMismatch(format!(
-                        "cannot cast {:?} to datetime",
-                        arg
-                    )))
+                    TypeMismatchSnafu {
+                        expected: ConcreteDataType::datetime_datatype(),
+                        actual: arg.data_type(),
+                    }
+                    .fail()?
                 }
             }
             Self::CastDatetimeToInt64 => {
                 let datetime = if let Value::DateTime(datetime) = arg {
                     Ok(datetime.val())
                 } else {
-                    Err(EvalError::TypeMismatch(format!(
-                        "cannot cast {:?} to datetime",
-                        arg
-                    )))
+                    TypeMismatchSnafu {
+                        expected: ConcreteDataType::datetime_datatype(),
+                        actual: arg.data_type(),
+                    }
+                    .fail()?
                 }?;
                 Ok(Value::from(datetime))
             }
@@ -114,10 +125,11 @@ impl UnaryFunc {
                 let int64 = if let Value::Int64(int64) = arg {
                     Ok(int64)
                 } else {
-                    Err(EvalError::TypeMismatch(format!(
-                        "cannot cast {:?} to int64",
-                        arg
-                    )))
+                    TypeMismatchSnafu {
+                        expected: ConcreteDataType::int64_datatype(),
+                        actual: arg.data_type(),
+                    }
+                    .fail()?
                 }?;
                 Ok(Value::from(int64 as f32))
             }
@@ -301,55 +313,72 @@ impl VariadicFunc {
 
 fn add<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value> + std::ops::Add<Output = T>,
-    <T as TryFrom<Value>>::Error: std::fmt::Debug,
+    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Add<Output = T>,
     Value: From<T>,
 {
-    let left = T::try_from(left).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
-    let right = T::try_from(right).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
+    let left = T::try_from(left)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let right = T::try_from(right)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
     Ok(Value::from(left + right))
 }
 
 fn sub<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value> + std::ops::Sub<Output = T>,
-    <T as TryFrom<Value>>::Error: std::fmt::Debug,
+    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Sub<Output = T>,
     Value: From<T>,
 {
-    let left = T::try_from(left).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
-    let right = T::try_from(right).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
+    let left = T::try_from(left)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let right = T::try_from(right)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
     Ok(Value::from(left - right))
 }
 
 fn mul<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value> + std::ops::Mul<Output = T>,
-    <T as TryFrom<Value>>::Error: std::fmt::Debug,
+    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Mul<Output = T>,
     Value: From<T>,
 {
-    let left = T::try_from(left).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
-    let right = T::try_from(right).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
+    let left = T::try_from(left)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let right = T::try_from(right)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
     Ok(Value::from(left * right))
 }
 
 fn div<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value> + std::ops::Div<Output = T>,
+    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Div<Output = T>,
     <T as TryFrom<Value>>::Error: std::fmt::Debug,
     Value: From<T>,
 {
-    let left = T::try_from(left).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
-    let right = T::try_from(right).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
+    let left = T::try_from(left)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let right = T::try_from(right)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
     Ok(Value::from(left / right))
 }
 
 fn rem<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value> + std::ops::Rem<Output = T>,
+    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Rem<Output = T>,
     <T as TryFrom<Value>>::Error: std::fmt::Debug,
     Value: From<T>,
 {
-    let left = T::try_from(left).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
-    let right = T::try_from(right).map_err(|e| EvalError::TypeMismatch(format!("{:?}", e)))?;
+    let left = T::try_from(left)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let right = T::try_from(right)
+        .map_err(|e| e.to_string())
+        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
     Ok(Value::from(left % right))
 }

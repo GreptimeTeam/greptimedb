@@ -28,7 +28,7 @@ pub use linear::{MapFilterProject, SafeMfpPlan};
 pub(crate) use relation::{AggregateExpr, AggregateFunc};
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::error::EvalError;
+use crate::adapter::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
 pub(crate) use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -89,18 +89,20 @@ impl ScalarExpr {
         match self {
             ScalarExpr::Column(index) => Ok(values[*index].clone()),
             ScalarExpr::Literal(row_res, _ty) => row_res.clone(),
-            ScalarExpr::CallUnmaterializable(f) => Err(EvalError::Optimize(format!(
-                "Can't eval unmaterializable function: {f:?}"
-            ))),
+            ScalarExpr::CallUnmaterializable(f) => OptimizeSnafu {
+                reason: "Can't eval unmaterializable function".to_string(),
+            }
+            .fail(),
             ScalarExpr::CallUnary { func, expr } => func.eval(values, expr),
             ScalarExpr::CallBinary { func, expr1, expr2 } => func.eval(values, expr1, expr2),
             ScalarExpr::CallVariadic { func, exprs } => func.eval(values, exprs),
             ScalarExpr::If { cond, then, els } => match cond.eval(values) {
                 Ok(Value::Boolean(true)) => then.eval(values),
                 Ok(Value::Boolean(false)) => els.eval(values),
-                _ => Err(EvalError::InvalidArgument(
-                    "if condition must be boolean".to_string(),
-                )),
+                _ => InvalidArgumentSnafu {
+                    reason: "if condition must be boolean".to_string(),
+                }
+                .fail(),
             },
         }
     }
@@ -290,10 +292,12 @@ impl ScalarExpr {
     /// false for lower bound, true for upper bound
     /// TODO(discord9): allow simple transform like `now() + a < b` to `now() < b - a`
     pub fn extract_bound(&self) -> Result<(Option<Self>, Option<Self>), String> {
-        let unsupport_err = Err(format!(
-            "Unsupported temporal predicate. Use `now()` in direct comparison: {:?}",
-            self
-        ));
+        let unsupported_err = || {
+            Err(format!(
+                "Unsupported temporal predicate. Use `now()` in direct comparison: {:?}",
+                self
+            ))
+        };
         if let Self::CallBinary {
             mut func,
             mut expr1,
@@ -301,7 +305,7 @@ impl ScalarExpr {
         } = self.clone()
         {
             if expr1.contains_temporal() ^ expr2.contains_temporal() {
-                return unsupport_err;
+                return unsupported_err();
             }
             if !expr1.contains_temporal()
                 && *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
@@ -315,7 +319,7 @@ impl ScalarExpr {
                     BinaryFunc::Gt => BinaryFunc::Lt,
                     BinaryFunc::Gte => BinaryFunc::Lte,
                     _ => {
-                        return unsupport_err;
+                        return unsupported_err();
                     }
                 };
             }
@@ -323,7 +327,7 @@ impl ScalarExpr {
             if expr2.contains_temporal()
                 || *expr1 != ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
             {
-                return unsupport_err;
+                return unsupported_err();
             }
             let step = |expr: ScalarExpr| expr.call_unary(UnaryFunc::StepTimestamp);
             match func {
@@ -332,10 +336,10 @@ impl ScalarExpr {
                 BinaryFunc::Lte => Ok((None, Some(step(*expr2)))),
                 BinaryFunc::Gt => Ok((Some(step(*expr2)), None)),
                 BinaryFunc::Gte => Ok((Some(*expr2), None)),
-                _ => unsupport_err,
+                _ => unsupported_err(),
             }
         } else {
-            unsupport_err
+            unsupported_err()
         }
     }
 }
