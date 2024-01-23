@@ -51,7 +51,7 @@ pub struct GreptimeDbStandalone {
 struct StaticState {
     kv_backend: KvBackendRef,
     guard: TestGuard,
-    // The following state are actually no need to be perserved across rebuilds.
+    // The following state are actually no need to be preserved across rebuilds.
     procedure_manager: ProcedureManagerRef,
     datanode_opts: DatanodeOptions,
 }
