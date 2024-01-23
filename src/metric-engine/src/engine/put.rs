@@ -98,11 +98,9 @@ impl MetricEngineInner {
     ) -> Result<()> {
         // check if the region exists
         let metadata_region_id = to_metadata_region_id(physical_region_id);
-        if !self
-            .metadata_region
-            .is_logical_region_exists(metadata_region_id, logical_region_id)
-            .await?
-        {
+        let data_region_id = to_data_region_id(physical_region_id);
+        let state = self.state.read().unwrap();
+        if !state.is_logical_region_exist(logical_region_id) {
             error!("Trying to write to an nonexistent region {logical_region_id}");
             return LogicalRegionNotFoundSnafu {
                 region_id: logical_region_id,
@@ -112,12 +110,7 @@ impl MetricEngineInner {
 
         // check if the columns exist
         for col in &request.rows.schema {
-            if self
-                .metadata_region
-                .column_semantic_type(metadata_region_id, logical_region_id, &col.column_name)
-                .await?
-                .is_none()
-            {
+            if !state.is_physical_column_exist(data_region_id, &col.column_name)? {
                 return ColumnNotFoundSnafu {
                     name: col.column_name.clone(),
                     region_id: logical_region_id,
