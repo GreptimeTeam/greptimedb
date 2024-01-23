@@ -228,15 +228,18 @@ pub struct SstUploadRequest {
 #[cfg(test)]
 mod tests {
 
-    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::util::join_dir;
 
     use super::*;
     use crate::cache::test_util::new_fs_store;
+    use crate::cache::CacheManager;
     use crate::sst::file::FileId;
     use crate::sst::location::{index_file_path, sst_file_path};
-    use crate::test_util::sst_util::{new_batch_by_range, new_source, sst_region_metadata};
+    use crate::sst::parquet::reader::ParquetReaderBuilder;
+    use crate::test_util::sst_util::{
+        assert_parquet_metadata_eq, new_batch_by_range, new_source, sst_file_handle,
+        sst_region_metadata,
+    };
     use crate::test_util::TestEnv;
 
     #[tokio::test]
@@ -244,27 +247,17 @@ mod tests {
         // TODO(QuenKar): maybe find a way to create some object server for testing,
         // and now just use local file system to mock.
         let mut env = TestEnv::new();
-        let data_home = env.data_home().display().to_string();
         let mock_store = env.init_object_store_manager();
         let file_id = FileId::random();
         let upload_path = sst_file_path("test", file_id);
         let index_upload_path = index_file_path("test", file_id);
-        let intm_mgr = IntermediateManager::init_fs(join_dir(&data_home, "intm"))
-            .await
-            .unwrap();
 
-        // Create WriteCache
         let local_dir = create_temp_dir("");
         let local_store = new_fs_store(local_dir.path().to_str().unwrap());
-        let object_store_manager = env.get_object_store_manager().unwrap();
-        let write_cache = WriteCache::new(
-            local_store.clone(),
-            object_store_manager,
-            ReadableSize::mb(10),
-            intm_mgr,
-        )
-        .await
-        .unwrap();
+
+        let write_cache = env
+            .create_write_cache(local_store.clone(), ReadableSize::mb(10))
+            .await;
 
         // Create Source
         let metadata = Arc::new(sst_region_metadata());
@@ -326,5 +319,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remote_index_data, cache_index_data);
+    }
+
+    #[tokio::test]
+    async fn test_read_metadata_from_write_cache() {
+        let mut env = TestEnv::new();
+        let data_home = env.data_home().display().to_string();
+        let mock_store = env.init_object_store_manager();
+
+        let local_dir = create_temp_dir("");
+        let local_path = local_dir.path().to_str().unwrap();
+        let local_store = new_fs_store(local_path);
+
+        // Create a cache manager using only write cache
+        let write_cache = env
+            .create_write_cache(local_store.clone(), ReadableSize::mb(10))
+            .await;
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .write_cache(Some(write_cache.clone()))
+                .build(),
+        );
+
+        // Create source
+        let metadata = Arc::new(sst_region_metadata());
+        let handle = sst_file_handle(0, 1000);
+        let file_id = handle.file_id();
+        let source = new_source(&[
+            new_batch_by_range(&["a", "d"], 0, 60),
+            new_batch_by_range(&["b", "f"], 0, 40),
+            new_batch_by_range(&["b", "h"], 100, 200),
+        ]);
+
+        // Write to local cache and upload sst to mock remote store
+        let write_request = SstWriteRequest {
+            file_id,
+            metadata,
+            source,
+            storage: None,
+            create_inverted_index: false,
+            mem_threshold_index_create: None,
+            index_write_buffer_size: None,
+            cache_manager: cache_manager.clone(),
+        };
+        let write_opts = WriteOptions {
+            row_group_size: 512,
+            ..Default::default()
+        };
+        let upload_path = sst_file_path(&data_home, file_id);
+        let index_upload_path = index_file_path(&data_home, file_id);
+        let upload_request = SstUploadRequest {
+            upload_path: upload_path.clone(),
+            index_upload_path: index_upload_path.clone(),
+            remote_store: mock_store.clone(),
+        };
+
+        let sst_info = write_cache
+            .write_and_upload_sst(write_request, upload_request, &write_opts)
+            .await
+            .unwrap()
+            .unwrap();
+        let write_parquet_metadata = sst_info.file_metadata.unwrap();
+
+        // Read metadata from write cache
+        let builder = ParquetReaderBuilder::new(data_home, handle.clone(), mock_store.clone())
+            .cache(Some(cache_manager.clone()));
+        let reader = builder.build().await.unwrap();
+
+        // Check parquet metadata
+        assert_parquet_metadata_eq(write_parquet_metadata, reader.parquet_metadata());
     }
 }

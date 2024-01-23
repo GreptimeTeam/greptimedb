@@ -228,13 +228,13 @@ impl FileCache {
         self.local_store.clone()
     }
 
-    /// Returns the parquet metadata of the file.
+    /// Try to get the parquet metadata in file cache.
     pub(crate) async fn try_get_parquet_meta_data(
         &self,
         key: IndexKey,
         file_size: u64,
     ) -> Option<ParquetMetaData> {
-        // Check whether file cache contrains the key
+        // Check if file cache contrains the key
         if self.memory_index.get(&key).await.is_none() {
             CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
             return None;

@@ -29,6 +29,7 @@ use api::greptime_proto::v1;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
+use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
@@ -38,6 +39,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
+use object_store::util::join_dir;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::RegionEngine;
@@ -47,6 +49,7 @@ use store_api::region_request::{
 };
 use store_api::storage::{ColumnId, RegionId};
 
+use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::config::MitoConfig;
 use crate::engine::listener::EventListenerRef;
 use crate::engine::{MitoEngine, MITO_ENGINE_NAME};
@@ -55,6 +58,7 @@ use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
+use crate::sst::index::intermediate::IntermediateManager;
 use crate::worker::WorkerGroup;
 
 #[derive(Debug)]
@@ -324,6 +328,26 @@ impl TestEnv {
         } else {
             RegionManifestManager::open(manifest_opts).await
         }
+    }
+
+    /// Creates a write cache with local store.
+    pub async fn create_write_cache(
+        &self,
+        local_store: ObjectStore,
+        capacity: ReadableSize,
+    ) -> WriteCacheRef {
+        let data_home = self.data_home().display().to_string();
+
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&data_home, "intm"))
+            .await
+            .unwrap();
+
+        let object_store_manager = self.get_object_store_manager().unwrap();
+        let write_cache = WriteCache::new(local_store, object_store_manager, capacity, intm_mgr)
+            .await
+            .unwrap();
+
+        Arc::new(write_cache)
     }
 }
 
