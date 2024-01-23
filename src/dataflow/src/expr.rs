@@ -77,11 +77,11 @@ impl ScalarExpr {
         }
     }
 
-    pub fn call_binary(func: BinaryFunc, expr1: Self, expr2: Self) -> Self {
+    pub fn call_binary(self, other: Self, func: BinaryFunc) -> Self {
         ScalarExpr::CallBinary {
             func,
-            expr1: Box::new(expr1),
-            expr2: Box::new(expr2),
+            expr1: Box::new(self),
+            expr2: Box::new(other),
         }
     }
 
@@ -176,6 +176,28 @@ impl ScalarExpr {
     pub fn literal_null() -> Self {
         ScalarExpr::Literal(Ok(Value::Null), ConcreteDataType::null_datatype())
     }
+
+    pub fn literal(res: Result<Value, EvalError>, typ: ConcreteDataType) -> Self {
+        ScalarExpr::Literal(res, typ)
+    }
+
+    pub fn literal_ok(val: Value, typ: ConcreteDataType) -> Self {
+        ScalarExpr::Literal(Ok(val), typ)
+    }
+
+    pub fn literal_false() -> Self {
+        ScalarExpr::Literal(
+            Ok(Value::Boolean(false)),
+            ConcreteDataType::boolean_datatype(),
+        )
+    }
+
+    pub fn literal_true() -> Self {
+        ScalarExpr::Literal(
+            Ok(Value::Boolean(true)),
+            ConcreteDataType::boolean_datatype(),
+        )
+    }
 }
 
 impl ScalarExpr {
@@ -245,6 +267,75 @@ impl ScalarExpr {
                 f(then);
                 f(els);
             }
+        }
+    }
+}
+
+impl ScalarExpr {
+    /// if expr contains function `Now`
+    pub fn contains_temporal(&self) -> bool {
+        let mut contains = false;
+        self.visit_post_nolimit(&mut |e| {
+            if let ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now) = e {
+                contains = true;
+            }
+        });
+        contains
+    }
+
+    /// extract lower or upper bound of `Now` for expr,
+    ///
+    /// returned bool indicates whether the bound is upper bound:
+    ///
+    /// false for lower bound, true for upper bound
+    /// TODO(discord9): allow simple transform like `now() + a < b` to `now() < b - a`
+    pub fn extract_bound(&self) -> Result<(Option<Self>, Option<Self>), String> {
+        let unsupport_err = Err(format!(
+            "Unsupported temporal predicate. Use `now()` in direct comparison: {:?}",
+            self
+        ));
+        if let Self::CallBinary {
+            mut func,
+            mut expr1,
+            mut expr2,
+        } = self.clone()
+        {
+            if expr1.contains_temporal() ^ expr2.contains_temporal() {
+                return unsupport_err;
+            }
+            if !expr1.contains_temporal()
+                && *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
+            {
+                std::mem::swap(&mut expr1, &mut expr2);
+                func = match func {
+                    BinaryFunc::Eq => BinaryFunc::Eq,
+                    BinaryFunc::NotEq => BinaryFunc::NotEq,
+                    BinaryFunc::Lt => BinaryFunc::Gt,
+                    BinaryFunc::Lte => BinaryFunc::Gte,
+                    BinaryFunc::Gt => BinaryFunc::Lt,
+                    BinaryFunc::Gte => BinaryFunc::Lte,
+                    _ => {
+                        return unsupport_err;
+                    }
+                };
+            }
+            // TODO: support simple transform like `now() + a < b` to `now() < b - a`
+            if expr2.contains_temporal()
+                || *expr1 != ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
+            {
+                return unsupport_err;
+            }
+            let step = |expr: ScalarExpr| expr.call_unary(UnaryFunc::StepTimestamp);
+            match func {
+                BinaryFunc::Eq => Ok((Some(*expr2.clone()), Some(step(*expr2)))),
+                BinaryFunc::Lt => Ok((None, Some(*expr2))),
+                BinaryFunc::Lte => Ok((None, Some(step(*expr2)))),
+                BinaryFunc::Gt => Ok((Some(step(*expr2)), None)),
+                BinaryFunc::Gte => Ok((Some(*expr2), None)),
+                _ => unsupport_err,
+            }
+        } else {
+            unsupport_err
         }
     }
 }

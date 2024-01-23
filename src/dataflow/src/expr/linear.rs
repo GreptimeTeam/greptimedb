@@ -356,11 +356,33 @@ pub struct MfpPlan {
 }
 
 impl MfpPlan {
+    /// find `now` in `predicates` and put them into lower/upper temporal bounds for temporal filter to use
     pub fn create_from(mut mfp: MapFilterProject) -> Result<Self, String> {
+        let mut lower_bounds = Vec::new();
+        let mut upper_bounds = Vec::new();
+
+        let mut temporal = Vec::new();
+
+        // Optimize, to ensure that temporal predicates are move in to `mfp.predicates`.
+        mfp.optimize();
+
+        mfp.predicates.retain(|(_position, predicate)| {
+            if predicate.contains_temporal() {
+                temporal.push(predicate.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for predicate in temporal {
+            let (lower, upper) = predicate.extract_bound()?;
+            lower_bounds.extend(lower);
+            upper_bounds.extend(upper);
+        }
         Ok(Self {
             mfp: SafeMfpPlan { mfp },
-            lower_bounds: Vec::new(),
-            upper_bounds: Vec::new(),
+            lower_bounds,
+            upper_bounds,
         })
     }
     pub fn evaluate<E: From<EvalError>, V: Fn(&repr::Timestamp) -> bool>(
@@ -395,8 +417,8 @@ fn test_mfp() {
     use super::BinaryFunc;
     let mfp = MapFilterProject::new(3)
         .map(vec![
-            ScalarExpr::call_binary(BinaryFunc::Lt, ScalarExpr::Column(0), ScalarExpr::Column(1)),
-            ScalarExpr::call_binary(BinaryFunc::Lt, ScalarExpr::Column(1), ScalarExpr::Column(2)),
+            ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
+            ScalarExpr::Column(1).call_binary(ScalarExpr::Column(2), BinaryFunc::Lt),
         ])
         .project(vec![3, 4]);
     assert!(!mfp.is_identity());
@@ -416,16 +438,8 @@ fn test_mfp() {
         mfp,
         MapFilterProject::new(3)
             .map(vec![
-                ScalarExpr::call_binary(
-                    BinaryFunc::Lt,
-                    ScalarExpr::Column(2),
-                    ScalarExpr::Column(1)
-                ),
-                ScalarExpr::call_binary(
-                    BinaryFunc::Lt,
-                    ScalarExpr::Column(1),
-                    ScalarExpr::Column(0)
-                )
+                ScalarExpr::Column(2).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
+                ScalarExpr::Column(1).call_binary(ScalarExpr::Column(0), BinaryFunc::Lt),
             ])
             .project(vec![3, 4])
     );

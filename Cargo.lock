@@ -2525,6 +2525,7 @@ dependencies = [
  "common-meta",
  "common-query",
  "common-telemetry",
+ "common-time",
  "datatypes",
  "hydroflow",
  "itertools 0.10.5",

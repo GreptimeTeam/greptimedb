@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::DateTime;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +20,7 @@ use super::ScalarExpr;
 // TODO(discord9): more function & eval
 use crate::{adapter::error::EvalError, repr::Row};
 
-#[derive(
-    Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash
-)]
+#[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub enum UnmaterializableFunc {
     Now,
     CurrentDatabase,
@@ -34,6 +33,7 @@ pub enum UnaryFunc {
     IsNull,
     IsTrue,
     IsFalse,
+    StepTimestamp,
     // TODO(discord9): spec treat of cast
     CastDatetimeToInt64,
     CastInt64ToFloat32,
@@ -54,6 +54,51 @@ impl UnaryFunc {
     pub fn eval(&self, values: &[Value], expr: &ScalarExpr) -> Result<Value, EvalError> {
         let arg = expr.eval(values)?;
         match self {
+            Self::Not => {
+                let bool = if let Value::Boolean(bool) = arg {
+                    Ok(bool)
+                } else {
+                    Err(EvalError::TypeMismatch(format!(
+                        "cannot cast {:?} to bool",
+                        arg
+                    )))
+                }?;
+                Ok(Value::from(!bool))
+            }
+            Self::IsNull => Ok(Value::from(arg.is_null())),
+            Self::IsTrue => {
+                let bool = if let Value::Boolean(bool) = arg {
+                    Ok(bool)
+                } else {
+                    Err(EvalError::TypeMismatch(format!(
+                        "cannot cast {:?} to bool",
+                        arg
+                    )))
+                }?;
+                Ok(Value::from(bool))
+            }
+            Self::IsFalse => {
+                let bool = if let Value::Boolean(bool) = arg {
+                    Ok(bool)
+                } else {
+                    Err(EvalError::TypeMismatch(format!(
+                        "cannot cast {:?} to bool",
+                        arg
+                    )))
+                }?;
+                Ok(Value::from(!bool))
+            }
+            Self::StepTimestamp => {
+                if let Value::DateTime(datetime) = arg {
+                    let datetime = DateTime::from(datetime.val() + 1);
+                    Ok(Value::from(datetime))
+                } else {
+                    Err(EvalError::TypeMismatch(format!(
+                        "cannot cast {:?} to datetime",
+                        arg
+                    )))
+                }
+            }
             Self::CastDatetimeToInt64 => {
                 let datetime = if let Value::DateTime(datetime) = arg {
                     Ok(datetime.val())
@@ -76,7 +121,6 @@ impl UnaryFunc {
                 }?;
                 Ok(Value::from(int64 as f32))
             }
-            _ => todo!(),
         }
     }
 }

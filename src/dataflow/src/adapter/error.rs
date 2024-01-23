@@ -80,7 +80,7 @@ pub enum EvalError {
     TypeMismatch(String),
     InvalidArgument(String),
     Internal(String),
-    Optimize(String)
+    Optimize(String),
 }
 
 impl std::fmt::Display for EvalError {
