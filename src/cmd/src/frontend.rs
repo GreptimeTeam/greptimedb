@@ -46,6 +46,10 @@ impl Instance {
     fn new(frontend: FeInstance) -> Self {
         Self { frontend }
     }
+
+    pub fn mut_inner(&mut self) -> &mut FeInstance {
+        &mut self.frontend
+    }
 }
 
 #[async_trait]
@@ -253,13 +257,11 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let servers = Services::new(plugins)
-            .build(opts.clone(), Arc::new(instance.clone()))
-            .await
+        let servers = Services::new(opts.clone(), Arc::new(instance.clone()), plugins)
+            .build()
             .context(StartFrontendSnafu)?;
         instance
             .build_servers(opts, servers)
-            .await
             .context(StartFrontendSnafu)?;
 
         Ok(Instance::new(instance))

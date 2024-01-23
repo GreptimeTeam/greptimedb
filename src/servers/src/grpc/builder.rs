@@ -37,12 +37,18 @@ use crate::grpc::prom_query_gateway::PrometheusGatewayService;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
+/// Add a GRPC service (`service`) to a `builder`([RoutesBuilder]).
+/// This macro will automatically add some GRPC properties to the service.
+#[macro_export]
 macro_rules! add_service {
     ($builder: ident, $service: expr) => {
-        $builder.routes_builder.add_service(
+        let max_recv_message_size = $builder.config().max_recv_message_size;
+        let max_send_message_size = $builder.config().max_send_message_size;
+
+        $builder.routes_builder_mut().add_service(
             $service
-                .max_decoding_message_size($builder.config.max_recv_message_size)
-                .max_encoding_message_size($builder.config.max_send_message_size),
+                .max_decoding_message_size(max_recv_message_size)
+                .max_encoding_message_size(max_send_message_size),
         )
     };
 }
@@ -60,6 +66,10 @@ impl GrpcServerBuilder {
             runtime,
             routes_builder: RoutesBuilder::default(),
         }
+    }
+
+    pub fn config(&self) -> &GrpcServerConfig {
+        &self.config
     }
 
     pub fn runtime(&self) -> &Arc<Runtime> {

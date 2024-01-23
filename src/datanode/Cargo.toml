@@ -13,8 +13,6 @@ arrow-flight.workspace = true
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait.workspace = true
-axum = "0.6"
-axum-macros = "0.3"
 bytes.workspace = true
 catalog.workspace = true
 client.workspace = true
@@ -77,7 +75,6 @@ url = "2.3.1"
 uuid.workspace = true
 
 [dev-dependencies]
-axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 client.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-query.workspace = true

@@ -16,7 +16,7 @@ api.workspace = true
 arrow-flight.workspace = true
 async-trait = "0.1"
 auth.workspace = true
-axum = { version = "0.6", features = ["headers"] }
+axum.workspace = true
 axum-macros = "0.3.8"
 base64.workspace = true
 bytes.workspace = true

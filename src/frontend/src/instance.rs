@@ -32,6 +32,7 @@ use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -119,6 +120,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     export_metrics_task: Option<ExportMetricsTask>,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl Instance {
@@ -186,7 +188,7 @@ impl Instance {
         Ok((kv_backend, procedure_manager))
     }
 
-    pub async fn build_servers(
+    pub fn build_servers(
         &mut self,
         opts: impl Into<FrontendOptions> + TomlSerializable,
         servers: ServerHandlers,
@@ -218,6 +220,10 @@ impl Instance {
 
     pub fn statement_executor(&self) -> Arc<StatementExecutor> {
         self.statement_executor.clone()
+    }
+
+    pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
+        &self.table_metadata_manager
     }
 }
 
