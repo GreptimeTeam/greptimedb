@@ -69,6 +69,7 @@ impl<'a> MetadataLoader<'a> {
     pub async fn load(&self) -> Result<ParquetMetaData> {
         let object_store = &self.object_store;
         let path = self.file_path;
+
         let file_size = self.get_file_size().await?;
 
         if file_size < FOOTER_SIZE as u64 {

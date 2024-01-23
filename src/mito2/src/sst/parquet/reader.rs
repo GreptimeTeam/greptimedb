@@ -243,14 +243,17 @@ impl ParquetReaderBuilder {
         file_path: &str,
         file_size: u64,
     ) -> Result<Arc<ParquetMetaData>> {
+        let region_id = self.file_handle.region_id();
+        let file_id = self.file_handle.file_id();
         // Tries to get from global cache.
-        if let Some(metadata) = self.cache_manager.as_ref().and_then(|cache| {
-            cache.get_parquet_meta_data(self.file_handle.region_id(), self.file_handle.file_id())
-        }) {
-            return Ok(metadata);
+        if let Some(manager) = self.cache_manager.as_ref() {
+            if let Some(metadata) = manager
+                .get_parquet_meta_data(region_id, file_id, file_size)
+                .await
+            {
+                return Ok(metadata);
+            }
         }
-
-        // TODO(QuenKar): should also check write cache to get parquet metadata.
 
         // Cache miss, load metadata directly.
         let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);

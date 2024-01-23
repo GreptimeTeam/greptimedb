@@ -26,6 +26,7 @@ use moka::future::Cache;
 use moka::notification::RemovalCause;
 use object_store::util::join_path;
 use object_store::{ErrorKind, Metakey, ObjectStore, Reader};
+use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
@@ -34,6 +35,7 @@ use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
+use crate::sst::parquet::metadata::MetadataLoader;
 
 /// Subdirectory of cached files.
 const FILE_DIR: &str = "files/";
@@ -224,6 +226,43 @@ impl FileCache {
     /// Returns the local store of the file cache.
     pub(crate) fn local_store(&self) -> ObjectStore {
         self.local_store.clone()
+    }
+
+    /// Returns the parquet metadata of the file.
+    pub(crate) async fn try_get_parquet_meta_data(
+        &self,
+        key: IndexKey,
+        file_size: u64,
+    ) -> Option<ParquetMetaData> {
+        // Check whether file cache contrains the key
+        if self.memory_index.get(&key).await.is_none() {
+            CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+            return None;
+        }
+
+        // Load metadata from file cache
+        let local_store = self.local_store();
+        let file_path = self.cache_file_path(key);
+        let metadata_loader = MetadataLoader::new(local_store, &file_path, file_size);
+
+        match metadata_loader.load().await {
+            Ok(metadata) => {
+                CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
+                Some(metadata)
+            }
+            Err(e) => {
+                if !e.is_object_not_found() {
+                    warn!(
+                        "Failed to get parquet metadata for key {:?}, err: {}",
+                        key, e
+                    );
+                }
+                // We removes the file from the index.
+                self.memory_index.remove(&key).await;
+                CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+                None
+            }
+        }
     }
 
     async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
