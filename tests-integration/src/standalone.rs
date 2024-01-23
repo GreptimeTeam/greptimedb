@@ -91,17 +91,13 @@ impl GreptimeDbStandaloneBuilder {
     pub fn with_static_state(self) -> Self {
         let (opts, guard) = self.build_datanode_opts_and_guard();
 
-        let kv_backend = Arc::new(
-            RaftEngineBackend::try_open_with_cfg(Config {
-                dir: format!("{}/kv", &opts.storage.data_home),
-                purge_threshold: ReadableSize(self.kv_backend_config.purge_threshold.0),
-                recovery_mode: RecoveryMode::TolerateTailCorruption,
-                batch_compression_threshold: ReadableSize::kb(8),
-                target_file_size: ReadableSize(self.kv_backend_config.file_size.0),
-                ..Default::default()
-            })
-            .unwrap(),
-        );
+        let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
+             format!("{}/kv", &opts.storage.data_home),
+             kv_backend_config.clone(),
+             procedure_config.clone(),
+         )
+         .await
+         .unwrap();
 
         Self {
             static_state: Some(StaticState {
