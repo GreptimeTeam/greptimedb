@@ -35,7 +35,8 @@ lazy_static! {
     pub static ref HANDLE_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_handle_request_elapsed",
             "mito handle request elapsed",
-            &[TYPE_LABEL]
+            &[TYPE_LABEL],
+            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 60.0, 300.0]
         )
         .unwrap();
 
@@ -75,7 +76,8 @@ lazy_static! {
     pub static ref WRITE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_write_stage_elapsed",
             "mito write stage elapsed",
-            &[STAGE_LABEL]
+            &[STAGE_LABEL],
+            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
         )
         .unwrap();
     /// Counter of rows to write.

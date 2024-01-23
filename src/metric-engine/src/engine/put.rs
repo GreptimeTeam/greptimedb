@@ -65,6 +65,10 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
         mut request: RegionPutRequest,
     ) -> Result<AffectedRows> {
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["put"])
+            .start_timer();
+
         let physical_region_id = *self
             .state
             .read()
