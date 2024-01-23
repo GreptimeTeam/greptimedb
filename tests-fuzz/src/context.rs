@@ -26,7 +26,7 @@ pub struct TableContext {
     pub columns: Vec<Column>,
 
     // GreptimeDB specific options
-    pub partitions: Vec<PartitionDef>,
+    pub partition: Option<PartitionDef>,
     pub primary_keys: Vec<usize>,
 }
 
@@ -35,7 +35,7 @@ impl From<&CreateTableExpr> for TableContext {
         CreateTableExpr {
             name,
             columns,
-            partitions,
+            partition,
             primary_keys,
             ..
         }: &CreateTableExpr,
@@ -43,7 +43,7 @@ impl From<&CreateTableExpr> for TableContext {
         Self {
             name: name.to_string(),
             columns: columns.clone(),
-            partitions: partitions.clone(),
+            partition: partition.clone(),
             primary_keys: primary_keys.clone(),
         }
     }

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::Column;
 
-#[derive(Debug, Builder, Clone)]
+#[derive(Debug, Builder, Clone, Serialize, Deserialize)]
 pub struct AlterTableExpr {
     pub name: String,
     pub alter_options: AlterTableOperation,

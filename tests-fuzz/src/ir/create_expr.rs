@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::ir::Column;
 
 // The column options
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum ColumnOption {
     Null,
     NotNull,
@@ -49,6 +49,7 @@ impl Display for ColumnOption {
 /// A naive create table expr builder.
 #[derive(Debug, Builder, Clone, Serialize, Deserialize)]
 pub struct CreateTableExpr {
+    #[builder(setter(into))]
     pub name: String,
     pub columns: Vec<Column>,
     #[builder(default)]
@@ -56,7 +57,8 @@ pub struct CreateTableExpr {
 
     // GreptimeDB specific options
     #[builder(default, setter(into))]
-    pub partitions: Vec<PartitionDef>,
+    pub partition: Option<PartitionDef>,
+    #[builder(default, setter(into))]
     pub engine: String,
     #[builder(default, setter(into))]
     pub options: HashMap<String, Value>,

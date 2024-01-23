@@ -2,4 +2,4 @@
 ue = "ue"
 datas = "datas"
 [files]
-extend-exclude = ["corrupted"]
+extend-exclude = ["corrupted","tests-fuzz/src/data/lorem_words"]
