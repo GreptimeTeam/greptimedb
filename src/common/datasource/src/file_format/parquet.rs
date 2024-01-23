@@ -175,14 +175,14 @@ type InnerBufferedWriter = LazyBufferedWriter<
 impl BufferedWriter {
     fn make_write_factory(
         store: ObjectStore,
-        concurrent: usize,
+        concurrency: usize,
     ) -> impl Fn(String) -> BoxFuture<'static, Result<Writer>> {
         move |path| {
             let store = store.clone();
             Box::pin(async move {
                 store
                     .writer_with(&path)
-                    .concurrent(concurrent)
+                    .concurrent(concurrency)
                     .await
                     .context(error::WriteObjectSnafu { path })
             })
@@ -195,7 +195,7 @@ impl BufferedWriter {
         arrow_schema: SchemaRef,
         props: Option<WriterProperties>,
         buffer_threshold: usize,
-        concurrent: usize,
+        concurrency: usize,
     ) -> error::Result<Self> {
         let buffer = SharedBuffer::with_capacity(buffer_threshold);
 
@@ -208,7 +208,7 @@ impl BufferedWriter {
                 buffer,
                 arrow_writer,
                 &path,
-                Self::make_write_factory(store, concurrent),
+                Self::make_write_factory(store, concurrency),
             ),
         })
     }
@@ -237,7 +237,7 @@ pub async fn stream_to_parquet(
     store: ObjectStore,
     path: &str,
     threshold: usize,
-    concurrent: usize,
+    concurrency: usize,
 ) -> Result<usize> {
     let write_props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
@@ -249,7 +249,7 @@ pub async fn stream_to_parquet(
         schema,
         Some(write_props),
         threshold,
-        concurrent,
+        concurrency,
     )
     .await?;
     let mut rows_written = 0;
