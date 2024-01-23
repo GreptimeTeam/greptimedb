@@ -52,3 +52,8 @@ CREATE TABLE test_multiple_pk_definitions ("timestamp" TIMESTAMP TIME INDEX, hos
 
 CREATE TABLE test_multiple_inline_pk_definitions ("timestamp" TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE PRIMARY KEY);
 
+CREATE TABLE neg_default_value(i INT DEFAULT -1024, ts TIMESTAMP TIME INDEX);
+
+desc TABLE neg_default_value;
+
+DROP TABLE neg_default_value;
