@@ -32,6 +32,11 @@ set time_zone='Asia/Shanghai';
 ---- align to 'Asia/Shanghai' unix epoch 0 ----
 SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' ORDER BY host, ts;
 
+set time_zone='+23:00';
+
+---- align to '+23:00' unix epoch 0 ----
+SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' ORDER BY host, ts;
+
 set time_zone='UTC';
 
 DROP TABLE host;

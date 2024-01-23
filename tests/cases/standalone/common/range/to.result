@@ -99,6 +99,24 @@ SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' ORDER BY host, ts;
 | 2024-01-24T08:00:00 | host2 | 6                                |
 +---------------------+-------+----------------------------------+
 
+set time_zone='+23:00';
+
+Affected Rows: 0
+
+---- align to '+23:00' unix epoch 0 ----
+SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' ORDER BY host, ts;
+
++---------------------+-------+----------------------------------+
+| ts                  | host  | MIN(host.val) RANGE 1d FILL NULL |
++---------------------+-------+----------------------------------+
+| 2024-01-22T23:00:00 | host1 | 0                                |
+| 2024-01-23T23:00:00 | host1 | 1                                |
+| 2024-01-24T23:00:00 | host1 | 3                                |
+| 2024-01-22T23:00:00 | host2 | 4                                |
+| 2024-01-23T23:00:00 | host2 | 5                                |
+| 2024-01-24T23:00:00 | host2 | 7                                |
++---------------------+-------+----------------------------------+
+
 set time_zone='UTC';
 
 Affected Rows: 0
