@@ -23,3 +23,11 @@ insert into presentations values (1, 'Patrick Damme', 'Analytical Query Processi
 DROP TABLE integers;
 
 DROP TABLE presentations;
+
+CREATE TABLE neg_default_value(i INT DEFAULT -1024, ts TIMESTAMP TIME INDEX);
+
+INSERT INTO neg_default_value(ts) values ('2000-01-01 00:00:00+00:00');
+
+SELECT * FROM neg_default_value;
+
+DROP TABLE neg_default_value;

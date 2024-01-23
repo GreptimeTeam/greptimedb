@@ -126,3 +126,20 @@ CREATE TABLE test_multiple_inline_pk_definitions ("timestamp" TIMESTAMP TIME IND
 
 Error: 1004(InvalidArguments), Illegal primary keys definition: not allowed to inline multiple primary keys in columns options
 
+CREATE TABLE neg_default_value(i INT DEFAULT -1024, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+desc TABLE neg_default_value;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  | -1024   | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE neg_default_value;
+
+Affected Rows: 0
+
