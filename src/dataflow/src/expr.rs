@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! for declare dataflow description that is the last step before build dataflow
+//! for declare Expression in dataflow, including map, reduce, id and join(TODO!) etc.
 
 mod func;
 mod id;

@@ -14,6 +14,9 @@
 
 //! basically a wrapper around the `datatype` crate
 //! for basic Data Representation
+
+mod relation;
+
 use std::borrow::Borrow;
 use std::slice::SliceIndex;
 
