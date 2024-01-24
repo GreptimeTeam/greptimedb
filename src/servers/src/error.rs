@@ -35,6 +35,12 @@ use tonic::Code;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Arrow error"))]
+    Arrow {
+        #[snafu(source)]
+        error: arrow_schema::ArrowError,
+    },
+
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
 
@@ -455,7 +461,8 @@ impl ErrorExt for Error {
             | TcpIncoming { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildHttpResponse { .. } => StatusCode::Internal,
+            | BuildHttpResponse { .. }
+            | Arrow { .. } => StatusCode::Internal,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 

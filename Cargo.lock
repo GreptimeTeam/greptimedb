@@ -8495,7 +8495,10 @@ version = "0.6.0"
 dependencies = [
  "aide",
  "api",
+ "arrow",
  "arrow-flight",
+ "arrow-ipc",
+ "arrow-schema",
  "async-trait",
  "auth",
  "axum",
