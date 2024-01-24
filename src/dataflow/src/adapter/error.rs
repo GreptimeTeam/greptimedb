@@ -92,6 +92,17 @@ pub enum EvalError {
     /// can't nest datatypes error because EvalError need to be store in map and serialization
     #[snafu(display("Fail to unpack from value to given type: {}", msg))]
     TryFromValue { msg: String },
+    #[snafu(display(
+        "Fail to cast value of type {} to given type: {}. Detail: {}",
+        from,
+        to,
+        msg
+    ))]
+    CastValue {
+        from: ConcreteDataType,
+        to: ConcreteDataType,
+        msg: String,
+    },
     #[snafu(display("Invalid argument: {}", reason))]
     InvalidArgument { reason: String },
     #[snafu(display("Internal error: {}", reason))]

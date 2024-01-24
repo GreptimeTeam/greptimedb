@@ -14,12 +14,15 @@
 
 use common_time::DateTime;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::types::cast::CastOption;
+use datatypes::types::cast_with_opt;
 use datatypes::value::Value;
 use hydroflow::bincode::Error;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use super::ScalarExpr;
+use crate::adapter::error::CastValueSnafu;
 // TODO(discord9): more function & eval
 use crate::{
     adapter::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu},
@@ -40,23 +43,10 @@ pub enum UnaryFunc {
     IsTrue,
     IsFalse,
     StepTimestamp,
-    // TODO(discord9): spec treat of cast
-    CastDatetimeToInt64,
-    CastInt64ToFloat32,
+    Cast(ConcreteDataType),
 }
 
 impl UnaryFunc {
-    pub fn name_to_func(name: &str) -> Option<Self> {
-        match name {
-            "not" => Some(Self::Not),
-            "is_null" => Some(Self::IsNull),
-            "is_true" => Some(Self::IsTrue),
-            "is_false" => Some(Self::IsFalse),
-            "cast_datetime_to_int64" => Some(Self::CastDatetimeToInt64),
-            "cast_int64_to_float32" => Some(Self::CastInt64ToFloat32),
-            _ => None,
-        }
-    }
     pub fn eval(&self, values: &[Value], expr: &ScalarExpr) -> Result<Value, EvalError> {
         let arg = expr.eval(values)?;
         match self {
@@ -109,29 +99,17 @@ impl UnaryFunc {
                     .fail()?
                 }
             }
-            Self::CastDatetimeToInt64 => {
-                let datetime = if let Value::DateTime(datetime) = arg {
-                    Ok(datetime.val())
-                } else {
-                    TypeMismatchSnafu {
-                        expected: ConcreteDataType::datetime_datatype(),
-                        actual: arg.data_type(),
+            Self::Cast(to) => {
+                let arg_ty = arg.data_type();
+                let res = cast_with_opt(arg, to, &CastOption { strict: true }).map_err(|e| {
+                    CastValueSnafu {
+                        from: arg_ty,
+                        to: to.clone(),
+                        msg: e.to_string(),
                     }
-                    .fail()?
-                }?;
-                Ok(Value::from(datetime))
-            }
-            Self::CastInt64ToFloat32 => {
-                let int64 = if let Value::Int64(int64) = arg {
-                    Ok(int64)
-                } else {
-                    TypeMismatchSnafu {
-                        expected: ConcreteDataType::int64_datatype(),
-                        actual: arg.data_type(),
-                    }
-                    .fail()?
-                }?;
-                Ok(Value::from(int64 as f32))
+                    .build()
+                })?;
+                Ok(res)
             }
         }
     }
@@ -187,55 +165,6 @@ pub enum BinaryFunc {
 }
 
 impl BinaryFunc {
-    pub fn name_to_func(name: &str) -> Option<Self> {
-        match name {
-            "eq" => Some(Self::Eq),
-            "not_eq" => Some(Self::NotEq),
-            "lt" => Some(Self::Lt),
-            "lte" => Some(Self::Lte),
-            "gt" => Some(Self::Gt),
-            "gte" => Some(Self::Gte),
-            "add_int16" => Some(Self::AddInt16),
-            "add_int32" => Some(Self::AddInt32),
-            "add_int64" => Some(Self::AddInt64),
-            "add_uint16" => Some(Self::AddUInt16),
-            "add_uint32" => Some(Self::AddUInt32),
-            "add_uint64" => Some(Self::AddUInt64),
-            "add_float32" => Some(Self::AddFloat32),
-            "add_float64" => Some(Self::AddFloat64),
-            "sub_int16" => Some(Self::SubInt16),
-            "sub_int32" => Some(Self::SubInt32),
-            "sub_int64" => Some(Self::SubInt64),
-            "sub_uint16" => Some(Self::SubUInt16),
-            "sub_uint32" => Some(Self::SubUInt32),
-            "sub_uint64" => Some(Self::SubUInt64),
-            "sub_float32" => Some(Self::SubFloat32),
-            "sub_float64" => Some(Self::SubFloat64),
-            "mul_int16" => Some(Self::MulInt16),
-            "mul_int32" => Some(Self::MulInt32),
-            "mul_int64" => Some(Self::MulInt64),
-            "mul_uint16" => Some(Self::MulUInt16),
-            "mul_uint32" => Some(Self::MulUInt32),
-            "mul_uint64" => Some(Self::MulUInt64),
-            "mul_float32" => Some(Self::MulFloat32),
-            "mul_float64" => Some(Self::MulFloat64),
-            "div_int16" => Some(Self::DivInt16),
-            "div_int32" => Some(Self::DivInt32),
-            "div_int64" => Some(Self::DivInt64),
-            "div_uint16" => Some(Self::DivUInt16),
-            "div_uint32" => Some(Self::DivUInt32),
-            "div_uint64" => Some(Self::DivUInt64),
-            "div_float32" => Some(Self::DivFloat32),
-            "div_float64" => Some(Self::DivFloat64),
-            "mod_int16" => Some(Self::ModInt16),
-            "mod_int32" => Some(Self::ModInt32),
-            "mod_int64" => Some(Self::ModInt64),
-            "mod_uint16" => Some(Self::ModUInt16),
-            "mod_uint32" => Some(Self::ModUInt32),
-            "mod_uint64" => Some(Self::ModUInt64),
-            _ => None,
-        }
-    }
     pub fn eval(
         &self,
         values: &[Value],
