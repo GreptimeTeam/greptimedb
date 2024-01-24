@@ -58,9 +58,9 @@ impl Status {
     }
 
     /// Returns a [Status::Done] with output.
-    pub fn done_with_output(output: Output) -> Status {
+    pub fn done_with_output<T: Any + Send + Sync>(output: T) -> Status {
         Status::Done {
-            output: Some(output),
+            output: Some(Arc::new(output)),
         }
     }
     /// Returns `true` if the procedure is done.

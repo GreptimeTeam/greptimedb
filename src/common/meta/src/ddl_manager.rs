@@ -456,7 +456,7 @@ async fn handle_create_table_task(
         .await?;
     let output = output.context(error::ProcedureOutputSnafu)?;
 
-    let table_id = *(output.downcast_ref::<Arc<u32>>().unwrap().as_ref());
+    let table_id = *(output.downcast_ref::<u32>().unwrap());
     info!("Table: {table_id} is created via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
