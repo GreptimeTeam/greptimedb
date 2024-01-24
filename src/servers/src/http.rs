@@ -14,6 +14,7 @@
 
 use std::fmt::Display;
 use std::net::SocketAddr;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
@@ -62,7 +63,6 @@ use crate::metrics::{
 };
 use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
-use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef,
@@ -99,26 +99,15 @@ pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"]
 
 #[derive(Default)]
 pub struct HttpServer {
-    // server handlers
-    sql_handler: Option<ServerSqlQueryHandlerRef>,
-    grpc_handler: Option<ServerGrpcQueryHandlerRef>,
-    influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
-    opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
-    prom_handler: Option<PromStoreProtocolHandlerRef>,
-    prometheus_handler: Option<PrometheusHandlerRef>,
-    otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
-    script_handler: Option<ScriptHandlerRef>,
+    router: StdMutex<Router>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
-    metrics_handler: Option<MetricsHandler>,
 
     // plugins
     plugins: Plugins,
 
     // server configs
     options: HttpOptions,
-    greptime_config_options: Option<String>,
-    prom_store_with_metric_engine: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,105 +395,16 @@ pub struct GreptimeOptionsConfigState {
 
 #[derive(Default)]
 pub struct HttpServerBuilder {
-    inner: HttpServer,
+    options: HttpOptions,
+    plugins: Plugins,
+    user_provider: Option<UserProviderRef>,
+    api: OpenApi,
+    router: Router,
 }
 
 impl HttpServerBuilder {
     pub fn new(options: HttpOptions) -> Self {
-        Self {
-            inner: HttpServer {
-                sql_handler: None,
-                grpc_handler: None,
-                options,
-                opentsdb_handler: None,
-                influxdb_handler: None,
-                prom_handler: None,
-                prometheus_handler: None,
-                otlp_handler: None,
-                user_provider: None,
-                script_handler: None,
-                metrics_handler: None,
-                shutdown_tx: Mutex::new(None),
-                greptime_config_options: None,
-                plugins: Default::default(),
-                prom_store_with_metric_engine: false,
-            },
-        }
-    }
-
-    pub fn with_sql_handler(&mut self, handler: ServerSqlQueryHandlerRef) -> &mut Self {
-        let _ = self.inner.sql_handler.get_or_insert(handler);
-        self
-    }
-
-    pub fn with_grpc_handler(&mut self, handler: ServerGrpcQueryHandlerRef) -> &mut Self {
-        let _ = self.inner.grpc_handler.get_or_insert(handler);
-        self
-    }
-
-    pub fn with_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) -> &mut Self {
-        let _ = self.inner.opentsdb_handler.get_or_insert(handler);
-        self
-    }
-
-    pub fn with_script_handler(&mut self, handler: ScriptHandlerRef) -> &mut Self {
-        let _ = self.inner.script_handler.get_or_insert(handler);
-        self
-    }
-
-    pub fn with_influxdb_handler(&mut self, handler: InfluxdbLineProtocolHandlerRef) -> &mut Self {
-        let _ = self.inner.influxdb_handler.get_or_insert(handler);
-        self
-    }
-
-    pub fn with_prom_handler(&mut self, handler: PromStoreProtocolHandlerRef) -> &mut Self {
-        let _ = self.inner.prom_handler.get_or_insert(handler);
-        self
-    }
-
-    pub fn with_prometheus_handler(&mut self, handler: PrometheusHandlerRef) -> &mut Self {
-        let _ = self.inner.prometheus_handler.get_or_insert(handler);
-        self
-    }
-
-    pub fn with_otlp_handler(&mut self, handler: OpenTelemetryProtocolHandlerRef) -> &mut Self {
-        let _ = self.inner.otlp_handler.get_or_insert(handler);
-        self
-    }
-
-    pub fn with_user_provider(&mut self, user_provider: UserProviderRef) -> &mut Self {
-        let _ = self.inner.user_provider.get_or_insert(user_provider);
-        self
-    }
-
-    pub fn with_metrics_handler(&mut self, handler: MetricsHandler) -> &mut Self {
-        let _ = self.inner.metrics_handler.get_or_insert(handler);
-        self
-    }
-
-    pub fn with_plugins(&mut self, plugins: Plugins) -> &mut Self {
-        self.inner.plugins = plugins;
-        self
-    }
-
-    pub fn with_greptime_config_options(&mut self, opts: String) -> &mut Self {
-        self.inner.greptime_config_options = Some(opts);
-        self
-    }
-
-    pub fn set_prom_store_with_metric_engine(&mut self, with_metric_engine: bool) -> &mut Self {
-        self.inner.prom_store_with_metric_engine = with_metric_engine;
-        self
-    }
-
-    pub fn build(&mut self) -> HttpServer {
-        std::mem::take(self).inner
-    }
-}
-
-impl HttpServer {
-    pub fn make_app(&self) -> Router {
-        let mut api = OpenApi {
+        let api = OpenApi {
             info: Info {
                 title: "GreptimeDB HTTP API".to_string(),
                 description: Some("HTTP APIs to interact with GreptimeDB".to_string()),
@@ -517,71 +417,148 @@ impl HttpServer {
             }],
             ..OpenApi::default()
         };
-
-        let mut router = Router::new();
-
-        if let Some(sql_handler) = self.sql_handler.clone() {
-            let sql_router = self
-                .route_sql(ApiState {
-                    sql_handler,
-                    script_handler: self.script_handler.clone(),
-                })
-                .finish_api(&mut api)
-                .layer(Extension(api.clone()));
-            router = router.nest(&format!("/{HTTP_API_VERSION}"), sql_router);
+        Self {
+            options,
+            plugins: Plugins::default(),
+            user_provider: None,
+            api,
+            router: Router::new(),
         }
+    }
 
-        if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
-            router = router.nest(
+    pub fn with_sql_handler(
+        mut self,
+        sql_handler: ServerSqlQueryHandlerRef,
+        script_handler: Option<ScriptHandlerRef>,
+    ) -> Self {
+        let sql_router = HttpServer::route_sql(ApiState {
+            sql_handler,
+            script_handler,
+        })
+        .finish_api(&mut self.api)
+        .layer(Extension(self.api.clone()));
+
+        Self {
+            router: self
+                .router
+                .nest(&format!("/{HTTP_API_VERSION}"), sql_router),
+            ..self
+        }
+    }
+
+    pub fn with_opentsdb_handler(self, handler: OpentsdbProtocolHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/opentsdb"),
-                self.route_opentsdb(opentsdb_handler),
-            );
+                HttpServer::route_opentsdb(handler),
+            ),
+            ..self
         }
+    }
 
-        if let Some(influxdb_handler) = self.influxdb_handler.clone() {
-            router = router.nest(
+    pub fn with_influxdb_handler(self, handler: InfluxdbLineProtocolHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/influxdb"),
-                self.route_influxdb(influxdb_handler),
-            );
+                HttpServer::route_influxdb(handler),
+            ),
+            ..self
         }
+    }
 
-        if let Some(prom_handler) = self.prom_handler.clone() {
-            router = router.nest(
+    pub fn with_prom_handler(
+        self,
+        handler: PromStoreProtocolHandlerRef,
+        prom_store_with_metric_engine: bool,
+    ) -> Self {
+        Self {
+            router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus"),
-                self.route_prom(prom_handler),
-            );
+                HttpServer::route_prom(handler, prom_store_with_metric_engine),
+            ),
+            ..self
         }
+    }
 
-        if let Some(prometheus_handler) = self.prometheus_handler.clone() {
-            router = router.nest(
+    pub fn with_prometheus_handler(self, handler: PrometheusHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus/api/v1"),
-                self.route_prometheus(prometheus_handler),
-            );
+                HttpServer::route_prometheus(handler),
+            ),
+            ..self
         }
+    }
 
-        if let Some(otlp_handler) = self.otlp_handler.clone() {
-            router = router.nest(
+    pub fn with_otlp_handler(self, handler: OpenTelemetryProtocolHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/otlp"),
-                self.route_otlp(otlp_handler),
-            );
+                HttpServer::route_otlp(handler),
+            ),
+            ..self
         }
+    }
 
-        if let Some(metrics_handler) = self.metrics_handler {
-            router = router.nest("", self.route_metrics(metrics_handler));
+    pub fn with_user_provider(self, user_provider: UserProviderRef) -> Self {
+        Self {
+            user_provider: Some(user_provider),
+            ..self
         }
+    }
+
+    pub fn with_metrics_handler(self, handler: MetricsHandler) -> Self {
+        Self {
+            router: self.router.nest("", HttpServer::route_metrics(handler)),
+            ..self
+        }
+    }
+
+    pub fn with_plugins(self, plugins: Plugins) -> Self {
+        Self { plugins, ..self }
+    }
+
+    pub fn with_greptime_config_options(mut self, opts: String) -> Self {
+        let config_router = HttpServer::route_config(GreptimeOptionsConfigState {
+            greptime_config_options: opts,
+        })
+        .finish_api(&mut self.api);
+
+        Self {
+            router: self.router.nest("", config_router),
+            ..self
+        }
+    }
+
+    pub fn with_extra_router(self, router: Router) -> Self {
+        Self {
+            router: self.router.nest("", router),
+            ..self
+        }
+    }
+
+    pub fn build(self) -> HttpServer {
+        HttpServer {
+            options: self.options,
+            user_provider: self.user_provider,
+            shutdown_tx: Mutex::new(None),
+            plugins: self.plugins,
+            router: StdMutex::new(self.router),
+        }
+    }
+}
+
+impl HttpServer {
+    pub fn make_app(&self) -> Router {
+        let mut router = {
+            let router = self.router.lock().unwrap();
+            router.clone()
+        };
 
         router = router.route(
             "/health",
             routing::get(handler::health).post(handler::health),
         );
-
-        let config_router = self
-            .route_config(GreptimeOptionsConfigState {
-                greptime_config_options: self.greptime_config_options.clone().unwrap_or_default(),
-            })
-            .finish_api(&mut api);
-
-        router = router.nest("", config_router);
 
         router = router.route("/status", routing::get(handler::status));
 
@@ -643,13 +620,13 @@ impl HttpServer {
             )
     }
 
-    fn route_metrics<S>(&self, metrics_handler: MetricsHandler) -> Router<S> {
+    fn route_metrics<S>(metrics_handler: MetricsHandler) -> Router<S> {
         Router::new()
             .route("/metrics", routing::get(handler::metrics))
             .with_state(metrics_handler)
     }
 
-    fn route_sql<S>(&self, api_state: ApiState) -> ApiRouter<S> {
+    fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {
         ApiRouter::new()
             .api_route(
                 "/sql",
@@ -668,7 +645,7 @@ impl HttpServer {
             .with_state(api_state)
     }
 
-    fn route_prometheus<S>(&self, prometheus_handler: PrometheusHandlerRef) -> Router<S> {
+    fn route_prometheus<S>(prometheus_handler: PrometheusHandlerRef) -> Router<S> {
         Router::new()
             .route(
                 "/format_query",
@@ -685,9 +662,12 @@ impl HttpServer {
             .with_state(prometheus_handler)
     }
 
-    fn route_prom<S>(&self, prom_handler: PromStoreProtocolHandlerRef) -> Router<S> {
+    fn route_prom<S>(
+        prom_handler: PromStoreProtocolHandlerRef,
+        prom_store_with_metric_engine: bool,
+    ) -> Router<S> {
         let mut router = Router::new().route("/read", routing::post(prom_store::remote_read));
-        if self.prom_store_with_metric_engine {
+        if prom_store_with_metric_engine {
             router = router.route("/write", routing::post(prom_store::remote_write));
         } else {
             router = router.route(
@@ -698,7 +678,7 @@ impl HttpServer {
         router.with_state(prom_handler)
     }
 
-    fn route_influxdb<S>(&self, influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
+    fn route_influxdb<S>(influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
         Router::new()
             .route("/write", routing::post(influxdb_write_v1))
             .route("/api/v2/write", routing::post(influxdb_write_v2))
@@ -707,20 +687,20 @@ impl HttpServer {
             .with_state(influxdb_handler)
     }
 
-    fn route_opentsdb<S>(&self, opentsdb_handler: OpentsdbProtocolHandlerRef) -> Router<S> {
+    fn route_opentsdb<S>(opentsdb_handler: OpentsdbProtocolHandlerRef) -> Router<S> {
         Router::new()
             .route("/api/put", routing::post(opentsdb::put))
             .with_state(opentsdb_handler)
     }
 
-    fn route_otlp<S>(&self, otlp_handler: OpenTelemetryProtocolHandlerRef) -> Router<S> {
+    fn route_otlp<S>(otlp_handler: OpenTelemetryProtocolHandlerRef) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
             .with_state(otlp_handler)
     }
 
-    fn route_config<S>(&self, state: GreptimeOptionsConfigState) -> ApiRouter<S> {
+    fn route_config<S>(state: GreptimeOptionsConfigState) -> ApiRouter<S> {
         ApiRouter::new()
             .route("/config", apirouting::get(handler::config))
             .with_state(state)
@@ -841,7 +821,7 @@ mod test {
 
     use super::*;
     use crate::error::Error;
-    use crate::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerAdapter};
+    use crate::query_handler::grpc::GrpcQueryHandler;
     use crate::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 
     struct DummyInstance {
@@ -909,10 +889,8 @@ mod test {
     fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         let instance = Arc::new(DummyInstance { _tx: tx });
         let sql_instance = ServerSqlQueryHandlerAdapter::arc(instance.clone());
-        let grpc_instance = ServerGrpcQueryHandlerAdapter::arc(instance);
         let server = HttpServerBuilder::new(HttpOptions::default())
-            .with_sql_handler(sql_instance)
-            .with_grpc_handler(grpc_instance)
+            .with_sql_handler(sql_instance, None)
             .build();
         server.build(server.make_app()).route(
             "/test/timeout",
