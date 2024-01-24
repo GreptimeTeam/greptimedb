@@ -37,8 +37,8 @@ use crate::grpc::prom_query_gateway::PrometheusGatewayService;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
-/// Add a GRPC service (`service`) to a `builder`([RoutesBuilder]).
-/// This macro will automatically add some GRPC properties to the service.
+/// Add a gRPC service (`service`) to a `builder`([RoutesBuilder]).
+/// This macro will automatically add some gRPC properties to the service.
 #[macro_export]
 macro_rules! add_service {
     ($builder: ident, $service: expr) => {
