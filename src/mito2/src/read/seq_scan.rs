@@ -28,6 +28,7 @@ use table::predicate::Predicate;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 
+use super::null_expand::NullExpandReader;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::error::Result;
@@ -152,6 +153,10 @@ impl SeqScan {
         } else {
             self.build_reader().await?
         };
+        reader = Box::new(NullExpandReader::new(
+            reader,
+            self.mapper.metadata().clone(),
+        ));
         let elapsed = start.elapsed();
         metrics.build_reader_cost = elapsed;
         metrics.scan_cost = elapsed;

@@ -32,7 +32,7 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector, VectorRef};
 use datatypes::value::ValueRef;
 use datatypes::vectors::{
-    Helper, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+    Helper, NullVector, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
 };
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -585,14 +585,32 @@ impl Series {
             }
 
             let arrays = frozen.iter().map(|v| v.columns()).collect::<Vec<_>>();
-            let concatenated = (0..column_size)
-                .map(|i| {
-                    let to_concat = arrays.iter().map(|a| a[i].as_ref()).collect::<Vec<_>>();
-                    arrow::compute::concat(&to_concat)
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .context(ComputeArrowSnafu)?;
-
+            let mut concatenated = Vec::with_capacity(column_size);
+            for i in 0..column_size {
+                let mut to_concat = Vec::with_capacity(arrays.len());
+                let mut data_types = HashSet::with_capacity(arrays.len());
+                for a in &arrays {
+                    to_concat.push(a[i].as_ref());
+                    data_types.insert(a[i].data_type());
+                }
+                if data_types.len() == 1 {
+                    concatenated
+                        .push(arrow::compute::concat(&to_concat).context(ComputeArrowSnafu)?);
+                } else {
+                    // Add cast to make null array compatible with other arrays
+                    data_types.remove(&arrow::datatypes::DataType::Null);
+                    // Safety: we have checked that there are at least two items
+                    let formal_type = data_types.into_iter().next().unwrap();
+                    let casted = to_concat
+                        .into_iter()
+                        .map(|a| arrow::compute::cast(a, formal_type))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .context(ComputeArrowSnafu)?;
+                    let casted_borrow = casted.iter().map(|a| a.as_ref()).collect::<Vec<_>>();
+                    concatenated
+                        .push(arrow::compute::concat(&casted_borrow).context(ComputeArrowSnafu)?);
+                }
+            }
             debug_assert_eq!(concatenated.len(), column_size);
             let values = Values::from_columns(&concatenated)?;
             self.frozen = vec![values.clone()];
@@ -750,9 +768,7 @@ impl From<ValueBuilder> for Values {
                 if let Some(v) = v {
                     v.to_vector()
                 } else {
-                    let mut single_null = value.field_types[i].create_mutable_vector(num_rows);
-                    single_null.push_nulls(num_rows);
-                    single_null.to_vector()
+                    Arc::new(NullVector::new(num_rows))
                 }
             })
             .collect::<Vec<_>>();

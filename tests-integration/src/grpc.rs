@@ -30,6 +30,7 @@ mod test {
     use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use common_telemetry::info;
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
     use query::plan::LogicalPlan;
@@ -288,6 +289,7 @@ CREATE TABLE {table_name} (
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_insert_and_query() {
+        common_telemetry::init_default_ut_logging();
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_insert_and_query")
             .build()
             .await;
@@ -567,6 +569,7 @@ CREATE TABLE {table_name} (
     }
 
     async fn test_insert_delete_and_query_on_auto_created_table(instance: &Instance) {
+        info!("running case test_insert_delete_and_query_on_auto_created_table");
         let insert = InsertRequest {
             table_name: "auto_created_table".to_string(),
             columns: vec![

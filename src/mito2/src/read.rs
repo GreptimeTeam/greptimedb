@@ -16,6 +16,7 @@
 
 pub mod compat;
 pub mod merge;
+pub mod null_expand;
 pub mod projection;
 pub(crate) mod scan_region;
 pub(crate) mod seq_scan;
@@ -220,67 +221,6 @@ impl Batch {
             fields,
             put_only: self.put_only,
         }
-    }
-
-    /// Takes `batches` and concat them into one batch.
-    ///
-    /// All `batches` must have the same primary key.
-    pub fn concat(mut batches: Vec<Batch>) -> Result<Batch> {
-        ensure!(
-            !batches.is_empty(),
-            InvalidBatchSnafu {
-                reason: "empty batches",
-            }
-        );
-        if batches.len() == 1 {
-            // Now we own the `batches` so we could pop it directly.
-            return Ok(batches.pop().unwrap());
-        }
-
-        let primary_key = std::mem::take(&mut batches[0].primary_key);
-        let first = &batches[0];
-        // We took the primary key from the first batch so we don't use `first.primary_key()`.
-        ensure!(
-            batches
-                .iter()
-                .skip(1)
-                .all(|b| b.primary_key() == primary_key),
-            InvalidBatchSnafu {
-                reason: "batches have different primary key",
-            }
-        );
-        for b in batches.iter().skip(1) {
-            ensure!(
-                b.fields.len() == first.fields.len(),
-                InvalidBatchSnafu {
-                    reason: "batches have different field num",
-                }
-            );
-            for (l, r) in b.fields.iter().zip(&first.fields) {
-                ensure!(
-                    l.column_id == r.column_id,
-                    InvalidBatchSnafu {
-                        reason: "batches have different fields",
-                    }
-                );
-            }
-        }
-
-        // We take the primary key from the first batch.
-        let mut builder = BatchBuilder::new(primary_key);
-        // Concat timestamps, sequences, op_types, fields.
-        let array = concat_arrays(batches.iter().map(|b| b.timestamps().to_arrow_array()))?;
-        builder.timestamps_array(array)?;
-        let array = concat_arrays(batches.iter().map(|b| b.sequences().to_arrow_array()))?;
-        builder.sequences_array(array)?;
-        let array = concat_arrays(batches.iter().map(|b| b.op_types().to_arrow_array()))?;
-        builder.op_types_array(array)?;
-        for (i, batch_column) in first.fields.iter().enumerate() {
-            let array = concat_arrays(batches.iter().map(|b| b.fields()[i].data.to_arrow_array()))?;
-            builder.push_field_array(batch_column.column_id, array)?;
-        }
-
-        builder.build()
     }
 
     /// Removes rows whose op type is delete.
@@ -493,13 +433,6 @@ fn is_put_only(op_types: &UInt8Vector) -> bool {
 
 /// Len of timestamp in arrow row format.
 const TIMESTAMP_KEY_LEN: usize = 9;
-
-/// Helper function to concat arrays from `iter`.
-fn concat_arrays(iter: impl Iterator<Item = ArrayRef>) -> Result<ArrayRef> {
-    let arrays: Vec<_> = iter.collect();
-    let dyn_arrays: Vec<_> = arrays.iter().map(|array| array.as_ref()).collect();
-    arrow::compute::concat(&dyn_arrays).context(ComputeArrowSnafu)
-}
 
 /// A column in a [Batch].
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -736,7 +669,6 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Error;
     use crate::test_util::new_batch_builder;
 
     fn new_batch(
@@ -822,99 +754,6 @@ mod tests {
             &[21, 22, 23, 24],
         );
         assert_eq!(&[1, 2, 3, 4], batch.timestamps_native().unwrap());
-    }
-
-    #[test]
-    fn test_concat_empty() {
-        let err = Batch::concat(vec![]).unwrap_err();
-        assert!(
-            matches!(err, Error::InvalidBatch { .. }),
-            "unexpected err: {err}"
-        );
-    }
-
-    #[test]
-    fn test_concat_one() {
-        let batch = new_batch(&[], &[], &[], &[]);
-        let actual = Batch::concat(vec![batch.clone()]).unwrap();
-        assert_eq!(batch, actual);
-
-        let batch = new_batch(&[1, 2], &[11, 12], &[OpType::Put, OpType::Put], &[21, 22]);
-        let actual = Batch::concat(vec![batch.clone()]).unwrap();
-        assert_eq!(batch, actual);
-    }
-
-    #[test]
-    fn test_concat_multiple() {
-        let batches = vec![
-            new_batch(&[1, 2], &[11, 12], &[OpType::Put, OpType::Put], &[21, 22]),
-            new_batch(
-                &[3, 4, 5],
-                &[13, 14, 15],
-                &[OpType::Put, OpType::Delete, OpType::Put],
-                &[23, 24, 25],
-            ),
-            new_batch(&[], &[], &[], &[]),
-            new_batch(&[6], &[16], &[OpType::Put], &[26]),
-        ];
-        let batch = Batch::concat(batches).unwrap();
-        let expect = new_batch(
-            &[1, 2, 3, 4, 5, 6],
-            &[11, 12, 13, 14, 15, 16],
-            &[
-                OpType::Put,
-                OpType::Put,
-                OpType::Put,
-                OpType::Delete,
-                OpType::Put,
-                OpType::Put,
-            ],
-            &[21, 22, 23, 24, 25, 26],
-        );
-        assert_eq!(expect, batch);
-    }
-
-    #[test]
-    fn test_concat_different() {
-        let batch1 = new_batch(&[1], &[1], &[OpType::Put], &[1]);
-        let mut batch2 = new_batch(&[2], &[2], &[OpType::Put], &[2]);
-        batch2.primary_key = b"hello".to_vec();
-        let err = Batch::concat(vec![batch1, batch2]).unwrap_err();
-        assert!(
-            matches!(err, Error::InvalidBatch { .. }),
-            "unexpected err: {err}"
-        );
-    }
-
-    #[test]
-    fn test_concat_different_fields() {
-        let batch1 = new_batch(&[1], &[1], &[OpType::Put], &[1]);
-        let fields = vec![
-            batch1.fields()[0].clone(),
-            BatchColumn {
-                column_id: 2,
-                data: Arc::new(UInt64Vector::from_slice([2])),
-            },
-        ];
-        // Batch 2 has more fields.
-        let batch2 = batch1.clone().with_fields(fields).unwrap();
-        let err = Batch::concat(vec![batch1.clone(), batch2]).unwrap_err();
-        assert!(
-            matches!(err, Error::InvalidBatch { .. }),
-            "unexpected err: {err}"
-        );
-
-        // Batch 2 has different field.
-        let fields = vec![BatchColumn {
-            column_id: 2,
-            data: Arc::new(UInt64Vector::from_slice([2])),
-        }];
-        let batch2 = batch1.clone().with_fields(fields).unwrap();
-        let err = Batch::concat(vec![batch1, batch2]).unwrap_err();
-        assert!(
-            matches!(err, Error::InvalidBatch { .. }),
-            "unexpected err: {err}"
-        );
     }
 
     #[test]
