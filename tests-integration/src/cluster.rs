@@ -187,7 +187,7 @@ impl GreptimeDbClusterBuilder {
         .await;
 
         let datanode_instances = self
-            .build_datanodes_with_options(meta_srv.clone(), &datanode_options)
+            .build_datanodes_with_options(&meta_srv, &datanode_options)
             .await;
 
         build_datanode_clients(datanode_clients.clone(), &datanode_instances, datanodes).await;
@@ -217,12 +217,12 @@ impl GreptimeDbClusterBuilder {
     pub async fn build(&self) -> GreptimeDbCluster {
         let datanodes = self.datanodes.unwrap_or(4);
         let (datanode_options, storage_guards, dir_guards) =
-            self.build_datanode_options(datanodes).await;
+            self.build_datanode_options_and_guards(datanodes).await;
         self.build_with(datanode_options, storage_guards, dir_guards)
             .await
     }
 
-    async fn build_datanode_options(
+    async fn build_datanode_options_and_guards(
         &self,
         datanodes: u32,
     ) -> (Vec<DatanodeOptions>, Vec<StorageGuard>, Vec<FileDirGuard>) {
@@ -278,7 +278,7 @@ impl GreptimeDbClusterBuilder {
 
     async fn build_datanodes_with_options(
         &self,
-        meta_srv: MockInfo,
+        meta_srv: &MockInfo,
         options: &[DatanodeOptions],
     ) -> HashMap<DatanodeId, Datanode> {
         let mut instances = HashMap::with_capacity(options.len());
