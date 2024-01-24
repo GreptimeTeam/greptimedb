@@ -763,8 +763,7 @@ impl From<ValueBuilder> for Values {
         let fields = value
             .fields
             .iter_mut()
-            .enumerate()
-            .map(|(i, v)| {
+            .map(|v| {
                 if let Some(v) = v {
                     v.to_vector()
                 } else {
