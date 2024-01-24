@@ -24,6 +24,7 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, Py
 use pyo3::{pymethods, IntoPy, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
 use snafu::{ensure, Location, ResultExt};
 
+use crate::engine::EvalContext;
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::py_recordbatch::PyRecordBatch;
@@ -65,6 +66,7 @@ pub(crate) fn pyo3_exec_parsed(
     copr: &Coprocessor,
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
+    eval_ctx: &EvalContext,
 ) -> Result<RecordBatch> {
     let _t = metric::METRIC_PYO3_EXEC_TOTAL_ELAPSED.start_timer();
     // i.e params or use `vector(..)` to construct a PyVector
@@ -115,7 +117,7 @@ coprocessor = copr
             let locals = py_main.dict();
 
             if let Some(engine) = &copr.query_engine {
-                let query_engine = PyQueryEngine::from_weakref(engine.clone());
+                let query_engine = PyQueryEngine::from_weakref(engine.clone(), eval_ctx.query_ctx.clone());
                 let query_engine = PyCell::new(py, query_engine)?;
                 globals.set_item("__query__", query_engine)?;
             }
@@ -307,6 +309,7 @@ mod copr_test {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Float32Vector, Float64Vector, VectorRef};
 
+    use super::*;
     use crate::python::ffi_types::copr::{exec_parsed, parse, BackendType};
 
     #[test]
@@ -342,6 +345,7 @@ def a(cpu, mem, **kwargs):
             &copr,
             &Some(rb),
             &HashMap::from([("a".to_string(), "1".to_string())]),
+            &EvalContext::default(),
         );
         dbg!(&ret);
         let _ = ret.unwrap();

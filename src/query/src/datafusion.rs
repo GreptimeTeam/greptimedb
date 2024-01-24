@@ -26,7 +26,6 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_function::scalars::udf::create_udf;
 use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
@@ -84,7 +83,7 @@ impl DatafusionQueryEngine {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let mut ctx = QueryEngineContext::new(self.state.session_state(), query_ctx.clone());
+        let mut ctx = self.engine_context(query_ctx.clone());
 
         // `create_physical_plan` will optimize logical plan internally
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
@@ -242,8 +241,13 @@ impl QueryEngine for DatafusionQueryEngine {
         "datafusion"
     }
 
-    async fn describe(&self, plan: LogicalPlan) -> Result<DescribeResult> {
-        let optimised_plan = self.optimize(&plan)?;
+    async fn describe(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<DescribeResult> {
+        let ctx = self.engine_context(query_ctx);
+        let optimised_plan = self.optimize(&ctx, &plan)?;
         Ok(DescribeResult {
             schema: optimised_plan.schema()?,
             logical_plan: optimised_plan,
@@ -259,10 +263,6 @@ impl QueryEngine for DatafusionQueryEngine {
         }
     }
 
-    fn register_udf(&self, udf: ScalarUdf) {
-        self.state.register_udf(udf);
-    }
-
     /// Note in SQL queries, aggregate names are looked up using
     /// lowercase unless the query uses quotes. For example,
     ///
@@ -274,8 +274,15 @@ impl QueryEngine for DatafusionQueryEngine {
         self.state.register_aggregate_function(func);
     }
 
+    /// Register a [`ScalarUdf`].
+    fn register_udf(&self, udf: ScalarUdf) {
+        self.state.register_udf(udf);
+    }
+
+    /// Register an UDF function.
+    /// Will override if the function with same name is already registered.
     fn register_function(&self, func: FunctionRef) {
-        self.state.register_udf(create_udf(func));
+        self.state.register_function(func);
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {
@@ -287,18 +294,31 @@ impl QueryEngine for DatafusionQueryEngine {
                 .context(QueryExecutionSnafu)?,
         ))
     }
+
+    fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
+        QueryEngineContext::new(self.state.session_state(), query_ctx)
+    }
 }
 
 impl LogicalOptimizer for DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
-    fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
+    fn optimize(&self, context: &QueryEngineContext, plan: &LogicalPlan) -> Result<LogicalPlan> {
         let _timer = metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
+                // Optimized by extension rules
+                let optimized_plan = self
+                    .state
+                    .optimize_by_extension_rules(df_plan.clone(), context)
+                    .context(error::DatafusionSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+
+                // Optimized by datafusion optimizer
                 let optimized_plan = self
                     .state
                     .session_state()
-                    .optimize(df_plan)
+                    .optimize(&optimized_plan)
                     .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
@@ -519,7 +539,7 @@ mod tests {
     use datatypes::vectors::{Helper, StringVectorBuilder, UInt32Vector, UInt64Vector, VectorRef};
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
-    use sql::parser::ParserContext;
+    use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::show::{ShowKind, ShowTables};
     use sql::statements::statement::Statement;
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
@@ -547,7 +567,7 @@ mod tests {
         let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
             .plan(stmt, QueryContext::arc())
@@ -569,7 +589,7 @@ mod tests {
         let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let plan = engine
             .planner()
             .plan(stmt, QueryContext::arc())
@@ -643,7 +663,7 @@ mod tests {
         let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
 
         let plan = engine
             .planner()
@@ -654,7 +674,7 @@ mod tests {
         let DescribeResult {
             schema,
             logical_plan,
-        } = engine.describe(plan).await.unwrap();
+        } = engine.describe(plan, QueryContext::arc()).await.unwrap();
 
         assert_eq!(
             schema.column_schemas()[0],
@@ -709,6 +729,7 @@ mod tests {
         let statement = ParserContext::create_with_dialect(
             "SHOW TABLES WHERE \"Tables\"='monitor'",
             &GreptimeDbDialect {},
+            ParseOptions::default(),
         )
         .unwrap()[0]
             .clone();

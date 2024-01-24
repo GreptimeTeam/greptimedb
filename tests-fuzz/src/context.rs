@@ -11,3 +11,40 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+use std::sync::Arc;
+
+use partition::partition::PartitionDef;
+
+use crate::ir::{Column, CreateTableExpr};
+
+pub type TableContextRef = Arc<TableContext>;
+
+/// TableContext stores table info.
+pub struct TableContext {
+    pub name: String,
+    pub columns: Vec<Column>,
+
+    // GreptimeDB specific options
+    pub partition: Option<PartitionDef>,
+    pub primary_keys: Vec<usize>,
+}
+
+impl From<&CreateTableExpr> for TableContext {
+    fn from(
+        CreateTableExpr {
+            name,
+            columns,
+            partition,
+            primary_keys,
+            ..
+        }: &CreateTableExpr,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            columns: columns.clone(),
+            partition: partition.clone(),
+            primary_keys: primary_keys.clone(),
+        }
+    }
+}

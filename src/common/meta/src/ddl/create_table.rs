@@ -123,7 +123,7 @@ impl CreateTableProcedure {
                 }
             );
 
-            return Ok(Status::Done);
+            return Ok(Status::done());
         }
 
         self.creator.data.state = CreateTableState::DatanodeCreateRegions;
@@ -232,12 +232,14 @@ impl CreateTableProcedure {
         region_routes: &[RegionRoute],
         request_builder: CreateRequestBuilder,
     ) -> Result<Status> {
-        // Registers opening regions
-        let guards = self
-            .creator
-            .register_opening_regions(&self.context, region_routes)?;
-        if !guards.is_empty() {
-            self.creator.opening_regions = guards;
+        if self.creator.data.table_route.is_physical() {
+            // Registers opening regions
+            let guards = self
+                .creator
+                .register_opening_regions(&self.context, region_routes)?;
+            if !guards.is_empty() {
+                self.creator.opening_regions = guards;
+            }
         }
 
         let create_table_data = &self.creator.data;
@@ -313,7 +315,7 @@ impl CreateTableProcedure {
             .await?;
         info!("Created table metadata for table {table_id}");
 
-        Ok(Status::Done)
+        Ok(Status::done())
     }
 }
 

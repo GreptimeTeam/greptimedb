@@ -17,11 +17,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromStoreOptions {
     pub enable: bool,
+    pub with_metric_engine: bool,
 }
 
 impl Default for PromStoreOptions {
     fn default() -> Self {
-        Self { enable: true }
+        Self {
+            enable: true,
+            with_metric_engine: true,
+        }
     }
 }
 
@@ -33,5 +37,6 @@ mod tests {
     fn test_prom_store_options() {
         let default = PromStoreOptions::default();
         assert!(default.enable);
+        assert!(default.with_metric_engine)
     }
 }

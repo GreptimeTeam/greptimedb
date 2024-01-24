@@ -29,6 +29,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 
+use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
@@ -111,6 +112,7 @@ pub async fn sql(
     };
 
     let resp = match format {
+        ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
         ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
         ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
         ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,

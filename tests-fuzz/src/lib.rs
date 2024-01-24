@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod context;
-pub(crate) mod executor;
-pub(crate) mod generator;
-pub(crate) mod table_creator;
-pub(crate) mod translator;
+#![feature(associated_type_bounds)]
+
+pub mod context;
+pub mod error;
+pub mod executor;
+pub mod fake;
+pub mod generator;
+pub mod ir;
+pub mod translator;

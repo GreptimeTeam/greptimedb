@@ -1710,6 +1710,7 @@ dependencies = [
  "paste",
  "ron",
  "serde",
+ "session",
  "snafu",
  "statrs",
 ]
@@ -2658,9 +2659,6 @@ dependencies = [
  "async-compat",
  "async-stream",
  "async-trait",
- "axum",
- "axum-macros",
- "axum-test-helper",
  "bytes",
  "catalog",
  "client",
@@ -5543,12 +5541,11 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.44.1"
+version = "0.44.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc0ad72f7b44ca4ae59d27ea151fdc6f37305cf6efe099bdaedbb30ec34579c0"
+checksum = "4af824652d4d2ffabf606d337a071677ae621b05622adf35df9562f69d9b4498"
 dependencies = [
  "anyhow",
- "async-compat",
  "async-trait",
  "backon",
  "base64 0.21.5",
@@ -5561,9 +5558,7 @@ dependencies = [
  "log",
  "md-5",
  "once_cell",
- "parking_lot 0.12.1",
  "percent-encoding",
- "pin-project",
  "quick-xml 0.30.0",
  "reqsign",
  "reqwest",
@@ -5751,6 +5746,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "common-time",
  "datafusion",
  "datafusion-common",
@@ -8499,7 +8495,10 @@ version = "0.6.0"
 dependencies = [
  "aide",
  "api",
+ "arrow",
  "arrow-flight",
+ "arrow-ipc",
+ "arrow-schema",
  "async-trait",
  "auth",
  "axum",
@@ -9532,6 +9531,24 @@ name = "tests-fuzz"
 version = "0.6.0"
 dependencies = [
  "async-trait",
+ "common-error",
+ "common-macro",
+ "common-query",
+ "common-telemetry",
+ "datatypes",
+ "derive_builder 0.12.0",
+ "dotenv",
+ "lazy_static",
+ "partition",
+ "rand",
+ "rand_chacha",
+ "serde",
+ "serde_json",
+ "snafu",
+ "sql",
+ "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef)",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]

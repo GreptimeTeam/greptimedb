@@ -25,6 +25,10 @@ use crate::parsers::tql_parser;
 use crate::statements::statement::Statement;
 use crate::statements::transform_statements;
 
+/// SQL Parser options.
+#[derive(Clone, Debug, Default)]
+pub struct ParseOptions {}
+
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
     pub(crate) parser: Parser<'a>,
@@ -33,7 +37,11 @@ pub struct ParserContext<'a> {
 
 impl<'a> ParserContext<'a> {
     /// Parses SQL with given dialect
-    pub fn create_with_dialect(sql: &'a str, dialect: &dyn Dialect) -> Result<Vec<Statement>> {
+    pub fn create_with_dialect(
+        sql: &'a str,
+        dialect: &dyn Dialect,
+        _opts: ParseOptions,
+    ) -> Result<Vec<Statement>> {
         let mut stmts: Vec<Statement> = Vec::new();
 
         let parser = Parser::new(dialect)
@@ -207,10 +215,14 @@ mod tests {
     use crate::statements::sql_data_type_to_concrete_data_type;
 
     fn test_timestamp_precision(sql: &str, expected_type: ConcreteDataType) {
-        match ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .pop()
-            .unwrap()
+        match ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
         {
             Statement::CreateTable(CreateTable { columns, .. }) => {
                 let ts_col = columns.first().unwrap();

@@ -33,6 +33,13 @@ const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
 /// Default channel size for parallel scan task.
 const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 
+// Use `1/GLOBAL_WRITE_BUFFER_SIZE_FACTOR` of OS memory as global write buffer size in default mode
+const GLOBAL_WRITE_BUFFER_SIZE_FACTOR: u64 = 8;
+/// Use `1/SST_META_CACHE_SIZE_FACTOR` of OS memory size as SST meta cache size in default mode
+const SST_META_CACHE_SIZE_FACTOR: u64 = 32;
+/// Use `1/MEM_CACHE_SIZE_FACTOR` of OS memory size as mem cache size in default mode
+const MEM_CACHE_SIZE_FACTOR: u64 = 16;
+
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
@@ -192,14 +199,20 @@ impl MitoConfig {
     }
 
     fn adjust_buffer_and_cache_size(&mut self, sys_memory: ReadableSize) {
-        // Use 1/64 of OS memory as global write buffer size, it shouldn't be greater than 1G in default mode.
-        let global_write_buffer_size = cmp::min(sys_memory / 64, ReadableSize::gb(1));
+        // shouldn't be greater than 1G in default mode.
+        let global_write_buffer_size = cmp::min(
+            sys_memory / GLOBAL_WRITE_BUFFER_SIZE_FACTOR,
+            ReadableSize::gb(1),
+        );
         // Use 2x of global write buffer size as global write buffer reject size.
         let global_write_buffer_reject_size = global_write_buffer_size * 2;
-        // Use 1/256 of OS memory size as SST meta cache size, it shouldn't be greater than 128MB in default mode.
-        let sst_meta_cache_size = cmp::min(sys_memory / 256, ReadableSize::mb(128));
-        // Use 1/128 of OS memory size as mem cache size, it shouldn't be greater than 512MB in default mode.
-        let mem_cache_size = cmp::min(sys_memory / 128, ReadableSize::mb(512));
+        // shouldn't be greater than 128MB in default mode.
+        let sst_meta_cache_size = cmp::min(
+            sys_memory / SST_META_CACHE_SIZE_FACTOR,
+            ReadableSize::mb(128),
+        );
+        // shouldn't be greater than 512MB in default mode.
+        let mem_cache_size = cmp::min(sys_memory / MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(512));
 
         self.global_write_buffer_size = global_write_buffer_size;
         self.global_write_buffer_reject_size = global_write_buffer_reject_size;
@@ -252,6 +265,8 @@ pub struct InvertedIndexConfig {
     pub create_on_compaction: Mode,
     /// Whether to apply the index on query: automatically or never.
     pub apply_on_query: Mode,
+    /// Write buffer size for creating the index.
+    pub write_buffer_size: ReadableSize,
     /// Memory threshold for performing an external sort during index creation.
     /// `None` means all sorting will happen in memory.
     #[serde_as(as = "NoneAsEmptyString")]
@@ -266,6 +281,7 @@ impl Default for InvertedIndexConfig {
             create_on_flush: Mode::Auto,
             create_on_compaction: Mode::Auto,
             apply_on_query: Mode::Auto,
+            write_buffer_size: ReadableSize::mb(8),
             mem_threshold_on_create: Some(ReadableSize::mb(64)),
             intermediate_path: String::new(),
         }

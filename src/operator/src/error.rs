@@ -351,8 +351,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to read parquet file"))]
-    ReadParquet {
+    #[snafu(display("Failed to read parquet file metadata"))]
+    ReadParquetMetadata {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
         location: Location,
@@ -417,6 +417,9 @@ pub enum Error {
         value: String,
         location: Location,
     },
+
+    #[snafu(display("Invalid COPY DATABASE location, must end with '/': {}", value))]
+    InvalidCopyDatabasePath { value: String, location: Location },
 
     #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
@@ -587,16 +590,18 @@ impl ErrorExt for Error {
 
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
-            Error::ReadObject { .. } | Error::ReadParquet { .. } | Error::ReadOrc { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            Error::ReadObject { .. }
+            | Error::ReadParquetMetadata { .. }
+            | Error::ReadOrc { .. } => StatusCode::StorageUnavailable,
 
             Error::ListObjects { source, .. }
             | Error::ParseUrl { source, .. }
             | Error::BuildBackend { source, .. } => source.status_code(),
 
             Error::ExecuteDdl { source, .. } => source.status_code(),
-            Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
+            Error::InvalidCopyParameter { .. } | Error::InvalidCopyDatabasePath { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             Error::ReadRecordBatch { source, .. } | Error::BuildColumnVectors { source, .. } => {
                 source.status_code()

@@ -28,6 +28,7 @@ use ron::from_str as from_ron_string;
 use rustpython_parser::{parse, Mode};
 use serde::{Deserialize, Serialize};
 
+use crate::engine::EvalContext;
 use crate::python::error::{get_error_reason_loc, pretty_print_error_in_src, visualize_loc, Error};
 use crate::python::ffi_types::copr::parse::parse_and_compile_copr;
 use crate::python::ffi_types::copr::{exec_coprocessor, AnnotationInfo};
@@ -124,7 +125,8 @@ fn run_ron_testcases() {
             }
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
-                let res = exec_coprocessor(&testcase.code, &Some(rb)).unwrap();
+                let res =
+                    exec_coprocessor(&testcase.code, &Some(rb), &EvalContext::default()).unwrap();
                 fields
                     .iter()
                     .zip(res.schema.column_schemas())
@@ -150,7 +152,7 @@ fn run_ron_testcases() {
                 reason: part_reason,
             } => {
                 let rb = create_sample_recordbatch();
-                let res = exec_coprocessor(&testcase.code, &Some(rb));
+                let res = exec_coprocessor(&testcase.code, &Some(rb), &EvalContext::default());
                 assert!(res.is_err(), "{res:#?}\nExpect Err(...), actual Ok(...)");
                 if let Err(res) = res {
                     error!(
@@ -252,7 +254,7 @@ def calc_rvs(open_time, close):
         ],
     )
     .unwrap();
-    let ret = exec_coprocessor(python_source, &Some(rb));
+    let ret = exec_coprocessor(python_source, &Some(rb), &EvalContext::default());
     if let Err(Error::PyParse { location: _, error }) = ret {
         let res = visualize_loc(
             python_source,
@@ -298,7 +300,7 @@ def a(cpu, mem):
         ],
     )
     .unwrap();
-    let ret = exec_coprocessor(python_source, &Some(rb));
+    let ret = exec_coprocessor(python_source, &Some(rb), &EvalContext::default());
     if let Err(Error::PyParse { location: _, error }) = ret {
         let res = visualize_loc(
             python_source,

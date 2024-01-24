@@ -48,6 +48,8 @@ pub trait App {
 pub async fn start_app(mut app: Box<dyn App>) -> error::Result<()> {
     let name = app.name().to_string();
 
+    app.pre_start()?;
+
     tokio::select! {
         result = app.start() => {
             if let Err(err) = result {

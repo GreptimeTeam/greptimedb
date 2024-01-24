@@ -632,7 +632,7 @@ fn merge_options(mut table_opts: TableOptions, schema_opts: SchemaNameValue) -> 
 mod test {
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
-    use sql::parser::ParserContext;
+    use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
 
     use super::*;
@@ -698,7 +698,12 @@ ENGINE=mito",
             ),
         ];
         for (sql, expected) in cases {
-            let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+            let result = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
                     let expr = expr_factory::create_to_expr(c, QueryContext::arc()).unwrap();

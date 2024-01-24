@@ -49,12 +49,14 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
 
     #[test]
     pub fn test_set_timezone() {
         // mysql style
         let sql = "SET time_zone = 'UTC'";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
@@ -65,7 +67,8 @@ mod tests {
         );
         // postgresql style
         let sql = "SET TIMEZONE TO 'UTC'";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),

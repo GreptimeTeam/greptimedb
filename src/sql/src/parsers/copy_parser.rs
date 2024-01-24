@@ -15,13 +15,12 @@
 use std::collections::HashMap;
 
 use snafu::ResultExt;
-use sqlparser::ast::ObjectName;
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::Token::Word;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use crate::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
 
@@ -47,7 +46,7 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::Copy(copy))
     }
 
-    fn parser_copy_database(&mut self) -> Result<CopyDatabaseArgument> {
+    fn parser_copy_database(&mut self) -> Result<CopyDatabase> {
         let database_name =
             self.parser
                 .parse_object_name()
@@ -57,17 +56,29 @@ impl<'a> ParserContext<'a> {
                     actual: self.peek_token_as_string(),
                 })?;
 
-        self.parser
-            .expect_keyword(Keyword::TO)
-            .context(error::SyntaxSnafu)?;
-
-        let (with, connection, location) = self.parse_copy_to()?;
-        Ok(CopyDatabaseArgument {
-            database_name,
-            with: with.into(),
-            connection: connection.into(),
-            location,
-        })
+        let req = if self.parser.parse_keyword(Keyword::TO) {
+            let (with, connection, location) = self.parse_copy_parameters()?;
+            let argument = CopyDatabaseArgument {
+                database_name,
+                with: with.into(),
+                connection: connection.into(),
+                location,
+            };
+            CopyDatabase::To(argument)
+        } else {
+            self.parser
+                .expect_keyword(Keyword::FROM)
+                .context(error::SyntaxSnafu)?;
+            let (with, connection, location) = self.parse_copy_parameters()?;
+            let argument = CopyDatabaseArgument {
+                database_name,
+                with: with.into(),
+                connection: connection.into(),
+                location,
+            };
+            CopyDatabase::From(argument)
+        };
+        Ok(req)
     }
 
     fn parse_copy_table(&mut self) -> Result<CopyTable> {
@@ -82,7 +93,7 @@ impl<'a> ParserContext<'a> {
         let table_name = Self::canonicalize_object_name(raw_table_name);
 
         if self.parser.parse_keyword(Keyword::TO) {
-            let (with, connection, location) = self.parse_copy_to()?;
+            let (with, connection, location) = self.parse_copy_parameters()?;
             Ok(CopyTable::To(CopyTableArgument {
                 table_name,
                 with: with.into(),
@@ -93,52 +104,17 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .expect_keyword(Keyword::FROM)
                 .context(error::SyntaxSnafu)?;
-            Ok(CopyTable::From(self.parse_copy_table_from(table_name)?))
+            let (with, connection, location) = self.parse_copy_parameters()?;
+            Ok(CopyTable::From(CopyTableArgument {
+                table_name,
+                with: with.into(),
+                connection: connection.into(),
+                location,
+            }))
         }
     }
 
-    fn parse_copy_table_from(&mut self, table_name: ObjectName) -> Result<CopyTableArgument> {
-        let location =
-            self.parser
-                .parse_literal_string()
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a uri",
-                    actual: self.peek_token_as_string(),
-                })?;
-
-        let options = self
-            .parser
-            .parse_options(Keyword::WITH)
-            .context(error::SyntaxSnafu)?;
-
-        let with = options
-            .into_iter()
-            .filter_map(|option| {
-                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
-            })
-            .collect();
-
-        let connection_options = self
-            .parser
-            .parse_options(Keyword::CONNECTION)
-            .context(error::SyntaxSnafu)?;
-
-        let connection = connection_options
-            .into_iter()
-            .filter_map(|option| {
-                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
-            })
-            .collect();
-        Ok(CopyTableArgument {
-            table_name,
-            with,
-            connection,
-            location,
-        })
-    }
-
-    fn parse_copy_to(&mut self) -> Result<(With, Connection, String)> {
+    fn parse_copy_parameters(&mut self) -> Result<(With, Connection, String)> {
         let location =
             self.parser
                 .parse_literal_string()
@@ -181,18 +157,29 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::collections::HashMap;
 
-    use sqlparser::ast::Ident;
+    use sqlparser::ast::{Ident, ObjectName};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
     use crate::statements::statement::Statement::Copy;
 
     #[test]
     fn test_parse_copy_table() {
         let sql0 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet'";
         let sql1 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'parquet')";
-        let result0 = ParserContext::create_with_dialect(sql0, &GreptimeDbDialect {}).unwrap();
-        let result1 = ParserContext::create_with_dialect(sql1, &GreptimeDbDialect {}).unwrap();
+        let result0 = ParserContext::create_with_dialect(
+            sql0,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let result1 = ParserContext::create_with_dialect(
+            sql1,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
 
         for mut result in [result0, result1] {
             assert_eq!(1, result.len());
@@ -238,7 +225,10 @@ mod tests {
             "COPY catalog0.schema0.tbl FROM 'tbl_file.parquet' WITH (FORMAT = 'parquet')",
         ]
         .iter()
-        .map(|sql| ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap())
+        .map(|sql| {
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+        })
         .collect::<Vec<_>>();
 
         for mut result in results {
@@ -298,8 +288,12 @@ mod tests {
         ];
 
         for test in tests {
-            let mut result =
-                ParserContext::create_with_dialect(test.sql, &GreptimeDbDialect {}).unwrap();
+            let mut result = ParserContext::create_with_dialect(
+                test.sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
             assert_eq!(1, result.len());
 
             let statement = result.remove(0);
@@ -344,8 +338,12 @@ mod tests {
         ];
 
         for test in tests {
-            let mut result =
-                ParserContext::create_with_dialect(test.sql, &GreptimeDbDialect {}).unwrap();
+            let mut result = ParserContext::create_with_dialect(
+                test.sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
             assert_eq!(1, result.len());
 
             let statement = result.remove(0);
@@ -367,14 +365,59 @@ mod tests {
     #[test]
     fn test_copy_database_to() {
         let sql = "COPY DATABASE catalog0.schema0 TO 'tbl_file.parquet' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .pop()
-            .unwrap();
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
 
         let Copy(crate::statements::copy::Copy::CopyDatabase(stmt)) = stmt else {
             unreachable!()
         };
+
+        let CopyDatabase::To(stmt) = stmt else {
+            unreachable!()
+        };
+
+        assert_eq!(
+            ObjectName(vec![Ident::new("catalog0"), Ident::new("schema0")]),
+            stmt.database_name
+        );
+        assert_eq!(
+            [("format".to_string(), "parquet".to_string())]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+            stmt.with.map
+        );
+
+        assert_eq!(
+            [
+                ("foo".to_string(), "Bar".to_string()),
+                ("one".to_string(), "two".to_string())
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+            stmt.connection.map
+        );
+    }
+
+    #[test]
+    fn test_copy_database_from() {
+        let sql = "COPY DATABASE catalog0.schema0 FROM '/a/b/c/' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Copy(crate::statements::copy::Copy::CopyDatabase(stmt)) = stmt else {
+            unreachable!()
+        };
+
+        let CopyDatabase::From(stmt) = stmt else {
+            unreachable!()
+        };
+
         assert_eq!(
             ObjectName(vec![Ident::new("catalog0"), Ident::new("schema0")]),
             stmt.database_name

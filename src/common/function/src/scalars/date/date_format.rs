@@ -79,7 +79,7 @@ impl Function for DateFormatFunction {
 
                     let result = match (ts, format) {
                         (Some(ts), Some(fmt)) => Some(
-                            ts.as_formatted_string(&fmt, Some(&func_ctx.timezone))
+                            ts.as_formatted_string(&fmt, Some(&func_ctx.query_ctx.timezone()))
                                 .map_err(BoxedError::new)
                                 .context(error::ExecuteSnafu)?,
                         ),
@@ -96,7 +96,7 @@ impl Function for DateFormatFunction {
 
                     let result = match (date, format) {
                         (Some(date), Some(fmt)) => date
-                            .as_formatted_string(&fmt, Some(&func_ctx.timezone))
+                            .as_formatted_string(&fmt, Some(&func_ctx.query_ctx.timezone()))
                             .map_err(BoxedError::new)
                             .context(error::ExecuteSnafu)?,
                         _ => None,
@@ -112,7 +112,7 @@ impl Function for DateFormatFunction {
 
                     let result = match (datetime, format) {
                         (Some(datetime), Some(fmt)) => datetime
-                            .as_formatted_string(&fmt, Some(&func_ctx.timezone))
+                            .as_formatted_string(&fmt, Some(&func_ctx.query_ctx.timezone()))
                             .map_err(BoxedError::new)
                             .context(error::ExecuteSnafu)?,
                         _ => None,

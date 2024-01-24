@@ -14,10 +14,13 @@ testing = []
 aide = { version = "0.9", features = ["axum"] }
 api.workspace = true
 arrow-flight.workspace = true
+arrow-ipc.workspace = true
+arrow-schema.workspace = true
+arrow.workspace = true
 async-trait = "0.1"
 auth.workspace = true
-axum = { version = "0.6", features = ["headers"] }
 axum-macros = "0.3.8"
+axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 catalog.workspace = true

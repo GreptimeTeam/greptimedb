@@ -36,13 +36,14 @@ mod function;
 mod pow;
 
 async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
-    let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+    let query_ctx = QueryContext::arc();
+    let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
     let plan = engine
         .planner()
-        .plan(stmt, QueryContext::arc())
+        .plan(stmt, query_ctx.clone())
         .await
         .unwrap();
-    let Output::Stream(stream) = engine.execute(plan, QueryContext::arc()).await.unwrap() else {
+    let Output::Stream(stream) = engine.execute(plan, query_ctx).await.unwrap() else {
         unreachable!()
     };
     util::collect(stream).await.unwrap()

@@ -55,6 +55,7 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
 
     #[test]
     fn test_parse_function() {
@@ -64,10 +65,11 @@ mod tests {
     }
 
     fn assert_describe_table(sql: &str) {
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .pop()
-            .unwrap();
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
         assert!(matches!(stmt, Statement::DescribeTable(_)))
     }
 

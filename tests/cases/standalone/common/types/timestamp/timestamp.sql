@@ -32,8 +32,7 @@ SELECT t/t FROM timestamp;
 
 SELECT t%t FROM timestamp;
 
--- TODO(dennis): It can't run on distributed mode, uncomment it when the issue is fixed: https://github.com/GreptimeTeam/greptimedb/issues/2071 --
--- SELECT t-t FROM timestamp; --
+SELECT t-t FROM timestamp;
 
 SELECT EXTRACT(YEAR from TIMESTAMP '1992-01-01 01:01:01');
 

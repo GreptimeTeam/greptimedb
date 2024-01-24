@@ -35,6 +35,12 @@ use tonic::Code;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Arrow error"))]
+    Arrow {
+        #[snafu(source)]
+        error: arrow_schema::ArrowError,
+    },
+
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
 
@@ -430,6 +436,11 @@ pub enum Error {
 
     #[snafu(display("Missing query context"))]
     MissingQueryContext { location: Location },
+
+    #[snafu(display(
+        "Invalid parameter, physical_table is not expected when metric engine is disabled"
+    ))]
+    UnexpectedPhysicalTable { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -450,7 +461,8 @@ impl ErrorExt for Error {
             | TcpIncoming { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildHttpResponse { .. } => StatusCode::Internal,
+            | BuildHttpResponse { .. }
+            | Arrow { .. } => StatusCode::Internal,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 
@@ -488,7 +500,8 @@ impl ErrorExt for Error {
             | UrlDecode { .. }
             | IncompatibleSchema { .. }
             | MissingQueryContext { .. }
-            | MysqlValueConversion { .. } => StatusCode::InvalidArguments,
+            | MysqlValueConversion { .. }
+            | UnexpectedPhysicalTable { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }

@@ -53,6 +53,7 @@ use servers::Mode;
 use tempfile::TempDir;
 use tonic::transport::Server;
 use tower::service_fn;
+use uuid::Uuid;
 
 use crate::test_util::{
     self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard,
@@ -96,7 +97,9 @@ impl GreptimeDbClusterBuilder {
             let backend = EtcdStore::with_endpoints(endpoints)
                 .await
                 .expect("malformed endpoints");
-            Arc::new(ChrootKvBackend::new(cluster_name.into(), backend))
+            // Each retry requires a new isolation namespace.
+            let chroot = format!("{}{}", cluster_name, Uuid::new_v4());
+            Arc::new(ChrootKvBackend::new(chroot.into(), backend))
         };
 
         Self {

@@ -56,7 +56,7 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl PromStoreProtocolHandler for DummyInstance {
-    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()> {
+    async fn write(&self, request: WriteRequest, ctx: QueryContextRef, _: bool) -> Result<()> {
         let _ = self
             .tx
             .send((ctx.current_schema().to_owned(), request.encode_to_vec()))
@@ -133,9 +133,8 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
 
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
-        .with_grpc_handler(instance.clone())
-        .with_sql_handler(instance.clone())
-        .with_prom_handler(instance)
+        .with_sql_handler(instance.clone(), None)
+        .with_prom_handler(instance, true)
         .build();
     server.build(server.make_app())
 }

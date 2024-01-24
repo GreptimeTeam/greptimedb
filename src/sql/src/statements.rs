@@ -44,7 +44,7 @@ use datatypes::types::{cast, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 pub use option_map::OptionMap;
 use snafu::{ensure, OptionExt, ResultExt};
-use sqlparser::ast::ExactNumberInfo;
+use sqlparser::ast::{ExactNumberInfo, UnaryOperator};
 pub use transform::{get_data_type_by_alias_name, transform_statements};
 
 use crate::ast::{
@@ -74,7 +74,7 @@ fn parse_string_to_value(
     match data_type {
         ConcreteDataType::String(_) => Ok(Value::String(s.into())),
         ConcreteDataType::Date(_) => {
-            if let Ok(date) = common_time::date::Date::from_str(&s) {
+            if let Ok(date) = common_time::date::Date::from_str_utc(&s) {
                 Ok(Value::Date(date))
             } else {
                 ParseSqlValueSnafu {
@@ -84,7 +84,7 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::DateTime(_) => {
-            if let Ok(datetime) = common_time::datetime::DateTime::from_str(&s) {
+            if let Ok(datetime) = common_time::datetime::DateTime::from_str_system(&s) {
                 Ok(Value::DateTime(datetime))
             } else {
                 ParseSqlValueSnafu {
@@ -94,7 +94,7 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::Timestamp(t) => {
-            if let Ok(ts) = Timestamp::from_str(&s) {
+            if let Ok(ts) = Timestamp::from_str_utc(&s) {
                 Ok(Value::Timestamp(ts.convert_to(t.unit()).context(
                     TimestampOverflowSnafu {
                         timestamp: ts,
@@ -302,6 +302,16 @@ fn parse_column_default_constraint(
                 ColumnDefaultConstraint::Function(func.to_lowercase())
             }
             ColumnOption::Default(expr) => {
+                if let Expr::UnaryOp { op, expr } = expr {
+                    if let (UnaryOperator::Minus, Expr::Value(SqlValue::Number(n, _))) =
+                        (op, expr.as_ref())
+                    {
+                        return Ok(Some(ColumnDefaultConstraint::Value(sql_number_to_value(
+                            data_type,
+                            &format!("-{n}"),
+                        )?)));
+                    }
+                }
                 return UnsupportedDefaultValueSnafu {
                     column_name,
                     expr: expr.clone(),

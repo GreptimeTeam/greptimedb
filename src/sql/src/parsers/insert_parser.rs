@@ -45,6 +45,7 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
 
     #[test]
     pub fn test_parse_insert() {
@@ -52,7 +53,9 @@ mod tests {
             'test1',1,'true',
             'test2',2,'false')
          ";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
         assert_matches!(result[0], Statement::Insert { .. })
     }
@@ -60,7 +63,8 @@ mod tests {
     #[test]
     pub fn test_parse_invalid_insert() {
         let sql = r"INSERT INTO table_1 VALUES ("; // intentionally a bad sql
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err(), "result is: {result:?}");
     }
 }

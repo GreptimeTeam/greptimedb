@@ -32,6 +32,7 @@ use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -70,8 +71,8 @@ use servers::server::{start_server, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
-use sql::parser::ParserContext;
-use sql::statements::copy::CopyTable;
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
@@ -119,6 +120,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     export_metrics_task: Option<ExportMetricsTask>,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl Instance {
@@ -186,7 +188,7 @@ impl Instance {
         Ok((kv_backend, procedure_manager))
     }
 
-    pub async fn build_servers(
+    pub fn build_servers(
         &mut self,
         opts: impl Into<FrontendOptions> + TomlSerializable,
         servers: ServerHandlers,
@@ -218,6 +220,10 @@ impl Instance {
 
     pub fn statement_executor(&self) -> Arc<StatementExecutor> {
         self.statement_executor.clone()
+    }
+
+    pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
+        &self.table_metadata_manager
     }
 }
 
@@ -253,7 +259,7 @@ impl FrontendInstance for Instance {
 }
 
 fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
-    ParserContext::create_with_dialect(sql, dialect).context(ParseSqlSnafu)
+    ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).context(ParseSqlSnafu)
 }
 
 impl Instance {
@@ -374,11 +380,11 @@ impl SqlQueryHandler for Instance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(QueryStatement::Sql(stmt), query_ctx)
+                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
             self.query_engine
-                .describe(plan)
+                .describe(plan, query_ctx)
                 .await
                 .map(Some)
                 .context(error::DescribeStatementSnafu)
@@ -414,8 +420,10 @@ impl PrometheusHandler for Instance {
             .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
             .context(AuthSnafu)?;
 
-        let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
-            query: query.clone(),
+        let stmt = QueryLanguageParser::parse_promql(query, &query_ctx).with_context(|_| {
+            ParsePromQLSnafu {
+                query: query.clone(),
+            }
         })?;
 
         let output = self
@@ -485,8 +493,11 @@ pub fn check_permission(
                 validate_param(&copy_table_from.table_name, query_ctx)?
             }
         },
-        Statement::Copy(sql::statements::copy::Copy::CopyDatabase(stmt)) => {
-            validate_param(&stmt.database_name, query_ctx)?
+        Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_database)) => {
+            match copy_database {
+                CopyDatabase::To(stmt) => validate_param(&stmt.database_name, query_ctx)?,
+                CopyDatabase::From(stmt) => validate_param(&stmt.database_name, query_ctx)?,
+            }
         }
         Statement::TruncateTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;

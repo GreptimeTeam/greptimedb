@@ -20,13 +20,19 @@ use crate::statements::OptionMap;
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum Copy {
     CopyTable(CopyTable),
-    CopyDatabase(CopyDatabaseArgument),
+    CopyDatabase(CopyDatabase),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum CopyTable {
     To(CopyTableArgument),
     From(CopyTableArgument),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub enum CopyDatabase {
+    To(CopyDatabaseArgument),
+    From(CopyDatabaseArgument),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]

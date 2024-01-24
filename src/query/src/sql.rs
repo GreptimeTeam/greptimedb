@@ -657,7 +657,7 @@ mod test {
             variable: ObjectName(vec![Ident::new(variable)]),
         };
         let ctx = QueryContextBuilder::default()
-            .timezone(Timezone::from_tz_string(tz).unwrap())
+            .timezone(Arc::new(Timezone::from_tz_string(tz).unwrap()))
             .build();
         match show_variable(stmt, ctx) {
             Ok(Output::RecordBatches(record)) => {

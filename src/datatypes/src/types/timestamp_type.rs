@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::str::FromStr;
-
 use arrow::datatypes::{
     DataType as ArrowDataType, TimeUnit as ArrowTimeUnit,
     TimestampMicrosecondType as ArrowTimestampMicrosecondType,
@@ -132,7 +130,7 @@ macro_rules! impl_data_type_for_timestamp {
                 fn try_cast(&self, from: Value)-> Option<Value>{
                     match from {
                         Value::Timestamp(v) => v.convert_to(TimeUnit::$unit).map(Value::Timestamp),
-                        Value::String(v) => Timestamp::from_str(v.as_utf8()).map(Value::Timestamp).ok(),
+                        Value::String(v) => Timestamp::from_str_utc(v.as_utf8()).map(Value::Timestamp).ok(),
                         Value::Int64(v) => Some(Value::Timestamp(Timestamp::new(v, TimeUnit::$unit))),
                         Value::DateTime(v) => Timestamp::new_second(v.val()).convert_to(TimeUnit::$unit).map(Value::Timestamp),
                         Value::Date(v) => Timestamp::new_second(v.to_secs()).convert_to(TimeUnit::$unit).map(Value::Timestamp),
@@ -259,7 +257,7 @@ mod tests {
         assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1234567)));
 
         // Date -> TimestampMillisecond
-        let d = Value::Date(Date::from_str("1970-01-01").unwrap());
+        let d = Value::Date(Date::from_str_utc("1970-01-01").unwrap());
         let ts = ConcreteDataType::timestamp_millisecond_datatype()
             .try_cast(d)
             .unwrap();

@@ -20,6 +20,7 @@ use common_base::Plugins;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
@@ -127,7 +128,7 @@ impl FrontendBuilder {
             catalog_manager.clone(),
             query_engine.clone(),
             self.ddl_task_executor,
-            kv_backend,
+            kv_backend.clone(),
             catalog_manager.clone(),
             inserter.clone(),
         ));
@@ -145,6 +146,7 @@ impl FrontendBuilder {
             inserter,
             deleter,
             export_metrics_task: None,
+            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
         })
     }
 }

@@ -182,7 +182,7 @@ impl TruncateTableProcedure {
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Status::Done)
+        Ok(Status::done())
     }
 }
 

@@ -30,7 +30,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::IndexerBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
-use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// A cache for uploading files to remote object stores.
 ///
@@ -110,6 +110,7 @@ impl WriteCache {
         let indexer = IndexerBuilder {
             create_inverted_index: write_request.create_inverted_index,
             mem_threshold_index_create: write_request.mem_threshold_index_create,
+            write_buffer_size: write_request.index_write_buffer_size,
             file_id,
             file_path: self.file_cache.cache_file_path(puffin_key),
             metadata: &write_request.metadata,
@@ -179,6 +180,7 @@ impl WriteCache {
         let mut writer = remote_store
             .writer_with(upload_path)
             .buffer(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .concurrent(DEFAULT_WRITE_CONCURRENCY)
             .await
             .context(error::OpenDalSnafu)?;
 
@@ -281,6 +283,7 @@ mod tests {
             storage: None,
             create_inverted_index: true,
             mem_threshold_index_create: None,
+            index_write_buffer_size: None,
             cache_manager: Default::default(),
         };
 

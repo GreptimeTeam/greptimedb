@@ -113,6 +113,12 @@ impl SstIndexCreator {
         }
     }
 
+    /// Sets the write buffer size of the store.
+    pub fn with_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
+        self.store = self.store.with_write_buffer_size(write_buffer_size);
+        self
+    }
+
     /// Updates index with a batch of rows.
     /// Garbage will be cleaned up if failed to update.
     pub async fn update(&mut self, batch: &Batch) -> Result<()> {
@@ -125,7 +131,14 @@ impl SstIndexCreator {
         if let Err(update_err) = self.do_update(batch).await {
             // clean up garbage if failed to update
             if let Err(err) = self.do_cleanup().await {
-                warn!(err; "Failed to clean up index creator, file_path: {}", self.file_path);
+                if cfg!(any(test, feature = "test")) {
+                    panic!(
+                        "Failed to clean up index creator, file_path: {}, err: {}",
+                        self.file_path, err
+                    );
+                } else {
+                    warn!(err; "Failed to clean up index creator, file_path: {}", self.file_path);
+                }
             }
             return Err(update_err);
         }
@@ -146,7 +159,14 @@ impl SstIndexCreator {
         let finish_res = self.do_finish().await;
         // clean up garbage no matter finish successfully or not
         if let Err(err) = self.do_cleanup().await {
-            warn!(err; "Failed to clean up index creator, file_path: {}", self.file_path);
+            if cfg!(any(test, feature = "test")) {
+                panic!(
+                    "Failed to clean up index creator, file_path: {}, err: {}",
+                    self.file_path, err
+                );
+            } else {
+                warn!(err; "Failed to clean up index creator, file_path: {}", self.file_path);
+            }
         }
 
         finish_res.map(|_| (self.stats.row_count(), self.stats.byte_count()))

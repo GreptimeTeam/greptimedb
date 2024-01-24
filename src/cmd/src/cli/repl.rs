@@ -157,19 +157,20 @@ impl Repl {
         let start = Instant::now();
 
         let output = if let Some(query_engine) = &self.query_engine {
-            let stmt = QueryLanguageParser::parse_sql(&sql)
-                .with_context(|_| ParseSqlSnafu { sql: sql.clone() })?;
-
             let query_ctx = QueryContext::with(self.database.catalog(), self.database.schema());
+
+            let stmt = QueryLanguageParser::parse_sql(&sql, &query_ctx)
+                .with_context(|_| ParseSqlSnafu { sql: sql.clone() })?;
 
             let plan = query_engine
                 .planner()
-                .plan(stmt, query_ctx)
+                .plan(stmt, query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
 
-            let LogicalPlan::DfPlan(plan) =
-                query_engine.optimize(&plan).context(PlanStatementSnafu)?;
+            let LogicalPlan::DfPlan(plan) = query_engine
+                .optimize(&query_engine.engine_context(query_ctx), &plan)
+                .context(PlanStatementSnafu)?;
 
             let plan = DFLogicalSubstraitConvertor {}
                 .encode(&plan)
