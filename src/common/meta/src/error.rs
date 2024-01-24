@@ -118,6 +118,9 @@ pub enum Error {
         source: datatypes::Error,
     },
 
+    #[snafu(display("Failed to get procedure output"))]
+    ProcedureOutput { location: Location },
+
     #[snafu(display("Primary key '{key}' not found when creating region request"))]
     PrimaryKeyNotFound { key: String, location: Location },
 
@@ -396,7 +399,8 @@ impl ErrorExt for Error {
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. }
-            | UnexpectedLogicalRouteTable { .. } => StatusCode::Unexpected,
+            | UnexpectedLogicalRouteTable { .. }
+            | ProcedureOutput { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }

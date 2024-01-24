@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{watcher, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, tracing};
 use snafu::{OptionExt, ResultExt};
@@ -163,7 +163,7 @@ impl DdlManager {
         alter_table_task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         physical_table_info: Option<(TableId, TableName)>,
-    ) -> Result<ProcedureId> {
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure = AlterTableProcedure::new(
@@ -187,7 +187,7 @@ impl DdlManager {
         create_table_task: CreateTableTask,
         table_route: TableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,
-    ) -> Result<ProcedureId> {
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure = CreateTableProcedure::new(
@@ -211,7 +211,7 @@ impl DdlManager {
         drop_table_task: DropTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         table_route_value: DeserializedValueWithBytes<TableRouteValue>,
-    ) -> Result<ProcedureId> {
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure = DropTableProcedure::new(
@@ -235,7 +235,7 @@ impl DdlManager {
         truncate_table_task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         region_routes: Vec<RegionRoute>,
-    ) -> Result<ProcedureId> {
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = TruncateTableProcedure::new(
             cluster_id,
@@ -250,7 +250,10 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    async fn submit_procedure(&self, procedure_with_id: ProcedureWithId) -> Result<ProcedureId> {
+    async fn submit_procedure(
+        &self,
+        procedure_with_id: ProcedureWithId,
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let procedure_id = procedure_with_id.id;
 
         let mut watcher = self
@@ -259,11 +262,11 @@ impl DdlManager {
             .await
             .context(SubmitProcedureSnafu)?;
 
-        watcher::wait(&mut watcher)
+        let output = watcher::wait(&mut watcher)
             .await
             .context(WaitProcedureSnafu)?;
 
-        Ok(procedure_id)
+        Ok((procedure_id, output))
     }
 }
 
@@ -288,7 +291,7 @@ async fn handle_truncate_table_task(
 
     let table_route = table_route_value.into_inner().region_routes()?.clone();
 
-    let id = ddl_manager
+    let (id, _) = ddl_manager
         .submit_truncate_table_task(
             cluster_id,
             truncate_table_task,
@@ -363,7 +366,7 @@ async fn handle_alter_table_task(
         ))
     };
 
-    let id = ddl_manager
+    let (id, _) = ddl_manager
         .submit_alter_table_task(
             cluster_id,
             alter_table_task,
@@ -405,7 +408,7 @@ async fn handle_drop_table_task(
     let table_route_value =
         DeserializedValueWithBytes::from_inner(TableRouteValue::Physical(table_route_value));
 
-    let id = ddl_manager
+    let (id, _) = ddl_manager
         .submit_drop_table_task(
             cluster_id,
             drop_table_task,
@@ -443,7 +446,7 @@ async fn handle_create_table_task(
 
     create_table_task.table_info.ident.table_id = table_id;
 
-    let id = ddl_manager
+    let (id, output) = ddl_manager
         .submit_create_table_task(
             cluster_id,
             create_table_task,
@@ -451,8 +454,10 @@ async fn handle_create_table_task(
             region_wal_options,
         )
         .await?;
+    let output = output.context(error::ProcedureOutputSnafu)?;
 
-    info!("Table: {table_id:?} is created via procedure_id {id:?}");
+    let table_id = *(output.downcast_ref::<Arc<u32>>().unwrap().as_ref());
+    info!("Table: {table_id} is created via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),

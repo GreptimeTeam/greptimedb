@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{
@@ -104,18 +105,18 @@ impl CreateTableProcedure {
     /// Checks whether the table exists.
     async fn on_prepare(&mut self) -> Result<Status> {
         let expr = &self.creator.data.task.create_table;
-        let exist = self
+        let table_name_value = self
             .context
             .table_metadata_manager
             .table_name_manager()
-            .exists(TableNameKey::new(
+            .get(TableNameKey::new(
                 &expr.catalog_name,
                 &expr.schema_name,
                 &expr.table_name,
             ))
             .await?;
 
-        if exist {
+        if table_name_value.is_some() {
             ensure!(
                 self.creator.data.task.create_table.create_if_not_exists,
                 error::TableAlreadyExistsSnafu {
@@ -123,7 +124,8 @@ impl CreateTableProcedure {
                 }
             );
 
-            return Ok(Status::done());
+            let table_id = table_name_value.unwrap().table_id();
+            return Ok(Status::done_with_output(Arc::new(table_id)));
         }
 
         self.creator.data.state = CreateTableState::DatanodeCreateRegions;
@@ -315,7 +317,7 @@ impl CreateTableProcedure {
             .await?;
         info!("Created table metadata for table {table_id}");
 
-        Ok(Status::done())
+        Ok(Status::done_with_output(Arc::new(table_id)))
     }
 }
 
