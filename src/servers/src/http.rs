@@ -99,7 +99,6 @@ pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"]
 
 #[derive(Default)]
 pub struct HttpServer {
-    // server handlers
     router: StdMutex<Router>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
