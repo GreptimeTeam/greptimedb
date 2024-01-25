@@ -17,6 +17,7 @@
 pub(crate) mod alter_expr;
 pub(crate) mod create_expr;
 pub(crate) mod insert_expr;
+pub(crate) mod select_expr;
 
 pub use alter_expr::AlterTableExpr;
 pub use create_expr::CreateTableExpr;
