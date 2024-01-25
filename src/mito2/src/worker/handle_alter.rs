@@ -51,7 +51,7 @@ impl<S> RegionWorkerLoop<S> {
         if version.metadata.schema_version != request.schema_version {
             // This is possible if we retry the request.
             debug!(
-                "Ignores alter request, region id:{}, region schema version {} is greater than request schema version {}",
+                "Ignores alter request, region id:{}, region schema version {} is not equal to request schema version {}",
                 region_id, version.metadata.schema_version, request.schema_version
             );
             // Returns an error.
