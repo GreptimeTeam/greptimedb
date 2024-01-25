@@ -31,15 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use datafusion_common::arrow::array::{
-    BooleanArray, Date32Array, Date64Array, Decimal128Array, DurationMicrosecondArray,
-    DurationMillisecondArray, DurationNanosecondArray, DurationSecondArray, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, IntervalDayTimeArray,
-    IntervalMonthDayNanoArray, IntervalYearMonthArray, NullArray, StringArray,
-    Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt32Array, UInt8Array,
-};
+use datafusion_common::arrow::array::new_null_array;
 use datafusion_common::ScalarValue;
 use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Array, UInt64Array};
 use datatypes::arrow::datatypes::{
@@ -59,8 +51,7 @@ use store_api::storage::consts::{
 use store_api::storage::ColumnId;
 
 use crate::error::{
-    ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu,
-    NotSupportedFieldSnafu, Result,
+    ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -142,113 +133,8 @@ impl WriteFormat {
 }
 
 fn build_nulls_only_array(length: usize, data_type: &ConcreteDataType) -> Result<ArrayRef> {
-    match data_type {
-        ConcreteDataType::Null(_) => Ok(Arc::new(NullArray::new(length)) as _),
-        ConcreteDataType::Boolean(_) => Ok(Arc::new(BooleanArray::from_iter(
-            std::iter::repeat(None::<bool>).take(length),
-        )) as _),
-        ConcreteDataType::Int8(_) => Ok(Arc::new(Int8Array::from_iter(
-            std::iter::repeat(None::<i8>).take(length),
-        )) as _),
-        ConcreteDataType::Int16(_) => Ok(Arc::new(Int16Array::from_iter(
-            std::iter::repeat(None::<i16>).take(length),
-        )) as _),
-        ConcreteDataType::Int32(_) => Ok(Arc::new(Int32Array::from_iter(
-            std::iter::repeat(None::<i32>).take(length),
-        )) as _),
-        ConcreteDataType::Int64(_) => Ok(Arc::new(Int64Array::from_iter(
-            std::iter::repeat(None::<i64>).take(length),
-        )) as _),
-        ConcreteDataType::UInt8(_) => Ok(Arc::new(UInt8Array::from_iter(
-            std::iter::repeat(None::<u8>).take(length),
-        )) as _),
-        ConcreteDataType::UInt16(_) => Ok(Arc::new(UInt16Array::from_iter(
-            std::iter::repeat(None::<u16>).take(length),
-        )) as _),
-        ConcreteDataType::UInt32(_) => Ok(Arc::new(UInt32Array::from_iter(
-            std::iter::repeat(None::<u32>).take(length),
-        )) as _),
-        ConcreteDataType::UInt64(_) => Ok(Arc::new(UInt64Array::from_iter(
-            std::iter::repeat(None::<u64>).take(length),
-        )) as _),
-        ConcreteDataType::Float32(_) => Ok(Arc::new(Float32Array::from_iter(
-            std::iter::repeat(None::<f32>).take(length),
-        )) as _),
-        ConcreteDataType::Float64(_) => Ok(Arc::new(Float64Array::from_iter(
-            std::iter::repeat(None::<f64>).take(length),
-        )) as _),
-        ConcreteDataType::Decimal128(_) => Ok(Arc::new(Decimal128Array::from_iter(
-            std::iter::repeat(None).take(length),
-        )) as _),
-        ConcreteDataType::Binary(_) => {
-            Ok(Arc::new(BinaryArray::from_opt_vec(vec![None::<&[u8]>; length])) as _)
-        }
-        ConcreteDataType::String(_) => {
-            Ok(Arc::new(StringArray::from(vec![None::<&str>; length])) as _)
-        }
-        ConcreteDataType::Date(_) => {
-            Ok(Arc::new(Date32Array::from_iter(std::iter::repeat(None).take(length))) as _)
-        }
-        ConcreteDataType::DateTime(_) => {
-            Ok(Arc::new(Date64Array::from_iter(std::iter::repeat(None).take(length))) as _)
-        }
-        ConcreteDataType::Timestamp(precision) => match precision {
-            datatypes::types::TimestampType::Second(_) => Ok(Arc::new(
-                TimestampSecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::TimestampType::Millisecond(_) => Ok(Arc::new(
-                TimestampMillisecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::TimestampType::Microsecond(_) => Ok(Arc::new(
-                TimestampMicrosecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::TimestampType::Nanosecond(_) => Ok(Arc::new(
-                TimestampNanosecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-        },
-        ConcreteDataType::Time(precision) => match precision {
-            datatypes::types::TimeType::Second(_) => Ok(Arc::new(Time32SecondArray::from_iter(
-                std::iter::repeat(None).take(length),
-            )) as _),
-            datatypes::types::TimeType::Millisecond(_) => Ok(Arc::new(
-                Time32MillisecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::TimeType::Microsecond(_) => Ok(Arc::new(
-                Time64MicrosecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::TimeType::Nanosecond(_) => Ok(Arc::new(
-                Time64NanosecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-        },
-        ConcreteDataType::Duration(precision) => match precision {
-            datatypes::types::DurationType::Second(_) => Ok(Arc::new(
-                DurationSecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::DurationType::Millisecond(_) => Ok(Arc::new(
-                DurationMillisecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::DurationType::Microsecond(_) => Ok(Arc::new(
-                DurationMicrosecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::DurationType::Nanosecond(_) => Ok(Arc::new(
-                DurationNanosecondArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-        },
-        ConcreteDataType::Interval(precision) => match precision {
-            datatypes::types::IntervalType::YearMonth(_) => Ok(Arc::new(
-                IntervalYearMonthArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::IntervalType::DayTime(_) => Ok(Arc::new(
-                IntervalDayTimeArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-            datatypes::types::IntervalType::MonthDayNano(_) => Ok(Arc::new(
-                IntervalMonthDayNanoArray::from_iter(std::iter::repeat(None).take(length)),
-            ) as _),
-        },
-        ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
-            NotSupportedFieldSnafu { data_type }.fail()
-        }
-    }
+    let arrow_type = data_type.as_arrow_type();
+    Ok(new_null_array(&arrow_type, length))
 }
 
 /// Helper for reading the SST format.
