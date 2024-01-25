@@ -135,9 +135,10 @@ pub async fn from_output(
                 results.push(GreptimeQueryOutput::AffectedRows(rows));
             }
             Ok(Output::Stream(stream)) => {
+                let schema = stream.schema().clone();
                 // TODO(sunng87): streaming response
                 match util::collect(stream).await {
-                    Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                    Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
                         Ok(rows) => {
                             results.push(GreptimeQueryOutput::Records(rows));
                         }
@@ -150,14 +151,16 @@ pub async fn from_output(
                     }
                 }
             }
-            Ok(Output::RecordBatches(rbs)) => match HttpRecordsOutput::try_from(rbs.take()) {
-                Ok(rows) => {
-                    results.push(GreptimeQueryOutput::Records(rows));
+            Ok(Output::RecordBatches(rbs)) => {
+                match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
+                    Ok(rows) => {
+                        results.push(GreptimeQueryOutput::Records(rows));
+                    }
+                    Err(err) => {
+                        return Err(ErrorResponse::from_error(ty, err));
+                    }
                 }
-                Err(err) => {
-                    return Err(ErrorResponse::from_error(ty, err));
-                }
-            },
+            }
             Err(err) => {
                 return Err(ErrorResponse::from_error(ty, err));
             }
