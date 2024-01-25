@@ -42,7 +42,35 @@ Hence, we choose the third option, and use a simple logical plan that's anagonis
 - Greptime Flow needs a WAL for recovering. It's possible to reuse datanode's.
 
 The workflow is shown in the following diagram
-![Greptime Flow](./flow_workflow.png)
+```mermaid
+graph TB
+subgraph Flownode["Flownode"]
+    subgraph Dataflows
+        df1("Dataflow_1")
+        df2("Dataflow_2")
+    end
+end
+subgraph Frontend["Frontend"]
+    newLines["Mirror Insert
+Create Task From Query
+Write result from flow node"]
+end
+
+subgraph Datanode["Datanode"]
+end
+
+User --> Frontend
+Frontend -->|Register Task| Metasrv
+Metasrv -->|Read Task Metadata| Frontend
+Frontend -->|Create Task| Flownode
+
+Frontend -->|Mirror Insert| Flownode
+Flownode -->|Write back| Frontend
+
+Frontend --> Datanode
+Datanode --> Frontend
+
+```
 
 ## Lifecycle of data
 - New data is inserted into frontend like before. Frontend will mirror insert request to Flow node if there is configured flow job.
