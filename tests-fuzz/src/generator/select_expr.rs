@@ -62,7 +62,7 @@ impl<R: Rng + 'static> Generator<SelectExpr, R> for SelectExprGenerator<R> {
         };
 
         Ok(SelectExpr {
-            name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.to_string(),
             columns: selected_columns,
             order_by,
             direction,

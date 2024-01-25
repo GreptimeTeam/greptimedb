@@ -19,7 +19,7 @@ use crate::ir::Column;
 pub type RowValue = Vec<Value>;
 
 pub struct InsertIntoExpr {
-    pub name: String,
+    pub table_name: String,
     pub columns: Vec<Column>,
     pub rows: Vec<RowValue>,
 }

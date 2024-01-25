@@ -39,8 +39,8 @@ impl DslTranslator<SelectExpr, String> for SelectExprTranslator {
             .to_string();
 
         Ok(format!(
-            "SELECT {} for {} ORDER BY {} {};",
-            columns, input.name, order_by, input.direction,
+            "SELECT {} FROM {} ORDER BY {} {};",
+            columns, input.table_name, order_by, input.direction,
         ))
     }
 }
@@ -69,7 +69,7 @@ mod tests {
 
         let select_expr = select_expr_generator.generate(&mut rng).unwrap();
         let output = SelectExprTranslator.translate(&select_expr).unwrap();
-        let expected = r#"SELECT memory_util, ts, cpu_util, disk_util for test ORDER BY cpu_util, disk_util DESC;"#;
+        let expected = r#"SELECT memory_util, ts, cpu_util, disk_util FROM test ORDER BY cpu_util, disk_util DESC;"#;
         assert_eq!(output, expected);
     }
 }

@@ -74,7 +74,7 @@ impl<R: Rng + 'static> Generator<AlterTableExpr, R> for AlterExprAddColumnGenera
         )
         .remove(0);
         Ok(AlterTableExpr {
-            name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.to_string(),
             alter_options: AlterTableOperation::AddColumn { column, location },
         })
     }
@@ -99,7 +99,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprDropColumnGenerator<R> {
             .name
             .to_string();
         Ok(AlterTableExpr {
-            name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.to_string(),
             alter_options: AlterTableOperation::DropColumn { name },
         })
     }
@@ -120,7 +120,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprRenameGenerator<R> {
     fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
         let new_table_name = self.name_generator.gen(rng);
         Ok(AlterTableExpr {
-            name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.to_string(),
             alter_options: AlterTableOperation::RenameTable { new_table_name },
         })
     }

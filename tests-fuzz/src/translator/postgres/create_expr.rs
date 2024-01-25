@@ -30,7 +30,7 @@ impl DslTranslator<CreateTableExpr, String> for CreateTableExprTranslator {
         Ok(format!(
             "CREATE TABLE{}{}(\n{}\n);",
             Self::create_if_not_exists(input),
-            input.name,
+            input.table_name,
             Self::format_columns(input),
         ))
     }

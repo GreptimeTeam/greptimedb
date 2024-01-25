@@ -31,7 +31,7 @@ impl DslTranslator<CreateTableExpr, String> for CreateTableExprTranslator {
         Ok(format!(
             "CREATE TABLE{}{}(\n{}\n)\n{};",
             Self::create_if_not_exists(input),
-            input.name,
+            input.table_name,
             Self::format_columns(input),
             Self::format_table_options(input)
         ))
@@ -162,7 +162,7 @@ mod tests {
         let test_ctx = test_utils::new_test_ctx();
         let create_table_expr = CreateTableExprBuilder::default()
             .columns(test_ctx.columns.clone())
-            .name("system_metrics")
+            .table_name("system_metrics")
             .engine("mito")
             .primary_keys(vec![0, 1])
             .partition(PartitionDef::new(

@@ -32,7 +32,7 @@ impl DslTranslator<InsertIntoExpr, String> for InsertIntoExprTranslator {
 
         Ok(format!(
             "INSERT INTO {} ({})\nVALUES\n{};",
-            input.name,
+            input.table_name,
             columns,
             Self::format_values(input)
         ))

@@ -50,6 +50,7 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
         for _ in 0..self.rows {
             let mut row = Vec::with_capacity(columns.len());
             for column in &columns {
+                // TODO(weny): generates the special cases
                 row.push(generate_random_value(
                     rng,
                     &column.column_type,
@@ -61,7 +62,7 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
         }
 
         Ok(InsertIntoExpr {
-            name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.to_string(),
             columns,
             rows,
         })

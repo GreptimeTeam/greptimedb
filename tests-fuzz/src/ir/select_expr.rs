@@ -31,7 +31,7 @@ impl Display for Direction {
 }
 
 pub struct SelectExpr {
-    pub name: String,
+    pub table_name: String,
     pub columns: Vec<Column>,
     pub order_by: Vec<String>,
     pub direction: Direction,

@@ -173,9 +173,9 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
         builder.engine(self.engine.to_string());
         builder.if_not_exists(self.if_not_exists);
         if self.name.is_empty() {
-            builder.name(self.name_generator.gen(rng));
+            builder.table_name(self.name_generator.gen(rng));
         } else {
-            builder.name(self.name.to_string());
+            builder.table_name(self.name.to_string());
         }
         builder.build().context(error::BuildCreateTableExprSnafu)
     }
