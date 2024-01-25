@@ -16,8 +16,9 @@ use std::result;
 
 use api::v1::meta::submit_ddl_task_request::Task;
 use api::v1::meta::{
-    AlterTableTask as PbAlterTableTask, CreateTableTask as PbCreateTableTask,
-    CreateTableTasks as PbCreateTableTasks, DropTableTask as PbDropTableTask, Partition,
+    AlterTableTask as PbAlterTableTask, AlterTableTasks as PbAlterTableTasks,
+    CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
+    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks, Partition,
     SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
     SubmitDdlTaskResponse as PbSubmitDdlTaskResponse, TruncateTableTask as PbTruncateTableTask,
 };
@@ -40,6 +41,8 @@ pub enum DdlTask {
     AlterTable(AlterTableTask),
     TruncateTable(TruncateTableTask),
     CreateLogicalTables(Vec<CreateTableTask>),
+    DropLogicalTables(Vec<DropTableTask>),
+    AlterLogicalTables(Vec<AlterTableTask>),
 }
 
 impl DdlTask {
@@ -123,7 +126,7 @@ impl TryFrom<Task> for DdlTask {
                     .map(|task| task.try_into())
                     .collect::<Result<Vec<_>>>()?;
 
-                Ok(DdlTask::DropTable(tasks.into_iter().next().unwrap()))
+                Ok(DdlTask::DropLogicalTables(tasks))
             }
             Task::AlterTableTasks(alter_tables) => {
                 let tasks = alter_tables
@@ -132,7 +135,7 @@ impl TryFrom<Task> for DdlTask {
                     .map(|task| task.try_into())
                     .collect::<Result<Vec<_>>>()?;
 
-                Ok(DdlTask::AlterTable(tasks.into_iter().next().unwrap()))
+                Ok(DdlTask::AlterLogicalTables(tasks))
             }
         }
     }
@@ -148,45 +151,33 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
 
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
         let task = match request.task {
-            DdlTask::CreateTable(task) => Task::CreateTableTask(PbCreateTableTask {
-                table_info: serde_json::to_vec(&task.table_info).context(error::SerdeJsonSnafu)?,
-                create_table: Some(task.create_table),
-                partitions: task.partitions,
-            }),
-            DdlTask::DropTable(task) => Task::DropTableTask(PbDropTableTask {
-                drop_table: Some(DropTableExpr {
-                    catalog_name: task.catalog,
-                    schema_name: task.schema,
-                    table_name: task.table,
-                    table_id: Some(api::v1::TableId { id: task.table_id }),
-                    drop_if_exists: task.drop_if_exists,
-                }),
-            }),
-            DdlTask::AlterTable(task) => Task::AlterTableTask(PbAlterTableTask {
-                alter_table: Some(task.alter_table),
-            }),
-            DdlTask::TruncateTable(task) => Task::TruncateTableTask(PbTruncateTableTask {
-                truncate_table: Some(TruncateTableExpr {
-                    catalog_name: task.catalog,
-                    schema_name: task.schema,
-                    table_name: task.table,
-                    table_id: Some(api::v1::TableId { id: task.table_id }),
-                }),
-            }),
+            DdlTask::CreateTable(task) => Task::CreateTableTask(task.try_into()?),
+            DdlTask::DropTable(task) => Task::DropTableTask(task.try_into()?),
+            DdlTask::AlterTable(task) => Task::AlterTableTask(task.try_into()?),
+            DdlTask::TruncateTable(task) => Task::TruncateTableTask(task.try_into()?),
             DdlTask::CreateLogicalTables(tasks) => {
                 let tasks = tasks
                     .into_iter()
-                    .map(|task| {
-                        Ok(PbCreateTableTask {
-                            table_info: serde_json::to_vec(&task.table_info)
-                                .context(error::SerdeJsonSnafu)?,
-                            create_table: Some(task.create_table),
-                            partitions: task.partitions,
-                        })
-                    })
+                    .map(|task| task.try_into())
                     .collect::<Result<Vec<_>>>()?;
 
                 Task::CreateTableTasks(PbCreateTableTasks { tasks })
+            }
+            DdlTask::DropLogicalTables(tasks) => {
+                let tasks = tasks
+                    .into_iter()
+                    .map(|task| task.try_into())
+                    .collect::<Result<Vec<_>>>()?;
+
+                Task::DropTableTasks(PbDropTableTasks { tasks })
+            }
+            DdlTask::AlterLogicalTables(tasks) => {
+                let tasks = tasks
+                    .into_iter()
+                    .map(|task| task.try_into())
+                    .collect::<Result<Vec<_>>>()?;
+
+                Task::AlterTableTasks(PbAlterTableTasks { tasks })
             }
         };
 
@@ -284,6 +275,22 @@ impl TryFrom<PbDropTableTask> for DropTableTask {
     }
 }
 
+impl TryFrom<DropTableTask> for PbDropTableTask {
+    type Error = error::Error;
+
+    fn try_from(task: DropTableTask) -> Result<Self> {
+        Ok(PbDropTableTask {
+            drop_table: Some(DropTableExpr {
+                catalog_name: task.catalog,
+                schema_name: task.schema,
+                table_name: task.table,
+                table_id: Some(api::v1::TableId { id: task.table_id }),
+                drop_if_exists: task.drop_if_exists,
+            }),
+        })
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
@@ -304,6 +311,18 @@ impl TryFrom<PbCreateTableTask> for CreateTableTask {
             pb.partitions,
             table_info,
         ))
+    }
+}
+
+impl TryFrom<CreateTableTask> for PbCreateTableTask {
+    type Error = error::Error;
+
+    fn try_from(task: CreateTableTask) -> Result<Self> {
+        Ok(PbCreateTableTask {
+            table_info: serde_json::to_vec(&task.table_info).context(error::SerdeJsonSnafu)?,
+            create_table: Some(task.create_table),
+            partitions: task.partitions,
+        })
     }
 }
 
@@ -416,6 +435,16 @@ impl TryFrom<PbAlterTableTask> for AlterTableTask {
     }
 }
 
+impl TryFrom<AlterTableTask> for PbAlterTableTask {
+    type Error = error::Error;
+
+    fn try_from(task: AlterTableTask) -> Result<Self> {
+        Ok(PbAlterTableTask {
+            alter_table: Some(task.alter_table),
+        })
+    }
+}
+
 impl Serialize for AlterTableTask {
     fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
     where
@@ -493,6 +522,21 @@ impl TryFrom<PbTruncateTableTask> for TruncateTableTask {
                     err_msg: "expected table_id",
                 })?
                 .id,
+        })
+    }
+}
+
+impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
+    type Error = error::Error;
+
+    fn try_from(task: TruncateTableTask) -> Result<Self> {
+        Ok(PbTruncateTableTask {
+            truncate_table: Some(TruncateTableExpr {
+                catalog_name: task.catalog,
+                schema_name: task.schema,
+                table_name: task.table,
+                table_id: Some(api::v1::TableId { id: task.table_id }),
+            }),
         })
     }
 }

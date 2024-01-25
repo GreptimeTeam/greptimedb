@@ -461,7 +461,6 @@ impl TableMetadataManager {
     pub async fn create_logic_tables_metadata(
         &self,
         tables_data: Vec<(RawTableInfo, TableRouteValue)>,
-        region_numbers: Vec<RegionNumber>,
     ) -> Result<()> {
         let len = tables_data.len();
         let mut txns = Vec::with_capacity(3 * len);
@@ -477,7 +476,7 @@ impl TableMetadataManager {
         }
         let mut on_failures = Vec::with_capacity(len);
         for (mut table_info, table_route_value) in tables_data {
-            table_info.meta.region_numbers = region_numbers.clone();
+            table_info.meta.region_numbers = table_route_value.region_numbers();
             let table_id = table_info.ident.table_id;
 
             // Creates table name.
@@ -1000,16 +999,15 @@ mod tests {
         let table_route_value = TableRouteValue::physical(region_routes.clone());
 
         let tables_data = vec![(table_info.clone(), table_route_value.clone())];
-        let region_numbers = vec![1];
         // creates metadata.
         table_metadata_manager
-            .create_logic_tables_metadata(tables_data.clone(), region_numbers.clone())
+            .create_logic_tables_metadata(tables_data.clone())
             .await
             .unwrap();
 
         // if metadata was already created, it should be ok.
         assert!(table_metadata_manager
-            .create_logic_tables_metadata(tables_data, region_numbers.clone())
+            .create_logic_tables_metadata(tables_data)
             .await
             .is_ok());
 
@@ -1017,10 +1015,9 @@ mod tests {
         modified_region_routes.push(new_region_route(2, 3));
         let modified_table_route_value = TableRouteValue::physical(modified_region_routes.clone());
         let modified_tables_data = vec![(table_info.clone(), modified_table_route_value)];
-        let modified_region_numbers = vec![1, 2];
         // if remote metadata was exists, it should return an error.
         assert!(table_metadata_manager
-            .create_logic_tables_metadata(modified_tables_data, modified_region_numbers)
+            .create_logic_tables_metadata(modified_tables_data)
             .await
             .is_err());
 

@@ -198,7 +198,7 @@ impl TableMetadataAllocator {
         })
     }
 
-    /// Sets table ids with all tasks and return the physical table info.
+    /// Sets table ids with all tasks.
     pub async fn set_table_ids_on_logic_create(&self, tasks: &mut [CreateTableTask]) -> Result<()> {
         for task in tasks {
             let table_id = self.allocate_table_id(task).await?;

@@ -159,10 +159,7 @@ impl CreateLogicalTablesProcedure {
         let num_tables = tables_data.len();
 
         if num_tables > 0 {
-            let region_numbers = self.creator.data.regin_numbers();
-            manager
-                .create_logic_tables_metadata(tables_data, region_numbers)
-                .await?;
+            manager.create_logic_tables_metadata(tables_data).await?;
         }
 
         info!("Created {num_tables} tables metadata for physical table {physical_table_id}");
@@ -270,7 +267,7 @@ impl Procedure for CreateLogicalTablesProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        let mut lock_key = vec![];
+        let mut lock_key = Vec::with_capacity(1 + self.creator.data.tasks.len());
         lock_key.push(TableLock::Write(self.creator.data.physical_table_id()).into());
         for task in &self.creator.data.tasks {
             lock_key.push(
@@ -386,10 +383,6 @@ impl CreateTablesData {
                 (table_info, table_route)
             })
             .collect::<Vec<_>>()
-    }
-
-    fn regin_numbers(&self) -> Vec<RegionNumber> {
-        self.physical_region_numbers.clone()
     }
 }
 

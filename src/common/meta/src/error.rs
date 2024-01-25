@@ -112,8 +112,14 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Failed to get procedure output"))]
-    ProcedureOutput { location: Location },
+    #[snafu(display(
+        "Failed to get procedure output, procedure id: {procedure_id}, error: {err_msg}"
+    ))]
+    ProcedureOutput {
+        procedure_id: String,
+        err_msg: String,
+        location: Location,
+    },
 
     #[snafu(display("Failed to convert RawTableInfo into TableInfo"))]
     ConvertRawTableInfo {

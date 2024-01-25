@@ -43,7 +43,8 @@ use crate::key::table_route::TableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::DdlTask::{
-    AlterTable, CreateLogicalTables, CreateTable, DropTable, TruncateTable,
+    AlterLogicalTables, AlterTable, CreateLogicalTables, CreateTable, DropLogicalTables, DropTable,
+    TruncateTable,
 };
 use crate::rpc::ddl::{
     AlterTableTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
@@ -495,13 +496,20 @@ async fn handle_create_table_task(
             region_wal_options,
         )
         .await?;
-    let output = output.context(error::ProcedureOutputSnafu)?;
 
-    let table_id = *(output.downcast_ref::<u32>().unwrap());
+    let procedure_id = id.to_string();
+    let output = output.context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "empty output",
+    })?;
+    let table_id = *(output.downcast_ref::<u32>().context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "downcast to `u32`",
+    })?);
     info!("Table: {table_id} is created via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
-        key: id.to_string().into(),
+        key: procedure_id.into(),
         table_id: Some(table_id),
         ..Default::default()
     })
@@ -531,11 +539,21 @@ async fn handle_create_logical_table_tasks(
 
     info!("{num_logical_tables} logical tables on physical table: {physical_table_id:?} is created via procedure_id {id:?}");
 
-    let output = output.context(ProcedureOutputSnafu)?;
-    let table_ids = output.downcast_ref::<Vec<TableId>>().unwrap().clone();
+    let procedure_id = id.to_string();
+    let output = output.context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "empty output",
+    })?;
+    let table_ids = output
+        .downcast_ref::<Vec<TableId>>()
+        .context(ProcedureOutputSnafu {
+            procedure_id: &procedure_id,
+            err_msg: "downcast to `Vec<TableId>`",
+        })?
+        .clone();
 
     Ok(SubmitDdlTaskResponse {
-        key: id.to_string().into(),
+        key: procedure_id.into(),
         table_ids,
         ..Default::default()
     })
@@ -573,6 +591,8 @@ impl DdlTaskExecutor for DdlManager {
                 CreateLogicalTables(create_table_tasks) => {
                     handle_create_logical_table_tasks(self, cluster_id, create_table_tasks).await
                 }
+                DropLogicalTables(_) => todo!(),
+                AlterLogicalTables(_) => todo!(),
             }
         }
         .trace(span)
