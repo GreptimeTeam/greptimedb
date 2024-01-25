@@ -176,10 +176,7 @@ impl ParquetReaderBuilder {
             cache_manager: self.cache_manager.clone(),
         };
 
-        let metrics = Metrics {
-            build_cost: start.elapsed(),
-            ..Default::default()
-        };
+        metrics.build_cost = start.elapsed();
 
         let predicate = if let Some(p) = &self.predicate {
             p.exprs()
