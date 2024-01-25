@@ -83,7 +83,7 @@ impl ParquetWriter {
         let props_builder = Self::customize_column_config(props_builder, &self.metadata);
         let writer_props = props_builder.build();
 
-        let write_format = WriteFormat::new(self.metadata.clone());
+        let mut write_format = WriteFormat::new(self.metadata.clone());
         let mut buffered_writer = BufferedWriter::try_new(
             self.file_path.clone(),
             self.object_store.clone(),
@@ -95,13 +95,14 @@ impl ParquetWriter {
         .context(WriteBufferSnafu)?;
 
         let mut stats = SourceStats::default();
-        while let Some(batch) = write_next_batch(&mut source, &write_format, &mut buffered_writer)
-            .or_else(|err| async {
-                // abort index creation if error occurs.
-                self.indexer.abort().await;
-                Err(err)
-            })
-            .await?
+        while let Some(batch) =
+            write_next_batch(&mut source, &mut write_format, &mut buffered_writer)
+                .or_else(|err| async {
+                    // abort index creation if error occurs.
+                    self.indexer.abort().await;
+                    Err(err)
+                })
+                .await?
         {
             stats.update(&batch);
             self.indexer.update(&batch).await;
@@ -162,7 +163,7 @@ impl ParquetWriter {
 
 async fn write_next_batch(
     source: &mut Source,
-    write_format: &WriteFormat,
+    write_format: &mut WriteFormat,
     buffered_writer: &mut BufferedWriter,
 ) -> Result<Option<Batch>> {
     let Some(batch) = source.next_batch().await? else {

@@ -66,6 +66,8 @@ pub(crate) struct WriteFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
+
+    null_buf: HashMap<ConcreteDataType, ArrayRef>,
 }
 
 impl WriteFormat {
@@ -75,6 +77,7 @@ impl WriteFormat {
         WriteFormat {
             metadata,
             arrow_schema,
+            null_buf: HashMap::new(),
         }
     }
 
@@ -84,13 +87,13 @@ impl WriteFormat {
     }
 
     /// Convert `batch` to a arrow record batch to store in parquet.
-    pub(crate) fn convert_batch(&self, batch: &Batch) -> Result<RecordBatch> {
+    pub(crate) fn convert_batch(&mut self, batch: &Batch) -> Result<RecordBatch> {
         debug_assert_eq!(
             batch.fields().len() + FIXED_POS_COLUMN_NUM,
             self.arrow_schema.fields().len()
         );
         let mut columns = Vec::with_capacity(batch.fields().len() + FIXED_POS_COLUMN_NUM);
-        let mut null_buf: HashMap<ConcreteDataType, ArrayRef> = HashMap::new();
+        // let mut null_buf: HashMap<ConcreteDataType, ArrayRef> = HashMap::new();
         // Store all fields first.
         for (column, column_metadata) in batch.fields().iter().zip(self.metadata.field_columns()) {
             ensure!(
@@ -104,14 +107,16 @@ impl WriteFormat {
             );
 
             if column.data.data_type() == ConcreteDataType::null_datatype() {
-                if let Some(null_array) = null_buf.get(&column_metadata.column_schema.data_type) {
+                if let Some(null_array) =
+                    self.null_buf.get(&column_metadata.column_schema.data_type)
+                {
                     columns.push(null_array.clone());
                 } else {
                     let null_array = build_nulls_only_array(
                         column.data.len(),
                         &column_metadata.column_schema.data_type,
                     )?;
-                    null_buf.insert(
+                    self.null_buf.insert(
                         column_metadata.column_schema.data_type.clone(),
                         null_array.clone(),
                     );
@@ -756,7 +761,7 @@ mod tests {
     #[test]
     fn test_convert_batch() {
         let metadata = build_test_region_metadata();
-        let write_format = WriteFormat::new(metadata);
+        let mut write_format = WriteFormat::new(metadata);
 
         let num_rows = 4;
         let batch = new_batch(b"test", 1, 2, num_rows);

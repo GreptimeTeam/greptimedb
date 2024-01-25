@@ -128,7 +128,7 @@ impl MetricEngineInner {
     /// - Generate tsid
     fn modify_rows(&self, table_id: TableId, rows: &mut Rows) -> Result<()> {
         // gather tag column indices
-        let mut tag_col_indices = rows
+        let tag_col_indices = rows
             .schema
             .iter()
             .enumerate()
