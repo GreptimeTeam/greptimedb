@@ -18,8 +18,12 @@ use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::value::Value;
+use serde::{Deserialize, Serialize};
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
+
+use crate::expr::EvalError;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -40,18 +44,22 @@ pub enum Error {
     },
     #[snafu(display("Invalid query: {}", reason))]
     InvalidQuery { reason: String, location: Location },
+    #[snafu(display("No protobuf type for value: {}", value))]
+    NoProtoType { value: Value },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
+    /// TODO(discord9): more detailed status code
     fn status_code(&self) -> StatusCode {
         match self {
             Self::Eval { .. }
-            | &Self::TableNotFound { .. }
             | &Self::TableAlreadyExist { .. }
             | &Self::JoinTask { .. }
-            | &Self::InvalidQuery { .. } => StatusCode::Internal,
+            | &Self::InvalidQuery { .. }
+            | &Self::TableNotFound { .. }
+            | Self::NoProtoType { .. } => StatusCode::Internal,
         }
     }
 
@@ -61,8 +69,6 @@ impl ErrorExt for Error {
 }
 
 define_into_tonic_status!(Error);
-
-use serde::{Deserialize, Serialize};
 
 // TODO(discord9): more error types
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, Deserialize, Serialize, PartialEq, Hash)]
@@ -74,39 +80,4 @@ impl From<EvalError> for DataflowError {
     fn from(e: EvalError) -> Self {
         DataflowError::EvalError(Box::new(e))
     }
-}
-
-/// EvalError is about errors happen on columnar evaluation
-#[derive(Snafu)]
-#[snafu(visibility(pub))]
-//#[stack_trace_debug]
-#[derive(Ord, PartialOrd, Clone, Debug, Eq, Deserialize, Serialize, PartialEq, Hash)]
-pub enum EvalError {
-    #[snafu(display("Division by zero"))]
-    DivisionByZero,
-    #[snafu(display("Type mismatch: expected {}, actual {}", expected, actual))]
-    TypeMismatch {
-        expected: ConcreteDataType,
-        actual: ConcreteDataType,
-    },
-    /// can't nest datatypes error because EvalError need to be store in map and serialization
-    #[snafu(display("Fail to unpack from value to given type: {}", msg))]
-    TryFromValue { msg: String },
-    #[snafu(display(
-        "Fail to cast value of type {} to given type: {}. Detail: {}",
-        from,
-        to,
-        msg
-    ))]
-    CastValue {
-        from: ConcreteDataType,
-        to: ConcreteDataType,
-        msg: String,
-    },
-    #[snafu(display("Invalid argument: {}", reason))]
-    InvalidArgument { reason: String },
-    #[snafu(display("Internal error: {}", reason))]
-    Internal { reason: String },
-    #[snafu(display("Optimize error: {}", reason))]
-    Optimize { reason: String },
 }

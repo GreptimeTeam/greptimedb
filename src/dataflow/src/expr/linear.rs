@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::error::EvalError;
+use crate::expr::error::EvalError;
 use crate::expr::{Id, LocalId, ScalarExpr};
 use crate::repr::{self, value2internal_ts, Diff, Row};
 

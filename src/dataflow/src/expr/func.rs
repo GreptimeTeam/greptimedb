@@ -22,10 +22,10 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use super::ScalarExpr;
-use crate::adapter::error::CastValueSnafu;
+use crate::expr::error::CastValueSnafu;
 // TODO(discord9): more function & eval
 use crate::{
-    adapter::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu},
+    expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu},
     repr::Row,
 };
 

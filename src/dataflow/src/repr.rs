@@ -27,7 +27,7 @@ use datatypes::value::Value;
 pub(crate) use relation::{RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::error::{CastValueSnafu, EvalError};
+use crate::expr::error::{CastValueSnafu, EvalError};
 
 /// System-wide Record count difference type.
 pub type Diff = i64;

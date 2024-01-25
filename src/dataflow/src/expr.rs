@@ -14,6 +14,7 @@
 
 //! for declare Expression in dataflow, including map, reduce, id and join(TODO!) etc.
 
+pub(crate) mod error;
 mod func;
 mod id;
 mod linear;
@@ -28,7 +29,7 @@ pub use linear::{MapFilterProject, SafeMfpPlan};
 pub(crate) use relation::{AggregateExpr, AggregateFunc};
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
+pub(crate) use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
 pub(crate) use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
