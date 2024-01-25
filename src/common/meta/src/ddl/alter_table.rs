@@ -226,7 +226,7 @@ impl AlterTableProcedure {
                         // Treat request outdated as success.
                         // The engine will throw this code when the schema version not match.
                         // As this procedure has locked the table, the only reason for this error
-                        // is procedure is successed before and is retrying.
+                        // is procedure is succeeded before and is retrying.
                         Err(e) if e.status_code() == StatusCode::RequestOutdated => Ok(()),
                         Err(e) => Err(handle_operate_region_error(datanode)(e)),
                     }
