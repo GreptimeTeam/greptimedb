@@ -246,7 +246,7 @@ impl ParquetReaderBuilder {
         let region_id = self.file_handle.region_id();
         let file_id = self.file_handle.file_id();
         // Tries to get from global cache.
-        if let Some(manager) = self.cache_manager.as_ref() {
+        if let Some(manager) = &self.cache_manager {
             if let Some(metadata) = manager.get_parquet_meta_data(region_id, file_id).await {
                 return Ok(metadata);
             }

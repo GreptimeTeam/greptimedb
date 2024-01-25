@@ -88,11 +88,7 @@ impl CacheManager {
         // Try to get metadata from write cache
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
         if let Some(write_cache) = &self.write_cache {
-            if let Some(metadata) = write_cache
-                .file_cache()
-                .try_get_parquet_meta_data(key)
-                .await
-            {
+            if let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await {
                 return Some(Arc::new(metadata));
             }
         };

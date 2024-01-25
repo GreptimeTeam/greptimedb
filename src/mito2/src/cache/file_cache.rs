@@ -122,7 +122,7 @@ impl FileCache {
             }
             Err(e) => {
                 if e.kind() != ErrorKind::NotFound {
-                    warn!("Failed to get file for key {:?}, err: {}", key, e);
+                    warn!(e; "Failed to get file for key {:?}", key);
                 }
             }
             Ok(None) => {}
@@ -156,7 +156,7 @@ impl FileCache {
             }
             Err(e) => {
                 if e.kind() != ErrorKind::NotFound {
-                    warn!("Failed to get file for key {:?}, err: {}", key, e);
+                    warn!(e; "Failed to get file for key {:?}", key);
                 }
 
                 // We removes the file from the index.
@@ -228,8 +228,9 @@ impl FileCache {
         self.local_store.clone()
     }
 
-    /// Try to get the parquet metadata in file cache.
-    pub(crate) async fn try_get_parquet_meta_data(&self, key: IndexKey) -> Option<ParquetMetaData> {
+    /// Get the parquet metadata in file cache.
+    /// If the file is not in the cache or fail to load metadata, return None.
+    pub(crate) async fn get_parquet_meta_data(&self, key: IndexKey) -> Option<ParquetMetaData> {
         // Check if file cache contrains the key
         if let Some(index_value) = self.memory_index.get(&key).await {
             // Load metadata from file cache
@@ -246,8 +247,8 @@ impl FileCache {
                 Err(e) => {
                     if !e.is_object_not_found() {
                         warn!(
-                            "Failed to get parquet metadata for key {:?}, err: {}",
-                            key, e
+                            e; "Failed to get parquet metadata for key {:?}",
+                            key
                         );
                     }
                     // We removes the file from the index.
