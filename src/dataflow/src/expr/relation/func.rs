@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::type_name;
+
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
+use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
 use crate::repr::Diff;
 
 /// sum(i*)->i64, sum(u*)->u64
@@ -64,7 +66,7 @@ pub enum AggregateFunc {
 }
 
 impl AggregateFunc {
-    pub fn eval<I>(&self, values: I) -> Value
+    pub fn eval<I>(&self, values: I) -> Result<Value, EvalError>
     where
         I: IntoIterator<Item = Value>,
     {
@@ -133,14 +135,13 @@ impl AggregateFunc {
                 } else {
                     None
                 };
-                let res = match self {
+                match self {
                     AggregateFunc::SumInt16 => sum_accum_diffs::<I, i16, i64>(accum, value_diffs),
                     AggregateFunc::SumInt32 => sum_accum_diffs::<I, i32, i64>(accum, value_diffs),
                     AggregateFunc::SumInt64 => sum_accum_diffs::<I, i64, i64>(accum, value_diffs),
 
                     _ => unreachable!(),
-                };
-                Ok(res)
+                }
             }
             AggregateFunc::SumUInt16 | AggregateFunc::SumUInt32 | AggregateFunc::SumUInt64 => {
                 let accum = if let Some(accum) = accum {
@@ -154,13 +155,12 @@ impl AggregateFunc {
                 } else {
                     None
                 };
-                let res = match self {
+                match self {
                     AggregateFunc::SumUInt16 => sum_accum_diffs::<I, u16, u64>(accum, value_diffs),
                     AggregateFunc::SumUInt32 => sum_accum_diffs::<I, u32, u64>(accum, value_diffs),
                     AggregateFunc::SumUInt64 => sum_accum_diffs::<I, u64, u64>(accum, value_diffs),
                     _ => unreachable!(),
-                };
-                Ok(res)
+                }
             }
             AggregateFunc::SumFloat32 => {
                 let accum = if let Some(accum) = accum {
@@ -174,7 +174,7 @@ impl AggregateFunc {
                 } else {
                     None
                 };
-                Ok(sum_accum_diffs::<I, f32, f32>(accum, value_diffs))
+                sum_accum_diffs::<I, f32, f32>(accum, value_diffs)
             }
             AggregateFunc::SumFloat64 => {
                 let accum = if let Some(accum) = accum {
@@ -188,20 +188,23 @@ impl AggregateFunc {
                 } else {
                     None
                 };
-                Ok(sum_accum_diffs::<I, f64, f64>(accum, value_diffs))
+                sum_accum_diffs::<I, f64, f64>(accum, value_diffs)
             }
 
-            AggregateFunc::Count => Ok(count_accum_diff(accum, value_diffs)),
+            AggregateFunc::Count => count_accum_diff(accum, value_diffs),
             _ => {
                 let values_only = value_diffs.into_iter().map(|e| e.0);
-                Ok(self.eval(values_only))
+                self.eval(values_only)
             }
         }
     }
 }
 
 /// TODO(discord9): deal with overflow
-fn sum_accum_diffs<I, ValueType, ResultType>(accum: Option<ResultType>, value_diffs: I) -> Value
+fn sum_accum_diffs<I, ValueType, ResultType>(
+    accum: Option<ResultType>,
+    value_diffs: I,
+) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = (Value, Diff)>,
     ValueType: TryFrom<Value>,
@@ -219,14 +222,23 @@ where
         .into_iter()
         .filter(|v| !v.0.is_null())
         .peekable();
-    if values.peek().is_none() {
+    let ret = if values.peek().is_none() {
         Value::Null
     } else {
-        let x = values
+        let res_ty_lst = values
             .map(|(v, d)| {
-                let res_v = ResultType::from(ValueType::try_from(v).expect("unexpected type"));
-                (res_v, d)
+                ValueType::try_from(v)
+                    .map(|v| (ResultType::from(v), d))
+                    .map_err(|err| {
+                        TryFromValueSnafu {
+                            msg: format!("type: {}, msg: {:?}", type_name::<ValueType>(), err),
+                        }
+                        .build()
+                    })
             })
+            .collect::<Result<Vec<_>, EvalError>>()?
+            .into_iter();
+        let x = res_ty_lst
             .fold(accum, |state, next| match (state, next) {
                 (Some(state), next) => Some(match next.1 {
                     1 => state + next.0,
@@ -239,20 +251,27 @@ where
                     _ => unreachable!("multicity of diff not supported"),
                 }),
             })
-            .expect("not all values are null");
+            .expect("not all values are null");// invariant: values are not null after filter
         x.into()
-    }
+    };
+    Ok(ret)
 }
 
-fn count_accum_diff<I>(accum: Option<Value>, value_diffs: I) -> Value
+fn count_accum_diff<I>(accum: Option<Value>, value_diffs: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = (Value, Diff)>,
 {
     let mut accum = if let Some(accum) = accum {
+        // invariant: accum is i64
         accum
             .as_value_ref()
             .as_i64()
-            .expect("unexpected type")
+            .map_err(|err| {
+                TryFromValueSnafu {
+                    msg: format!("type: i64, msg: {:?}", err),
+                }
+                .build()
+            })?
             .expect("Non Null accumulator")
     } else {
         0
@@ -264,72 +283,98 @@ where
             _ => unreachable!("multicity of diff not supported"),
         }
     }
-    Value::from(accum)
+    Ok(Value::from(accum))
 }
 
-fn max_string<I>(values: I) -> Value
+fn max_string<I>(values: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
 {
-    match values.into_iter().filter(|d| !d.is_null()).max_by(|a, b| {
-        let a = a.as_value_ref();
-        let a = a.as_string().expect("unexpected type").unwrap();
-        let b = b.as_value_ref();
-        let b = b.as_string().expect("unexpected type").unwrap();
-        a.cmp(b)
-    }) {
-        Some(v) => v,
+    let ret_err = || {
+        TryFromValueSnafu {
+            msg: "String".to_string(),
+        }
+        .build()
+    };
+    let str_list = values
+        .into_iter()
+        .map(|v| v.as_string().ok_or_else(ret_err))
+        .collect::<Result<Vec<_>, EvalError>>()?;
+    let ret = match str_list.into_iter().max_by(|a, b| a.cmp(b)) {
+        Some(v) => Value::from(v),
         None => Value::Null,
-    }
+    };
+    Ok(ret)
 }
 
-fn max_value<I, TypedValue>(values: I) -> Value
+fn max_value<I, TypedValue>(values: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
     TypedValue: TryFrom<Value> + Ord,
     <TypedValue as TryFrom<Value>>::Error: std::fmt::Debug,
     Value: From<Option<TypedValue>>,
 {
-    let x: Option<TypedValue> = values
-        .into_iter()
-        .filter(|v| !v.is_null())
-        .map(|v| TypedValue::try_from(v).expect("unexpected type"))
-        .max();
-    x.into()
+    let mut x: Option<TypedValue> = None;
+    for value in values.into_iter() {
+        if value.is_null() {
+            continue;
+        }
+        let v = TypedValue::try_from(value).map_err(|err| {
+            TryFromValueSnafu {
+                msg: format!("type: {}, msg: {:?}", type_name::<TypedValue>(), err),
+            }
+            .build()
+        })?;
+        x = x.map(|x| x.max(v));
+    }
+    Ok(x.into())
 }
 
-fn min_string<I>(values: I) -> Value
+fn min_string<I>(values: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
 {
-    match values.into_iter().filter(|d| !d.is_null()).min_by(|a, b| {
-        let a = a.as_value_ref();
-        let a = a.as_string().expect("unexpected type").unwrap();
-        let b = b.as_value_ref();
-        let b = b.as_string().expect("unexpected type").unwrap();
-        a.cmp(b)
-    }) {
-        Some(v) => v,
+    let ret_err = || {
+        TryFromValueSnafu {
+            msg: "String".to_string(),
+        }
+        .build()
+    };
+    let str_list = values
+        .into_iter()
+        .map(|v| v.as_string().ok_or_else(ret_err))
+        .collect::<Result<Vec<_>, EvalError>>()?;
+    let ret = match str_list.into_iter().min_by(|a, b| a.cmp(b)) {
+        Some(v) => Value::from(v),
         None => Value::Null,
-    }
+    };
+    Ok(ret)
 }
 
-fn min_value<I, TypedValue>(values: I) -> Value
+fn min_value<I, TypedValue>(values: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
     TypedValue: TryFrom<Value> + Ord,
     <TypedValue as TryFrom<Value>>::Error: std::fmt::Debug,
     Value: From<Option<TypedValue>>,
 {
-    let x: Option<TypedValue> = values
-        .into_iter()
-        .filter(|v| !v.is_null())
-        .map(|v| TypedValue::try_from(v).expect("unexpected type"))
-        .min();
-    x.into()
+    let mut x: Option<TypedValue> = None;
+    for value in values.into_iter() {
+        if value.is_null() {
+            continue;
+        }
+        let v = TypedValue::try_from(value).map_err(|err| {
+            TryFromValueSnafu {
+                msg: format!("type: {}, msg: {:?}", type_name::<TypedValue>(), err),
+            }
+            .build()
+        })?;
+        x = x.map(|x| x.min(v));
+    }
+    Ok(x.into())
 }
 
-fn sum_value<I, ValueType, ResultType>(values: I) -> Value
+fn sum_value<I, ValueType, ResultType>(values: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
     ValueType: TryFrom<Value>,
@@ -339,46 +384,56 @@ where
 {
     // If no row qualifies, then the result of COUNT is 0 (zero), and the result of any other aggregate function is the null value.
     let mut values = values.into_iter().filter(|v| !v.is_null()).peekable();
-    if values.peek().is_none() {
+    let ret = if values.peek().is_none() {
         Value::Null
     } else {
-        let x = values
-            .map(|v| ResultType::from(ValueType::try_from(v).expect("unexpected type")))
-            .sum::<ResultType>();
+        let x: ResultType = values
+            .map(|v| {
+                ValueType::try_from(v)
+                    .map(|v| ResultType::from(v))
+                    .map_err(|err| {
+                        TryFromValueSnafu {
+                            msg: format!("type: {}, msg: {:?}", type_name::<ResultType>(), err),
+                        }
+                        .build()
+                    })
+            })
+            .sum::<Result<ResultType, EvalError>>()?;
         x.into()
-    }
+    };
+    Ok(ret)
 }
 
-fn count<I>(values: I) -> Value
+fn count<I>(values: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
 {
     let x = values.into_iter().filter(|v| !v.is_null()).count() as i64;
-    Value::from(x)
+    Ok(Value::from(x))
 }
 
-fn any<I>(datums: I) -> Value
+fn any<I>(datums: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
 {
-    datums
+    Ok(datums
         .into_iter()
         .fold(Value::Boolean(false), |state, next| match (state, next) {
             (Value::Boolean(true), _) | (_, Value::Boolean(true)) => Value::Boolean(true),
             (Value::Null, _) | (_, Value::Null) => Value::Null,
             _ => Value::Boolean(false),
-        })
+        }))
 }
 
-fn all<I>(datums: I) -> Value
+fn all<I>(datums: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
 {
-    datums
+    Ok(datums
         .into_iter()
         .fold(Value::Boolean(true), |state, next| match (state, next) {
             (Value::Boolean(false), _) | (_, Value::Boolean(false)) => Value::Boolean(false),
             (Value::Null, _) | (_, Value::Null) => Value::Null,
             _ => Value::Boolean(true),
-        })
+        }))
 }
