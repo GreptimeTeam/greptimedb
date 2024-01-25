@@ -119,7 +119,7 @@ impl DataRegion {
 
         // overwrite semantic type
         let columns = columns
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(delta, c)| {
                 let mut c = c.clone();
