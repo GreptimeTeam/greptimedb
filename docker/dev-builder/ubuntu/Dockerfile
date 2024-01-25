@@ -1,5 +1,8 @@
 FROM ubuntu:20.04
 
+# The root path under which contains all the dependencies to build this Dockerfile.
+ARG DOCKER_BUILD_ROOT=.
+
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
 
@@ -40,7 +43,7 @@ RUN apt-get -y purge python3.8 && \
 RUN git config --global --add safe.directory ‘*’
 
 # Install Python dependencies.
-COPY ./docker/python/requirements.txt /etc/greptime/requirements.txt
+COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirements.txt
 RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
 # Install Rust.
