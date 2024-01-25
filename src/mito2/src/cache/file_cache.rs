@@ -258,7 +258,7 @@ impl FileCache {
             }
         } else {
             CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
-            return None;
+            None
         }
     }
 
