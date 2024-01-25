@@ -75,14 +75,14 @@ impl DataRegion {
 
             let result = self.mito.handle_request(region_id, request).await;
             match result {
-                Ok(_) => {}
+                Ok(_) => return Ok(()),
                 Err(e) if e.status_code() == StatusCode::RequestOutdated => {
                     info!("Retrying alter {region_id} due to outdated schema version, times {retries}");
                     retries += 1;
                     continue;
                 }
                 Err(e) => {
-                    Err(e).context(MitoWriteOperationSnafu)?;
+                    return Err(e).context(MitoWriteOperationSnafu)?;
                 }
             }
         }
