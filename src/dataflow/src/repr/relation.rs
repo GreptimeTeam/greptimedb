@@ -31,6 +31,8 @@ pub struct RelationType {
     /// have either zero or one sets of key indices.
     #[serde(default)]
     pub keys: Vec<Vec<usize>>,
+    /// optionally indicate the column that is TIME INDEX
+    pub time_index: Option<usize>,
 }
 
 impl RelationType {
@@ -47,6 +49,7 @@ impl RelationType {
         RelationType {
             column_types,
             keys: Vec::new(),
+            time_index: None,
         }
     }
 
