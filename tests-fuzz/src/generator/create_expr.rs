@@ -106,6 +106,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
                     partition_bounds.push(PartitionBound::Value(generate_random_value(
                         rng,
                         &column.column_type,
+                        None,
                     )));
                     partition_bounds.sort();
                 }
@@ -133,6 +134,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
                     partition_bounds.push(PartitionBound::Value(generate_random_value(
                         rng,
                         &column.column_type,
+                        None,
                     )));
                     partition_bounds.sort();
                 }

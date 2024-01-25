@@ -149,50 +149,19 @@ impl CreateTableExprTranslator {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::data_type::ConcreteDataType;
     use datatypes::value::Value;
     use partition::partition::{PartitionBound, PartitionDef};
 
     use super::CreateTableExprTranslator;
-    use crate::ir::create_expr::{ColumnOption, CreateTableExprBuilder};
-    use crate::ir::Column;
+    use crate::ir::create_expr::CreateTableExprBuilder;
+    use crate::test_utils;
     use crate::translator::DslTranslator;
 
     #[test]
     fn test_create_table_expr_translator() {
+        let test_ctx = test_utils::new_test_ctx();
         let create_table_expr = CreateTableExprBuilder::default()
-            .columns(vec![
-                Column {
-                    name: "host".to_string(),
-                    column_type: ConcreteDataType::string_datatype(),
-                    options: vec![ColumnOption::PrimaryKey],
-                },
-                Column {
-                    name: "idc".to_string(),
-                    column_type: ConcreteDataType::string_datatype(),
-                    options: vec![ColumnOption::PrimaryKey],
-                },
-                Column {
-                    name: "cpu_util".to_string(),
-                    column_type: ConcreteDataType::float64_datatype(),
-                    options: vec![],
-                },
-                Column {
-                    name: "memory_util".to_string(),
-                    column_type: ConcreteDataType::float64_datatype(),
-                    options: vec![],
-                },
-                Column {
-                    name: "disk_util".to_string(),
-                    column_type: ConcreteDataType::float64_datatype(),
-                    options: vec![],
-                },
-                Column {
-                    name: "ts".to_string(),
-                    column_type: ConcreteDataType::timestamp_millisecond_datatype(),
-                    options: vec![ColumnOption::TimeIndex],
-                },
-            ])
+            .columns(test_ctx.columns.clone())
             .name("system_metrics")
             .engine("mito")
             .primary_keys(vec![0, 1])

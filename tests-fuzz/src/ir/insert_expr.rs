@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(associated_type_bounds)]
+use datatypes::value::Value;
 
-pub mod context;
-pub mod error;
-pub mod executor;
-pub mod fake;
-pub mod generator;
-pub mod ir;
-pub mod translator;
+use crate::ir::Column;
 
-#[cfg(test)]
-pub mod test_utils;
+pub type RowValue = Vec<Value>;
+
+pub struct InsertIntoExpr {
+    pub name: String,
+    pub columns: Vec<Column>,
+    pub rows: Vec<RowValue>,
+}
