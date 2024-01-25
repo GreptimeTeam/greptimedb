@@ -27,6 +27,16 @@ RUN apt-get -y purge python3.8 && \
     ln -s /usr/bin/python3.10 /usr/bin/python3 && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
 
+# Silence all `safe.directory` warnings, to avoid the "detect dubious repository" error when building with submodules.
+# Disabling the safe directory check here won't pose extra security issues, because in our usage for this dev build
+# image, we use it solely on our own environment (that github action's VM, or ECS created dynamically by ourselves),
+# and the repositories are pulled from trusted sources (still us, of course). Doing so does not violate the intention
+# of the Git's addition to the "safe.directory" at the first place (see the commit message here:
+# https://github.com/git/git/commit/8959555cee7ec045958f9b6dd62e541affb7e7d9).
+# There's also another solution to this, that we add the desired submodules to the safe directory, instead of using 
+# wildcard here. However, that requires the git's config files and the submodules all owned by the very same user.
+# It's troublesome to do this since the dev build runs in Docker, which is under user "root"; while outside the Docker,
+# it can be a different user that have prepared the submodules.
 RUN git config --global --add safe.directory ‘*’
 
 # Install Python dependencies.
