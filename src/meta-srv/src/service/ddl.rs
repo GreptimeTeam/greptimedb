@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use api::v1::meta::{
-    ddl_task_server, SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
-    SubmitDdlTaskResponse as PbSubmitDdlTaskResponse,
+    procedure_server, DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
+    MigrateRegionRequest, MigrateRegionResponse, ProcedureId, ProcedureStateResponse,
+    QueryProcedureRequest,
 };
 use common_meta::ddl::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
@@ -26,12 +27,16 @@ use crate::error;
 use crate::metasrv::MetaSrv;
 
 #[async_trait::async_trait]
-impl ddl_task_server::DdlTask for MetaSrv {
-    async fn submit_ddl_task(
+impl procedure_server::Procedure for MetaSrv {
+    async fn query(
         &self,
-        request: Request<PbSubmitDdlTaskRequest>,
-    ) -> GrpcResult<PbSubmitDdlTaskResponse> {
-        let PbSubmitDdlTaskRequest { header, task, .. } = request.into_inner();
+        pid: Request<QueryProcedureRequest>,
+    ) -> GrpcResult<ProcedureStateResponse> {
+        todo!();
+    }
+
+    async fn ddl(&self, request: Request<PbDdlTaskRequest>) -> GrpcResult<PbDdlTaskResponse> {
+        let PbDdlTaskRequest { header, task, .. } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
         let cluster_id = header.cluster_id;
@@ -54,5 +59,12 @@ impl ddl_task_server::DdlTask for MetaSrv {
             .into();
 
         Ok(Response::new(resp))
+    }
+
+    async fn migrate(
+        &self,
+        pid: Request<MigrateRegionRequest>,
+    ) -> GrpcResult<MigrateRegionResponse> {
+        todo!();
     }
 }

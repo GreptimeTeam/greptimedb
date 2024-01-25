@@ -328,6 +328,7 @@ impl MetaClient {
         Ok(())
     }
 
+    /// Submit a DDL task
     pub async fn submit_ddl_task(
         &self,
         req: SubmitDdlTaskRequest,

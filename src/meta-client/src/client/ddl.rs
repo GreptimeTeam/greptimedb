@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::ddl_task_client::DdlTaskClient;
-use api::v1::meta::{ErrorCode, ResponseHeader, Role, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use api::v1::meta::procedure_client::ProcedureClient;
+use api::v1::meta::{DdlTaskRequest, DdlTaskResponse, ErrorCode, ResponseHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
@@ -61,10 +61,7 @@ impl Client {
         inner.is_started()
     }
 
-    pub async fn submit_ddl_task(
-        &self,
-        req: SubmitDdlTaskRequest,
-    ) -> Result<SubmitDdlTaskResponse> {
+    pub async fn submit_ddl_task(&self, req: DdlTaskRequest) -> Result<DdlTaskResponse> {
         let inner = self.inner.read().await;
         inner.submit_ddl_task(req).await
     }
@@ -109,13 +106,13 @@ impl Inner {
         Ok(())
     }
 
-    fn make_client(&self, addr: impl AsRef<str>) -> Result<DdlTaskClient<Channel>> {
+    fn make_client(&self, addr: impl AsRef<str>) -> Result<ProcedureClient<Channel>> {
         let channel = self
             .channel_manager
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        Ok(DdlTaskClient::new(channel))
+        Ok(ProcedureClient::new(channel))
     }
 
     #[inline]
@@ -123,10 +120,7 @@ impl Inner {
         self.ask_leader.is_some()
     }
 
-    pub async fn submit_ddl_task(
-        &self,
-        mut req: SubmitDdlTaskRequest,
-    ) -> Result<SubmitDdlTaskResponse> {
+    pub async fn submit_ddl_task(&self, mut req: DdlTaskRequest) -> Result<DdlTaskResponse> {
         ensure!(
             self.is_started(),
             error::IllegalGrpcClientStateSnafu {
@@ -145,7 +139,7 @@ impl Inner {
         while times < self.max_retry {
             if let Some(leader) = &ask_leader.get_leader() {
                 let mut client = self.make_client(leader)?;
-                match client.submit_ddl_task(req.clone()).await {
+                match client.ddl(req.clone()).await {
                     Ok(res) => {
                         let res = res.into_inner();
                         if is_not_leader(&res.header) {
