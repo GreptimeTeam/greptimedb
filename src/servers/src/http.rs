@@ -180,7 +180,7 @@ impl From<SchemaRef> for OutputSchema {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct HttpRecordsOutput {
-    schema: Option<OutputSchema>,
+    schema: OutputSchema,
     rows: Vec<Vec<Value>>,
 }
 
@@ -190,14 +190,11 @@ impl HttpRecordsOutput {
     }
 
     pub fn num_cols(&self) -> usize {
-        self.schema
-            .as_ref()
-            .map(|x| x.column_schemas.len())
-            .unwrap_or(0)
+        self.schema.column_schemas.len()
     }
 
-    pub fn schema(&self) -> Option<&OutputSchema> {
-        self.schema.as_ref()
+    pub fn schema(&self) -> &OutputSchema {
+        &self.schema
     }
 
     pub fn rows(&self) -> &Vec<Vec<Value>> {
@@ -212,13 +209,10 @@ impl HttpRecordsOutput {
     ) -> std::result::Result<HttpRecordsOutput, Error> {
         if recordbatches.is_empty() {
             Ok(HttpRecordsOutput {
-                schema: Some(OutputSchema::from(schema)),
+                schema: OutputSchema::from(schema),
                 rows: vec![],
             })
         } else {
-            // safety ensured by previous empty check
-            let output_schema = OutputSchema::from(schema);
-
             let mut rows =
                 Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
 
@@ -235,7 +229,7 @@ impl HttpRecordsOutput {
             }
 
             Ok(HttpRecordsOutput {
-                schema: Some(output_schema),
+                schema: OutputSchema::from(schema),
                 rows,
             })
         }
@@ -957,9 +951,8 @@ mod test {
             if let GreptimeQueryOutput::Records(r) = json_output {
                 assert_eq!(r.num_rows(), 0);
                 assert_eq!(r.num_cols(), 2);
-                let schema = r.schema.as_ref().unwrap();
-                assert_eq!(schema.column_schemas[0].name, "numbers");
-                assert_eq!(schema.column_schemas[0].data_type, "UInt32");
+                assert_eq!(r.schema.column_schemas[0].name, "numbers");
+                assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
             } else {
                 panic!("invalid output type");
             }
@@ -1008,9 +1001,8 @@ mod test {
                     if let GreptimeQueryOutput::Records(r) = json_output {
                         assert_eq!(r.num_rows(), 4);
                         assert_eq!(r.num_cols(), 2);
-                        let schema = r.schema.as_ref().unwrap();
-                        assert_eq!(schema.column_schemas[0].name, "numbers");
-                        assert_eq!(schema.column_schemas[0].data_type, "UInt32");
+                        assert_eq!(r.schema.column_schemas[0].name, "numbers");
+                        assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
                         assert_eq!(r.rows[0][0], serde_json::Value::from(1));
                         assert_eq!(r.rows[0][1], serde_json::Value::Null);
                     } else {
@@ -1033,9 +1025,8 @@ mod test {
                     if let GreptimeQueryOutput::Records(r) = output {
                         assert_eq!(r.num_rows(), 4);
                         assert_eq!(r.num_cols(), 2);
-                        let schema = r.schema.as_ref().unwrap();
-                        assert_eq!(schema.column_schemas[0].name, "numbers");
-                        assert_eq!(schema.column_schemas[0].data_type, "UInt32");
+                        assert_eq!(r.schema.column_schemas[0].name, "numbers");
+                        assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
                         assert_eq!(r.rows[0][0], serde_json::Value::from(1));
                         assert_eq!(r.rows[0][1], serde_json::Value::Null);
                     } else {
