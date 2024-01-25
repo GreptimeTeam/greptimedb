@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{debug, error, info};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
@@ -48,9 +48,9 @@ impl<S> RegionWorkerLoop<S> {
 
         // Get the version before alter.
         let version = region.version();
-        if version.metadata.schema_version > request.schema_version {
+        if version.metadata.schema_version != request.schema_version {
             // This is possible if we retry the request.
-            warn!(
+            debug!(
                 "Ignores alter request, region id:{}, region schema version {} is greater than request schema version {}",
                 region_id, version.metadata.schema_version, request.schema_version
             );

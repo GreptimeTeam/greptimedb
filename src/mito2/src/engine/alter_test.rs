@@ -283,7 +283,7 @@ async fn test_alter_region_retry() {
         .handle_request(region_id, RegionRequest::Alter(request))
         .await
         .unwrap_err();
-    assert!(matches!(err.status_code(), StatusCode::RequestOutdated));
+    assert_eq!(err.status_code(), StatusCode::RequestOutdated);
 
     let expected = "\
 +-------+-------+---------+---------------------+

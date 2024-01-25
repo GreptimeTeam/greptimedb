@@ -388,11 +388,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Schema version doesn't match. Expect greater than {} but gives {}",
-        expect,
-        actual
-    ))]
+    #[snafu(display("Schema version doesn't match. Expect {} but gives {}", expect, actual))]
     InvalidRegionRequestSchemaVersion {
         expect: u64,
         actual: u64,
