@@ -27,7 +27,7 @@ RUN apt-get -y purge python3.8 && \
     ln -s /usr/bin/python3.10 /usr/bin/python3 && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
 
-RUN git config --global --add safe.directory /greptimedb
+RUN git config --global --add safe.directory ‘*’
 
 # Install Python dependencies.
 COPY ./docker/python/requirements.txt /etc/greptime/requirements.txt
