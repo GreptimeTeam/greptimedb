@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapter::error::EvalError;
 use crate::expr::{Id, LocalId, ScalarExpr};
-use crate::repr::{self, Diff, Row};
+use crate::repr::{self, value2internal_ts, Diff, Row};
 
 /// A compound operator that can be applied row-by-row.
 ///
@@ -385,30 +385,104 @@ impl MfpPlan {
             upper_bounds,
         })
     }
-    pub fn evaluate<E: From<EvalError>, V: Fn(&repr::Timestamp) -> bool>(
+
+    /// Indicates if the planned `MapFilterProject` emits exactly its inputs as outputs.
+    pub fn is_identity(&self) -> bool {
+        self.mfp.mfp.is_identity() && self.lower_bounds.is_empty() && self.upper_bounds.is_empty()
+    }
+
+    /// if `lower_bound <= sys_time < upper_bound`, return `[(data, sys_time, +1), (data, min_upper_bound, -1)]`
+    ///
+    /// else if `sys_time < lower_bound`, return `[(data, lower_bound, +1), (data, min_upper_bound, -1)]`
+    ///
+    /// else if `sys_time >= upper_bound`, return `[None, None]`
+    ///
+    /// if eval error appeal in any of those process, corresponding result will be `Err`
+    pub fn evaluate<E: From<EvalError>>(
         &self,
         values: &mut Vec<Value>,
-        time: repr::Timestamp,
+        sys_time: repr::Timestamp,
         diff: Diff,
-        valid_time: V,
     ) -> impl Iterator<Item = Result<(Row, repr::Timestamp, Diff), (E, repr::Timestamp, Diff)>>
     {
         match self.mfp.evaluate_inner(values) {
             Err(e) => {
-                return Some(Err((e.into(), time, diff))).into_iter().chain(None);
+                return Some(Err((e.into(), sys_time, diff)))
+                    .into_iter()
+                    .chain(None);
             }
             Ok(true) => {}
             Ok(false) => {
                 return None.into_iter().chain(None);
             }
         }
-        // TODO(discord9): Temporal filter
-        let ret = Row::pack(self.mfp.mfp.projection.iter().map(|c| values[*c].clone()));
-        Some(Ok((ret, time, diff))).into_iter().chain(None)
-    }
-    /// Indicates if the planned `MapFilterProject` emits exactly its inputs as outputs.
-    pub fn is_identity(&self) -> bool {
-        self.mfp.mfp.is_identity() && self.lower_bounds.is_empty() && self.upper_bounds.is_empty()
+
+        let mut lower_bound = sys_time;
+        let mut upper_bound = None;
+
+        // Track whether we have seen a null in either bound, as this should
+        // prevent the record from being produced at any time.
+        let mut null_eval = false;
+        let ret_err = |e: EvalError| {
+            Some(Err((e.into(), sys_time, diff)))
+                .into_iter()
+                .chain(None)
+        };
+        for l in self.lower_bounds.iter() {
+            match l.eval(values) {
+                Ok(v) => {
+                    if v.is_null() {
+                        null_eval = true;
+                        continue;
+                    }
+                    match value2internal_ts(v) {
+                        Ok(ts) => lower_bound = lower_bound.max(ts),
+                        Err(e) => return ret_err(e),
+                    }
+                }
+                Err(e) => return ret_err(e),
+            };
+        }
+
+        for u in self.upper_bounds.iter() {
+            if upper_bound != Some(lower_bound) {
+                match u.eval(values) {
+                    Err(e) => return ret_err(e),
+                    Ok(val) => {
+                        if val.is_null() {
+                            null_eval = true;
+                            continue;
+                        }
+                        let ts = match value2internal_ts(val) {
+                            Ok(ts) => ts,
+                            Err(e) => return ret_err(e),
+                        };
+                        if let Some(upper) = upper_bound {
+                            upper_bound = Some(upper.min(ts));
+                        } else {
+                            upper_bound = Some(ts);
+                        }
+                        // Force the upper bound to be at least the lower
+                        // bound.
+                        if upper_bound.is_some() && upper_bound < Some(lower_bound) {
+                            upper_bound = Some(lower_bound);
+                        }
+                    }
+                }
+            }
+        }
+
+        if Some(lower_bound) != upper_bound && !null_eval {
+            let res_row = Row::pack(self.mfp.mfp.projection.iter().map(|c| values[*c].clone()));
+            let upper_opt =
+                upper_bound.map(|upper_bound| Ok((res_row.clone(), upper_bound, -diff)));
+            // if diff==-1, the `upper_opt` will cancel the future `-1` inserted before by previous diff==1 row
+            let lower = Some(Ok((res_row, lower_bound, diff)));
+
+            lower.into_iter().chain(upper_opt)
+        } else {
+            None.into_iter().chain(None)
+        }
     }
 }
 

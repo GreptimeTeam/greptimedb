@@ -20,8 +20,14 @@ mod relation;
 use std::borrow::Borrow;
 use std::slice::SliceIndex;
 
+use datatypes::data_type::ConcreteDataType;
+use datatypes::types::cast::CastOption;
+use datatypes::types::cast_with_opt;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
+
+use crate::adapter::error::{CastValueSnafu, EvalError};
+
 /// System-wide Record count difference type.
 pub type Diff = i64;
 
@@ -30,6 +36,37 @@ pub type Timestamp = u64;
 
 /// Default type for a repr of changes to a collection.
 pub type DiffRow = (Row, Timestamp, Diff);
+
+fn i64mapu64(i: i64) -> u64 {
+    (i as u64).wrapping_add(std::i64::MAX as u64 + 1)
+}
+
+pub fn value2internal_ts(value: Value) -> Result<Timestamp, EvalError> {
+    match value {
+        Value::DateTime(ts) => Ok(i64mapu64(ts.val())),
+        arg => {
+            let arg_ty = arg.data_type();
+            let res = cast_with_opt(
+                arg,
+                &ConcreteDataType::datetime_datatype(),
+                &CastOption { strict: true },
+            )
+            .map_err(|e| {
+                CastValueSnafu {
+                    from: arg_ty,
+                    to: ConcreteDataType::datetime_datatype(),
+                    msg: e.to_string(),
+                }
+                .build()
+            })?;
+            if let Value::DateTime(ts) = res {
+                Ok(i64mapu64(ts.val()))
+            } else {
+                unreachable!()
+            }
+        }
+    }
+}
 
 /// A row is a vector of values.
 ///
