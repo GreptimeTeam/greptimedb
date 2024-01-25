@@ -89,7 +89,7 @@ mod tests {
                     self.error = !self.error;
                     Err(Error::retry_later(MockError::new(StatusCode::Internal)))
                 } else {
-                    Ok(Status::done_with_output(Arc::new("hello")))
+                    Ok(Status::done_with_output("hello"))
                 }
             }
 
