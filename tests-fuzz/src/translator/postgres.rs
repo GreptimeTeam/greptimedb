@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod mysql;
-pub mod postgres;
+use sqlparser::ast::DataType as SqlDataType;
 
-use std::fmt;
+pub mod alter_expr;
+pub mod create_expr;
 
-pub trait DslTranslator<T, U> {
-    type Error: Sync + Send + fmt::Debug;
-
-    fn translate(&self, input: &T) -> Result<U, Self::Error>;
+pub fn sql_data_type_to_postgres_data_type(data_type: SqlDataType) -> String {
+    match data_type {
+        SqlDataType::Double => "DOUBLE PRECISION".to_string(),
+        _ => data_type.to_string(),
+    }
 }
