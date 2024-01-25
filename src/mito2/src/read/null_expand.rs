@@ -64,28 +64,19 @@ impl BatchReader for NullExpandReader {
                     .data_type
                     .clone();
                 if let Some(prev_null_vec) = self.null_buf.get_mut(&data_type) {
-                    // field.data = null_vec.clone();
                     if prev_null_vec.len() >= length {
                         field.data = prev_null_vec.slice(0, length);
                     } else {
                         let new_null_vec = Self::make_null_vec(&data_type, length);
-                        // self.null_buf.insert(data_type, null_vec.clone());
                         *prev_null_vec = new_null_vec.clone();
                         field.data = new_null_vec;
                     }
                 } else {
-                    // let mut builder = data_type.create_mutable_vector(length);
-                    // builder.push_nulls(length);
-                    // let null_vec = builder.to_vector();
                     let null_vec = Self::make_null_vec(&data_type, length);
                     self.null_buf.insert(data_type, null_vec.clone());
                     field.data = null_vec;
                 }
             }
-            // if let Some(null_buf) = self.null_buf.get(&field.data_type()) {
-            //     field.set_null_bitmap(null_buf.clone());
-            // }
-            // if
         });
 
         Ok(Some(batch))
