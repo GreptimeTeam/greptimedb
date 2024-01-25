@@ -242,7 +242,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         outputs[1],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"rows":[]}
+            "records":{"rows":[], "schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]}}
         }))
         .unwrap()
     );
