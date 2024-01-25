@@ -89,7 +89,10 @@ impl CacheManager {
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
         if let Some(write_cache) = &self.write_cache {
             if let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await {
-                return Some(Arc::new(metadata));
+                let metadata = Arc::new(metadata);
+                // Put metadata into sst meta cache
+                self.put_parquet_meta_data(region_id, file_id, metadata.clone());
+                return Some(metadata);
             }
         };
 
