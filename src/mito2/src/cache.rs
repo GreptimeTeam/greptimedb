@@ -74,7 +74,6 @@ impl CacheManager {
         &self,
         region_id: RegionId,
         file_id: FileId,
-        file_size: u64,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
         let metadata = self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
@@ -91,7 +90,7 @@ impl CacheManager {
         if let Some(write_cache) = &self.write_cache {
             if let Some(metadata) = write_cache
                 .file_cache()
-                .try_get_parquet_meta_data(key, file_size)
+                .try_get_parquet_meta_data(key)
                 .await
             {
                 return Some(Arc::new(metadata));
@@ -348,7 +347,7 @@ mod tests {
         let metadata = parquet_meta();
         cache.put_parquet_meta_data(region_id, file_id, metadata);
         assert!(cache
-            .get_parquet_meta_data(region_id, file_id, 0)
+            .get_parquet_meta_data(region_id, file_id)
             .await
             .is_none());
 
@@ -376,18 +375,18 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
         assert!(cache
-            .get_parquet_meta_data(region_id, file_id, 0)
+            .get_parquet_meta_data(region_id, file_id)
             .await
             .is_none());
         let metadata = parquet_meta();
         cache.put_parquet_meta_data(region_id, file_id, metadata);
         assert!(cache
-            .get_parquet_meta_data(region_id, file_id, 0)
+            .get_parquet_meta_data(region_id, file_id)
             .await
             .is_some());
         cache.remove_parquet_meta_data(region_id, file_id);
         assert!(cache
-            .get_parquet_meta_data(region_id, file_id, 0)
+            .get_parquet_meta_data(region_id, file_id)
             .await
             .is_none());
     }

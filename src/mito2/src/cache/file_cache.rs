@@ -229,39 +229,36 @@ impl FileCache {
     }
 
     /// Try to get the parquet metadata in file cache.
-    pub(crate) async fn try_get_parquet_meta_data(
-        &self,
-        key: IndexKey,
-        file_size: u64,
-    ) -> Option<ParquetMetaData> {
+    pub(crate) async fn try_get_parquet_meta_data(&self, key: IndexKey) -> Option<ParquetMetaData> {
         // Check if file cache contrains the key
-        if self.memory_index.get(&key).await.is_none() {
+        if let Some(index_value) = self.memory_index.get(&key).await {
+            // Load metadata from file cache
+            let local_store = self.local_store();
+            let file_path = self.cache_file_path(key);
+            let file_size = index_value.file_size as u64;
+            let metadata_loader = MetadataLoader::new(local_store, &file_path, file_size);
+
+            match metadata_loader.load().await {
+                Ok(metadata) => {
+                    CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
+                    Some(metadata)
+                }
+                Err(e) => {
+                    if !e.is_object_not_found() {
+                        warn!(
+                            "Failed to get parquet metadata for key {:?}, err: {}",
+                            key, e
+                        );
+                    }
+                    // We removes the file from the index.
+                    self.memory_index.remove(&key).await;
+                    CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+                    None
+                }
+            }
+        } else {
             CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
             return None;
-        }
-
-        // Load metadata from file cache
-        let local_store = self.local_store();
-        let file_path = self.cache_file_path(key);
-        let metadata_loader = MetadataLoader::new(local_store, &file_path, file_size);
-
-        match metadata_loader.load().await {
-            Ok(metadata) => {
-                CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
-                Some(metadata)
-            }
-            Err(e) => {
-                if !e.is_object_not_found() {
-                    warn!(
-                        "Failed to get parquet metadata for key {:?}, err: {}",
-                        key, e
-                    );
-                }
-                // We removes the file from the index.
-                self.memory_index.remove(&key).await;
-                CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
-                None
-            }
         }
     }
 
