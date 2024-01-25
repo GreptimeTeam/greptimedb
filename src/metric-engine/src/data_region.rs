@@ -13,6 +13,9 @@
 // limitations under the License.
 
 use api::v1::SemanticType;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_telemetry::info;
 use common_telemetry::tracing::warn;
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
@@ -29,6 +32,8 @@ use crate::error::{
 };
 use crate::metrics::MITO_DDL_DURATION;
 use crate::utils;
+
+const MAX_RETRIES: usize = 5;
 
 /// This is a generic handler like [MetricEngine](crate::engine::MetricEngine). It
 /// will handle all the data related operations across physical tables. Thus
@@ -61,6 +66,35 @@ impl DataRegion {
     ) -> Result<()> {
         let region_id = utils::to_data_region_id(region_id);
 
+        let mut retries = 0;
+        // submit alter request
+        while retries < MAX_RETRIES {
+            let request = self.assemble_alter_request(region_id, &columns).await?;
+
+            let _timer = MITO_DDL_DURATION.start_timer();
+
+            let result = self.mito.handle_request(region_id, request).await;
+            match result {
+                Ok(_) => {}
+                Err(e) if e.status_code() == StatusCode::RequestOutdated => {
+                    info!("Retrying alter {region_id} due to outdated schema version, times {retries}");
+                    retries += 1;
+                    continue;
+                }
+                Err(e) => {
+                    Err(e).context(MitoWriteOperationSnafu)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn assemble_alter_request(
+        &self,
+        region_id: RegionId,
+        columns: &[ColumnMetadata],
+    ) -> Result<RegionRequest> {
         // retrieve underlying version
         let region_metadata = self
             .mito
@@ -87,7 +121,8 @@ impl DataRegion {
         let columns = columns
             .into_iter()
             .enumerate()
-            .map(|(delta, mut c)| {
+            .map(|(delta, c)| {
+                let mut c = c.clone();
                 if c.semantic_type == SemanticType::Tag {
                     c.semantic_type = SemanticType::Field;
                     if !c.column_schema.data_type.is_string() {
@@ -120,16 +155,7 @@ impl DataRegion {
             kind: AlterKind::AddColumns { columns },
         });
 
-        // submit alter request
-        {
-            let _timer = MITO_DDL_DURATION.start_timer();
-            self.mito
-                .handle_request(region_id, alter_request)
-                .await
-                .context(MitoWriteOperationSnafu)?;
-        }
-
-        Ok(())
+        Ok(alter_request)
     }
 
     pub async fn write_data(

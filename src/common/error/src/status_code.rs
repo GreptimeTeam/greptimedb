@@ -68,6 +68,8 @@ pub enum StatusCode {
     // ====== Begin of storage related status code =====
     /// Storage is temporarily unable to handle the request
     StorageUnavailable = 5000,
+    /// Request is outdated, e.g., version mismatch
+    RequestOutdated = 5001,
     // ====== End of storage related status code =======
 
     // ====== Begin of server related status code =====
@@ -135,7 +137,8 @@ impl StatusCode {
             | StatusCode::AuthHeaderNotFound
             | StatusCode::InvalidAuthHeader
             | StatusCode::AccessDenied
-            | StatusCode::PermissionDenied => false,
+            | StatusCode::PermissionDenied
+            | StatusCode::RequestOutdated => false,
         }
     }
 
@@ -172,7 +175,8 @@ impl StatusCode {
             | StatusCode::AuthHeaderNotFound
             | StatusCode::InvalidAuthHeader
             | StatusCode::AccessDenied
-            | StatusCode::PermissionDenied => false,
+            | StatusCode::PermissionDenied
+            | StatusCode::RequestOutdated => false,
         }
     }
 

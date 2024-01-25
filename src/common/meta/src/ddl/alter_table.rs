@@ -21,6 +21,8 @@ use api::v1::region::{
 };
 use api::v1::{AlterExpr, RenameTable};
 use async_trait::async_trait;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_grpc_expr::alter_expr_to_request;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
@@ -218,10 +220,12 @@ impl AlterTableProcedure {
                 let requester = requester.clone();
 
                 alter_region_tasks.push(async move {
-                    if let Err(e) = requester.handle(request).await {
-                        return Err(handle_operate_region_error(datanode)(e));
+                    let result = requester.handle(request).await;
+                    match result {
+                        Ok(_) => Ok(()),
+                        Err(e) if e.status_code() == StatusCode::RequestOutdated => Ok(()),
+                        Err(e) => Err(handle_operate_region_error(datanode)(e)),
                     }
-                    Ok(())
                 });
             }
         }
