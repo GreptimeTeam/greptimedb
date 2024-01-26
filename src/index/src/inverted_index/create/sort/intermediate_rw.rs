@@ -23,7 +23,7 @@ use snafu::ResultExt;
 
 use crate::inverted_index::create::sort::SortedStream;
 use crate::inverted_index::error::{
-    ReadSnafu, Result, UnknownIntermediateCodecMagicSnafu, WriteSnafu,
+    CloseSnafu, FlushSnafu, ReadSnafu, Result, UnknownIntermediateCodecMagicSnafu, WriteSnafu,
 };
 use crate::inverted_index::Bytes;
 
@@ -50,7 +50,11 @@ impl<W: AsyncWrite + Unpin> IntermediateWriter<W> {
         let value_stream = stream::iter(values.into_iter().map(Ok));
         let frame_write = FramedWrite::new(&mut self.writer, encoder);
         // `forward()` will flush and close the writer when the stream ends
-        value_stream.forward(frame_write).await?;
+        if let Err(e) = value_stream.forward(frame_write).await {
+            self.writer.flush().await.context(FlushSnafu)?;
+            self.writer.close().await.context(CloseSnafu)?;
+            return Err(e);
+        }
 
         Ok(())
     }
