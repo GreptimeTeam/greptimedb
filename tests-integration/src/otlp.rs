@@ -75,7 +75,7 @@ mod test {
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -97,7 +97,7 @@ mod test {
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -117,7 +117,7 @@ mod test {
             .do_query("SELECT * FROM my_test_histo_sum", ctx.clone())
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -135,7 +135,7 @@ mod test {
             .do_query("SELECT * FROM my_test_histo_count", ctx.clone())
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();

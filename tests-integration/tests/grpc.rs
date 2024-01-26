@@ -383,7 +383,7 @@ async fn insert_and_assert(db: &Database) {
 
     let record_batches = match output {
         Output::RecordBatches(record_batches) => record_batches,
-        Output::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        Output::Stream(stream, _) => RecordBatches::try_collect(stream).await.unwrap(),
         Output::AffectedRows(_) => unreachable!(),
     };
 
@@ -683,7 +683,7 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
 async fn to_batch(output: Output) -> String {
     match output {
         Output::RecordBatches(batch) => batch,
-        Output::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        Output::Stream(stream, _) => RecordBatches::try_collect(stream).await.unwrap(),
         Output::AffectedRows(_) => unreachable!(),
     }
     .pretty_print()

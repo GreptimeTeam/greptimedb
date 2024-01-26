@@ -442,7 +442,7 @@ impl Database for GreptimeDB {
             }) as _
         } else {
             let mut result = client.sql(&query).await;
-            if let Ok(Output::Stream(stream)) = result {
+            if let Ok(Output::Stream(stream, _)) = result {
                 match RecordBatches::try_collect(stream).await {
                     Ok(recordbatches) => result = Ok(Output::RecordBatches(recordbatches)),
                     Err(e) => {
@@ -553,7 +553,7 @@ impl Display for ResultDisplayer {
                         }
                     }
                 }
-                Output::Stream(_) => unreachable!(),
+                Output::Stream(_, _) => unreachable!(),
             },
             Err(e) => {
                 let status_code = e.status_code();

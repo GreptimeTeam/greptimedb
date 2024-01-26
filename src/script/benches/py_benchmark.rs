@@ -69,7 +69,7 @@ async fn run_compiled(script: &PyScript) {
         .await
         .unwrap();
     let _res = match output {
-        Output::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
+        Output::Stream(s, _) => common_recordbatch::util::collect_batches(s).await.unwrap(),
         Output::RecordBatches(rbs) => rbs,
         _ => unreachable!(),
     };

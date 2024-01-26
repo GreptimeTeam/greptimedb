@@ -135,7 +135,7 @@ impl StatementExecutor {
             .await
             .context(ExecLogicalPlanSnafu)?;
         let stream = match output {
-            Output::Stream(stream) => stream,
+            Output::Stream(stream, _) => stream,
             Output::RecordBatches(record_batches) => record_batches.as_stream(),
             _ => unreachable!(),
         };

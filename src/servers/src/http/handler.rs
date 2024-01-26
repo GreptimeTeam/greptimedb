@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -22,11 +23,15 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_plugins::GREPTIME_EXEC_PREFIX;
+use common_query::physical_plan::PhysicalPlan;
 use common_query::Output;
 use common_recordbatch::util;
+use datafusion::physical_plan::metrics::MetricValue;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use session::context::QueryContextRef;
 
 use crate::http::arrow_result::ArrowResponse;
@@ -134,14 +139,12 @@ pub async fn from_output(
             Ok(Output::AffectedRows(rows)) => {
                 results.push(GreptimeQueryOutput::AffectedRows(rows));
             }
-            Ok(Output::Stream(stream)) => {
+            Ok(Output::Stream(stream, physical_plan)) => {
                 let schema = stream.schema().clone();
                 // TODO(sunng87): streaming response
-                match util::collect(stream).await {
+                let mut http_record_output = match util::collect(stream).await {
                     Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
-                        Ok(rows) => {
-                            results.push(GreptimeQueryOutput::Records(rows));
-                        }
+                        Ok(rows) => rows,
                         Err(err) => {
                             return Err(ErrorResponse::from_error(ty, err));
                         }
@@ -149,7 +152,13 @@ pub async fn from_output(
                     Err(err) => {
                         return Err(ErrorResponse::from_error(ty, err));
                     }
+                };
+                if let Some(physical_plan) = physical_plan {
+                    let mut result_map = HashMap::new();
+                    collect_plan_metrics(physical_plan, &mut result_map);
+                    http_record_output.metrics = result_map;
                 }
+                results.push(GreptimeQueryOutput::Records(http_record_output))
             }
             Ok(Output::RecordBatches(rbs)) => {
                 match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
@@ -168,6 +177,33 @@ pub async fn from_output(
     }
 
     Ok(results)
+}
+
+fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, result_map: &mut HashMap<String, Value>) {
+    if let Some(m) = plan.metrics() {
+        m.iter().for_each(|m| match m.value() {
+            MetricValue::Count { name, count } => {
+                if name.starts_with(GREPTIME_EXEC_PREFIX) && count.value() > 0 {
+                    result_map.insert(name.to_string(), Value::from(count.value()));
+                }
+            }
+            MetricValue::Gauge { name, gauge } => {
+                if name.starts_with(GREPTIME_EXEC_PREFIX) && gauge.value() > 0 {
+                    result_map.insert(name.to_string(), Value::from(gauge.value()));
+                }
+            }
+            MetricValue::Time { name, time } => {
+                if name.starts_with(GREPTIME_EXEC_PREFIX) {
+                    result_map.insert(name.to_string(), Value::from(time.value()));
+                }
+            }
+            _ => {}
+        });
+    }
+
+    for c in plan.children() {
+        collect_plan_metrics(c, result_map);
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]

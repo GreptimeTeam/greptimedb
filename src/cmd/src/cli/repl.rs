@@ -183,7 +183,7 @@ impl Repl {
         .context(RequestDatabaseSnafu { sql: &sql })?;
 
         let either = match output {
-            Output::Stream(s) => {
+            Output::Stream(s, _) => {
                 let x = RecordBatches::try_collect(s)
                     .await
                     .context(CollectRecordBatchesSnafu)?;

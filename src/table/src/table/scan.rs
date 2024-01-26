@@ -21,6 +21,7 @@ use std::task::{Context, Poll};
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
 use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef};
+use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::execution::context::TaskContext;
@@ -145,7 +146,7 @@ impl RecordBatchStream for StreamWithMetricWrapper {
         self.stream.schema()
     }
 
-    fn metrics(&self) -> Option<String> {
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
         self.stream.metrics()
     }
 }

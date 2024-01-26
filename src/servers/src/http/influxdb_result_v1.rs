@@ -159,7 +159,7 @@ impl InfluxdbV1Response {
                         series: vec![],
                     });
                 }
-                Ok(Output::Stream(stream)) => {
+                Ok(Output::Stream(stream, _)) => {
                     // TODO(sunng87): streaming response
                     match util::collect(stream).await {
                         Ok(rows) => match InfluxdbRecordsOutput::try_from((epoch, rows)) {

@@ -1483,6 +1483,8 @@ dependencies = [
  "prometheus",
  "prost 0.12.3",
  "rand",
+ "serde",
+ "serde_json",
  "session",
  "snafu",
  "substrait 0.17.1",
@@ -1856,6 +1858,10 @@ dependencies = [
  "tonic 0.10.2",
  "uuid",
 ]
+
+[[package]]
+name = "common-plugins"
+version = "0.6.0"
 
 [[package]]
 name = "common-procedure"
@@ -4887,7 +4893,7 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=abbd357c1e193cd270ea65ee7652334a150b628f#abbd357c1e193cd270ea65ee7652334a150b628f"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80b72716dcde47ec4161478416a5c6c21343364d#80b72716dcde47ec4161478416a5c6c21343364d"
 dependencies = [
  "anymap",
  "once_cell",
@@ -4897,7 +4903,7 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=abbd357c1e193cd270ea65ee7652334a150b628f#abbd357c1e193cd270ea65ee7652334a150b628f"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80b72716dcde47ec4161478416a5c6c21343364d#80b72716dcde47ec4161478416a5c6c21343364d"
 dependencies = [
  "meter-core",
 ]
@@ -6922,6 +6928,7 @@ dependencies = [
  "common-function",
  "common-macro",
  "common-meta",
+ "common-plugins",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
@@ -8518,6 +8525,7 @@ dependencies = [
  "common-macro",
  "common-mem-prof",
  "common-meta",
+ "common-plugins",
  "common-query",
  "common-recordbatch",
  "common-runtime",

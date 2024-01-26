@@ -52,7 +52,7 @@ impl GreptimeDatabase for DatabaseService {
                 }),
                 response: Some(RawResponse::AffectedRows(AffectedRows { value: rows as _ })),
             },
-            Output::Stream(_) | Output::RecordBatches(_) => {
+            Output::Stream(_, _) | Output::RecordBatches(_) => {
                 return Err(Status::unimplemented("GreptimeDatabase::Handle for query"));
             }
         };
@@ -71,7 +71,7 @@ impl GreptimeDatabase for DatabaseService {
             let output = self.handler.handle_request(request).await?;
             match output {
                 Output::AffectedRows(rows) => affected_rows += rows,
-                Output::Stream(_) | Output::RecordBatches(_) => {
+                Output::Stream(_, _) | Output::RecordBatches(_) => {
                     return Err(Status::unimplemented(
                         "GreptimeDatabase::HandleRequests for query",
                     ));

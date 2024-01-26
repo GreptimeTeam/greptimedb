@@ -131,7 +131,7 @@ impl PrometheusJsonResponse {
                     metric_name,
                     result_type,
                 )?),
-                Output::Stream(stream) => {
+                Output::Stream(stream, _) => {
                     let record_batches = RecordBatches::try_collect(stream)
                         .await
                         .context(CollectRecordbatchSnafu)?;
@@ -541,7 +541,7 @@ async fn retrieve_series_from_query_result(
             record_batches_to_series(batches, series, table_name)?;
             Ok(())
         }
-        Output::Stream(stream) => {
+        Output::Stream(stream, _) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
@@ -565,7 +565,7 @@ async fn retrieve_labels_name_from_query_result(
             record_batches_to_labels_name(batches, labels)?;
             Ok(())
         }
-        Output::Stream(stream) => {
+        Output::Stream(stream, _) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
@@ -771,7 +771,7 @@ async fn retrieve_label_values(
         Output::RecordBatches(batches) => {
             retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
         }
-        Output::Stream(stream) => {
+        Output::Stream(stream, _) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;

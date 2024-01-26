@@ -18,6 +18,7 @@ members = [
     "src/common/grpc-expr",
     "src/common/mem-prof",
     "src/common/meta",
+    "src/common/plugins",
     "src/common/procedure",
     "src/common/procedure-test",
     "src/common/query",
@@ -99,7 +100,7 @@ greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", r
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80b72716dcde47ec4161478416a5c6c21343364d" }
 mockall = "0.11.4"
 moka = "0.12"
 num_cpus = "1.16"
@@ -163,6 +164,7 @@ common-grpc-expr = { path = "src/common/grpc-expr" }
 common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
+common-plugins = { path = "src/common/plugins" }
 common-pprof = { path = "src/common/pprof" }
 common-procedure = { path = "src/common/procedure" }
 common-procedure-test = { path = "src/common/procedure-test" }
@@ -201,7 +203,7 @@ table = { path = "src/table" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "abbd357c1e193cd270ea65ee7652334a150b628f"
+rev = "80b72716dcde47ec4161478416a5c6c21343364d"
 
 [profile.release]
 debug = 1

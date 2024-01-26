@@ -21,6 +21,7 @@ pub mod util;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
 use datafusion::physical_plan::memory::MemoryStream;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
@@ -42,7 +43,7 @@ pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
         None
     }
 
-    fn metrics(&self) -> Option<String> {
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
         None
     }
 }
@@ -212,7 +213,7 @@ pub struct RecordBatchStreamWrapper<S> {
     pub schema: SchemaRef,
     pub stream: S,
     pub output_ordering: Option<Vec<OrderOption>>,
-    pub metrics: Arc<ArcSwapOption<String>>,
+    pub metrics: Arc<ArcSwapOption<RecordBatchMetrics>>,
 }
 
 impl<S> RecordBatchStreamWrapper<S> {
@@ -238,8 +239,8 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> RecordBatchStream
         self.output_ordering.as_deref()
     }
 
-    fn metrics(&self) -> Option<String> {
-        self.metrics.load().as_ref().map(|s| s.as_ref().clone())
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.metrics.load().as_ref().map(|s| *s.as_ref())
     }
 }
 

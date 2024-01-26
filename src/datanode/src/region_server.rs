@@ -635,7 +635,7 @@ impl RegionServerInner {
             Output::AffectedRows(_) | Output::RecordBatches(_) => {
                 UnsupportedOutputSnafu { expected: "stream" }.fail()
             }
-            Output::Stream(stream) => Ok(stream),
+            Output::Stream(stream, _) => Ok(stream),
         }
     }
 

@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 use api::greptime_proto::v1::add_column_location::LocationType;
 use api::greptime_proto::v1::AddColumnLocation as Location;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use physical_plan::PhysicalPlan;
 use serde::{Deserialize, Serialize};
 
 pub mod columnar_value;
@@ -32,7 +34,14 @@ use sqlparser_derive::{Visit, VisitMut};
 pub enum Output {
     AffectedRows(usize),
     RecordBatches(RecordBatches),
-    Stream(SendableRecordBatchStream),
+    Stream(SendableRecordBatchStream, Option<Arc<dyn PhysicalPlan>>),
+}
+
+impl Output {
+    // helper function to build original `Output::Stream`
+    pub fn new_stream(stream: SendableRecordBatchStream) -> Self {
+        Output::Stream(stream, None)
+    }
 }
 
 impl Debug for Output {
@@ -42,7 +51,13 @@ impl Debug for Output {
             Output::RecordBatches(recordbatches) => {
                 write!(f, "Output::RecordBatches({recordbatches:?})")
             }
-            Output::Stream(_) => write!(f, "Output::Stream(<stream>)"),
+            Output::Stream(_, df) => {
+                if df.is_some() {
+                    write!(f, "Output::Stream(<stream>, Some<physical_plan>)")
+                } else {
+                    write!(f, "Output::Stream(<stream>)")
+                }
+            }
         }
     }
 }

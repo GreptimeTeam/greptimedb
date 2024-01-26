@@ -89,7 +89,7 @@ impl ArrowResponse {
                     }
                 }
 
-                Output::Stream(recordbatches) => {
+                Output::Stream(recordbatches, _) => {
                     let schema = recordbatches.schema();
                     match write_arrow_bytes(recordbatches, schema.arrow_schema()).await {
                         Ok(payload) => HttpResponse::Arrow(ArrowResponse {

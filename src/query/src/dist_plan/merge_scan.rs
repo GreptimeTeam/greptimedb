@@ -22,8 +22,9 @@ use common_base::bytes::Bytes;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
 use common_meta::table_name::TableName;
+use common_plugins::GREPTIME_EXEC_COST;
 use common_query::physical_plan::TaskContext;
-use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchMetrics};
+use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
     DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream,
@@ -31,7 +32,7 @@ use common_recordbatch::{
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{tracing, warn};
 use datafusion::physical_plan::metrics::{
-    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
+    Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet, Time,
 };
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning};
 use datafusion_common::{Result, Statistics};
@@ -40,6 +41,7 @@ use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
+use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -215,18 +217,17 @@ impl MergeScanExec {
                     // reset poll timer
                     poll_timer = Instant::now();
                 }
-                if let Some(metrics) = stream
-                    .metrics()
-                    .and_then(|m| serde_json::from_str::<RecordBatchMetrics>(&m).ok())
-                {
+                if let Some(metrics) = stream.metrics() {
                     let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                    read_meter!(
+                    let value = read_meter!(
                         c,
                         s,
-                        metrics.elapsed_compute as u64,
-                        metrics.memory_usage as u64,
-                        0
+                        ReadItem {
+                            cpu_time: metrics.elapsed_compute as u64,
+                            table_scan: metrics.memory_usage as u64
+                        }
                     );
+                    metric.record_greptime_metrics(value as usize);
                 }
 
                 METRIC_MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
@@ -330,6 +331,9 @@ struct MergeScanMetric {
     finish_time: Time,
     /// Count of rows fetched from remote
     output_rows: Count,
+
+    /// Gauge for greptime plan execution metrics for output
+    greptime_metrics: Gauge,
 }
 
 impl MergeScanMetric {
@@ -339,6 +343,7 @@ impl MergeScanMetric {
             first_consume_time: MetricBuilder::new(metric).subset_time("first_consume_time", 1),
             finish_time: MetricBuilder::new(metric).subset_time("finish_time", 1),
             output_rows: MetricBuilder::new(metric).output_rows(1),
+            greptime_metrics: MetricBuilder::new(metric).gauge(GREPTIME_EXEC_COST, 1),
         }
     }
 
@@ -356,5 +361,9 @@ impl MergeScanMetric {
 
     pub fn record_output_batch_rows(&self, num_rows: usize) {
         self.output_rows.add(num_rows);
+    }
+
+    pub fn record_greptime_metrics(&self, metrics: usize) {
+        self.greptime_metrics.add(metrics);
     }
 }

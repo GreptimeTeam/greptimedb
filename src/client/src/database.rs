@@ -340,7 +340,7 @@ impl Database {
                     output_ordering: None,
                     metrics: Default::default(),
                 };
-                Ok(Output::Stream(Box::pin(record_batch_stream)))
+                Ok(Output::new_stream(Box::pin(record_batch_stream)))
             }
         }
     }

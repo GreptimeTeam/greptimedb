@@ -312,7 +312,7 @@ impl Script for PyScript {
                 .context(DatabaseQuerySnafu)?;
             let copr = self.copr.clone();
             match res {
-                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream::try_new(
+                Output::Stream(stream, _) => Ok(Output::new_stream(Box::pin(CoprStream::try_new(
                     stream, copr, params, ctx,
                 )?))),
                 _ => unreachable!(),
@@ -411,7 +411,7 @@ def test(number) -> vector[u32]:
             .await
             .unwrap();
         let res = common_recordbatch::util::collect_batches(match output {
-            Output::Stream(s) => s,
+            Output::Stream(s, _) => s,
             _ => unreachable!(),
         })
         .await
@@ -472,7 +472,7 @@ def test(number) -> vector[u32]:
             .await
             .unwrap();
         let res = common_recordbatch::util::collect_batches(match _output {
-            Output::Stream(s) => s,
+            Output::Stream(s, _) => s,
             _ => todo!(),
         })
         .await
@@ -504,7 +504,7 @@ def test(a, b, c) -> vector[f64]:
             .await
             .unwrap();
         match output {
-            Output::Stream(stream) => {
+            Output::Stream(stream, _) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());
@@ -542,7 +542,7 @@ def test(a) -> vector[i64]:
             .await
             .unwrap();
         match output {
-            Output::Stream(stream) => {
+            Output::Stream(stream, _) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());
