@@ -123,7 +123,6 @@ impl MetricEngineInner {
     }
 
     /// Perform metric engine specific logic to incoming rows.
-    /// - Change the semantic type of tag columns to field
     /// - Add table_id column
     /// - Generate tsid
     fn modify_rows(&self, table_id: TableId, rows: &mut Rows) -> Result<()> {
@@ -141,18 +140,6 @@ impl MetricEngineInner {
             })
             .collect::<Vec<_>>();
 
-        // generate new schema
-        rows.schema = rows
-            .schema
-            .clone()
-            .into_iter()
-            .map(|mut col| {
-                if col.semantic_type == SemanticType::Tag as i32 {
-                    col.semantic_type = SemanticType::Field as i32;
-                }
-                col
-            })
-            .collect::<Vec<_>>();
         // add table_name column
         rows.schema.push(ColumnSchema {
             column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
