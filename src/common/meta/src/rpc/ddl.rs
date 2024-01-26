@@ -203,7 +203,7 @@ impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
 
     fn try_from(resp: PbSubmitDdlTaskResponse) -> Result<Self> {
         let table_id = resp.table_id.map(|t| t.id);
-        let table_ids = resp.table_ids.iter().map(|t| t.id).collect();
+        let table_ids = resp.table_ids.into_iter().map(|t| t.id).collect();
         Ok(Self {
             key: resp.key,
             table_id,
@@ -219,6 +219,11 @@ impl From<SubmitDdlTaskResponse> for PbSubmitDdlTaskResponse {
             table_id: val
                 .table_id
                 .map(|table_id| api::v1::meta::TableId { id: table_id }),
+            table_ids: val
+                .table_ids
+                .into_iter()
+                .map(|id| api::v1::meta::TableId { id })
+                .collect(),
             ..Default::default()
         }
     }
