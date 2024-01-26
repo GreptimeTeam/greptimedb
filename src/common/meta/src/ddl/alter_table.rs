@@ -220,15 +220,16 @@ impl AlterTableProcedure {
                 let requester = requester.clone();
 
                 alter_region_tasks.push(async move {
-                    let result = requester.handle(request).await;
-                    match result {
-                        Ok(_) => Ok(()),
-                        // Treat request outdated as success.
-                        // The engine will throw this code when the schema version not match.
-                        // As this procedure has locked the table, the only reason for this error
-                        // is procedure is succeeded before and is retrying.
-                        Err(e) if e.status_code() == StatusCode::RequestOutdated => Ok(()),
-                        Err(e) => Err(handle_operate_region_error(datanode)(e)),
+                    if let Err(err) = requester.handle(request).await {
+                        if err.status_code() != StatusCode::RequestOutdated {
+                         // Treat request outdated as success.
+                         // The engine will throw this code when the schema version not match.
+                         // As this procedure has locked the table, the only reason for this error
+                         // is procedure is succeeded before and is retrying.
+                            return Err(handle_operate_region_error(datanode)(err));
+                        }
+                    }
+                    Ok(())
                     }
                 });
             }
