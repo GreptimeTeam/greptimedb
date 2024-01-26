@@ -21,6 +21,11 @@ lazy_static! {
         "table operator create table"
     )
     .unwrap();
+    pub static ref DIST_CREATE_TABLES: Histogram = register_histogram!(
+        "greptime_table_operator_create_tables",
+        "table operator create table"
+    )
+    .unwrap();
     pub static ref DIST_INGEST_ROW_COUNT: IntCounter = register_int_counter!(
         "greptime_table_operator_ingest_rows",
         "table operator ingest rows"

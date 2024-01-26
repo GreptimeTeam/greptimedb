@@ -15,10 +15,7 @@
 use std::collections::HashMap;
 
 use api::v1::region::region_request::Body as PbRegionRequest;
-use api::v1::region::{
-    CreateRequest as PbCreateRegionRequest, RegionColumnDef, RegionRequest, RegionRequestHeader,
-};
-use api::v1::{ColumnDef, SemanticType};
+use api::v1::region::{RegionRequest, RegionRequestHeader};
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{
@@ -30,25 +27,24 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
+use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
 use crate::ddl::utils::{handle_operate_region_error, handle_retry_error, region_storage_path};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result, TableRouteNotFoundSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::TableNameLock;
-use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
-use crate::wal_options_allocator::prepare_wal_options;
+use crate::{metrics, ClusterId};
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -59,7 +55,7 @@ impl CreateTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
     pub fn new(
-        cluster_id: u64,
+        cluster_id: ClusterId,
         task: CreateTableTask,
         table_route: TableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,
@@ -117,7 +113,7 @@ impl CreateTableProcedure {
 
         if let Some(value) = table_name_value {
             ensure!(
-                self.creator.data.task.create_table.create_if_not_exists,
+                expr.create_if_not_exists,
                 error::TableAlreadyExistsSnafu {
                     table_name: self.creator.data.table_ref().to_string(),
                 }
@@ -137,67 +133,8 @@ impl CreateTableProcedure {
         physical_table_id: Option<TableId>,
     ) -> Result<CreateRequestBuilder> {
         let create_table_expr = &self.creator.data.task.create_table;
-
-        let column_defs = create_table_expr
-            .column_defs
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let semantic_type = if create_table_expr.time_index == c.name {
-                    SemanticType::Timestamp
-                } else if create_table_expr.primary_keys.contains(&c.name) {
-                    SemanticType::Tag
-                } else {
-                    SemanticType::Field
-                };
-
-                RegionColumnDef {
-                    column_def: Some(ColumnDef {
-                        name: c.name.clone(),
-                        data_type: c.data_type,
-                        is_nullable: c.is_nullable,
-                        default_constraint: c.default_constraint.clone(),
-                        semantic_type: semantic_type as i32,
-                        comment: String::new(),
-                        datatype_extension: c.datatype_extension.clone(),
-                    }),
-                    column_id: i as u32,
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let primary_key = create_table_expr
-            .primary_keys
-            .iter()
-            .map(|key| {
-                column_defs
-                    .iter()
-                    .find_map(|c| {
-                        c.column_def.as_ref().and_then(|x| {
-                            if &x.name == key {
-                                Some(c.column_id)
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .context(error::PrimaryKeyNotFoundSnafu { key })
-            })
-            .collect::<Result<_>>()?;
-
-        let template = PbCreateRegionRequest {
-            region_id: 0,
-            engine: create_table_expr.engine.to_string(),
-            column_defs,
-            primary_key,
-            path: String::new(),
-            options: create_table_expr.table_options.clone(),
-        };
-
-        Ok(CreateRequestBuilder {
-            template,
-            physical_table_id,
-        })
+        let template = build_template(create_table_expr)?;
+        Ok(CreateRequestBuilder::new(template, physical_table_id))
     }
 
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
@@ -261,9 +198,11 @@ impl CreateTableProcedure {
             let mut requests = Vec::with_capacity(regions.len());
             for region_number in regions {
                 let region_id = RegionId::new(self.table_id(), region_number);
-                let create_region_request = request_builder
-                    .build_one(region_id, storage_path.clone(), region_wal_options)
-                    .await?;
+                let create_region_request = request_builder.build_one(
+                    region_id,
+                    storage_path.clone(),
+                    region_wal_options,
+                )?;
 
                 requests.push(PbRegionRequest::Create(create_region_request));
             }
@@ -426,52 +365,11 @@ pub struct CreateTableData {
     pub task: CreateTableTask,
     table_route: TableRouteValue,
     pub region_wal_options: HashMap<RegionNumber, String>,
-    pub cluster_id: u64,
+    pub cluster_id: ClusterId,
 }
 
 impl CreateTableData {
     fn table_ref(&self) -> TableReference<'_> {
         self.task.table_ref()
-    }
-}
-
-/// Builder for [PbCreateRegionRequest].
-pub struct CreateRequestBuilder {
-    template: PbCreateRegionRequest,
-    /// Optional. Only for metric engine.
-    physical_table_id: Option<TableId>,
-}
-
-impl CreateRequestBuilder {
-    pub fn template(&self) -> &PbCreateRegionRequest {
-        &self.template
-    }
-
-    async fn build_one(
-        &self,
-        region_id: RegionId,
-        storage_path: String,
-        region_wal_options: &HashMap<RegionNumber, String>,
-    ) -> Result<PbCreateRegionRequest> {
-        let mut request = self.template.clone();
-
-        request.region_id = region_id.as_u64();
-        request.path = storage_path;
-        // Stores the encoded wal options into the request options.
-        prepare_wal_options(&mut request.options, region_id, region_wal_options);
-
-        if let Some(physical_table_id) = self.physical_table_id {
-            // Logical table has the same region numbers with physical table, and they have a one-to-one mapping.
-            // For example, region 0 of logical table must resides with region 0 of physical table. So here we can
-            // simply concat the physical table id and the logical region number to get the physical region id.
-            let physical_region_id = RegionId::new(physical_table_id, region_id.region_number());
-
-            request.options.insert(
-                LOGICAL_TABLE_METADATA_KEY.to_string(),
-                physical_region_id.as_u64().to_string(),
-            );
-        }
-
-        Ok(request)
     }
 }
