@@ -20,10 +20,13 @@ mod relation;
 use std::borrow::Borrow;
 use std::slice::SliceIndex;
 
+use api::helper::{pb_value_to_value_ref, value_to_grpc_value};
+use api::v1::Row as ProtoRow;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast::CastOption;
 use datatypes::types::cast_with_opt;
 use datatypes::value::Value;
+use itertools::Itertools;
 pub(crate) use relation::{RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
 
@@ -38,11 +41,14 @@ pub type Timestamp = u64;
 /// Default type for a repr of changes to a collection.
 pub type DiffRow = (Row, Timestamp, Diff);
 
+/// map i64 to u64 by adding std::i64::MAX + 1
+/// useful for cast Datetime to internal timestamp, so time before 1970-01-01 can be represented
 fn i64mapu64(i: i64) -> u64 {
     (i as u64).wrapping_add(std::i64::MAX as u64 + 1)
 }
 
-pub fn value2internal_ts(value: Value) -> Result<Timestamp, EvalError> {
+/// Convert a value that is or can be converted to Datetime to internal timestamp
+pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
     match value {
         Value::DateTime(ts) => Ok(i64mapu64(ts.val())),
         arg => {
@@ -92,10 +98,14 @@ impl Row {
     pub fn clear(&mut self) {
         self.inner.clear();
     }
+    /// clear and return the inner vector
+    ///
+    /// useful if you want to reuse the vector as a buffer
     pub fn packer(&mut self) -> &mut Vec<Value> {
         self.inner.clear();
         &mut self.inner
     }
+    /// pack a iterator of values into a row
     pub fn pack<I>(iter: I) -> Row
     where
         I: IntoIterator<Item = Value>,
@@ -104,6 +114,7 @@ impl Row {
             inner: iter.into_iter().collect(),
         }
     }
+    /// unpack a row into a vector of values
     pub fn unpack(&self) -> Vec<Value> {
         self.inner.clone()
     }
@@ -122,6 +133,24 @@ impl Row {
     pub fn len(&self) -> usize {
         self.inner.len()
     }
+}
+
+/// Convert Protobuf-Row to Row used by GrepFlow
+pub(crate) fn row_proto_to_flow(row: ProtoRow) -> Row {
+    Row::pack(
+        row.values
+            .iter()
+            .map(|pb_val| -> Value { pb_value_to_value_ref(pb_val, &None).into() }),
+    )
+}
+
+pub(crate) fn row_flow_to_proto(row: Row) -> ProtoRow {
+    let values = row
+        .unpack()
+        .into_iter()
+        .map(value_to_grpc_value)
+        .collect_vec();
+    ProtoRow { values }
 }
 
 #[test]

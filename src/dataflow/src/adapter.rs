@@ -16,4 +16,3 @@
 //! and communicating with other parts of the database
 
 pub(crate) mod error;
-mod utils;

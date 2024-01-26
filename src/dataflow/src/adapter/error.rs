@@ -30,22 +30,25 @@ use crate::expr::EvalError;
 #[stack_trace_debug]
 pub enum Error {
     /// TODO(discord9): add detailed location of column
-    #[snafu(display("Stream Eval Failure, {}", raw))]
-    Eval { raw: EvalError },
-    #[snafu(display("Couldn't found table: {}", name))]
-    TableNotFound { name: String },
-    #[snafu(display("Table already exist: {}", name))]
-    TableAlreadyExist { name: String },
+    #[snafu(display("Stream Eval Failure"))]
+    Eval {
+        source: EvalError,
+        location: Location,
+    },
+    #[snafu(display("Couldn't found table: {name}"))]
+    TableNotFound { name: String, location: Location },
+    #[snafu(display("Table already exist: {name}"))]
+    TableAlreadyExist { name: String, location: Location },
     #[snafu(display("Failed to join task"))]
     JoinTask {
         #[snafu(source)]
         error: tokio::task::JoinError,
         location: Location,
     },
-    #[snafu(display("Invalid query: {}", reason))]
+    #[snafu(display("Invalid query: {reason}"))]
     InvalidQuery { reason: String, location: Location },
-    #[snafu(display("No protobuf type for value: {}", value))]
-    NoProtoType { value: Value },
+    #[snafu(display("No protobuf type for value: {value}"))]
+    NoProtoType { value: Value, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

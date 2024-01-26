@@ -22,36 +22,42 @@ use serde::{Deserialize, Serialize};
 use snafu::{Location, Snafu};
 
 /// EvalError is about errors happen on columnar evaluation
+///
+/// TODO(discord9): add detailed location of column/operator(instead of code) to errors, because EvalError happens on dataflow graph
+/// which makes it hard to locate the error if we only have the code location
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
-#[stack_trace_debug]
 #[derive(Ord, PartialOrd, Clone, Eq, Deserialize, Serialize, PartialEq, Hash)]
+#[stack_trace_debug]
 pub enum EvalError {
     #[snafu(display("Division by zero"))]
     DivisionByZero,
-    #[snafu(display("Type mismatch: expected {}, actual {}", expected, actual))]
+
+    #[snafu(display("Type mismatch: expected {expected}, actual {actual}"))]
     TypeMismatch {
         expected: ConcreteDataType,
         actual: ConcreteDataType,
     },
+
     /// can't nest datatypes error because EvalError need to be store in map and serialization
-    #[snafu(display("Fail to unpack from value to given type: {}", msg))]
+    #[snafu(display("Fail to unpack from value to given type: {msg}"))]
     TryFromValue { msg: String },
-    #[snafu(display(
-        "Fail to cast value of type {} to given type: {}. Detail: {}",
-        from,
-        to,
-        msg
-    ))]
+
+    #[snafu(display("Fail to cast value of type {from} to given type {to}"))]
     CastValue {
         from: ConcreteDataType,
         to: ConcreteDataType,
+        /// extra message on the nature of the error could be useful
+        /// since we don't want to nest other Snafu Error
         msg: String,
     },
-    #[snafu(display("Invalid argument: {}", reason))]
+
+    #[snafu(display("Invalid argument: {reason}"))]
     InvalidArgument { reason: String },
-    #[snafu(display("Internal error: {}", reason))]
+
+    #[snafu(display("Internal error: {reason}"))]
     Internal { reason: String },
-    #[snafu(display("Optimize error: {}", reason))]
+
+    #[snafu(display("Optimize error: {reason}"))]
     Optimize { reason: String },
 }

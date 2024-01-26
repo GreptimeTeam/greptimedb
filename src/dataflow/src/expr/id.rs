@@ -27,9 +27,11 @@ pub enum GlobalId {
     Explain,
 }
 
+/// Local id is used in local scope created by `Plan::Let{id: LocalId, value, body}`
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct LocalId(pub(crate) u64);
 
+/// Id is used to identify a dataflow component in plan like `Plan::Get{id: Id}`
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum Id {
     /// An identifier that refers to a local component of a dataflow.
