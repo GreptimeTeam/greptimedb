@@ -12,10 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
-use api::v1::meta::procedure_client::ProcedureClient;
-use api::v1::meta::{DdlTaskRequest, DdlTaskResponse, ErrorCode, ResponseHeader, Role};
+use api::v1::meta::procedure_service_client::ProcedureServiceClient;
+use api::v1::meta::{
+    DdlTaskRequest, DdlTaskResponse, ErrorCode, MigrateRegionRequest, MigrateRegionResponse,
+    ProcedureId, ProcedureStateResponse, QueryProcedureRequest, ResponseHeader, Role,
+};
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
@@ -65,10 +70,33 @@ impl Client {
         let inner = self.inner.read().await;
         inner.submit_ddl_task(req).await
     }
+
+    /// Query the procedure' state by its id
+    pub async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
+        let inner = self.inner.read().await;
+        inner.query_procedure_state(pid).await
+    }
+
+    /// Migrate the region from one datanode to the other datanode:
+    /// - `region_id`:  the migrated region id
+    /// - `from_peer`:  the source datanode id
+    /// - `to_peer`:  the target datanode id
+    /// - `replay_timeout`: replay WAL timeout after migration.
+    pub async fn migrate_region(
+        &self,
+        region_id: u64,
+        from_peer: u64,
+        to_peer: u64,
+        replay_timeout: Duration,
+    ) -> Result<MigrateRegionResponse> {
+        let inner = self.inner.read().await;
+        inner
+            .migrate_region(region_id, from_peer, to_peer, replay_timeout)
+            .await
+    }
 }
 
 #[derive(Debug)]
-
 struct Inner {
     id: Id,
     role: Role,
@@ -106,13 +134,13 @@ impl Inner {
         Ok(())
     }
 
-    fn make_client(&self, addr: impl AsRef<str>) -> Result<ProcedureClient<Channel>> {
+    fn make_client(&self, addr: impl AsRef<str>) -> Result<ProcedureServiceClient<Channel>> {
         let channel = self
             .channel_manager
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        Ok(ProcedureClient::new(channel))
+        Ok(ProcedureServiceClient::new(channel))
     }
 
     #[inline]
@@ -120,7 +148,7 @@ impl Inner {
         self.ask_leader.is_some()
     }
 
-    pub async fn submit_ddl_task(&self, mut req: DdlTaskRequest) -> Result<DdlTaskResponse> {
+    fn ask_leader(&self) -> Result<&AskLeader> {
         ensure!(
             self.is_started(),
             error::IllegalGrpcClientStateSnafu {
@@ -128,22 +156,25 @@ impl Inner {
             }
         );
 
-        req.set_header(
-            self.id,
-            self.role,
-            TracingContext::from_current_span().to_w3c(),
-        );
-        let ask_leader = self.ask_leader.as_ref().unwrap();
+        Ok(self.ask_leader.as_ref().unwrap())
+    }
+
+    async fn with_retry<T, F, R, H>(&self, task: &str, body_fn: F, get_header: H) -> Result<T>
+    where
+        R: Future<Output = std::result::Result<T, Status>>,
+        F: Fn(ProcedureServiceClient<Channel>) -> R,
+        H: Fn(&T) -> &Option<ResponseHeader>,
+    {
+        let ask_leader = self.ask_leader()?;
         let mut times = 0;
 
         while times < self.max_retry {
             if let Some(leader) = &ask_leader.get_leader() {
-                let mut client = self.make_client(leader)?;
-                match client.ddl(req.clone()).await {
+                let client = self.make_client(leader)?;
+                match body_fn(client).await {
                     Ok(res) => {
-                        let res = res.into_inner();
-                        if is_not_leader(&res.header) {
-                            warn!("Failed to submitting ddl to {leader}, not a leader");
+                        if is_not_leader(get_header(&res)) {
+                            warn!("Failed to {task} to {leader}, not a leader");
                             let leader = ask_leader.ask_leader().await?;
                             info!("DDL client updated to new leader addr: {leader}");
                             times += 1;
@@ -154,9 +185,9 @@ impl Inner {
                     Err(status) => {
                         // The leader may be unreachable.
                         if is_unreachable(&status) {
-                            warn!("Failed to submitting ddl to {leader}, source: {status}");
+                            warn!("Failed to {task} to {leader}, source: {status}");
                             let leader = ask_leader.ask_leader().await?;
-                            info!("DDL client updated to new leader addr: {leader}");
+                            info!("Procedure client updated to new leader addr: {leader}");
                             times += 1;
                             continue;
                         } else {
@@ -170,10 +201,85 @@ impl Inner {
         }
 
         error::RetryTimesExceededSnafu {
-            msg: "Failed to submit DDL task",
+            msg: "Failed to {task}",
             times: self.max_retry,
         }
         .fail()
+    }
+
+    async fn migrate_region(
+        &self,
+        region_id: u64,
+        from_peer: u64,
+        to_peer: u64,
+        replay_timeout: Duration,
+    ) -> Result<MigrateRegionResponse> {
+        let mut req = MigrateRegionRequest {
+            region_id,
+            from_peer,
+            to_peer,
+            replay_timeout_secs: replay_timeout.as_secs() as u32,
+            ..Default::default()
+        };
+
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
+
+        self.with_retry(
+            "migrate_region",
+            move |mut client| {
+                let req = req.clone();
+
+                async move { client.migrate(req).await.map(|res| res.into_inner()) }
+            },
+            |resp: &MigrateRegionResponse| &resp.header,
+        )
+        .await
+    }
+
+    async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
+        let mut req = QueryProcedureRequest {
+            pid: Some(ProcedureId { key: pid.into() }),
+            ..Default::default()
+        };
+
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
+
+        self.with_retry(
+            "query procedure state",
+            move |mut client| {
+                let req = req.clone();
+
+                async move { client.query(req).await.map(|res| res.into_inner()) }
+            },
+            |resp: &ProcedureStateResponse| &resp.header,
+        )
+        .await
+    }
+
+    async fn submit_ddl_task(&self, mut req: DdlTaskRequest) -> Result<DdlTaskResponse> {
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
+
+        self.with_retry(
+            "submit ddl task",
+            move |mut client| {
+                let req = req.clone();
+                async move { client.ddl(req).await.map(|res| res.into_inner()) }
+            },
+            |resp: &DdlTaskResponse| &resp.header,
+        )
+        .await
     }
 }
 

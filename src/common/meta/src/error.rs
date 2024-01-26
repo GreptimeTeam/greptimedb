@@ -100,6 +100,13 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to parse procedure id"))]
+    ParseProcedureId {
+        location: Location,
+        #[snafu(source)]
+        error: common_procedure::ParseIdError,
+    },
+
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
@@ -435,7 +442,7 @@ impl ErrorExt for Error {
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
 
-            InvalidNumTopics { .. } | EmptyCreateTableTasks { .. } => StatusCode::InvalidArguments,
+            ParseProcedureId { .. } | InvalidNumTopics { .. } | EmptyCreateTableTasks { .. } => StatusCode::InvalidArguments,
         }
     }
 

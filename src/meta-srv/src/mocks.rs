@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_server::HeartbeatServer;
-use api::v1::meta::procedure_server::ProcedureServer;
+use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use client::client_manager::DatanodeClients;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -83,7 +83,7 @@ pub async fn mock(
         tonic::transport::Server::builder()
             .add_service(HeartbeatServer::new(service.clone()))
             .add_service(StoreServer::new(service.clone()))
-            .add_service(ProcedureServer::new(service.clone()))
+            .add_service(ProcedureServiceServer::new(service.clone()))
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

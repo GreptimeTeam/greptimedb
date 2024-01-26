@@ -19,10 +19,10 @@ use tonic::{Response, Status};
 
 pub mod admin;
 pub mod cluster;
-pub mod ddl;
 mod heartbeat;
 pub mod lock;
 pub mod mailbox;
+pub mod procedure;
 pub mod store;
 
 pub type GrpcResult<T> = Result<Response<T>, Status>;

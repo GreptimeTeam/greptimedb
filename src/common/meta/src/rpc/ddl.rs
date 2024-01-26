@@ -205,7 +205,7 @@ impl TryFrom<PbDdlTaskResponse> for SubmitDdlTaskResponse {
         let table_id = resp.table_id.map(|t| t.id);
         let table_ids = resp.table_ids.into_iter().map(|t| t.id).collect();
         Ok(Self {
-            key: resp.pid.map(|pid| pid.key).unwrap_or(vec![]),
+            key: resp.pid.map(|pid| pid.key).unwrap_or_default(),
             table_id,
             table_ids,
         })
