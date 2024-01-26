@@ -388,6 +388,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Schema version doesn't match. Expect {} but gives {}", expect, actual))]
+    InvalidRegionRequestSchemaVersion {
+        expect: u64,
+        actual: u64,
+        location: Location,
+    },
+
     #[snafu(display("Region {} is read only", region_id))]
     RegionReadonly {
         region_id: RegionId,
@@ -591,6 +598,9 @@ impl ErrorExt for Error {
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }
             | InvalidMetadata { .. } => StatusCode::InvalidArguments,
+
+            InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
+
             RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }

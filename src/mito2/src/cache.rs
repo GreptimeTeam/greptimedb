@@ -32,6 +32,7 @@ use parquet::file::metadata::ParquetMetaData;
 use store_api::storage::RegionId;
 
 use crate::cache::cache_size::parquet_meta_size;
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
@@ -69,15 +70,33 @@ impl CacheManager {
     }
 
     /// Gets cached [ParquetMetaData].
-    pub fn get_parquet_meta_data(
+    pub async fn get_parquet_meta_data(
         &self,
         region_id: RegionId,
         file_id: FileId,
     ) -> Option<Arc<ParquetMetaData>> {
-        self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
+        // Try to get metadata from sst meta cache
+        let metadata = self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
             let value = sst_meta_cache.get(&SstMetaKey(region_id, file_id));
             update_hit_miss(value, SST_META_TYPE)
-        })
+        });
+
+        if metadata.is_some() {
+            return metadata;
+        }
+
+        // Try to get metadata from write cache
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        if let Some(write_cache) = &self.write_cache {
+            if let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await {
+                let metadata = Arc::new(metadata);
+                // Put metadata into sst meta cache
+                self.put_parquet_meta_data(region_id, file_id, metadata.clone());
+                return Some(metadata);
+            }
+        };
+
+        None
     }
 
     /// Puts [ParquetMetaData] into the cache.
@@ -315,8 +334,8 @@ mod tests {
     use super::*;
     use crate::cache::test_util::parquet_meta;
 
-    #[test]
-    fn test_disable_cache() {
+    #[tokio::test]
+    async fn test_disable_cache() {
         let cache = CacheManager::default();
         assert!(cache.sst_meta_cache.is_none());
         assert!(cache.vector_cache.is_none());
@@ -326,7 +345,10 @@ mod tests {
         let file_id = FileId::random();
         let metadata = parquet_meta();
         cache.put_parquet_meta_data(region_id, file_id, metadata);
-        assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
+        assert!(cache
+            .get_parquet_meta_data(region_id, file_id)
+            .await
+            .is_none());
 
         let value = Value::Int64(10);
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
@@ -346,17 +368,26 @@ mod tests {
         assert!(cache.write_cache().is_none());
     }
 
-    #[test]
-    fn test_parquet_meta_cache() {
+    #[tokio::test]
+    async fn test_parquet_meta_cache() {
         let cache = CacheManager::builder().sst_meta_cache_size(2000).build();
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
-        assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
+        assert!(cache
+            .get_parquet_meta_data(region_id, file_id)
+            .await
+            .is_none());
         let metadata = parquet_meta();
         cache.put_parquet_meta_data(region_id, file_id, metadata);
-        assert!(cache.get_parquet_meta_data(region_id, file_id).is_some());
+        assert!(cache
+            .get_parquet_meta_data(region_id, file_id)
+            .await
+            .is_some());
         cache.remove_parquet_meta_data(region_id, file_id);
-        assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
+        assert!(cache
+            .get_parquet_meta_data(region_id, file_id)
+            .await
+            .is_none());
     }
 
     #[test]

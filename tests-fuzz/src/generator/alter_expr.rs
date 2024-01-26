@@ -74,7 +74,7 @@ impl<R: Rng + 'static> Generator<AlterTableExpr, R> for AlterExprAddColumnGenera
         )
         .remove(0);
         Ok(AlterTableExpr {
-            name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.to_string(),
             alter_options: AlterTableOperation::AddColumn { column, location },
         })
     }
@@ -99,7 +99,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprDropColumnGenerator<R> {
             .name
             .to_string();
         Ok(AlterTableExpr {
-            name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.to_string(),
             alter_options: AlterTableOperation::DropColumn { name },
         })
     }
@@ -120,7 +120,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprRenameGenerator<R> {
     fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
         let new_table_name = self.name_generator.gen(rng);
         Ok(AlterTableExpr {
-            name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.to_string(),
             alter_options: AlterTableOperation::RenameTable { new_table_name },
         })
     }
@@ -155,7 +155,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"name":"DigNissIMOS","alter_options":{"AddColumn":{"column":{"name":"sit","column_type":{"Boolean":null},"options":["PrimaryKey"]},"location":null}}}"#;
+        let expected = r#"{"table_name":"DigNissIMOS","alter_options":{"AddColumn":{"column":{"name":"sit","column_type":{"Boolean":null},"options":["PrimaryKey"]},"location":null}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprRenameGeneratorBuilder::default()
@@ -165,7 +165,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"name":"DigNissIMOS","alter_options":{"RenameTable":{"new_table_name":"excepturi"}}}"#;
+        let expected = r#"{"table_name":"DigNissIMOS","alter_options":{"RenameTable":{"new_table_name":"excepturi"}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprDropColumnGeneratorBuilder::default()
@@ -176,7 +176,7 @@ mod tests {
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
         let expected =
-            r#"{"name":"DigNissIMOS","alter_options":{"DropColumn":{"name":"INVentORE"}}}"#;
+            r#"{"table_name":"DigNissIMOS","alter_options":{"DropColumn":{"name":"INVentORE"}}}"#;
         assert_eq!(expected, serialized);
     }
 }

@@ -168,15 +168,18 @@ impl MetricEngineInner {
                 }
             }
         }
-        info!("Found new columns {new_columns:?} to add to physical region {data_region_id}");
 
-        self.add_columns_to_physical_data_region(
-            data_region_id,
-            metadata_region_id,
-            logical_region_id,
-            new_columns,
-        )
-        .await?;
+        if !new_columns.is_empty() {
+            info!("Found new columns {new_columns:?} to add to physical region {data_region_id}");
+
+            self.add_columns_to_physical_data_region(
+                data_region_id,
+                metadata_region_id,
+                logical_region_id,
+                new_columns,
+            )
+            .await?;
+        }
 
         // register logical region to metadata region
         self.metadata_region

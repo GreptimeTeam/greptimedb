@@ -36,6 +36,7 @@ use common_telemetry::logging::{error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
+use datatypes::schema::SchemaRef;
 use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -150,21 +151,36 @@ impl ColumnSchema {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
-pub struct Schema {
+pub struct OutputSchema {
     column_schemas: Vec<ColumnSchema>,
 }
 
-impl Schema {
-    pub fn new(columns: Vec<ColumnSchema>) -> Schema {
-        Schema {
+impl OutputSchema {
+    pub fn new(columns: Vec<ColumnSchema>) -> OutputSchema {
+        OutputSchema {
             column_schemas: columns,
+        }
+    }
+}
+
+impl From<SchemaRef> for OutputSchema {
+    fn from(schema: SchemaRef) -> OutputSchema {
+        OutputSchema {
+            column_schemas: schema
+                .column_schemas()
+                .iter()
+                .map(|cs| ColumnSchema {
+                    name: cs.name.clone(),
+                    data_type: cs.data_type.name(),
+                })
+                .collect(),
         }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct HttpRecordsOutput {
-    schema: Option<Schema>,
+    schema: OutputSchema,
     rows: Vec<Vec<Value>>,
 }
 
@@ -174,14 +190,11 @@ impl HttpRecordsOutput {
     }
 
     pub fn num_cols(&self) -> usize {
-        self.schema
-            .as_ref()
-            .map(|x| x.column_schemas.len())
-            .unwrap_or(0)
+        self.schema.column_schemas.len()
     }
 
-    pub fn schema(&self) -> Option<&Schema> {
-        self.schema.as_ref()
+    pub fn schema(&self) -> &OutputSchema {
+        &self.schema
     }
 
     pub fn rows(&self) -> &Vec<Vec<Value>> {
@@ -189,33 +202,17 @@ impl HttpRecordsOutput {
     }
 }
 
-impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
-    type Error = Error;
-
-    // TODO(sunng87): use schema from recordstreams when #366 fixed
-    fn try_from(
+impl HttpRecordsOutput {
+    pub(crate) fn try_new(
+        schema: SchemaRef,
         recordbatches: Vec<RecordBatch>,
-    ) -> std::result::Result<HttpRecordsOutput, Self::Error> {
+    ) -> std::result::Result<HttpRecordsOutput, Error> {
         if recordbatches.is_empty() {
             Ok(HttpRecordsOutput {
-                schema: None,
+                schema: OutputSchema::from(schema),
                 rows: vec![],
             })
         } else {
-            // safety ensured by previous empty check
-            let first = &recordbatches[0];
-            let schema = Schema {
-                column_schemas: first
-                    .schema
-                    .column_schemas()
-                    .iter()
-                    .map(|cs| ColumnSchema {
-                        name: cs.name.clone(),
-                        data_type: cs.data_type.name(),
-                    })
-                    .collect(),
-            };
-
             let mut rows =
                 Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
 
@@ -232,7 +229,7 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
             }
 
             Ok(HttpRecordsOutput {
-                schema: Some(schema),
+                schema: OutputSchema::from(schema),
                 rows,
             })
         }
@@ -938,6 +935,33 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_schema_for_empty_response() {
+        let column_schemas = vec![
+            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+
+        let recordbatches = RecordBatches::try_new(schema.clone(), vec![]).unwrap();
+        let outputs = vec![Ok(Output::RecordBatches(recordbatches))];
+
+        let json_resp = GreptimedbV1Response::from_output(outputs).await;
+        if let HttpResponse::GreptimedbV1(json_resp) = json_resp {
+            let json_output = &json_resp.output[0];
+            if let GreptimeQueryOutput::Records(r) = json_output {
+                assert_eq!(r.num_rows(), 0);
+                assert_eq!(r.num_cols(), 2);
+                assert_eq!(r.schema.column_schemas[0].name, "numbers");
+                assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
+            } else {
+                panic!("invalid output type");
+            }
+        } else {
+            panic!("invalid format")
+        }
+    }
+
+    #[tokio::test]
     async fn test_recordbatches_conversion() {
         let column_schemas = vec![
             ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
@@ -977,9 +1001,8 @@ mod test {
                     if let GreptimeQueryOutput::Records(r) = json_output {
                         assert_eq!(r.num_rows(), 4);
                         assert_eq!(r.num_cols(), 2);
-                        let schema = r.schema.as_ref().unwrap();
-                        assert_eq!(schema.column_schemas[0].name, "numbers");
-                        assert_eq!(schema.column_schemas[0].data_type, "UInt32");
+                        assert_eq!(r.schema.column_schemas[0].name, "numbers");
+                        assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
                         assert_eq!(r.rows[0][0], serde_json::Value::from(1));
                         assert_eq!(r.rows[0][1], serde_json::Value::Null);
                     } else {
@@ -1002,9 +1025,8 @@ mod test {
                     if let GreptimeQueryOutput::Records(r) = output {
                         assert_eq!(r.num_rows(), 4);
                         assert_eq!(r.num_cols(), 2);
-                        let schema = r.schema.as_ref().unwrap();
-                        assert_eq!(schema.column_schemas[0].name, "numbers");
-                        assert_eq!(schema.column_schemas[0].data_type, "UInt32");
+                        assert_eq!(r.schema.column_schemas[0].name, "numbers");
+                        assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
                         assert_eq!(r.rows[0][0], serde_json::Value::from(1));
                         assert_eq!(r.rows[0][1], serde_json::Value::Null);
                     } else {

@@ -565,7 +565,9 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::Internal
         | StatusCode::PlanQuery
         | StatusCode::EngineExecuteQuery => Code::Internal,
-        StatusCode::InvalidArguments | StatusCode::InvalidSyntax => Code::InvalidArgument,
+        StatusCode::InvalidArguments | StatusCode::InvalidSyntax | StatusCode::RequestOutdated => {
+            Code::InvalidArgument
+        }
         StatusCode::Cancelled => Code::Cancelled,
         StatusCode::TableAlreadyExists
         | StatusCode::TableColumnExists

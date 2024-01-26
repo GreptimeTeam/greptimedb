@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::AddColumnLocation;
 use datatypes::data_type::ConcreteDataType;
 use sql::statements::concrete_data_type_to_sql_data_type;
 
@@ -20,6 +19,7 @@ use crate::error::{Error, Result};
 use crate::ir::alter_expr::AlterTableOperation;
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{AlterTableExpr, Column};
+use crate::translator::postgres::sql_data_type_to_postgres_data_type;
 use crate::translator::DslTranslator;
 
 pub struct AlterTableExprTranslator;
@@ -29,12 +29,12 @@ impl DslTranslator<AlterTableExpr, String> for AlterTableExprTranslator {
 
     fn translate(&self, input: &AlterTableExpr) -> Result<String> {
         Ok(match &input.alter_options {
-            AlterTableOperation::AddColumn { column, location } => {
-                Self::format_add_column(&input.name, column, location)
+            AlterTableOperation::AddColumn { column, .. } => {
+                Self::format_add_column(&input.table_name, column)
             }
-            AlterTableOperation::DropColumn { name } => Self::format_drop(&input.name, name),
+            AlterTableOperation::DropColumn { name } => Self::format_drop(&input.table_name, name),
             AlterTableOperation::RenameTable { new_table_name } => {
-                Self::format_rename(&input.name, new_table_name)
+                Self::format_rename(&input.table_name, new_table_name)
             }
         })
     }
@@ -46,35 +46,21 @@ impl AlterTableExprTranslator {
     }
 
     fn format_rename(name: &str, new_name: &str) -> String {
-        format!("ALTER TABLE {name} RENAME {new_name};")
+        format!("ALTER TABLE {name} RENAME TO {new_name};")
     }
 
-    fn format_add_column(
-        name: &str,
-        column: &Column,
-        location: &Option<AddColumnLocation>,
-    ) -> String {
+    fn format_add_column(name: &str, column: &Column) -> String {
         format!(
             "{};",
-            vec![
-                format!(
-                    "ALTER TABLE {name} ADD COLUMN {}",
-                    Self::format_column(column)
-                ),
-                Self::format_location(location).unwrap_or_default(),
-            ]
+            vec![format!(
+                "ALTER TABLE {name} ADD COLUMN {}",
+                Self::format_column(column)
+            ),]
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" ")
         )
-    }
-
-    fn format_location(location: &Option<AddColumnLocation>) -> Option<String> {
-        location.as_ref().map(|location| match location {
-            AddColumnLocation::First => "FIRST".to_string(),
-            AddColumnLocation::After { column_name } => format!("AFTER {column_name}"),
-        })
     }
 
     fn format_column(column: &Column) -> String {
@@ -90,15 +76,26 @@ impl AlterTableExprTranslator {
     }
 
     fn format_column_type(column_type: &ConcreteDataType) -> String {
-        // Safety: We don't use the `Dictionary` type
-        concrete_data_type_to_sql_data_type(column_type)
-            .unwrap()
-            .to_string()
+        sql_data_type_to_postgres_data_type(
+            // Safety: We don't use the `Dictionary` type
+            concrete_data_type_to_sql_data_type(column_type).unwrap(),
+        )
+    }
+
+    fn acceptable_column_option(option: &ColumnOption) -> bool {
+        matches!(
+            option,
+            ColumnOption::Null
+                | ColumnOption::NotNull
+                | ColumnOption::DefaultValue(_)
+                | ColumnOption::DefaultFn(_)
+        )
     }
 
     fn format_column_options(options: &[ColumnOption]) -> String {
         options
             .iter()
+            .filter(|opt| Self::acceptable_column_option(opt))
             .map(|option| option.to_string())
             .collect::<Vec<_>>()
             .join(" ")
@@ -119,7 +116,7 @@ mod tests {
     #[test]
     fn test_alter_table_expr() {
         let alter_expr = AlterTableExpr {
-            name: "test".to_string(),
+            table_name: "test".to_string(),
             alter_options: AlterTableOperation::AddColumn {
                 column: Column {
                     name: "host".to_string(),
@@ -131,23 +128,21 @@ mod tests {
         };
 
         let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();
-        assert_eq!(
-            "ALTER TABLE test ADD COLUMN host STRING PRIMARY KEY FIRST;",
-            output
-        );
+        // Ignores the location and primary key option.
+        assert_eq!("ALTER TABLE test ADD COLUMN host STRING;", output);
 
         let alter_expr = AlterTableExpr {
-            name: "test".to_string(),
+            table_name: "test".to_string(),
             alter_options: AlterTableOperation::RenameTable {
                 new_table_name: "foo".to_string(),
             },
         };
 
         let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();
-        assert_eq!("ALTER TABLE test RENAME foo;", output);
+        assert_eq!("ALTER TABLE test RENAME TO foo;", output);
 
         let alter_expr = AlterTableExpr {
-            name: "test".to_string(),
+            table_name: "test".to_string(),
             alter_options: AlterTableOperation::DropColumn {
                 name: "foo".to_string(),
             },

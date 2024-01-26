@@ -12,13 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod mysql;
-pub mod postgres;
+use std::fmt::Display;
 
-use std::fmt;
+use crate::ir::Column;
 
-pub trait DslTranslator<T, U> {
-    type Error: Sync + Send + fmt::Debug;
+pub enum Direction {
+    Asc,
+    Desc,
+}
 
-    fn translate(&self, input: &T) -> Result<U, Self::Error>;
+impl Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Direction::Asc => write!(f, "ASC"),
+            Direction::Desc => write!(f, "DESC"),
+        }
+    }
+}
+
+pub struct SelectExpr {
+    pub table_name: String,
+    pub columns: Vec<Column>,
+    pub order_by: Vec<String>,
+    pub direction: Direction,
+    pub limit: usize,
 }

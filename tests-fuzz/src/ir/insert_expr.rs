@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod mysql;
-pub mod postgres;
+use datatypes::value::Value;
 
-use std::fmt;
+use crate::ir::Column;
 
-pub trait DslTranslator<T, U> {
-    type Error: Sync + Send + fmt::Debug;
+pub type RowValue = Vec<Value>;
 
-    fn translate(&self, input: &T) -> Result<U, Self::Error>;
+pub struct InsertIntoExpr {
+    pub table_name: String,
+    pub columns: Vec<Column>,
+    pub rows: Vec<RowValue>,
 }

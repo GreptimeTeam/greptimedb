@@ -50,7 +50,7 @@ impl Display for ColumnOption {
 #[derive(Debug, Builder, Clone, Serialize, Deserialize)]
 pub struct CreateTableExpr {
     #[builder(setter(into))]
-    pub name: String,
+    pub table_name: String,
     pub columns: Vec<Column>,
     #[builder(default)]
     pub if_not_exists: bool,

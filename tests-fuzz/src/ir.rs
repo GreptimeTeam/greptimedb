@@ -16,6 +16,8 @@
 
 pub(crate) mod alter_expr;
 pub(crate) mod create_expr;
+pub(crate) mod insert_expr;
+pub(crate) mod select_expr;
 
 pub use alter_expr::AlterTableExpr;
 pub use create_expr::CreateTableExpr;
@@ -71,7 +73,11 @@ pub struct TsColumnTypeGenerator;
 pub struct PartibleColumnTypeGenerator;
 
 /// Generates a random [Value].
-pub fn generate_random_value<R: Rng>(rng: &mut R, datatype: &ConcreteDataType) -> Value {
+pub fn generate_random_value<R: Rng>(
+    rng: &mut R,
+    datatype: &ConcreteDataType,
+    random_str: Option<&dyn Random<String, R>>,
+) -> Value {
     match datatype {
         &ConcreteDataType::Boolean(_) => Value::from(rng.gen::<bool>()),
         ConcreteDataType::Int16(_) => Value::from(rng.gen::<i16>()),
@@ -79,9 +85,13 @@ pub fn generate_random_value<R: Rng>(rng: &mut R, datatype: &ConcreteDataType) -
         ConcreteDataType::Int64(_) => Value::from(rng.gen::<i64>()),
         ConcreteDataType::Float32(_) => Value::from(rng.gen::<f32>()),
         ConcreteDataType::Float64(_) => Value::from(rng.gen::<f64>()),
-        ConcreteDataType::String(_) => Value::from(rng.gen::<char>().to_string()),
+        ConcreteDataType::String(_) => match random_str {
+            Some(random) => Value::from(random.gen(rng)),
+            None => Value::from(rng.gen::<char>().to_string()),
+        },
         ConcreteDataType::Date(_) => Value::from(rng.gen::<i32>()),
         ConcreteDataType::DateTime(_) => Value::from(rng.gen::<i64>()),
+        &ConcreteDataType::Timestamp(_) => Value::from(rng.gen::<u64>()),
 
         _ => unimplemented!("unsupported type: {datatype}"),
     }
@@ -142,6 +152,7 @@ pub fn column_options_generator<R: Rng>(
         2 => vec![ColumnOption::DefaultValue(generate_random_value(
             rng,
             column_type,
+            None,
         ))],
         3 => vec![ColumnOption::PrimaryKey],
         _ => vec![],
@@ -163,7 +174,7 @@ pub fn partible_column_options_generator<R: Rng + 'static>(
         1 => vec![ColumnOption::PrimaryKey, ColumnOption::NotNull],
         2 => vec![
             ColumnOption::PrimaryKey,
-            ColumnOption::DefaultValue(generate_random_value(rng, column_type)),
+            ColumnOption::DefaultValue(generate_random_value(rng, column_type, None)),
         ],
         3 => vec![ColumnOption::PrimaryKey],
         _ => unreachable!(),

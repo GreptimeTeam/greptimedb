@@ -134,14 +134,14 @@ fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
 /// which is used as the basis for dividing time slot during the align operation.
 /// 1. NOW: align to current execute time
 /// 2. Timestamp string: align to specific timestamp
-/// 3. leave empty (as Default Option): align to unix epoch 0
+/// 3. leave empty (as Default Option): align to unix epoch 0 (timezone aware)
 fn parse_align_to(args: &[Expr], i: usize, timezone: Option<&Timezone>) -> DFResult<i64> {
     let s = parse_str_expr(args, i)?;
     let upper = s.to_uppercase();
     match upper.as_str() {
         "NOW" => return Ok(Timestamp::current_millis().value()),
-        // default align to unix epoch 0
-        "" => return Ok(0),
+        // default align to unix epoch 0 (timezone aware)
+        "" => return Ok(timezone.map(|tz| tz.local_minus_utc() * 1000).unwrap_or(0)),
         _ => (),
     }
 
@@ -762,7 +762,23 @@ mod test {
         assert!(epsinon.abs() < 100);
         // test default
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some("".into())))];
-        assert!(parse_align_to(&args, 0, None).unwrap() == 0);
+        assert_eq!(0, parse_align_to(&args, 0, None).unwrap());
+        // test default with timezone
+        let args = vec![Expr::Literal(ScalarValue::Utf8(Some("".into())))];
+        assert_eq!(
+            -36000 * 1000,
+            parse_align_to(&args, 0, Some(&Timezone::from_tz_string("HST").unwrap())).unwrap()
+        );
+        assert_eq!(
+            28800 * 1000,
+            parse_align_to(
+                &args,
+                0,
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap()
+        );
+
         // test Timestamp
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some(
             "1970-01-01T00:00:00+08:00".into(),

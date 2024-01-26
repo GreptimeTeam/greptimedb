@@ -15,38 +15,44 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{watcher, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, tracing};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionNumber, TableId};
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_table::AlterTableProcedure;
+use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{
-    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadata, TableMetadataAllocatorContext,
+    utils, DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadata,
+    TableMetadataAllocatorContext,
 };
 use crate::error::{
-    self, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableNotFoundSnafu,
-    WaitProcedureSnafu,
+    self, EmptyCreateTableTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
+    SubmitProcedureSnafu, TableNotFoundSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::region_keeper::MemoryRegionKeeperRef;
-use crate::rpc::ddl::DdlTask::{AlterTable, CreateTable, DropTable, TruncateTable};
+use crate::rpc::ddl::DdlTask::{
+    AlterLogicalTables, AlterTable, CreateLogicalTables, CreateTable, DropLogicalTables, DropTable,
+    TruncateTable,
+};
 use crate::rpc::ddl::{
     AlterTableTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
     TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
 use crate::table_name::TableName;
+use crate::ClusterId;
 
 pub type DdlManagerRef = Arc<DdlManager>;
 
@@ -116,6 +122,20 @@ impl DdlManager {
 
         self.procedure_manager
             .register_loader(
+                CreateLogicalTablesProcedure::TYPE_NAME,
+                Box::new(move |json| {
+                    let context = context.clone();
+                    CreateLogicalTablesProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                }),
+            )
+            .context(RegisterProcedureLoaderSnafu {
+                type_name: CreateLogicalTablesProcedure::TYPE_NAME,
+            })?;
+
+        let context = self.create_context();
+
+        self.procedure_manager
+            .register_loader(
                 DropTableProcedure::TYPE_NAME,
                 Box::new(move |json| {
                     let context = context.clone();
@@ -159,11 +179,11 @@ impl DdlManager {
     /// Submits and executes an alter table task.
     pub async fn submit_alter_table_task(
         &self,
-        cluster_id: u64,
+        cluster_id: ClusterId,
         alter_table_task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         physical_table_info: Option<(TableId, TableName)>,
-    ) -> Result<ProcedureId> {
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure = AlterTableProcedure::new(
@@ -183,11 +203,11 @@ impl DdlManager {
     /// Submits and executes a create table task.
     pub async fn submit_create_table_task(
         &self,
-        cluster_id: u64,
+        cluster_id: ClusterId,
         create_table_task: CreateTableTask,
         table_route: TableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,
-    ) -> Result<ProcedureId> {
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure = CreateTableProcedure::new(
@@ -204,14 +224,36 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
+    /// Submits and executes a create table task.
+    pub async fn submit_create_logical_table_tasks(
+        &self,
+        cluster_id: ClusterId,
+        create_table_tasks: Vec<CreateTableTask>,
+        physical_table_id: TableId,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+
+        let procedure = CreateLogicalTablesProcedure::new(
+            cluster_id,
+            create_table_tasks,
+            physical_table_id,
+            context,
+        );
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    #[tracing::instrument(skip_all)]
     /// Submits and executes a drop table task.
     pub async fn submit_drop_table_task(
         &self,
-        cluster_id: u64,
+        cluster_id: ClusterId,
         drop_table_task: DropTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         table_route_value: DeserializedValueWithBytes<TableRouteValue>,
-    ) -> Result<ProcedureId> {
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure = DropTableProcedure::new(
@@ -231,11 +273,11 @@ impl DdlManager {
     /// Submits and executes a truncate table task.
     pub async fn submit_truncate_table_task(
         &self,
-        cluster_id: u64,
+        cluster_id: ClusterId,
         truncate_table_task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         region_routes: Vec<RegionRoute>,
-    ) -> Result<ProcedureId> {
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = TruncateTableProcedure::new(
             cluster_id,
@@ -250,7 +292,10 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    async fn submit_procedure(&self, procedure_with_id: ProcedureWithId) -> Result<ProcedureId> {
+    async fn submit_procedure(
+        &self,
+        procedure_with_id: ProcedureWithId,
+    ) -> Result<(ProcedureId, Option<Output>)> {
         let procedure_id = procedure_with_id.id;
 
         let mut watcher = self
@@ -259,17 +304,17 @@ impl DdlManager {
             .await
             .context(SubmitProcedureSnafu)?;
 
-        watcher::wait(&mut watcher)
+        let output = watcher::wait(&mut watcher)
             .await
             .context(WaitProcedureSnafu)?;
 
-        Ok(procedure_id)
+        Ok((procedure_id, output))
     }
 }
 
 async fn handle_truncate_table_task(
     ddl_manager: &DdlManager,
-    cluster_id: u64,
+    cluster_id: ClusterId,
     truncate_table_task: TruncateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = truncate_table_task.table_id;
@@ -288,7 +333,7 @@ async fn handle_truncate_table_task(
 
     let table_route = table_route_value.into_inner().region_routes()?.clone();
 
-    let id = ddl_manager
+    let (id, _) = ddl_manager
         .submit_truncate_table_task(
             cluster_id,
             truncate_table_task,
@@ -307,7 +352,7 @@ async fn handle_truncate_table_task(
 
 async fn handle_alter_table_task(
     ddl_manager: &DdlManager,
-    cluster_id: u64,
+    cluster_id: ClusterId,
     alter_table_task: AlterTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_ref = alter_table_task.table_ref();
@@ -363,7 +408,7 @@ async fn handle_alter_table_task(
         ))
     };
 
-    let id = ddl_manager
+    let (id, _) = ddl_manager
         .submit_alter_table_task(
             cluster_id,
             alter_table_task,
@@ -382,7 +427,7 @@ async fn handle_alter_table_task(
 
 async fn handle_drop_table_task(
     ddl_manager: &DdlManager,
-    cluster_id: u64,
+    cluster_id: ClusterId,
     drop_table_task: DropTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = drop_table_task.table_id;
@@ -405,7 +450,7 @@ async fn handle_drop_table_task(
     let table_route_value =
         DeserializedValueWithBytes::from_inner(TableRouteValue::Physical(table_route_value));
 
-    let id = ddl_manager
+    let (id, _) = ddl_manager
         .submit_drop_table_task(
             cluster_id,
             drop_table_task,
@@ -424,7 +469,7 @@ async fn handle_drop_table_task(
 
 async fn handle_create_table_task(
     ddl_manager: &DdlManager,
-    cluster_id: u64,
+    cluster_id: ClusterId,
     mut create_table_task: CreateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_meta = ddl_manager
@@ -443,7 +488,7 @@ async fn handle_create_table_task(
 
     create_table_task.table_info.ident.table_id = table_id;
 
-    let id = ddl_manager
+    let (id, output) = ddl_manager
         .submit_create_table_task(
             cluster_id,
             create_table_task,
@@ -452,11 +497,65 @@ async fn handle_create_table_task(
         )
         .await?;
 
-    info!("Table: {table_id:?} is created via procedure_id {id:?}");
+    let procedure_id = id.to_string();
+    let output = output.context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "empty output",
+    })?;
+    let table_id = *(output.downcast_ref::<u32>().context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "downcast to `u32`",
+    })?);
+    info!("Table: {table_id} is created via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
-        key: id.to_string().into(),
+        key: procedure_id.into(),
         table_id: Some(table_id),
+        ..Default::default()
+    })
+}
+
+async fn handle_create_logical_table_tasks(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    mut create_table_tasks: Vec<CreateTableTask>,
+) -> Result<SubmitDdlTaskResponse> {
+    ensure!(!create_table_tasks.is_empty(), EmptyCreateTableTasksSnafu);
+    let physical_table_id = utils::check_and_get_physical_table_id(
+        &ddl_manager.table_metadata_manager,
+        &create_table_tasks,
+    )
+    .await?;
+    // Sets table_ids on create_table_tasks
+    ddl_manager
+        .table_metadata_allocator
+        .set_table_ids_on_logic_create(&mut create_table_tasks)
+        .await?;
+    let num_logical_tables = create_table_tasks.len();
+
+    let (id, output) = ddl_manager
+        .submit_create_logical_table_tasks(cluster_id, create_table_tasks, physical_table_id)
+        .await?;
+
+    info!("{num_logical_tables} logical tables on physical table: {physical_table_id:?} is created via procedure_id {id:?}");
+
+    let procedure_id = id.to_string();
+    let output = output.context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "empty output",
+    })?;
+    let table_ids = output
+        .downcast_ref::<Vec<TableId>>()
+        .context(ProcedureOutputSnafu {
+            procedure_id: &procedure_id,
+            err_msg: "downcast to `Vec<TableId>`",
+        })?
+        .clone();
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        table_ids,
+        ..Default::default()
     })
 }
 
@@ -489,6 +588,11 @@ impl DdlTaskExecutor for DdlManager {
                 TruncateTable(truncate_table_task) => {
                     handle_truncate_table_task(self, cluster_id, truncate_table_task).await
                 }
+                CreateLogicalTables(create_table_tasks) => {
+                    handle_create_logical_table_tasks(self, cluster_id, create_table_tasks).await
+                }
+                DropLogicalTables(_) => todo!(),
+                AlterLogicalTables(_) => todo!(),
             }
         }
         .trace(span)

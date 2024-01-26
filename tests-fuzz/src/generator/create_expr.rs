@@ -20,7 +20,7 @@ use snafu::{ensure, ResultExt};
 
 use super::Generator;
 use crate::error::{self, Error, Result};
-use crate::fake::{random_capitalize_map, MapWordGenerator};
+use crate::fake::{random_capitalize_map, MappedGenerator, WordGenerator};
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random};
 use crate::ir::create_expr::CreateTableExprBuilder;
 use crate::ir::{
@@ -58,7 +58,7 @@ impl<R: Rng + 'static> Default for CreateTableExprGenerator<R> {
             if_not_exists: false,
             partition: 0,
             name: String::new(),
-            name_generator: Box::new(MapWordGenerator::new(Box::new(random_capitalize_map))),
+            name_generator: Box::new(MappedGenerator::new(WordGenerator, random_capitalize_map)),
             ts_column_type_generator: Box::new(TsColumnTypeGenerator),
             column_type_generator: Box::new(ColumnTypeGenerator),
             partible_column_type_generator: Box::new(PartibleColumnTypeGenerator),
@@ -106,6 +106,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
                     partition_bounds.push(PartitionBound::Value(generate_random_value(
                         rng,
                         &column.column_type,
+                        None,
                     )));
                     partition_bounds.sort();
                 }
@@ -133,6 +134,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
                     partition_bounds.push(PartitionBound::Value(generate_random_value(
                         rng,
                         &column.column_type,
+                        None,
                     )));
                     partition_bounds.sort();
                 }
@@ -171,9 +173,9 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
         builder.engine(self.engine.to_string());
         builder.if_not_exists(self.if_not_exists);
         if self.name.is_empty() {
-            builder.name(self.name_generator.gen(rng));
+            builder.table_name(self.name_generator.gen(rng));
         } else {
-            builder.name(self.name.to_string());
+            builder.table_name(self.name.to_string());
         }
         builder.build().context(error::BuildCreateTableExprSnafu)
     }
@@ -228,7 +230,7 @@ mod tests {
             .unwrap();
 
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"name":"iN","columns":[{"name":"CUlpa","column_type":{"Int16":{}},"options":["PrimaryKey","NotNull"]},{"name":"dEBiTiS","column_type":{"Timestamp":{"Second":null}},"options":["TimeIndex"]},{"name":"HArum","column_type":{"Int16":{}},"options":["NotNull"]},{"name":"NObIS","column_type":{"Int32":{}},"options":["PrimaryKey"]},{"name":"IMPEDiT","column_type":{"Int16":{}},"options":[{"DefaultValue":{"Int16":-25151}}]},{"name":"bLanDITIis","column_type":{"Boolean":null},"options":[{"DefaultValue":{"Boolean":true}}]},{"name":"Dolores","column_type":{"Float32":{}},"options":["PrimaryKey"]},{"name":"eSt","column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.9152612}}]},{"name":"INVentORE","column_type":{"Int64":{}},"options":["PrimaryKey"]},{"name":"aDIpiSci","column_type":{"Float64":{}},"options":["Null"]}],"if_not_exists":true,"partition":{"partition_columns":["CUlpa"],"partition_bounds":[{"Value":{"Int16":15966}},{"Value":{"Int16":31925}},"MaxValue"]},"engine":"mito2","options":{},"primary_keys":[6,0,8,3]}"#;
+        let expected = r#"{"table_name":"iN","columns":[{"name":"CUlpa","column_type":{"Int16":{}},"options":["PrimaryKey","NotNull"]},{"name":"dEBiTiS","column_type":{"Timestamp":{"Second":null}},"options":["TimeIndex"]},{"name":"HArum","column_type":{"Int16":{}},"options":["NotNull"]},{"name":"NObIS","column_type":{"Int32":{}},"options":["PrimaryKey"]},{"name":"IMPEDiT","column_type":{"Int16":{}},"options":[{"DefaultValue":{"Int16":-25151}}]},{"name":"bLanDITIis","column_type":{"Boolean":null},"options":[{"DefaultValue":{"Boolean":true}}]},{"name":"Dolores","column_type":{"Float32":{}},"options":["PrimaryKey"]},{"name":"eSt","column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.9152612}}]},{"name":"INVentORE","column_type":{"Int64":{}},"options":["PrimaryKey"]},{"name":"aDIpiSci","column_type":{"Float64":{}},"options":["Null"]}],"if_not_exists":true,"partition":{"partition_columns":["CUlpa"],"partition_bounds":[{"Value":{"Int16":15966}},{"Value":{"Int16":31925}},"MaxValue"]},"engine":"mito2","options":{},"primary_keys":[6,0,8,3]}"#;
         assert_eq!(expected, serialized);
     }
 }
