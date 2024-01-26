@@ -9,7 +9,7 @@ inputs:
     required: true
   cargo-profile:
     description: Cargo profile to build
-    required: true
+    required: false
   artifacts-dir:
     description: Directory to store artifacts
     required: true
@@ -37,14 +37,21 @@ runs:
           FEATURES=${{ inputs.features }} \
           BASE_IMAGE=${{ inputs.base-image }}
 
+    - name: Pack GreptimeDB binaries
+      shell: bash
+      env:
+        # If inputs.cargo-profile is empty, we will use 'debug' as default.
+        PROFILE_TARGET: ${{ inputs.cargo-profile == '' && 'debug' || inputs.cargo-profile }}
+      run: |
+        mkdir -p ${{ inputs.artifacts-dir }} && \
+        sudo mv ./target/$PROFILE_TARGET/greptime ${{ inputs.artifacts-dir }} && \
+        sudo mv ./target/$PROFILE_TARGET/sqlness-runner ${{ inputs.artifacts-dir }}
+
     - name: Upload artifacts
       uses: ./.github/actions/upload-artifacts
       if: ${{ inputs.build-android-artifacts == 'false' }}
-      env:
-        PROFILE_TARGET: ${{ inputs.cargo-profile == 'dev' && 'debug' || inputs.cargo-profile }}
       with:
         artifacts-dir: ${{ inputs.artifacts-dir }}
-        target-file: ./target/$PROFILE_TARGET/greptime
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
 

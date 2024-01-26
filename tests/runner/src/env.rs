@@ -57,6 +57,11 @@ pub struct Env {
     data_home: PathBuf,
     server_addr: Option<String>,
     wal: WalConfig,
+
+    /// The path to the directory that contains the pre-built GreptimeDB binary.
+    /// When running in CI, this is expected to be set.
+    /// If not set, this runner will build the GreptimeDB binary itself when needed, and set this field by then.
+    bins_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[async_trait]
@@ -79,10 +84,12 @@ impl EnvController for Env {
 
 impl Env {
     pub fn new(data_home: PathBuf, server_addr: Option<String>, wal: WalConfig) -> Self {
+        let bins_dir = std::env::var("GREPTIME_BINS_DIR").map(PathBuf::from).ok();
         Self {
             data_home,
             server_addr,
             wal,
+            bins_dir: Arc::new(Mutex::new(bins_dir)),
         }
     }
 
@@ -90,7 +97,7 @@ impl Env {
         if let Some(server_addr) = self.server_addr.clone() {
             self.connect_db(&server_addr)
         } else {
-            Self::build_db().await;
+            self.build_db();
             self.setup_wal();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone());
@@ -116,7 +123,7 @@ impl Env {
         if let Some(server_addr) = self.server_addr.clone() {
             self.connect_db(&server_addr)
         } else {
-            Self::build_db().await;
+            self.build_db();
             self.setup_wal();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone());
@@ -249,8 +256,12 @@ impl Env {
         #[cfg(windows)]
         let program = "greptime.exe";
 
+        let bins_dir = self.bins_dir.lock().unwrap().clone().expect(
+            "GreptimeDB binary is not available. Please set the GREPTIME_BINS_DIR environment variable to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
+        );
+
         let mut process = Command::new(program)
-            .current_dir(util::get_binary_dir("debug"))
+            .current_dir(bins_dir)
             .env("TZ", "UTC")
             .args(args)
             .stdout(log_file)
@@ -374,7 +385,11 @@ impl Env {
     }
 
     /// Build the DB with `cargo build --bin greptime`
-    async fn build_db() {
+    fn build_db(&self) {
+        if self.bins_dir.lock().unwrap().is_some() {
+            return;
+        }
+
         println!("Going to build the DB...");
         let output = Command::new("cargo")
             .current_dir(util::get_workspace_root())
@@ -389,7 +404,12 @@ impl Env {
             io::stderr().write_all(&output.stderr).unwrap();
             panic!();
         }
-        println!("Build finished, starting...");
+
+        let _ = self
+            .bins_dir
+            .lock()
+            .unwrap()
+            .insert(util::get_binary_dir("debug"));
     }
 }
 

@@ -76,8 +76,8 @@ jobs:
       - name: Run taplo
         run: taplo format --check
 
-  sqlness:
-    name: Sqlness Test
+  build:
+    name: Build GreptimeDB binaries
     if: github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
@@ -86,16 +86,35 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: ./.github/actions/build-greptime-binary
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
+          base-image: ubuntu
+          features: ''
+          artifacts-dir: bins
+          version: current
+      - name: Print bins info
+        run: ls -lh ./bins
+
+  sqlness:
+    name: Sqlness Test
+    if: github.event.pull_request.draft == false
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04-8-cores ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
-        run: cargo sqlness
+        run: GREPTIME_BINS_DIR=./bins ./bins/sqlness-runner -c ./tests/cases
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3
@@ -107,6 +126,7 @@ jobs:
   sqlness-kafka-wal:
     name: Sqlness Test with Kafka Wal
     if: github.event.pull_request.draft == false
+    needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -114,19 +134,18 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
       - name: Setup kafka server
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
-        run: cargo sqlness -w kafka -k 127.0.0.1:9092
+        run: GREPTIME_BINS_DIR=./bins ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3

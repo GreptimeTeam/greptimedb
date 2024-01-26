@@ -4,9 +4,6 @@ inputs:
   artifacts-dir:
     description: Directory to store artifacts
     required: true
-  target-file:
-    description: The path of the target artifact
-    required: true
   version:
     description: Version of the artifact
     required: true
@@ -17,13 +14,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Create artifacts directory
-      working-directory: ${{ inputs.working-dir }}
-      shell: bash
-      run: |
-        mkdir -p ${{ inputs.artifacts-dir }} && \
-        cp ${{ inputs.target-file }} ${{ inputs.artifacts-dir }}
-
     # The compressed artifacts will use the following layout:
     # greptime-linux-amd64-pyo3-v0.3.0sha256sum
     # greptime-linux-amd64-pyo3-v0.3.0.tar.gz
@@ -51,13 +41,13 @@ runs:
     # Note: The artifacts will be double zip compressed(related issue: https://github.com/actions/upload-artifact/issues/39).
     # However, when we use 'actions/download-artifact@v3' to download the artifacts, it will be automatically unzipped.
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifacts-dir }}
         path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.tar.gz
 
     - name: Upload checksum
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifacts-dir }}.sha256sum
         path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.sha256sum
