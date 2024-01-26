@@ -25,5 +25,6 @@ snafu.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
+tempfile.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true

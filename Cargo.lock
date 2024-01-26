@@ -4054,6 +4054,7 @@ dependencies = [
  "regex",
  "regex-automata 0.2.0",
  "snafu",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
