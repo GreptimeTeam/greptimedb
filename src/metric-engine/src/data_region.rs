@@ -89,7 +89,6 @@ impl DataRegion {
             .enumerate()
             .map(|(delta, mut c)| {
                 if c.semantic_type == SemanticType::Tag {
-                    c.column_schema = c.column_schema.with_nullable_set();
                     if !c.column_schema.data_type.is_string() {
                         return ColumnTypeMismatchSnafu {
                             column_type: c.column_schema.data_type,
