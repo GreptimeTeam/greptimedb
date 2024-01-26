@@ -51,9 +51,9 @@ impl DataRegion {
 
     /// Submit an alter request to underlying physical region.
     ///
-    /// This method will change the semantic type of those given columns.
-    /// [SemanticType::Tag] will become [SemanticType::Field]. The procedure framework
-    /// ensures there is no concurrent conflict.
+    /// This method will change the nullability of those given columns.
+    /// [SemanticType::Tag] will become nullable column as it's shared between
+    /// logical regions.
     ///
     /// Invoker don't need to set up or verify the column id. This method will adjust
     /// it using underlying schema.
@@ -124,7 +124,6 @@ impl DataRegion {
             .map(|(delta, c)| {
                 let mut c = c.clone();
                 if c.semantic_type == SemanticType::Tag {
-                    c.semantic_type = SemanticType::Field;
                     if !c.column_schema.data_type.is_string() {
                         return ColumnTypeMismatchSnafu {
                             column_type: c.column_schema.data_type,
