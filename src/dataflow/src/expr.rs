@@ -15,19 +15,8 @@
 //! for declare Expression in dataflow, including map, reduce, id and join(TODO!) etc.
 
 pub(crate) mod error;
-mod func;
 mod id;
-mod linear;
-mod relation;
-mod scalar;
-
-use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) use id::{GlobalId, Id, LocalId};
-pub(crate) use linear::{MapFilterProject, SafeMfpPlan};
-pub(crate) use relation::{AggregateExpr, AggregateFunc};
-use serde::{Deserialize, Serialize};
 
 pub(crate) use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
-pub(crate) use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
-pub(crate) use crate::expr::scalar::ScalarExpr;
