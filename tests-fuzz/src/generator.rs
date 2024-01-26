@@ -14,6 +14,8 @@
 
 pub mod alter_expr;
 pub mod create_expr;
+pub mod insert_expr;
+pub mod select_expr;
 
 use std::fmt;
 

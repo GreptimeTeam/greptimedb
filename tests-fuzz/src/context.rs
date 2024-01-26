@@ -33,7 +33,7 @@ pub struct TableContext {
 impl From<&CreateTableExpr> for TableContext {
     fn from(
         CreateTableExpr {
-            name,
+            table_name: name,
             columns,
             partition,
             primary_keys,

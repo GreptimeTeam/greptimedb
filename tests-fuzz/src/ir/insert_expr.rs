@@ -12,7 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod alter_expr;
-pub mod create_expr;
-pub mod insert_expr;
-pub mod select_expr;
+use datatypes::value::Value;
+
+use crate::ir::Column;
+
+pub type RowValue = Vec<Value>;
+
+pub struct InsertIntoExpr {
+    pub table_name: String,
+    pub columns: Vec<Column>,
+    pub rows: Vec<RowValue>,
+}

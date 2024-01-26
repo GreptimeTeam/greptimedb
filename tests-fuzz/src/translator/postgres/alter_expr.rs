@@ -30,11 +30,11 @@ impl DslTranslator<AlterTableExpr, String> for AlterTableExprTranslator {
     fn translate(&self, input: &AlterTableExpr) -> Result<String> {
         Ok(match &input.alter_options {
             AlterTableOperation::AddColumn { column, .. } => {
-                Self::format_add_column(&input.name, column)
+                Self::format_add_column(&input.table_name, column)
             }
-            AlterTableOperation::DropColumn { name } => Self::format_drop(&input.name, name),
+            AlterTableOperation::DropColumn { name } => Self::format_drop(&input.table_name, name),
             AlterTableOperation::RenameTable { new_table_name } => {
-                Self::format_rename(&input.name, new_table_name)
+                Self::format_rename(&input.table_name, new_table_name)
             }
         })
     }
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn test_alter_table_expr() {
         let alter_expr = AlterTableExpr {
-            name: "test".to_string(),
+            table_name: "test".to_string(),
             alter_options: AlterTableOperation::AddColumn {
                 column: Column {
                     name: "host".to_string(),
@@ -132,7 +132,7 @@ mod tests {
         assert_eq!("ALTER TABLE test ADD COLUMN host STRING;", output);
 
         let alter_expr = AlterTableExpr {
-            name: "test".to_string(),
+            table_name: "test".to_string(),
             alter_options: AlterTableOperation::RenameTable {
                 new_table_name: "foo".to_string(),
             },
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!("ALTER TABLE test RENAME TO foo;", output);
 
         let alter_expr = AlterTableExpr {
-            name: "test".to_string(),
+            table_name: "test".to_string(),
             alter_options: AlterTableOperation::DropColumn {
                 name: "foo".to_string(),
             },

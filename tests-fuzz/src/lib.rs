@@ -21,3 +21,6 @@ pub mod fake;
 pub mod generator;
 pub mod ir;
 pub mod translator;
+
+#[cfg(test)]
+pub mod test_utils;

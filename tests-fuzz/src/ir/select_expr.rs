@@ -12,7 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod alter_expr;
-pub mod create_expr;
-pub mod insert_expr;
-pub mod select_expr;
+use std::fmt::Display;
+
+use crate::ir::Column;
+
+pub enum Direction {
+    Asc,
+    Desc,
+}
+
+impl Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Direction::Asc => write!(f, "ASC"),
+            Direction::Desc => write!(f, "DESC"),
+        }
+    }
+}
+
+pub struct SelectExpr {
+    pub table_name: String,
+    pub columns: Vec<Column>,
+    pub order_by: Vec<String>,
+    pub direction: Direction,
+    pub limit: usize,
+}
