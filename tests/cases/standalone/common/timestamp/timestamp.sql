@@ -10,17 +10,17 @@ INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('2023-04-04 08:00:00.0052+0
 
 INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('+100000-01-01 00:00:01.5Z', 3);
 
-INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('-262144-01-01 00:00:00Z', 4);
+INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('-262143-01-01 00:00:00Z', 4);
 
-INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('+262143-12-31 23:59:59Z', 5);
+INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('+262142-12-31 23:59:59Z', 5);
 
-INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('-262144-01-01 00:00:00Z', 6);
+INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('-262143-01-01 00:00:00Z', 6);
 
-INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('+262143-12-31 23:59:59.999Z', 7);
+INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('+262142-12-31 23:59:59.999Z', 7);
 
-INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('-262144-01-01 00:00:00Z', 8);
+INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('-262143-01-01 00:00:00Z', 8);
 
-INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('+262143-12-31 23:59:59.999999Z', 9);
+INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('+262142-12-31 23:59:59.999999Z', 9);
 
 INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('1677-09-21 00:12:43.145225Z', 10);
 
