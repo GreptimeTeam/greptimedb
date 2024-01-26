@@ -34,9 +34,7 @@ pub(crate) fn row_flow_to_proto(row: FlowRow) -> ProtoRow {
     let values = row
         .unpack()
         .into_iter()
-        .map(|val| {
-            value_to_grpc_value(val.clone())
-        })
+        .map(|val| value_to_grpc_value(val.clone()))
         .collect_vec();
     ProtoRow { values }
 }

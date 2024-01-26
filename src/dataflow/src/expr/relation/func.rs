@@ -251,7 +251,7 @@ where
                     _ => unreachable!("multicity of diff not supported"),
                 }),
             })
-            .expect("not all values are null");// invariant: values are not null after filter
+            .expect("not all values are null"); // invariant: values are not null after filter
         x.into()
     };
     Ok(ret)
