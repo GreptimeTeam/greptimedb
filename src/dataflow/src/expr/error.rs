@@ -12,7 +12,7 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 #[derive(Ord, PartialOrd, Clone, Eq, Deserialize, Serialize, PartialEq, Hash)]
-pub(crate) enum EvalError {
+pub enum EvalError {
     #[snafu(display("Division by zero"))]
     DivisionByZero,
     #[snafu(display("Type mismatch: expected {}, actual {}", expected, actual))]
