@@ -19,8 +19,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use common_runtime::Runtime;
-use common_telemetry::error;
-use common_telemetry::logging::{info, warn};
+use common_telemetry::logging::warn;
+use common_telemetry::{debug, error};
 use futures::StreamExt;
 use opensrv_mysql::{
     plain_run_with_options, secure_run_with_options, AsyncMysqlIntermediary, IntermediaryOptions,
@@ -157,13 +157,17 @@ impl MysqlServer {
         spawn_ref: Arc<MysqlSpawnRef>,
         spawn_config: Arc<MysqlSpawnConfig>,
     ) -> Result<()> {
-        info!("MySQL connection coming from: {}", stream.peer_addr()?);
+        debug!("MySQL connection coming from: {}", stream.peer_addr()?);
         let _handle = io_runtime.spawn(async move {
             crate::metrics::METRIC_MYSQL_CONNECTIONS.inc();
-            if let Err(e)  = Self::do_handle(stream, spawn_ref, spawn_config).await {
-                // TODO(LFC): Write this error to client as well, in MySQL text protocol.
-                // Looks like we have to expose opensrv-mysql's `PacketWriter`?
-                warn!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time")
+            if let Err(e) = Self::do_handle(stream, spawn_ref, spawn_config).await {
+                if let Error::InternalIo { error } = &e && error.kind() == std::io::ErrorKind::ConnectionAborted {
+                    // This is a client-side error, we don't need to log it.
+                } else {
+                    // TODO(LFC): Write this error to client as well, in MySQL text protocol.
+                    // Looks like we have to expose opensrv-mysql's `PacketWriter`?
+                    warn!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time");
+                }
             }
             crate::metrics::METRIC_MYSQL_CONNECTIONS.dec();
         });
