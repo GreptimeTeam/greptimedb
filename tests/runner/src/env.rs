@@ -83,8 +83,12 @@ impl EnvController for Env {
 }
 
 impl Env {
-    pub fn new(data_home: PathBuf, server_addr: Option<String>, wal: WalConfig) -> Self {
-        let bins_dir = std::env::var("GREPTIME_BINS_DIR").map(PathBuf::from).ok();
+    pub fn new(
+        data_home: PathBuf,
+        server_addr: Option<String>,
+        wal: WalConfig,
+        bins_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             data_home,
             server_addr,
@@ -257,7 +261,7 @@ impl Env {
         let program = "greptime.exe";
 
         let bins_dir = self.bins_dir.lock().unwrap().clone().expect(
-            "GreptimeDB binary is not available. Please set the GREPTIME_BINS_DIR environment variable to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
+            "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
         );
 
         let mut process = Command::new(program)

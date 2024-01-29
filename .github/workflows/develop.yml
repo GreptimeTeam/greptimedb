@@ -127,7 +127,7 @@ jobs:
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
-        run: GREPTIME_BINS_DIR=./bins ./bins/sqlness-runner -c ./tests/cases
+        run: ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3
@@ -158,7 +158,7 @@ jobs:
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
-        run: GREPTIME_BINS_DIR=./bins ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases
+        run: ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3
