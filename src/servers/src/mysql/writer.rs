@@ -200,8 +200,10 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         v.to_chrono_datetime_with_timezone(Some(&query_context.timezone())),
                     )?,
                     Value::Interval(v) => row_writer.write_col(v.to_iso8601_string())?,
-                    Value::Duration(v) => row_writer.write_col(v.to_std_duration())?,
-                    Value::List(_) => {
+                    Value::Time(v) => row_writer
+                        .write_col(v.to_timezone_aware_string(Some(&query_context.timezone())))?,
+                    Value::Decimal128(v) => row_writer.write_col(v.to_string())?,
+                    Value::Duration(_) | Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
                                 "cannot write value {:?} in mysql protocol: unimplemented",
@@ -209,9 +211,6 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             ),
                         })
                     }
-                    Value::Time(v) => row_writer
-                        .write_col(v.to_timezone_aware_string(Some(&query_context.timezone())))?,
-                    Value::Decimal128(v) => row_writer.write_col(v.to_string())?,
                 }
             }
             row_writer.end_row().await?;
@@ -263,7 +262,6 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Date(_) => Ok(ColumnType::MYSQL_TYPE_DATE),
         ConcreteDataType::DateTime(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
         ConcreteDataType::Interval(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
-        ConcreteDataType::Duration(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Decimal128(_) => Ok(ColumnType::MYSQL_TYPE_DECIMAL),
         _ => error::UnsupportedDataTypeSnafu {
             data_type,
