@@ -215,16 +215,15 @@ impl StatementExecutor {
                 path,
                 schema,
             } => {
-                let output_schema = Arc::new(
+                let projected_schema = Arc::new(
                     compat_schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
-
                 let csv_conf = CsvConfigBuilder::default()
                     .batch_size(DEFAULT_BATCH_SIZE)
                     .file_schema(schema.clone())
-                    .file_projection(Some(projection))
+                    .file_projection(Some(projection.clone()))
                     .build()
                     .context(error::BuildCsvConfigSnafu)?;
 
@@ -237,8 +236,9 @@ impl StatementExecutor {
                     .await?;
 
                 Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    output_schema,
+                    projected_schema,
                     stream,
+                    Some(projection),
                 )))
             }
             FileMetadata::Json {
@@ -251,7 +251,7 @@ impl StatementExecutor {
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
-                let output_schema = Arc::new(
+                let projected_schema = Arc::new(
                     compat_schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
@@ -270,8 +270,9 @@ impl StatementExecutor {
                     .await?;
 
                 Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    output_schema,
+                    projected_schema,
                     stream,
+                    Some(projection),
                 )))
             }
             FileMetadata::Parquet { metadata, path, .. } => {
@@ -286,14 +287,15 @@ impl StatementExecutor {
                     .build()
                     .context(error::BuildParquetRecordBatchStreamSnafu)?;
 
-                let output_schema = Arc::new(
+                let projected_schema = Arc::new(
                     compat_schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
                 Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    output_schema,
+                    projected_schema,
                     stream,
+                    Some(projection),
                 )))
             }
             FileMetadata::Orc { path, .. } => {
@@ -306,14 +308,16 @@ impl StatementExecutor {
                     .await
                     .context(error::ReadOrcSnafu)?;
 
-                let output_schema = Arc::new(
+                let projected_schema = Arc::new(
                     compat_schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
+
                 Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    output_schema,
+                    projected_schema,
                     stream,
+                    Some(projection),
                 )))
             }
         }

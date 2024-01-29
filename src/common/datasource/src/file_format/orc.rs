@@ -95,15 +95,16 @@ impl OrcOpener {
 impl FileOpener for OrcOpener {
     fn open(&self, meta: FileMeta) -> DfResult<FileOpenFuture> {
         let object_store = self.object_store.clone();
-        let output_schema = if let Some(projection) = &self.projection {
-            let output_schema = self
+        let projected_schema = if let Some(projection) = &self.projection {
+            let projected_schema = self
                 .output_schema
                 .project(projection)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            Arc::new(output_schema)
+            Arc::new(projected_schema)
         } else {
             self.output_schema.clone()
         };
+        let projection = self.projection.clone();
         Ok(Box::pin(async move {
             let reader = object_store
                 .reader(meta.location().to_string().as_str())
@@ -114,7 +115,8 @@ impl FileOpener for OrcOpener {
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-            let stream = RecordBatchStreamTypeAdapter::new(output_schema, stream_reader);
+            let stream =
+                RecordBatchStreamTypeAdapter::new(projected_schema, stream_reader, projection);
 
             let adopted = stream.map_err(|e| ArrowError::ExternalError(Box::new(e)));
             Ok(adopted.boxed())

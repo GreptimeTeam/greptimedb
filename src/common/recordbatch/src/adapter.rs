@@ -23,6 +23,7 @@ use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
 use datafusion::physical_plan::{ExecutionPlan, RecordBatchStream as DfRecordBatchStream};
+use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::DataFusionError;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
@@ -43,7 +44,8 @@ type FutureStream =
 pub struct RecordBatchStreamTypeAdapter<T, E> {
     #[pin]
     stream: T,
-    output_schema: DfSchemaRef,
+    projected_schema: DfSchemaRef,
+    projection: Vec<usize>,
     phantom: PhantomData<E>,
 }
 
@@ -52,10 +54,17 @@ where
     T: Stream<Item = std::result::Result<DfRecordBatch, E>>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    pub fn new(output_schema: DfSchemaRef, stream: T) -> Self {
+    pub fn new(projected_schema: DfSchemaRef, stream: T, projection: Option<Vec<usize>>) -> Self {
+        let projection = if let Some(projection) = projection {
+            projection
+        } else {
+            (0..projected_schema.fields().len()).collect()
+        };
+
         Self {
             stream,
-            output_schema,
+            projected_schema,
+            projection,
             phantom: Default::default(),
         }
     }
@@ -67,7 +76,7 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     fn schema(&self) -> DfSchemaRef {
-        self.output_schema.clone()
+        self.projected_schema.clone()
     }
 }
 
@@ -84,14 +93,22 @@ where
         let batch = futures::ready!(this.stream.poll_next(cx))
             .map(|r| r.map_err(|e| DataFusionError::External(Box::new(e))));
 
-        let output_schema = this.output_schema.clone();
+        let projected_schema = this.projected_schema.clone();
+        let projection = this.projection.clone();
         let batch = batch.map(|b| {
             b.and_then(|b| {
-                let mut columns = Vec::with_capacity(output_schema.fields.len());
-                for idx in 0..output_schema.fields.len() {
-                    let column = b.column(idx);
-                    let field = output_schema.field(idx);
+                let projected_column = b.project(&projection)?;
+                if projected_column.schema().fields.len() != projected_schema.fields.len() {
+                   return Err(DataFusionError::ArrowError(ArrowError::SchemaError(format!(
+                        "Trying to cast a RecordBatch into an incompatible schema. RecordBatch: {}, Target: {}",
+                        projected_column.schema(),
+                        projected_schema,
+                    ))));
+                }
 
+                let mut columns = Vec::with_capacity(projected_schema.fields.len());
+                for (idx,field) in projected_schema.fields.iter().enumerate() {
+                    let column = projected_column.column(idx);
                     if column.data_type() != field.data_type() {
                         let output = cast(&column, field.data_type())?;
                         columns.push(output)
@@ -99,9 +116,7 @@ where
                         columns.push(column.clone())
                     }
                 }
-
-                let record_batch = DfRecordBatch::try_new(output_schema, columns)?;
-
+                let record_batch = DfRecordBatch::try_new(projected_schema, columns)?;
                 Ok(record_batch)
             })
         });
