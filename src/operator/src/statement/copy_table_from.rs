@@ -464,7 +464,10 @@ fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     }
 }
 
-/// Allows the file schema is a subset of table
+/// Generates a maybe compatible schema of the file schema.
+///
+/// If there is a field is found in table schema,
+/// copy the field data type to maybe compatible schema(`compatible_fields`).
 fn generated_schema_projection_and_compatible_file_schema(
     file: &SchemaRef,
     table: &SchemaRef,
