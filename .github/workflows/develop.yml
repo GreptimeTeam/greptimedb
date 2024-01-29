@@ -86,14 +86,27 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
-      - uses: ./.github/actions/build-greptime-binary
+      - uses: arduino/setup-protoc@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          base-image: ubuntu
-          features: ''
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build greptime binaries
+        shell: bash
+        run: cargo build
+      - name: Pack greptime binaries
+        shell: bash
+        run: |
+          mkdir bins && \
+          mv ./target/debug/greptime bins && \
+          mv ./target/debug/sqlness-runner bins
+      - name: Print greptime binaries info
+        run: ls -lh bins
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
           artifacts-dir: bins
           version: current
-      - name: Print bins info
-        run: ls -lh ./bins
 
   sqlness:
     name: Sqlness Test
@@ -102,7 +115,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04-8-cores ]
+        os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
