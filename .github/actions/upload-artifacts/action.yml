@@ -6,7 +6,7 @@ inputs:
     required: true
   target-file:
     description: The path of the target artifact
-    required: true
+    required: false
   version:
     description: Version of the artifact
     required: true
@@ -18,6 +18,7 @@ runs:
   using: composite
   steps:
     - name: Create artifacts directory
+      if: ${{ inputs.target-file != '' }}
       working-directory: ${{ inputs.working-dir }}
       shell: bash
       run: |
