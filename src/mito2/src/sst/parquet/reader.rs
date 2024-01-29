@@ -311,14 +311,11 @@ impl ParquetReaderBuilder {
         // Prunes row groups by min-max index.
         if let Some(predicate) = &self.predicate {
             let region_meta = read_format.metadata();
-            let column_ids = match &self.projection {
-                Some(ids) => ids.iter().cloned().collect(),
-                None => region_meta
-                    .column_metadatas
-                    .iter()
-                    .map(|c| c.column_id)
-                    .collect(),
-            };
+            let column_ids = region_meta
+                .column_metadatas
+                .iter()
+                .map(|c| c.column_id)
+                .collect();
 
             let row_groups = row_group_ids
                 .iter()
