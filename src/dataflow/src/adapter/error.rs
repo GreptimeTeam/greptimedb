@@ -72,15 +72,3 @@ impl ErrorExt for Error {
 }
 
 define_into_tonic_status!(Error);
-
-// TODO(discord9): more error types
-#[derive(Ord, PartialOrd, Clone, Debug, Eq, Deserialize, Serialize, PartialEq, Hash)]
-pub enum DataflowError {
-    EvalError(Box<EvalError>),
-}
-
-impl From<EvalError> for DataflowError {
-    fn from(e: EvalError) -> Self {
-        DataflowError::EvalError(Box::new(e))
-    }
-}

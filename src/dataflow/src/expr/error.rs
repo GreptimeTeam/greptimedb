@@ -23,11 +23,9 @@ use snafu::{Location, Snafu};
 
 /// EvalError is about errors happen on columnar evaluation
 ///
-/// TODO(discord9): add detailed location of column/operator(instead of code) to errors, because EvalError happens on dataflow graph
-/// which makes it hard to locate the error if we only have the code location
+/// TODO(discord9): add detailed location of column/operator(instead of code) to errors tp help identify related column
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
-#[derive(Ord, PartialOrd, Clone, Eq, Deserialize, Serialize, PartialEq, Hash)]
 #[stack_trace_debug]
 pub enum EvalError {
     #[snafu(display("Division by zero"))]
@@ -37,27 +35,27 @@ pub enum EvalError {
     TypeMismatch {
         expected: ConcreteDataType,
         actual: ConcreteDataType,
+        location: Location,
     },
 
     /// can't nest datatypes error because EvalError need to be store in map and serialization
     #[snafu(display("Fail to unpack from value to given type: {msg}"))]
-    TryFromValue { msg: String },
+    TryFromValue { msg: String, location: Location },
 
     #[snafu(display("Fail to cast value of type {from} to given type {to}"))]
     CastValue {
         from: ConcreteDataType,
         to: ConcreteDataType,
-        /// extra message on the nature of the error could be useful
-        /// since we don't want to nest other Snafu Error
-        msg: String,
+        source: datatypes::Error,
+        location: Location,
     },
 
     #[snafu(display("Invalid argument: {reason}"))]
-    InvalidArgument { reason: String },
+    InvalidArgument { reason: String, location: Location },
 
     #[snafu(display("Internal error: {reason}"))]
-    Internal { reason: String },
+    Internal { reason: String, location: Location },
 
     #[snafu(display("Optimize error: {reason}"))]
-    Optimize { reason: String },
+    Optimize { reason: String, location: Location },
 }

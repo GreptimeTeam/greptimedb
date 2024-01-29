@@ -29,6 +29,7 @@ use datatypes::value::Value;
 use itertools::Itertools;
 pub(crate) use relation::{RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
 use crate::expr::error::{CastValueSnafu, EvalError};
 
@@ -58,13 +59,11 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
                 &ConcreteDataType::datetime_datatype(),
                 &CastOption { strict: true },
             )
-            .map_err(|e| {
+            .context({
                 CastValueSnafu {
                     from: arg_ty,
                     to: ConcreteDataType::datetime_datatype(),
-                    msg: e.to_string(),
                 }
-                .build()
             })?;
             if let Value::DateTime(ts) = res {
                 Ok(i64mapu64(ts.val()))
