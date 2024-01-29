@@ -19,8 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use common_runtime::Runtime;
-use common_telemetry::logging::warn;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, warn};
 use futures::StreamExt;
 use opensrv_mysql::{
     plain_run_with_options, secure_run_with_options, AsyncMysqlIntermediary, IntermediaryOptions,
