@@ -82,7 +82,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-20.04-8-cores ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
