@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
+#![feature(let_chains)]
 
 use datatypes::schema::Schema;
 use query::plan::LogicalPlan;
