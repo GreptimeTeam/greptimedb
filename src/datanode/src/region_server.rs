@@ -247,6 +247,8 @@ impl RegionServerHandler for RegionServer {
                 .context(ExecuteGrpcRequestSnafu)?
         } else {
             let mut results = Vec::with_capacity(requests.len());
+            // FIXME(jeremy, ruihang): Once the engine supports merged calls, we should immediately
+            // modify this part to avoid inefficient serial loop calls.
             for (region_id, req) in requests {
                 let span = tracing_context.attach(info_span!(
                     "RegionServer::handle_region_request",
