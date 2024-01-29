@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -20,12 +21,12 @@ use std::task::{Context, Poll};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
-use datafusion::parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStream};
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
 use datafusion::physical_plan::{ExecutionPlan, RecordBatchStream as DfRecordBatchStream};
 use datafusion_common::DataFusionError;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
+use pin_project::pin_project;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -37,55 +38,59 @@ use crate::{
 type FutureStream =
     Pin<Box<dyn std::future::Future<Output = Result<SendableRecordBatchStream>> + Send>>;
 
-/// ParquetRecordBatchStream -> DataFusion RecordBatchStream
-pub struct ParquetRecordBatchStreamAdapter<T> {
-    stream: ParquetRecordBatchStream<T>,
+/// Casts the `RecordBatch`es of `stream` against the `output_schema`.
+#[pin_project]
+pub struct RecordBatchStreamTypeAdapter<T, E> {
+    #[pin]
+    stream: T,
     output_schema: DfSchemaRef,
-    projection: Vec<usize>,
+    phantom: PhantomData<E>,
 }
 
-impl<T: Unpin + AsyncFileReader + Send + 'static> ParquetRecordBatchStreamAdapter<T> {
-    pub fn new(
-        output_schema: DfSchemaRef,
-        stream: ParquetRecordBatchStream<T>,
-        projection: Option<Vec<usize>>,
-    ) -> Self {
-        let projection = if let Some(projection) = projection {
-            projection
-        } else {
-            (0..output_schema.fields().len()).collect()
-        };
-
+impl<T, E> RecordBatchStreamTypeAdapter<T, E>
+where
+    T: Stream<Item = std::result::Result<DfRecordBatch, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    pub fn new(output_schema: DfSchemaRef, stream: T) -> Self {
         Self {
             stream,
             output_schema,
-            projection,
+            phantom: Default::default(),
         }
     }
 }
 
-impl<T: Unpin + AsyncFileReader + Send + 'static> DfRecordBatchStream
-    for ParquetRecordBatchStreamAdapter<T>
+impl<T, E> DfRecordBatchStream for RecordBatchStreamTypeAdapter<T, E>
+where
+    T: Stream<Item = std::result::Result<DfRecordBatch, E>>,
+    E: std::error::Error + Send + Sync + 'static,
 {
     fn schema(&self) -> DfSchemaRef {
-        self.stream.schema().clone()
+        self.output_schema.clone()
     }
 }
 
-impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchStreamAdapter<T> {
+impl<T, E> Stream for RecordBatchStreamTypeAdapter<T, E>
+where
+    T: Stream<Item = std::result::Result<DfRecordBatch, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
     type Item = DfResult<DfRecordBatch>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let batch = futures::ready!(Pin::new(&mut self.stream).poll_next(cx))
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+
+        let batch = futures::ready!(this.stream.poll_next(cx))
             .map(|r| r.map_err(|e| DataFusionError::External(Box::new(e))));
 
-        let projected_schema = self.output_schema.project(&self.projection)?;
+        let output_schema = this.output_schema.clone();
         let batch = batch.map(|b| {
             b.and_then(|b| {
-                let mut columns = Vec::with_capacity(self.projection.len());
-                for idx in self.projection.iter() {
-                    let column = b.column(*idx);
-                    let field = self.output_schema.field(*idx);
+                let mut columns = Vec::with_capacity(output_schema.fields.len());
+                for idx in 0..output_schema.fields.len() {
+                    let column = b.column(idx);
+                    let field = output_schema.field(idx);
 
                     if column.data_type() != field.data_type() {
                         let output = cast(&column, field.data_type())?;
@@ -95,7 +100,7 @@ impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchS
                     }
                 }
 
-                let record_batch = DfRecordBatch::try_new(projected_schema.into(), columns)?;
+                let record_batch = DfRecordBatch::try_new(output_schema, columns)?;
 
                 Ok(record_batch)
             })
