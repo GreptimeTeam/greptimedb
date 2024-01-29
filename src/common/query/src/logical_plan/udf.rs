@@ -66,14 +66,15 @@ impl ScalarUdf {
             fun: fun.clone(),
         }
     }
+}
 
-    /// Cast self into datafusion UDF.
-    pub fn into_df_udf(self) -> DfScalarUDF {
+impl From<ScalarUdf> for DfScalarUDF {
+    fn from(udf: ScalarUdf) -> Self {
         DfScalarUDF::new(
-            &self.name,
-            &self.signature.into(),
-            &to_df_return_type(self.return_type),
-            &to_df_scalar_func(self.fun),
+            &udf.name,
+            &udf.signature.into(),
+            &to_df_return_type(udf.return_type),
+            &to_df_scalar_func(udf.fun),
         )
     }
 }

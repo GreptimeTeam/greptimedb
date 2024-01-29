@@ -134,7 +134,7 @@ mod tests {
         assert_eq!(return_type, (udf.return_type)(&[]).unwrap());
 
         // test into_df_udf
-        let df_udf: DfScalarUDF = udf.into_df_udf();
+        let df_udf: DfScalarUDF = udf.into();
         assert_eq!("and", df_udf.name);
 
         let types = vec![DataType::Boolean, DataType::Boolean];

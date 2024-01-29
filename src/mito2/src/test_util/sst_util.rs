@@ -14,11 +14,14 @@
 
 //! Utilities for testing SSTs.
 
+use std::sync::Arc;
+
 use api::v1::{OpType, SemanticType};
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::ValueRef;
+use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::storage::RegionId;
 
@@ -123,4 +126,28 @@ pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
     new_batch_builder(&pk, &timestamps, &sequences, &op_types, 2, &field)
         .build()
         .unwrap()
+}
+
+/// ParquetMetaData doesn't implement `PartialEq` trait, check internal fields manually
+pub fn assert_parquet_metadata_eq(a: Arc<ParquetMetaData>, b: Arc<ParquetMetaData>) {
+    macro_rules! assert_metadata {
+            ( $a:expr, $b:expr, $($method:ident,)+ ) => {
+                $(
+                    assert_eq!($a.$method(), $b.$method());
+                )+
+            }
+        }
+
+    assert_metadata!(
+        a.file_metadata(),
+        b.file_metadata(),
+        version,
+        num_rows,
+        created_by,
+        key_value_metadata,
+        schema_descr,
+        column_orders,
+    );
+
+    assert_metadata!(a, b, row_groups, column_index, offset_index,);
 }

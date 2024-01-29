@@ -27,6 +27,7 @@ use client::client_manager::DatanodeClients;
 use common_catalog::consts::MITO2_ENGINE;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::alter_table::AlterTableProcedure;
+use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, CreateTablesState};
 use common_meta::ddl::create_table::*;
 use common_meta::ddl::drop_table::DropTableProcedure;
 use common_meta::key::table_info::TableInfoValue;
@@ -40,11 +41,11 @@ use store_api::storage::RegionId;
 use crate::procedure::utils::mock::EchoRegionServer;
 use crate::procedure::utils::test_data;
 
-fn create_table_task() -> CreateTableTask {
+fn create_table_task(table_name: Option<&str>) -> CreateTableTask {
     let create_table_expr = CreateTableExpr {
         catalog_name: "my_catalog".to_string(),
         schema_name: "my_schema".to_string(),
-        table_name: "my_table".to_string(),
+        table_name: table_name.unwrap_or("my_table").to_string(),
         desc: "blabla".to_string(),
         column_defs: vec![
             PbColumnDef {
@@ -99,7 +100,7 @@ fn create_table_task() -> CreateTableTask {
 fn test_region_request_builder() {
     let procedure = CreateTableProcedure::new(
         1,
-        create_table_task(),
+        create_table_task(None),
         TableRouteValue::physical(test_data::new_region_routes()),
         HashMap::default(),
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
@@ -190,7 +191,7 @@ async fn test_on_datanode_create_regions() {
 
     let mut procedure = CreateTableProcedure::new(
         1,
-        create_table_task(),
+        create_table_task(None),
         TableRouteValue::physical(region_routes),
         HashMap::default(),
         test_data::new_ddl_context(datanode_manager),
@@ -228,6 +229,74 @@ async fn test_on_datanode_create_regions() {
     handle.await.unwrap();
 
     assert!(expected_created_regions.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_on_datanode_create_logical_regions() {
+    let (region_server, mut rx) = EchoRegionServer::new();
+    let region_routes = test_data::new_region_routes();
+    let datanode_manager = new_datanode_manager(&region_server, &region_routes).await;
+    let physical_table_route = TableRouteValue::physical(region_routes);
+    let physical_table_id = 111;
+
+    let task1 = create_table_task(Some("my_table1"));
+    let task2 = create_table_task(Some("my_table2"));
+    let task3 = create_table_task(Some("my_table3"));
+
+    let ctx = test_data::new_ddl_context(datanode_manager);
+    let kv_backend = ctx.table_metadata_manager.kv_backend();
+    let physical_route_txn = ctx
+        .table_metadata_manager
+        .table_route_manager()
+        .build_create_txn(physical_table_id, &physical_table_route)
+        .unwrap()
+        .0;
+    let _ = kv_backend.txn(physical_route_txn).await.unwrap();
+    let mut procedure =
+        CreateLogicalTablesProcedure::new(1, vec![task1, task2, task3], physical_table_id, ctx);
+
+    let expected_created_regions = Arc::new(Mutex::new(HashMap::from([(1, 3), (2, 3), (3, 3)])));
+
+    let handle = tokio::spawn({
+        let expected_created_regions = expected_created_regions.clone();
+        let mut max_recv = expected_created_regions.lock().unwrap().len() * 3;
+        async move {
+            while let Some(PbRegionRequest::Creates(requests)) = rx.recv().await {
+                for request in requests.requests {
+                    let region_number = RegionId::from_u64(request.region_id).region_number();
+
+                    let mut map = expected_created_regions.lock().unwrap();
+                    let v = map.get_mut(&region_number).unwrap();
+                    *v -= 1;
+                    if *v == 0 {
+                        map.remove(&region_number);
+                    }
+
+                    max_recv -= 1;
+                    if max_recv == 0 {
+                        break;
+                    }
+                }
+                if max_recv == 0 {
+                    break;
+                }
+            }
+        }
+    });
+
+    let status = procedure.on_datanode_create_regions().await.unwrap();
+    assert!(matches!(status, Status::Executing { persist: false }));
+    assert!(matches!(
+        procedure.creator.data.state(),
+        &CreateTablesState::CreateMetadata
+    ));
+
+    handle.await.unwrap();
+
+    assert!(expected_created_regions.lock().unwrap().is_empty());
+
+    let status = procedure.on_create_metadata().await.unwrap();
+    assert!(status.is_done());
 }
 
 #[tokio::test]

@@ -176,10 +176,7 @@ impl ParquetReaderBuilder {
             cache_manager: self.cache_manager.clone(),
         };
 
-        let metrics = Metrics {
-            build_cost: start.elapsed(),
-            ..Default::default()
-        };
+        metrics.build_cost = start.elapsed();
 
         let predicate = if let Some(p) = &self.predicate {
             p.exprs()
@@ -243,14 +240,14 @@ impl ParquetReaderBuilder {
         file_path: &str,
         file_size: u64,
     ) -> Result<Arc<ParquetMetaData>> {
+        let region_id = self.file_handle.region_id();
+        let file_id = self.file_handle.file_id();
         // Tries to get from global cache.
-        if let Some(metadata) = self.cache_manager.as_ref().and_then(|cache| {
-            cache.get_parquet_meta_data(self.file_handle.region_id(), self.file_handle.file_id())
-        }) {
-            return Ok(metadata);
+        if let Some(manager) = &self.cache_manager {
+            if let Some(metadata) = manager.get_parquet_meta_data(region_id, file_id).await {
+                return Ok(metadata);
+            }
         }
-
-        // TODO(QuenKar): should also check write cache to get parquet metadata.
 
         // Cache miss, load metadata directly.
         let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
@@ -314,14 +311,11 @@ impl ParquetReaderBuilder {
         // Prunes row groups by min-max index.
         if let Some(predicate) = &self.predicate {
             let region_meta = read_format.metadata();
-            let column_ids = match &self.projection {
-                Some(ids) => ids.iter().cloned().collect(),
-                None => region_meta
-                    .column_metadatas
-                    .iter()
-                    .map(|c| c.column_id)
-                    .collect(),
-            };
+            let column_ids = region_meta
+                .column_metadatas
+                .iter()
+                .map(|c| c.column_id)
+                .collect();
 
             let row_groups = row_group_ids
                 .iter()

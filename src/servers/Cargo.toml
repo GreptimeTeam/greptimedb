@@ -14,10 +14,13 @@ testing = []
 aide = { version = "0.9", features = ["axum"] }
 api.workspace = true
 arrow-flight.workspace = true
+arrow-ipc.workspace = true
+arrow-schema.workspace = true
+arrow.workspace = true
 async-trait = "0.1"
 auth.workspace = true
-axum = { version = "0.6", features = ["headers"] }
 axum-macros = "0.3.8"
+axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 catalog.workspace = true
@@ -102,7 +105,7 @@ tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
-axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
+axum-test-helper = "0.3"
 catalog = { workspace = true, features = ["testing"] }
 client.workspace = true
 common-base.workspace = true
@@ -116,7 +119,7 @@ serde_json.workspace = true
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tokio-postgres = "0.7"
-tokio-postgres-rustls = { git = "https://github.com/ol-teuto/tokio-postgres-rustls.git", branch = "rustls-update" }
+tokio-postgres-rustls = "0.11"
 tokio-test = "0.4"
 
 [build-dependencies]

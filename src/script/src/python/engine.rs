@@ -150,7 +150,7 @@ impl Function for PyUDF {
 
     fn eval(
         &self,
-        _func_ctx: common_function::function::FunctionContext,
+        func_ctx: common_function::function::FunctionContext,
         columns: &[datatypes::vectors::VectorRef],
     ) -> common_query::error::Result<datatypes::vectors::VectorRef> {
         // FIXME(discord9): exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
@@ -158,15 +158,17 @@ impl Function for PyUDF {
         let columns = columns.to_vec();
         let rb = Some(RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?);
 
-        // FIXME(dennis): Create EvalContext from FunctionContext.
-        let res = exec_parsed(&self.copr, &rb, &HashMap::new(), &EvalContext::default()).map_err(
-            |err| {
-                PyUdfSnafu {
-                    msg: format!("{err:#?}"),
-                }
-                .build()
+        let res = exec_parsed(
+            &self.copr,
+            &rb,
+            &HashMap::new(),
+            &EvalContext {
+                query_ctx: func_ctx.query_ctx.clone(),
             },
-        )?;
+        )
+        .map_err(BoxedError::new)
+        .context(common_query::error::ExecuteSnafu)?;
+
         let len = res.columns().len();
         if len == 0 {
             return PyUdfSnafu {

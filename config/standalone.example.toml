@@ -81,6 +81,9 @@ enable = true
 [prom_store]
 # Whether to enable Prometheus remote write and read in HTTP API, true by default.
 enable = true
+# Whether to store the data from Prometheus remote write in metric engine.
+# true by default
+with_metric_engine = true
 
 [wal]
 # Available wal providers:

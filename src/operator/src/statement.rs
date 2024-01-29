@@ -21,7 +21,6 @@ mod dml;
 mod show;
 mod tql;
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -331,8 +330,8 @@ fn to_copy_database_request(
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
-    let start_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_START_KEY)?;
-    let end_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_END_KEY)?;
+    let start_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_START_KEY, query_ctx)?;
+    let end_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_END_KEY, query_ctx)?;
 
     let time_range = match (start_timestamp, end_timestamp) {
         (Some(start), Some(end)) => TimestampRange::new(start, end),
@@ -352,10 +351,14 @@ fn to_copy_database_request(
 }
 
 /// Extracts timestamp from a [HashMap<String, String>] with given key.
-fn extract_timestamp(map: &OptionMap, key: &str) -> Result<Option<Timestamp>> {
+fn extract_timestamp(
+    map: &OptionMap,
+    key: &str,
+    query_ctx: &QueryContextRef,
+) -> Result<Option<Timestamp>> {
     map.get(key)
         .map(|v| {
-            Timestamp::from_str(v)
+            Timestamp::from_str(v, Some(&query_ctx.timezone()))
                 .map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
         })
         .transpose()

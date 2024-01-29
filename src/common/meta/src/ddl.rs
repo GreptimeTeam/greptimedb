@@ -27,7 +27,9 @@ use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 
 pub mod alter_table;
+pub mod create_logical_tables;
 pub mod create_table;
+mod create_table_template;
 pub mod drop_table;
 pub mod table_meta;
 pub mod truncate_table;

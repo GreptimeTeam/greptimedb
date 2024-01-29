@@ -437,13 +437,11 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
-        let servers = Services::new(fe_plugins)
-            .build(opts.clone(), Arc::new(frontend.clone()))
-            .await
+        let servers = Services::new(opts.clone(), Arc::new(frontend.clone()), fe_plugins)
+            .build()
             .context(StartFrontendSnafu)?;
         frontend
             .build_servers(opts, servers)
-            .await
             .context(StartFrontendSnafu)?;
 
         Ok(Instance {

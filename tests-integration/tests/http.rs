@@ -242,7 +242,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         outputs[1],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"rows":[]}
+            "records":{"rows":[], "schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]}}
         }))
         .unwrap()
     );
@@ -706,6 +706,7 @@ enable = true
 
 [frontend.prom_store]
 enable = true
+with_metric_engine = true
 
 [frontend.otlp]
 enable = true
@@ -727,7 +728,7 @@ write_interval = "30s"
 mode = "standalone"
 node_id = 0
 require_lease_before_startup = true
-initialize_region_in_background = false
+init_regions_in_background = false
 rpc_addr = "127.0.0.1:3001"
 rpc_runtime_size = 8
 rpc_max_recv_message_size = "512MiB"

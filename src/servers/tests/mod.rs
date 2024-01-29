@@ -99,10 +99,10 @@ impl SqlQueryHandler for DummyInstance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(QueryStatement::Sql(stmt), query_ctx)
+                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .unwrap();
-            let schema = self.query_engine.describe(plan).await.unwrap();
+            let schema = self.query_engine.describe(plan, query_ctx).await.unwrap();
             Ok(Some(schema))
         } else {
             Ok(None)

@@ -37,7 +37,7 @@ pub mod read;
 pub mod region;
 mod region_write_ctx;
 pub mod request;
-mod row_converter;
+pub mod row_converter;
 pub(crate) mod schedule;
 pub mod sst;
 pub mod wal;

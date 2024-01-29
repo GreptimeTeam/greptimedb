@@ -70,9 +70,11 @@ aquamarine = "0.3"
 arrow = { version = "47.0" }
 arrow-array = "47.0"
 arrow-flight = "47.0"
+arrow-ipc = "47.0"
 arrow-schema = { version = "47.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
+axum = { version = "0.6", features = ["headers"] }
 base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
@@ -93,7 +95,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "65b008f018395f8fa917a7d3c7883b82f309cb74" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "519b1d0757404c8ff1eeb2a68d29f5ade54a1752" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"

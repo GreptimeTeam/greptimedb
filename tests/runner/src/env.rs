@@ -411,13 +411,32 @@ impl Database for GreptimeDB {
         }
 
         let mut client = self.client.lock().await;
+
         if query.trim().to_lowercase().starts_with("use ") {
+            // use [db]
             let database = query
                 .split_ascii_whitespace()
                 .nth(1)
                 .expect("Illegal `USE` statement: expecting a database.")
                 .trim_end_matches(';');
             client.set_schema(database);
+            Box::new(ResultDisplayer {
+                result: Ok(Output::AffectedRows(0)),
+            }) as _
+        } else if query.trim().to_lowercase().starts_with("set time_zone") {
+            // set time_zone='xxx'
+            let timezone = query
+                .split('=')
+                .nth(1)
+                .expect("Illegal `SET TIMEZONE` statement: expecting a timezone expr.")
+                .trim()
+                .strip_prefix('\'')
+                .unwrap()
+                .strip_suffix("';")
+                .unwrap();
+
+            client.set_timezone(timezone);
+
             Box::new(ResultDisplayer {
                 result: Ok(Output::AffectedRows(0)),
             }) as _

@@ -60,12 +60,14 @@ pub async fn inner_auth<B>(
 ) -> std::result::Result<Request<B>, Response> {
     // 1. prepare
     let (catalog, schema) = extract_catalog_and_schema(&req);
-    let timezone = extract_timezone(&req);
-    let query_ctx = QueryContextBuilder::default()
+    // TODO(ruihang): move this out of auth module
+    let timezone = Arc::new(extract_timezone(&req));
+    let query_ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
-        .timezone(Arc::new(timezone))
-        .build();
+        .timezone(timezone);
+
+    let query_ctx = query_ctx_builder.build();
     let need_auth = need_auth(&req);
     let is_influxdb = req.uri().path().contains("influxdb");
 

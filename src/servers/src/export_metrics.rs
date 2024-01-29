@@ -256,7 +256,7 @@ pub async fn write_system_metric_by_handler(
             filter.as_ref(),
             Timestamp::current_millis().value(),
         );
-        if let Err(e) = handler.write(request, ctx.clone()).await {
+        if let Err(e) = handler.write(request, ctx.clone(), false).await {
             error!("report export metrics by handler failed, error {}", e);
         }
     }

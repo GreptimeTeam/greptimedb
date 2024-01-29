@@ -492,6 +492,27 @@ pub enum Error {
         table_name: String,
         location: Location,
     },
+
+    #[snafu(display(
+        "Do not support creating tables in multiple catalogs: {}",
+        catalog_names
+    ))]
+    CreateTableWithMultiCatalogs {
+        catalog_names: String,
+        location: Location,
+    },
+
+    #[snafu(display("Do not support creating tables in multiple schemas: {}", schema_names))]
+    CreateTableWithMultiSchemas {
+        schema_names: String,
+        location: Location,
+    },
+
+    #[snafu(display("Empty creating table expr"))]
+    EmptyCreateTableExpr { location: Location },
+
+    #[snafu(display("Failed to create logical tables: {}", reason))]
+    CreateLogicalTables { reason: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -608,6 +629,12 @@ impl ErrorExt for Error {
             }
 
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
+
+            Error::CreateTableWithMultiCatalogs { .. }
+            | Error::CreateTableWithMultiSchemas { .. }
+            | Error::EmptyCreateTableExpr { .. } => StatusCode::InvalidArguments,
+
+            Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
         }
     }
 

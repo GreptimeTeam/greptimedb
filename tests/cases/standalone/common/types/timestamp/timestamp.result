@@ -101,8 +101,21 @@ SELECT t%t FROM timestamp;
 
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) % Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) % Timestamp(Millisecond, None)
 
--- TODO(dennis): It can't run on distributed mode, uncomment it when the issue is fixed: https://github.com/GreptimeTeam/greptimedb/issues/2071 --
--- SELECT t-t FROM timestamp; --
+SELECT t-t FROM timestamp;
+
++---------------------------+
+| timestamp.t - timestamp.t |
++---------------------------+
+| PT0S                      |
+|                           |
+| PT0S                      |
+| PT0S                      |
+| PT0S                      |
+| PT0S                      |
+| PT0S                      |
+| PT0S                      |
++---------------------------+
+
 SELECT EXTRACT(YEAR from TIMESTAMP '1992-01-01 01:01:01');
 
 +-----------------------------------------------------+

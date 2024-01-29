@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+#![feature(type_alias_impl_trait)]
 
 pub mod buffered_writer;
 pub mod compression;

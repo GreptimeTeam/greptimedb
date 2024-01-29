@@ -387,12 +387,12 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         ..Default::default()
     };
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(
-            instance.instance.clone(),
-        ))
+        .with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
+            None,
+        )
         .with_metrics_handler(MetricsHandler)
-        .with_greptime_config_options(instance.datanode_opts.to_toml_string())
+        .with_greptime_config_options(instance.mix_options.datanode.to_toml_string())
         .build();
     (http_server.build(http_server.make_app()), instance.guard)
 }
@@ -420,16 +420,15 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     let mut http_server = HttpServerBuilder::new(http_opts);
 
-    http_server
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(
-            instance.instance.clone(),
-        ))
-        .with_script_handler(instance.instance.clone())
+    http_server = http_server
+        .with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
+            Some(instance.instance.clone()),
+        )
         .with_greptime_config_options(instance.mix_options.to_toml().unwrap());
 
     if let Some(user_provider) = user_provider {
-        http_server.with_user_provider(user_provider);
+        http_server = http_server.with_user_provider(user_provider);
     }
 
     let http_server = http_server.build();
@@ -458,12 +457,13 @@ pub async fn setup_test_prom_app_with_frontend(
     };
     let frontend_ref = instance.instance.clone();
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(frontend_ref.clone()))
-        .with_script_handler(frontend_ref.clone())
-        .with_prom_handler(frontend_ref.clone())
+        .with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()),
+            Some(frontend_ref.clone()),
+        )
+        .with_prom_handler(frontend_ref.clone(), true)
         .with_prometheus_handler(frontend_ref)
-        .with_greptime_config_options(instance.datanode_opts.to_toml_string())
+        .with_greptime_config_options(instance.mix_options.datanode.to_toml_string())
         .build();
     let app = http_server.build(http_server.make_app());
     (app, instance.guard)

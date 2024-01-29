@@ -29,6 +29,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 
+use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
@@ -111,6 +112,7 @@ pub async fn sql(
     };
 
     let resp = match format {
+        ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
         ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
         ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
         ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
@@ -133,9 +135,10 @@ pub async fn from_output(
                 results.push(GreptimeQueryOutput::AffectedRows(rows));
             }
             Ok(Output::Stream(stream)) => {
+                let schema = stream.schema().clone();
                 // TODO(sunng87): streaming response
                 match util::collect(stream).await {
-                    Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                    Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
                         Ok(rows) => {
                             results.push(GreptimeQueryOutput::Records(rows));
                         }
@@ -148,14 +151,16 @@ pub async fn from_output(
                     }
                 }
             }
-            Ok(Output::RecordBatches(rbs)) => match HttpRecordsOutput::try_from(rbs.take()) {
-                Ok(rows) => {
-                    results.push(GreptimeQueryOutput::Records(rows));
+            Ok(Output::RecordBatches(rbs)) => {
+                match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
+                    Ok(rows) => {
+                        results.push(GreptimeQueryOutput::Records(rows));
+                    }
+                    Err(err) => {
+                        return Err(ErrorResponse::from_error(ty, err));
+                    }
                 }
-                Err(err) => {
-                    return Err(ErrorResponse::from_error(ty, err));
-                }
-            },
+            }
             Err(err) => {
                 return Err(ErrorResponse::from_error(ty, err));
             }

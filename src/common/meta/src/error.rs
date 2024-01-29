@@ -112,6 +112,15 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display(
+        "Failed to get procedure output, procedure id: {procedure_id}, error: {err_msg}"
+    ))]
+    ProcedureOutput {
+        procedure_id: String,
+        err_msg: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to convert RawTableInfo into TableInfo"))]
     ConvertRawTableInfo {
         location: Location,
@@ -354,6 +363,9 @@ pub enum Error {
 
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable { location: Location, err_msg: String },
+
+    #[snafu(display("The tasks of create tables cannot be empty"))]
+    EmptyCreateTableTasks { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -396,7 +408,8 @@ impl ErrorExt for Error {
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. }
-            | UnexpectedLogicalRouteTable { .. } => StatusCode::Unexpected,
+            | UnexpectedLogicalRouteTable { .. }
+            | ProcedureOutput { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -422,7 +435,7 @@ impl ErrorExt for Error {
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
 
-            InvalidNumTopics { .. } => StatusCode::InvalidArguments,
+            InvalidNumTopics { .. } | EmptyCreateTableTasks { .. } => StatusCode::InvalidArguments,
         }
     }
 

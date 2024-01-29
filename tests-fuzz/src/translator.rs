@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod mysql;
+pub mod postgres;
+
 use std::fmt;
 
-pub(crate) trait DslTranslator<T, U> {
+pub trait DslTranslator<T, U> {
     type Error: Sync + Send + fmt::Debug;
 
     fn translate(&self, input: &T) -> Result<U, Self::Error>;
