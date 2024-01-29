@@ -36,6 +36,14 @@ pub struct MetaClientOptions {
     #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
     pub tcp_nodelay: bool,
+    #[serde(default = "default_cached_max_capacity")]
+    pub cached_max_capacity: u64,
+    #[serde(default = "default_cached_ttl")]
+    #[serde(with = "humantime_serde")]
+    pub cached_ttl: Duration,
+    #[serde(default = "default_cached_tti")]
+    #[serde(with = "humantime_serde")]
+    pub cached_tti: Duration,
 }
 
 fn default_heartbeat_timeout() -> Duration {
@@ -54,6 +62,18 @@ fn default_timeout() -> Duration {
     Duration::from_millis(3_000u64)
 }
 
+fn default_cached_max_capacity() -> u64 {
+    100_000u64
+}
+
+fn default_cached_ttl() -> Duration {
+    Duration::from_secs(600u64)
+}
+
+fn default_cached_tti() -> Duration {
+    Duration::from_secs(300u64)
+}
+
 impl Default for MetaClientOptions {
     fn default() -> Self {
         Self {
@@ -63,6 +83,9 @@ impl Default for MetaClientOptions {
             ddl_timeout: default_ddl_timeout(),
             connect_timeout: default_connect_timeout(),
             tcp_nodelay: true,
+            cached_max_capacity: default_cached_max_capacity(),
+            cached_ttl: default_cached_ttl(),
+            cached_tti: default_cached_tti(),
         }
     }
 }
