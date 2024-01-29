@@ -52,13 +52,13 @@ runs:
     # Note: The artifacts will be double zip compressed(related issue: https://github.com/actions/upload-artifact/issues/39).
     # However, when we use 'actions/download-artifact@v3' to download the artifacts, it will be automatically unzipped.
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifacts-dir }}
         path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.tar.gz
 
     - name: Upload checksum
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifacts-dir }}.sha256sum
         path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.sha256sum
