@@ -175,7 +175,7 @@ jobs:
 
   coverage:
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-20.04-8-cores
+    runs-on: ubuntu-20.04 
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -190,6 +190,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: llvm-tools-preview
+      - name: Setup mold
+        uses: rui314/setup-mold@v1
+        with:
+          mold-version: 1.1.1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Install latest nextest release
@@ -211,7 +215,7 @@ jobs:
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard
         env:
-          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=/usr/local/bin/mold"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ secrets.S3_BUCKET }}
