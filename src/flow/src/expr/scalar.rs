@@ -340,99 +340,72 @@ impl ScalarExpr {
 
 #[test]
 fn test_extract_bound() {
-    /// col(0) == now
-    let expr = ScalarExpr::CallBinary {
-        func: BinaryFunc::Eq,
-        expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
-        expr2: Box::new(ScalarExpr::Column(0)),
-    };
-    assert!(expr.contains_temporal());
-    assert_eq!(
-        expr.extract_bound(),
-        Ok((
-            Some(ScalarExpr::Column(0)),
-            Some(ScalarExpr::CallUnary {
-                func: UnaryFunc::StepTimestamp,
-                expr: Box::new(ScalarExpr::Column(0)),
-            },),
-        ),)
-    );
-
-    /// now < col(0)
-    let expr = ScalarExpr::CallBinary {
-        func: BinaryFunc::Lt,
-        expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
-        expr2: Box::new(ScalarExpr::Column(0)),
-    };
-    assert!(expr.contains_temporal());
-    assert_eq!(
-        expr.extract_bound(),
-        Ok((None, Some(ScalarExpr::Column(0)),),)
-    );
-
-    /// col(0) <= now
-    let expr = ScalarExpr::CallBinary {
-        func: BinaryFunc::Lte,
-        expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
-        expr2: Box::new(ScalarExpr::Column(0)),
-    };
-    assert!(expr.contains_temporal());
-    assert_eq!(
-        expr.extract_bound(),
-        Ok((
-            None,
-            Some(ScalarExpr::CallUnary {
-                func: UnaryFunc::StepTimestamp,
-                expr: Box::new(ScalarExpr::Column(0)),
-            },),
-        ),)
-    );
-
-    /// now > col(0) -> now >= col(0) + 1
-    let expr = ScalarExpr::CallBinary {
-        func: BinaryFunc::Gt,
-        expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
-        expr2: Box::new(ScalarExpr::Column(0)),
-    };
-    assert!(expr.contains_temporal());
-    assert_eq!(
-        expr.extract_bound(),
-        Ok((
-            Some(ScalarExpr::CallUnary {
-                func: UnaryFunc::StepTimestamp,
-                expr: Box::new(ScalarExpr::Column(0)),
-            },),
-            None
-        ),)
-    );
-
-    /// now >= col(0)
-    let expr = ScalarExpr::CallBinary {
-        func: BinaryFunc::Gte,
-        expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
-        expr2: Box::new(ScalarExpr::Column(0)),
-    };
-    assert!(expr.contains_temporal());
-    assert_eq!(
-        expr.extract_bound(),
-        Ok((Some(ScalarExpr::Column(0)), None),)
-    );
-
-    /// col(0) == now
-    let expr = ScalarExpr::CallBinary {
-        func: BinaryFunc::Eq,
-        expr2: Box::new(ScalarExpr::Column(0)),
-        expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
-    };
-    assert!(expr.contains_temporal());
-    assert_eq!(
-        expr.extract_bound(),
-        Ok((
-            Some(ScalarExpr::Column(0)),
-            Some(ScalarExpr::CallUnary {
-                func: UnaryFunc::StepTimestamp,
-                expr: Box::new(ScalarExpr::Column(0)),
-            })
-        ),)
-    );
+    let test_list = [
+        // col(0) == now
+        (
+            ScalarExpr::CallBinary {
+                func: BinaryFunc::Eq,
+                expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                expr2: Box::new(ScalarExpr::Column(0)),
+            },
+            Ok((
+                Some(ScalarExpr::Column(0)),
+                Some(ScalarExpr::CallUnary {
+                    func: UnaryFunc::StepTimestamp,
+                    expr: Box::new(ScalarExpr::Column(0)),
+                }),
+            )),
+        ),
+        // now < col(0)
+        (
+            ScalarExpr::CallBinary {
+                func: BinaryFunc::Lt,
+                expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                expr2: Box::new(ScalarExpr::Column(0)),
+            },
+            Ok((None, Some(ScalarExpr::Column(0)))),
+        ),
+        // now <= col(0)
+        (
+            ScalarExpr::CallBinary {
+                func: BinaryFunc::Lte,
+                expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                expr2: Box::new(ScalarExpr::Column(0)),
+            },
+            Ok((
+                None,
+                Some(ScalarExpr::CallUnary {
+                    func: UnaryFunc::StepTimestamp,
+                    expr: Box::new(ScalarExpr::Column(0)),
+                }),
+            )),
+        ),
+        // now > col(0) -> now >= col(0) + 1
+        (
+            ScalarExpr::CallBinary {
+                func: BinaryFunc::Gt,
+                expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                expr2: Box::new(ScalarExpr::Column(0)),
+            },
+            Ok((
+                Some(ScalarExpr::CallUnary {
+                    func: UnaryFunc::StepTimestamp,
+                    expr: Box::new(ScalarExpr::Column(0)),
+                }),
+                None,
+            )),
+        ),
+        // now >= col(0)
+        (
+            ScalarExpr::CallBinary {
+                func: BinaryFunc::Gte,
+                expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                expr2: Box::new(ScalarExpr::Column(0)),
+            },
+            Ok((Some(ScalarExpr::Column(0)), None)),
+        ),
+    ];
+    for (expr, expected) in test_list.iter() {
+        assert_eq!(expr.extract_bound(), *expected);
+    }
 }

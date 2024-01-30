@@ -181,7 +181,7 @@ impl MapFilterProject {
 
 impl MapFilterProject {
     pub fn optimize(&mut self) {
-        // TODO(discord9): optimize later
+        // TODO(discord9): optimize
     }
 
     /// Convert the `MapFilterProject` into a staged evaluation plan.

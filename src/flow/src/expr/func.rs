@@ -14,8 +14,8 @@
 
 use common_time::DateTime;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
-use datatypes::types::cast_with_opt;
 use datatypes::value::Value;
 use hydroflow::bincode::Error;
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,7 @@ impl UnaryFunc {
             }
             Self::Cast(to) => {
                 let arg_ty = arg.data_type();
-                let res = cast_with_opt(arg, to, &CastOption { strict: true }).map_err(|e| {
+                let res = cast(arg, to).map_err(|e| {
                     CastValueSnafu {
                         from: arg_ty,
                         to: to.clone(),
