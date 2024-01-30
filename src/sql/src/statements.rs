@@ -293,15 +293,9 @@ fn parse_column_default_constraint(
         .find(|o| matches!(o.option, ColumnOption::Default(_)))
     {
         let default_constraint = match &opt.option {
-            ColumnOption::Default(Expr::Value(v)) => {
-                // Ignore `timezone` here, will be transformed in DDL functions.
-                ColumnDefaultConstraint::Value(sql_value_to_value(
-                    column_name,
-                    data_type,
-                    v,
-                    timezone,
-                )?)
-            }
+            ColumnOption::Default(Expr::Value(v)) => ColumnDefaultConstraint::Value(
+                sql_value_to_value(column_name, data_type, v, timezone)?,
+            ),
             ColumnOption::Default(Expr::Function(func)) => {
                 let mut func = format!("{func}").to_lowercase();
                 // normalize CURRENT_TIMESTAMP to CURRENT_TIMESTAMP()
