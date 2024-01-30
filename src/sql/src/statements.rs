@@ -710,6 +710,21 @@ mod tests {
         } else {
             unreachable!()
         }
+
+        // with timezone
+        let value = sql_value_to_value(
+            "date",
+            &ConcreteDataType::date_datatype(),
+            &SqlValue::DoubleQuotedString("2022-02-22".to_string()),
+            Some(&Timezone::from_tz_string("+07:00").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(ConcreteDataType::date_datatype(), value.data_type());
+        if let Value::Date(d) = value {
+            assert_eq!("2022-02-21", d.to_string());
+        } else {
+            unreachable!()
+        }
     }
 
     #[test]
@@ -818,6 +833,24 @@ mod tests {
             None,
         )
         .is_err());
+
+        // with timezone
+        match parse_string_to_value(
+            "timestamp_col",
+            "2022-02-22T00:01:01".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+            Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(1645459261000000000, ts.value());
+                assert_eq!(TimeUnit::Nanosecond, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
     }
 
     #[test]
