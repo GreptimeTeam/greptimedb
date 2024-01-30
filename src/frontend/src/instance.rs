@@ -507,7 +507,7 @@ pub fn check_permission(
 }
 
 fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> {
-    let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx.clone())
+    let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
