@@ -2515,29 +2515,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e962a19be5cfc3f3bf6dd8f61eb50107f356ad6270fbb3ed41476571db78be5"
 
 [[package]]
-name = "dataflow"
-version = "0.6.0"
-dependencies = [
- "api",
- "bimap",
- "common-error",
- "common-macro",
- "common-meta",
- "common-query",
- "common-telemetry",
- "common-time",
- "datatypes",
- "hydroflow",
- "itertools 0.10.5",
- "serde",
- "servers",
- "session",
- "snafu",
- "tokio",
- "tonic 0.10.2",
-]
-
-[[package]]
 name = "datafusion"
 version = "32.0.0"
 source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
@@ -3392,6 +3369,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "flow"
+version = "0.6.0"
+dependencies = [
+ "api",
+ "bimap",
+ "common-error",
+ "common-macro",
+ "common-meta",
+ "common-query",
+ "common-telemetry",
+ "common-time",
+ "datatypes",
+ "hydroflow",
+ "itertools 0.10.5",
+ "serde",
+ "servers",
+ "session",
+ "snafu",
+ "tokio",
+ "tonic 0.10.2",
 ]
 
 [[package]]

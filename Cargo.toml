@@ -56,7 +56,7 @@ members = [
     "tests-fuzz",
     "tests-integration",
     "tests/runner",
-    "src/dataflow",
+    "src/flow",
 ]
 resolver = "2"
 

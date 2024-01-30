@@ -30,12 +30,12 @@ use crate::expr::EvalError;
 #[stack_trace_debug]
 pub enum Error {
     /// TODO(discord9): add detailed location of column
-    #[snafu(display("Stream Eval Failure"))]
+    #[snafu(display("Failed to eval stream"))]
     Eval {
         source: EvalError,
         location: Location,
     },
-    #[snafu(display("Couldn't found table: {name}"))]
+    #[snafu(display("Table not found: {name}"))]
     TableNotFound { name: String, location: Location },
     #[snafu(display("Table already exist: {name}"))]
     TableAlreadyExist { name: String, location: Location },
@@ -54,15 +54,13 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
-    /// TODO(discord9): more detailed status code
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::Eval { .. }
-            | &Self::TableAlreadyExist { .. }
-            | &Self::JoinTask { .. }
-            | &Self::InvalidQuery { .. }
-            | &Self::TableNotFound { .. }
-            | Self::NoProtoType { .. } => StatusCode::Internal,
+            Self::Eval { .. } | &Self::JoinTask { .. } => StatusCode::Internal,
+            &Self::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
+            Self::TableNotFound { .. } => StatusCode::TableNotFound,
+            &Self::InvalidQuery { .. } => StatusCode::PlanQuery,
+            Self::NoProtoType { .. } => StatusCode::Unexpected,
         }
     }
 

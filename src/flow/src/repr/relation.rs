@@ -314,17 +314,4 @@ impl RelationDesc {
 }
 
 /// The name of a column in a [`RelationDesc`].
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
-pub struct ColumnName(pub(crate) String);
-
-impl ColumnName {
-    /// Returns this column name as a `str`.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Returns a mutable reference to the string underlying this column name.
-    pub fn as_mut_str(&mut self) -> &mut String {
-        &mut self.0
-    }
-}
+pub type ColumnName = String;

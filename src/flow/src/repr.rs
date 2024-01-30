@@ -37,21 +37,15 @@ use crate::expr::error::{CastValueSnafu, EvalError};
 pub type Diff = i64;
 
 /// System-wide default timestamp type
-pub type Timestamp = u64;
+pub type Timestamp = i64;
 
 /// Default type for a repr of changes to a collection.
 pub type DiffRow = (Row, Timestamp, Diff);
 
-/// map i64 to u64 by adding std::i64::MAX + 1
-/// useful for cast Datetime to internal timestamp, so time before 1970-01-01 can be represented
-fn i64mapu64(i: i64) -> u64 {
-    (i as u64).wrapping_add(std::i64::MAX as u64 + 1)
-}
-
 /// Convert a value that is or can be converted to Datetime to internal timestamp
 pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
     match value {
-        Value::DateTime(ts) => Ok(i64mapu64(ts.val())),
+        Value::DateTime(ts) => Ok(ts.val()),
         arg => {
             let arg_ty = arg.data_type();
             let res = cast_with_opt(
@@ -66,7 +60,7 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
                 }
             })?;
             if let Value::DateTime(ts) = res {
-                Ok(i64mapu64(ts.val()))
+                Ok(ts.val())
             } else {
                 unreachable!()
             }
@@ -134,7 +128,7 @@ impl Row {
     }
 }
 
-/// Convert Protobuf-Row to Row used by GrepFlow
+/// Convert Protobuf-Row to Row used by GreptimeFlow
 pub(crate) fn row_proto_to_flow(row: ProtoRow) -> Row {
     Row::pack(
         row.values
