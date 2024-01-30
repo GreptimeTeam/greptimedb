@@ -127,22 +127,25 @@ impl Row {
     }
 }
 
-/// Convert Protobuf-Row to Row used by GreptimeFlow
-pub(crate) fn row_proto_to_flow(row: ProtoRow) -> Row {
-    Row::pack(
-        row.values
-            .iter()
-            .map(|pb_val| -> Value { pb_value_to_value_ref(pb_val, &None).into() }),
-    )
+impl From<ProtoRow> for Row {
+    fn from(row: ProtoRow) -> Self {
+        Row::pack(
+            row.values
+                .iter()
+                .map(|pb_val| -> Value { pb_value_to_value_ref(pb_val, &None).into() }),
+        )
+    }
 }
 
-pub(crate) fn row_flow_to_proto(row: Row) -> ProtoRow {
-    let values = row
-        .unpack()
-        .into_iter()
-        .map(value_to_grpc_value)
-        .collect_vec();
-    ProtoRow { values }
+impl From<Row> for ProtoRow {
+    fn from(row: Row) -> Self {
+        let values = row
+            .unpack()
+            .into_iter()
+            .map(value_to_grpc_value)
+            .collect_vec();
+        ProtoRow { values }
+    }
 }
 
 #[test]
