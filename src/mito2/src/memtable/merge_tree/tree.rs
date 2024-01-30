@@ -17,11 +17,13 @@
 use std::sync::{Arc, RwLock};
 
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::ColumnId;
+use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::merge_tree::mutable::{MutablePart, WriteMetrics};
 use crate::memtable::merge_tree::MergeTreeConfig;
-use crate::memtable::KeyValues;
+use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::row_converter::{McmpRowCodec, SortField};
 
 /// The merge tree.
@@ -29,7 +31,7 @@ pub(crate) struct MergeTree {
     /// Metadata of the region.
     pub(crate) metadata: RegionMetadataRef,
     /// Primary key codec.
-    row_codec: McmpRowCodec,
+    row_codec: Arc<McmpRowCodec>,
     /// Mutable part of the tree.
     mutable: RwLock<MutablePart>,
 }
@@ -47,7 +49,7 @@ impl MergeTree {
         );
         MergeTree {
             metadata,
-            row_codec,
+            row_codec: Arc::new(row_codec),
             mutable: RwLock::new(MutablePart::new(config)),
         }
     }
@@ -56,5 +58,28 @@ impl MergeTree {
     pub(crate) fn write(&self, kvs: &KeyValues, metrics: &mut WriteMetrics) -> Result<()> {
         let mut part = self.mutable.write().unwrap();
         part.write(&self.metadata, &self.row_codec, kvs, metrics)
+    }
+
+    /// Scans the tree.
+    pub(crate) fn scan(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) -> Result<BoxedBatchIterator> {
+        let mutable = self.mutable.read().unwrap();
+
+        mutable.scan_part(
+            &self.metadata,
+            self.row_codec.clone(),
+            projection,
+            predicate.as_ref(),
+            true,
+        )
+    }
+
+    /// Returns true if the tree is empty.
+    pub(crate) fn is_empty(&self) -> bool {
+        let mutable = self.mutable.write().unwrap();
+        mutable.is_empty()
     }
 }

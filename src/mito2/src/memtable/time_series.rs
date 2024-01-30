@@ -217,7 +217,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         filters: Option<Predicate>,
-    ) -> BoxedBatchIterator {
+    ) -> Result<BoxedBatchIterator> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -227,7 +227,7 @@ impl Memtable for TimeSeriesMemtable {
                 .collect()
         };
 
-        Box::new(self.series_set.iter_series(projection, filters))
+        Ok(Box::new(self.series_set.iter_series(projection, filters)))
     }
 
     fn is_empty(&self) -> bool {
@@ -781,55 +781,13 @@ impl From<ValueBuilder> for Values {
 mod tests {
     use std::collections::HashSet;
 
-    use api::helper::ColumnDataTypeWrapper;
-    use api::v1::value::ValueData;
-    use api::v1::{Row, Rows, SemanticType};
     use common_time::Timestamp;
-    use datatypes::prelude::{ConcreteDataType, ScalarVector};
-    use datatypes::schema::ColumnSchema;
+    use datatypes::prelude::ScalarVector;
     use datatypes::value::{OrderedFloat, Value};
     use datatypes::vectors::{Float64Vector, Int64Vector, TimestampMillisecondVector};
-    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
 
     use super::*;
-
-    fn schema_for_test() -> RegionMetadataRef {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
-                semantic_type: SemanticType::Tag,
-                column_id: 0,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("k1", ConcreteDataType::int64_datatype(), false),
-                semantic_type: SemanticType::Tag,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 2,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("v0", ConcreteDataType::int64_datatype(), true),
-                semantic_type: SemanticType::Field,
-                column_id: 3,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("v1", ConcreteDataType::float64_datatype(), true),
-                semantic_type: SemanticType::Field,
-                column_id: 4,
-            })
-            .primary_key(vec![0, 1]);
-        let region_metadata = builder.build().unwrap();
-        Arc::new(region_metadata)
-    }
+    use crate::test_util::memtable_util;
 
     fn ts_value_ref(val: i64) -> ValueRef<'static> {
         ValueRef::Timestamp(Timestamp::new_millisecond(val))
@@ -875,7 +833,7 @@ mod tests {
 
     #[test]
     fn test_series() {
-        let region_metadata = schema_for_test();
+        let region_metadata = memtable_util::metadata_for_test();
         let mut series = Series::new(&region_metadata);
         series.push(ts_value_ref(1), 0, OpType::Put, field_value_ref(1, 10.1));
         series.push(ts_value_ref(2), 0, OpType::Put, field_value_ref(2, 10.2));
@@ -890,7 +848,7 @@ mod tests {
 
     #[test]
     fn test_series_with_nulls() {
-        let region_metadata = schema_for_test();
+        let region_metadata = memtable_util::metadata_for_test();
         let mut series = Series::new(&region_metadata);
         // col1: NULL 1 2 3
         // col2: NULL NULL 10.2 NULL
@@ -949,7 +907,7 @@ mod tests {
 
     #[test]
     fn test_values_sort() {
-        let schema = schema_for_test();
+        let schema = memtable_util::metadata_for_test();
         let timestamp = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2, 3, 4, 3]));
         let sequence = Arc::new(UInt64Vector::from_vec(vec![1, 1, 1, 1, 2]));
         let op_type = Arc::new(UInt8Vector::from_vec(vec![1, 1, 1, 1, 0]));
@@ -1003,55 +961,9 @@ mod tests {
         )
     }
 
-    fn build_key_values(schema: &RegionMetadataRef, k0: String, k1: i64, len: usize) -> KeyValues {
-        let column_schema = schema
-            .column_metadatas
-            .iter()
-            .map(|c| api::v1::ColumnSchema {
-                column_name: c.column_schema.name.clone(),
-                datatype: ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
-                    .unwrap()
-                    .datatype() as i32,
-                semantic_type: c.semantic_type as i32,
-                ..Default::default()
-            })
-            .collect();
-
-        let rows = (0..len)
-            .map(|i| Row {
-                values: vec![
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(k0.clone())),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::I64Value(k1)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(i as i64)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::I64Value(i as i64)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::F64Value(i as f64)),
-                    },
-                ],
-            })
-            .collect();
-        let mutation = api::v1::Mutation {
-            op_type: 1,
-            sequence: 0,
-            rows: Some(Rows {
-                schema: column_schema,
-                rows,
-            }),
-        };
-        KeyValues::new(schema.as_ref(), mutation).unwrap()
-    }
-
     #[test]
     fn test_series_set_concurrency() {
-        let schema = schema_for_test();
+        let schema = memtable_util::metadata_for_test();
         let row_codec = Arc::new(McmpRowCodec::new(
             schema
                 .primary_key_columns()
@@ -1130,8 +1042,8 @@ mod tests {
     #[test]
     fn test_memtable() {
         common_telemetry::init_default_ut_logging();
-        let schema = schema_for_test();
-        let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
+        let schema = memtable_util::metadata_for_test();
+        let kvs = memtable_util::build_key_values(&schema, "hello".to_string(), 42, 100);
         let memtable = TimeSeriesMemtable::new(schema, 42, None);
         memtable.write(&kvs).unwrap();
 
@@ -1140,7 +1052,7 @@ mod tests {
             .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
             .collect::<HashSet<_>>();
 
-        let iter = memtable.iter(None, None);
+        let iter = memtable.iter(None, None).unwrap();
         let read = iter
             .flat_map(|batch| {
                 batch
@@ -1171,12 +1083,12 @@ mod tests {
     #[test]
     fn test_memtable_projection() {
         common_telemetry::init_default_ut_logging();
-        let schema = schema_for_test();
-        let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
+        let schema = memtable_util::metadata_for_test();
+        let kvs = memtable_util::build_key_values(&schema, "hello".to_string(), 42, 100);
         let memtable = TimeSeriesMemtable::new(schema, 42, None);
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(Some(&[3]), None);
+        let iter = memtable.iter(Some(&[3]), None).unwrap();
 
         let mut v0_all = vec![];
 

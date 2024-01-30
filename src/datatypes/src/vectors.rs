@@ -23,7 +23,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
-use crate::vectors::operations::VectorOp;
+pub use crate::vectors::operations::VectorOp;
 
 mod binary;
 mod boolean;

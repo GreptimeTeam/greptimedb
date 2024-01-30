@@ -27,7 +27,7 @@ use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of binary strings.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct BinaryVector {
     array: BinaryArray,
 }

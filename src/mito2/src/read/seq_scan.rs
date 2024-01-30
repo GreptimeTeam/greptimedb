@@ -213,7 +213,7 @@ impl SeqScan {
     async fn build_sources(&self) -> Result<Vec<Source>> {
         let mut sources = Vec::with_capacity(self.memtables.len() + self.files.len());
         for mem in &self.memtables {
-            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone());
+            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone())?;
             sources.push(Source::Iter(iter));
         }
         for file in &self.files {

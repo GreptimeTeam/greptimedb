@@ -49,6 +49,14 @@ pub struct PrimitiveVector<T: LogicalPrimitiveType> {
     array: PrimitiveArray<T::ArrowPrimitive>,
 }
 
+impl<T: LogicalPrimitiveType> Clone for PrimitiveVector<T> {
+    fn clone(&self) -> Self {
+        Self {
+            array: self.array.clone(),
+        }
+    }
+}
+
 impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
     pub fn new(array: PrimitiveArray<T::ArrowPrimitive>) -> Self {
         Self { array }
