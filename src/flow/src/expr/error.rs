@@ -27,6 +27,7 @@ use snafu::{Location, Snafu};
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EvalError {
     #[snafu(display("Division by zero"))]
     DivisionByZero,
@@ -35,27 +36,26 @@ pub enum EvalError {
     TypeMismatch {
         expected: ConcreteDataType,
         actual: ConcreteDataType,
-        location: Location,
     },
 
     /// can't nest datatypes error because EvalError need to be store in map and serialization
     #[snafu(display("Fail to unpack from value to given type: {msg}"))]
-    TryFromValue { msg: String, location: Location },
+    TryFromValue { msg: String },
 
     #[snafu(display("Fail to cast value of type {from} to given type {to}"))]
     CastValue {
         from: ConcreteDataType,
         to: ConcreteDataType,
-        source: datatypes::Error,
-        location: Location,
+        /// can't use `datatypes::Error` due to derive requirement
+        msg: String,
     },
 
     #[snafu(display("Invalid argument: {reason}"))]
-    InvalidArgument { reason: String, location: Location },
+    InvalidArgument { reason: String },
 
     #[snafu(display("Internal error: {reason}"))]
-    Internal { reason: String, location: Location },
+    Internal { reason: String },
 
     #[snafu(display("Optimize error: {reason}"))]
-    Optimize { reason: String, location: Location },
+    Optimize { reason: String },
 }

@@ -15,8 +15,12 @@
 //! for declare Expression in dataflow, including map, reduce, id and join(TODO!) etc.
 
 pub(crate) mod error;
+mod func;
 mod id;
+mod linear;
+mod scalar;
 
 pub(crate) use id::{GlobalId, Id, LocalId};
+pub(crate) use scalar::ScalarExpr;
 
 pub(crate) use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};

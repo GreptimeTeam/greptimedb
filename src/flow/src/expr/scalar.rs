@@ -285,7 +285,7 @@ impl ScalarExpr {
         } = self.clone()
         {
             if !(expr1.contains_temporal() ^ expr2.contains_temporal()) {
-                return unsupported_err("one side of the comparsion must be `now()`");
+                return unsupported_err("one side of the comparison must be `now()`");
             }
             if !expr1.contains_temporal()
                 && *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
@@ -307,7 +307,7 @@ impl ScalarExpr {
             if expr2.contains_temporal()
                 || *expr1 != ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
             {
-                return unsupported_err("None of the sides of the comparsion is `now()`");
+                return unsupported_err("None of the sides of the comparison is `now()`");
             }
             let step = |expr: ScalarExpr| expr.call_unary(UnaryFunc::StepTimestamp);
             match func {
@@ -319,7 +319,7 @@ impl ScalarExpr {
                 _ => unreachable!("Already checked"),
             }
         } else {
-            unsupported_err("None of the sides of the comparsion is `now()`")
+            unsupported_err("None of the sides of the comparison is `now()`")
         }
     }
 }
