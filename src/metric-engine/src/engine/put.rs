@@ -28,7 +28,7 @@ use crate::engine::MetricEngineInner;
 use crate::error::{
     ColumnNotFoundSnafu, ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result,
 };
-use crate::metrics::FORBIDDEN_OPERATION_COUNT;
+use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
 use crate::utils::{to_data_region_id, to_metadata_region_id};
 
 // A random number
@@ -65,6 +65,10 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
         mut request: RegionPutRequest,
     ) -> Result<AffectedRows> {
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["put"])
+            .start_timer();
+
         let physical_region_id = *self
             .state
             .read()
