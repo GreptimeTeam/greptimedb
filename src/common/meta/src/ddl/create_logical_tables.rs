@@ -162,9 +162,11 @@ impl CreateLogicalTablesProcedure {
             manager.create_logic_tables_metadata(tables_data).await?;
         }
 
-        info!("Created {num_tables} tables metadata for physical table {physical_table_id}");
+        let table_ids = self.creator.data.real_table_ids();
 
-        Ok(Status::done_with_output(self.creator.data.real_table_ids()))
+        info!("Created {num_tables} tables {table_ids:?} metadata for physical table {physical_table_id}");
+
+        Ok(Status::done_with_output(table_ids))
     }
 
     fn create_region_request_builder(

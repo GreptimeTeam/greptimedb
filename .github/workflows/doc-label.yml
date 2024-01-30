@@ -29,3 +29,8 @@ jobs:
         body: |
           A document change request is generated from
           ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
+    - name: Check doc labels
+      uses: docker://agilepathway/pull-request-label-checker:latest
+      with:
+        one_of: Doc update required,Doc not needed
+        repo_token: ${{ secrets.GITHUB_TOKEN }}

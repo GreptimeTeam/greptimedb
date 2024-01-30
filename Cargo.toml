@@ -33,6 +33,7 @@ members = [
     "src/datanode",
     "src/datatypes",
     "src/file-engine",
+    "src/flow",
     "src/frontend",
     "src/log-store",
     "src/meta-client",

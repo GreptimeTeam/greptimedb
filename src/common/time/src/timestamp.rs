@@ -1253,27 +1253,31 @@ mod tests {
 
     #[test]
     fn test_from_naive_date_time() {
-        let min_sec = Timestamp::new_second(-8334632851200);
-        let max_sec = Timestamp::new_second(8210298412799);
+        let naive_date_time_min = NaiveDateTime::MIN;
+        let naive_date_time_max = NaiveDateTime::MAX;
+
+        let min_sec = Timestamp::new_second(naive_date_time_min.timestamp());
+        let max_sec = Timestamp::new_second(naive_date_time_max.timestamp());
         check_conversion(min_sec, true);
         check_conversion(Timestamp::new_second(min_sec.value - 1), false);
         check_conversion(max_sec, true);
         check_conversion(Timestamp::new_second(max_sec.value + 1), false);
 
-        let min_millis = Timestamp::new_millisecond(-8334632851200000);
-        let max_millis = Timestamp::new_millisecond(8210298412799999);
+        let min_millis = Timestamp::new_millisecond(naive_date_time_min.timestamp_millis());
+        let max_millis = Timestamp::new_millisecond(naive_date_time_max.timestamp_millis());
         check_conversion(min_millis, true);
         check_conversion(Timestamp::new_millisecond(min_millis.value - 1), false);
         check_conversion(max_millis, true);
         check_conversion(Timestamp::new_millisecond(max_millis.value + 1), false);
 
-        let min_micros = Timestamp::new_microsecond(-8334632851200000000);
-        let max_micros = Timestamp::new_microsecond(8210298412799999999);
+        let min_micros = Timestamp::new_microsecond(naive_date_time_min.timestamp_micros());
+        let max_micros = Timestamp::new_microsecond(naive_date_time_max.timestamp_micros());
         check_conversion(min_micros, true);
         check_conversion(Timestamp::new_microsecond(min_micros.value - 1), false);
         check_conversion(max_micros, true);
         check_conversion(Timestamp::new_microsecond(max_micros.value + 1), false);
 
+        // the min time that can be represented by nanoseconds is: 1677-09-21T00:12:43.145224192
         let min_nanos = Timestamp::new_nanosecond(-9223372036854775000);
         let max_nanos = Timestamp::new_nanosecond(i64::MAX);
         check_conversion(min_nanos, true);
@@ -1283,13 +1287,16 @@ mod tests {
 
     #[test]
     fn test_parse_timestamp_range() {
+        let datetime_min = NaiveDateTime::MIN.format("%Y-%m-%d %H:%M:%SZ").to_string();
+        assert_eq!("-262143-01-01 00:00:00Z", datetime_min);
+        let datetime_max = NaiveDateTime::MAX.format("%Y-%m-%d %H:%M:%SZ").to_string();
+        assert_eq!("+262142-12-31 23:59:59Z", datetime_max);
+
         let valid_strings = vec![
-            "-262144-01-01 00:00:00Z",
-            "+262143-12-31 23:59:59Z",
-            "-262144-01-01 00:00:00Z",
-            "+262143-12-31 23:59:59.999Z",
-            "-262144-01-01 00:00:00Z",
-            "+262143-12-31 23:59:59.999999Z",
+            "-262143-01-01 00:00:00Z",
+            "+262142-12-31 23:59:59Z",
+            "+262142-12-31 23:59:59.999Z",
+            "+262142-12-31 23:59:59.999999Z",
             "1677-09-21 00:12:43.145225Z",
             "2262-04-11 23:47:16.854775807Z",
             "+100000-01-01 00:00:01.5Z",
