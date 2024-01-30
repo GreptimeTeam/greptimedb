@@ -31,16 +31,16 @@ use crate::insert::InserterRef;
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
 pub fn table_idents_to_full_name(
     obj_name: &ObjectName,
-    query_ctx: QueryContextRef,
+    query_ctx: &QueryContextRef,
 ) -> Result<(String, String, String)> {
     match &obj_name.0[..] {
         [table] => Ok((
-            query_ctx.current_catalog().to_owned(),
-            query_ctx.current_schema().to_owned(),
+            query_ctx.current_catalog().to_string(),
+            query_ctx.current_schema().to_string(),
             table.value.clone(),
         )),
         [schema, table] => Ok((
-            query_ctx.current_catalog().to_owned(),
+            query_ctx.current_catalog().to_string(),
             schema.value.clone(),
             table.value.clone(),
         )),

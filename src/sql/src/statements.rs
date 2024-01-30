@@ -286,6 +286,7 @@ fn parse_column_default_constraint(
     column_name: &str,
     data_type: &ConcreteDataType,
     opts: &[ColumnOptionDef],
+    timezone: Option<&Timezone>,
 ) -> Result<Option<ColumnDefaultConstraint>> {
     if let Some(opt) = opts
         .iter()
@@ -294,7 +295,12 @@ fn parse_column_default_constraint(
         let default_constraint = match &opt.option {
             ColumnOption::Default(Expr::Value(v)) => {
                 // Ignore `timezone` here, will be transformed in DDL functions.
-                ColumnDefaultConstraint::Value(sql_value_to_value(column_name, data_type, v, None)?)
+                ColumnDefaultConstraint::Value(sql_value_to_value(
+                    column_name,
+                    data_type,
+                    v,
+                    timezone,
+                )?)
             }
             ColumnOption::Default(Expr::Function(func)) => {
                 let mut func = format!("{func}").to_lowercase();
@@ -345,7 +351,11 @@ pub fn has_primary_key_option(column_def: &ColumnDef) -> bool {
 // TODO(yingwen): Make column nullable by default, and checks invalid case like
 // a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
-pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Result<ColumnSchema> {
+pub fn column_def_to_schema(
+    column_def: &ColumnDef,
+    is_time_index: bool,
+    timezone: Option<&Timezone>,
+) -> Result<ColumnSchema> {
     let is_nullable = column_def
         .options
         .iter()
@@ -355,7 +365,7 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
     let name = column_def.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type)?;
     let default_constraint =
-        parse_column_default_constraint(&name, &data_type, &column_def.options)?;
+        parse_column_default_constraint(&name, &data_type, &column_def.options, timezone)?;
 
     let mut column_schema = ColumnSchema::new(name, data_type, is_nullable)
         .with_time_index(is_time_index)
@@ -380,7 +390,10 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
 }
 
 /// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.
-pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::ColumnDef> {
+pub fn sql_column_def_to_grpc_column_def(
+    col: &ColumnDef,
+    timezone: Option<&Timezone>,
+) -> Result<api::v1::ColumnDef> {
     let name = col.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
 
@@ -389,10 +402,11 @@ pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::Col
         .iter()
         .all(|o| !matches!(o.option, ColumnOption::NotNull));
 
-    let default_constraint = parse_column_default_constraint(&name, &data_type, &col.options)?
-        .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
-        .transpose()
-        .context(SerializeColumnDefaultConstraintSnafu)?;
+    let default_constraint =
+        parse_column_default_constraint(&name, &data_type, &col.options, timezone)?
+            .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
+            .transpose()
+            .context(SerializeColumnDefaultConstraintSnafu)?;
     // convert ConcreteDataType to grpc ColumnDataTypeWrapper
     let (datatype, datatype_ext) = ColumnDataTypeWrapper::try_from(data_type.clone())
         .context(ConvertToGrpcDataTypeSnafu)?
@@ -868,9 +882,13 @@ mod tests {
             },
         ];
 
-        let constraint =
-            parse_column_default_constraint("coll", &ConcreteDataType::Boolean(BooleanType), &opts)
-                .unwrap();
+        let constraint = parse_column_default_constraint(
+            "coll",
+            &ConcreteDataType::Boolean(BooleanType),
+            &opts,
+            None,
+        )
+        .unwrap();
 
         assert_matches!(
             constraint,
@@ -888,7 +906,7 @@ mod tests {
             options: vec![],
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
 
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
@@ -907,7 +925,7 @@ mod tests {
             }],
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
         assert!(!grpc_column_def.is_nullable);
 
         // test primary key
@@ -921,7 +939,7 @@ mod tests {
             }],
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
         assert_eq!(grpc_column_def.semantic_type, SemanticType::Tag as i32);
     }
 
@@ -956,7 +974,7 @@ mod tests {
             options: vec![],
         };
 
-        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+        let column_schema = column_def_to_schema(&column_def, false, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -966,7 +984,7 @@ mod tests {
         assert!(column_schema.is_nullable());
         assert!(!column_schema.is_time_index());
 
-        let column_schema = column_def_to_schema(&column_def, true).unwrap();
+        let column_schema = column_def_to_schema(&column_def, true, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -992,7 +1010,7 @@ mod tests {
             ],
         };
 
-        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+        let column_schema = column_def_to_schema(&column_def, false, None).unwrap();
 
         assert_eq!("col2", column_schema.name);
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
