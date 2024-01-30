@@ -227,7 +227,7 @@ impl MergeScanExec {
                             table_scan: metrics.memory_usage as u64
                         }
                     );
-                    metric.record_greptime_metrics(value as usize);
+                    metric.record_greptime_exec_cost(value as usize);
                 }
 
                 METRIC_MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
@@ -332,8 +332,8 @@ struct MergeScanMetric {
     /// Count of rows fetched from remote
     output_rows: Count,
 
-    /// Gauge for greptime plan execution metrics for output
-    greptime_metrics: Gauge,
+    /// Gauge for greptime plan execution cost metrics for output
+    greptime_exec_cost: Gauge,
 }
 
 impl MergeScanMetric {
@@ -343,7 +343,7 @@ impl MergeScanMetric {
             first_consume_time: MetricBuilder::new(metric).subset_time("first_consume_time", 1),
             finish_time: MetricBuilder::new(metric).subset_time("finish_time", 1),
             output_rows: MetricBuilder::new(metric).output_rows(1),
-            greptime_metrics: MetricBuilder::new(metric).gauge(GREPTIME_EXEC_COST, 1),
+            greptime_exec_cost: MetricBuilder::new(metric).gauge(GREPTIME_EXEC_COST, 1),
         }
     }
 
@@ -363,7 +363,7 @@ impl MergeScanMetric {
         self.output_rows.add(num_rows);
     }
 
-    pub fn record_greptime_metrics(&self, metrics: usize) {
-        self.greptime_metrics.add(metrics);
+    pub fn record_greptime_exec_cost(&self, metrics: usize) {
+        self.greptime_exec_cost.add(metrics);
     }
 }
