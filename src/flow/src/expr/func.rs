@@ -23,6 +23,7 @@ use snafu::ResultExt;
 
 use super::ScalarExpr;
 use crate::expr::error::CastValueSnafu;
+use crate::expr::InvalidArgumentSnafu;
 // TODO(discord9): more function & eval
 use crate::{
     expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu},
@@ -222,21 +223,84 @@ impl BinaryFunc {
             Self::ModUInt16 => Ok(rem::<u16>(left, right)?),
             Self::ModUInt32 => Ok(rem::<u32>(left, right)?),
             Self::ModUInt64 => Ok(rem::<u64>(left, right)?),
-
-            _ => todo!(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
-pub enum VariadicFunc {}
+pub enum VariadicFunc {
+    And,
+    Or,
+}
 
 impl VariadicFunc {
-    pub fn name_to_func(name: &str) -> Option<Self> {
-        todo!("No variadic function yet")
-    }
     pub fn eval(&self, values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
-        todo!()
+        match self {
+            VariadicFunc::And => and(values, exprs),
+            VariadicFunc::Or => or(values, exprs),
+        }
+    }
+}
+
+fn and(values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
+    // If any is false, then return false. Else, if any is null, then return null. Else, return true.
+    let mut null = false;
+    let mut err = None;
+    for expr in exprs {
+        match expr.eval(values) {
+            Ok(Value::Boolean(true)) => {}
+            Ok(Value::Boolean(false)) => return Ok(Value::Boolean(false)), // short-circuit
+            Ok(Value::Null) => null = true,
+            Err(this_err) => {
+                if err.is_none() {
+                    err = Some(this_err)
+                }
+            } // retain first error encountered
+            Ok(x) => InvalidArgumentSnafu {
+                reason: format!(
+                    "`and()` only support boolean type, found value {:?} of type {:?}",
+                    x,
+                    x.data_type()
+                ),
+            }
+            .fail()?,
+        }
+    }
+    match (err, null) {
+        (Some(err), _) => Err(err),
+        (None, true) => Ok(Value::Null),
+        (None, false) => Ok(Value::Boolean(true)),
+    }
+}
+
+fn or(values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
+    // If any is false, then return false. Else, if any is null, then return null. Else, return true.
+    let mut null = false;
+    let mut err = None;
+    for expr in exprs {
+        match expr.eval(values) {
+            Ok(Value::Boolean(true)) => return Ok(Value::Boolean(true)), // short-circuit
+            Ok(Value::Boolean(false)) => {}                              // short-circuit
+            Ok(Value::Null) => null = true,
+            Err(this_err) => {
+                if err.is_none() {
+                    err = Some(this_err)
+                }
+            } // retain first error encountered
+            Ok(x) => InvalidArgumentSnafu {
+                reason: format!(
+                    "`or()` only support boolean type, found value {:?} of type {:?}",
+                    x,
+                    x.data_type()
+                ),
+            }
+            .fail()?,
+        }
+    }
+    match (err, null) {
+        (Some(err), _) => Err(err),
+        (None, true) => Ok(Value::Null),
+        (None, false) => Ok(Value::Boolean(false)),
     }
 }
 

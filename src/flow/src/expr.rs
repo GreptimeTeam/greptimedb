@@ -19,8 +19,10 @@ mod func;
 mod id;
 mod linear;
 mod scalar;
+mod relation;
 
 pub(crate) use id::{GlobalId, Id, LocalId};
 pub(crate) use scalar::ScalarExpr;
-
-pub(crate) use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
+pub(crate) use func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
+pub(crate) use error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
+pub(crate) use relation::{AggregateExpr, AggregateFunc};
