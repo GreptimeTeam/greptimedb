@@ -51,12 +51,12 @@ impl Key {
         self.column_indices.extend(cols);
     }
 
-    // Remove a column from Key
+    /// Remove a column from Key
     pub fn remove_col(&mut self, col: usize) {
         self.column_indices.retain(|&r| r != col);
     }
 
-    // get all column
+    /// get all columns in Key
     pub fn get(&self) -> &Vec<usize> {
         &self.column_indices
     }
@@ -159,11 +159,9 @@ impl RelationType {
         }
 
         let all_keys = other.keys.iter().all(|key1| {
-            self.keys.iter().any(|key2| {
-                key1.column_indices
-                    .iter()
-                    .all(|k| key2.column_indices.contains(k))
-            })
+            self.keys
+                .iter()
+                .any(|key2| key1.get().iter().all(|k| key2.get().contains(k)))
         });
         if !all_keys {
             return false;
@@ -222,10 +220,6 @@ impl RelationDesc {
     /// Constructs a new `RelationDesc` from a `RelationType` and an iterator
     /// over column names.
     ///
-    /// # Panics
-    ///
-    /// Panics if the arity of the `RelationType` is not equal to the number of
-    /// items in `names`.
     pub fn try_new<I, N>(typ: RelationType, names: I) -> Result<Self>
     where
         I: IntoIterator<Item = N>,
@@ -244,7 +238,24 @@ impl RelationDesc {
         Ok(RelationDesc { typ, names })
     }
 
-    pub fn try_from_names_and_types<I, T, N>(iter: I) -> Result<Self>
+    /// Constructs a new `RelationDesc` from a `RelationType` and an iterator
+    /// over column names.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the arity of the `RelationType` is not equal to the number of
+    /// items in `names`.
+    pub fn new_unchecked<I, N>(typ: RelationType, names: I) -> Self
+    where
+        I: IntoIterator<Item = N>,
+        N: Into<ColumnName>,
+    {
+        let names: Vec<_> = names.into_iter().map(|name| name.into()).collect();
+        assert_eq!(typ.arity(), names.len());
+        RelationDesc { typ, names }
+    }
+
+    pub fn from_names_and_types<I, T, N>(iter: I) -> Self
     where
         I: IntoIterator<Item = (N, T)>,
         T: Into<ColumnType>,
@@ -253,7 +264,7 @@ impl RelationDesc {
         let (names, types): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
         let types = types.into_iter().map(Into::into).collect();
         let typ = RelationType::new(types);
-        Self::try_new(typ, names)
+        Self::new_unchecked(typ, names)
     }
     /// Concatenates a `RelationDesc` onto the end of this `RelationDesc`.
     pub fn concat(mut self, other: Self) -> Self {
