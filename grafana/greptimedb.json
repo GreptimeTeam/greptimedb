@@ -1725,7 +1725,7 @@
           "expr": "histogram_quantile(0.99, sum by(le, operation) (rate(greptime_metric_engine_mito_op_elapsed_bucket[$__rate_interval])))",
           "hide": false,
           "instant": false,
-          "legendFormat": "p99-{{label_name}}",
+          "legendFormat": "p99-{{operation}}",
           "range": true,
           "refId": "B"
         }
@@ -1917,32 +1917,7 @@
           },
           "unit": "none"
         },
-        "overrides": [
-          {
-            "__systemRef": "hideSeriesFrom",
-            "matcher": {
-              "id": "byNames",
-              "options": {
-                "mode": "exclude",
-                "names": [
-                  "{instance=\"localhost:4000\", job=\"greptime\"}"
-                ],
-                "prefix": "All except:",
-                "readOnly": true
-              }
-            },
-            "properties": [
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": true
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 7,
@@ -2522,20 +2497,20 @@
       "type": "timeseries"
     }
   ],
-  "refresh": "5s",
+  "refresh": "10s",
   "schemaVersion": 39,
   "tags": [],
   "templating": {
     "list": []
   },
   "time": {
-    "from": "now-30m",
+    "from": "now-3h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "",
   "title": "GreptimeDB",
   "uid": "e7097237-669b-4f8d-b751-13067afbfb68",
-  "version": 6,
+  "version": 8,
   "weekStart": ""
 }
