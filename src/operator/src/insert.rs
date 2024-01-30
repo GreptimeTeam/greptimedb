@@ -181,7 +181,7 @@ impl Inserter {
     ) -> Result<Output> {
         let inserts =
             StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
-                .convert(insert)
+                .convert(insert, ctx)
                 .await?;
 
         let affected_rows = self.do_request(inserts, ctx).await?;
@@ -334,7 +334,7 @@ impl Inserter {
 
         // create physical table
         let res = statement_executor
-            .create_table_inner(create_table_expr, None)
+            .create_table_inner(create_table_expr, None, ctx)
             .await;
 
         match res {
@@ -431,7 +431,7 @@ impl Inserter {
 
         // TODO(weny): multiple regions table.
         let res = statement_executor
-            .create_table_inner(create_table_expr, None)
+            .create_table_inner(create_table_expr, None, ctx)
             .await;
 
         match res {
