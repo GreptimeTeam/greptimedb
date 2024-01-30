@@ -72,7 +72,6 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
 ///
 /// TODO(discord9): use a more efficient representation
 /// i.e. more compact like raw u8 of \[tag0, value0, tag1, value1, ...\]
-
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Row {
     pub inner: Vec<Value>,
