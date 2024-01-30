@@ -973,10 +973,10 @@ mod tests {
         );
         assert!(!grpc_column_def.default_constraint.is_empty());
 
-        let constrait =
+        let constraint =
             ColumnDefaultConstraint::try_from(&grpc_column_def.default_constraint[..]).unwrap();
         assert!(
-            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
         );
 
@@ -990,10 +990,10 @@ mod tests {
         );
         assert!(!grpc_column_def.default_constraint.is_empty());
 
-        let constrait =
+        let constraint =
             ColumnDefaultConstraint::try_from(&grpc_column_def.default_constraint[..]).unwrap();
         assert!(
-            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-30 00:01:01+0000")
         );
     }
@@ -1108,9 +1108,9 @@ mod tests {
         );
         assert!(column_schema.is_nullable());
 
-        let constrait = column_schema.default_constraint().unwrap();
+        let constraint = column_schema.default_constraint().unwrap();
         assert!(
-            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
         );
 
@@ -1124,9 +1124,9 @@ mod tests {
         );
         assert!(column_schema.is_nullable());
 
-        let constrait = column_schema.default_constraint().unwrap();
+        let constraint = column_schema.default_constraint().unwrap();
         assert!(
-            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-30 00:01:01+0000")
         );
     }

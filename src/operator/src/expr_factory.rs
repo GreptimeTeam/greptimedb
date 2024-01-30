@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_to_expr_with_default_timestamp_vaue() {
+    fn test_create_to_expr_with_default_timestamp_value() {
         let sql = "CREATE TABLE monitor (v double,ts TIMESTAMP default '2024-01-30T00:01:01',TIME INDEX (ts)) engine=mito;";
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -466,9 +466,9 @@ mod tests {
         // query context with system timezone UTC.
         let expr = create_to_expr(&create_table, QueryContext::arc()).unwrap();
         let ts_column = &expr.column_defs[1];
-        let constrait = assert_ts_column(ts_column);
+        let constraint = assert_ts_column(ts_column);
         assert!(
-            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-30 00:01:01+0000")
         );
 
@@ -478,9 +478,9 @@ mod tests {
             .build();
         let expr = create_to_expr(&create_table, ctx).unwrap();
         let ts_column = &expr.column_defs[1];
-        let constrait = assert_ts_column(ts_column);
+        let constraint = assert_ts_column(ts_column);
         assert!(
-            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
         );
     }
@@ -519,9 +519,9 @@ mod tests {
 
         assert_eq!(1, add_columns.len());
         let ts_column = add_columns[0].column_def.clone().unwrap();
-        let constrait = assert_ts_column(&ts_column);
+        let constraint = assert_ts_column(&ts_column);
         assert!(
-            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-30 00:01:01+0000")
         );
 
@@ -539,9 +539,9 @@ mod tests {
 
         assert_eq!(1, add_columns.len());
         let ts_column = add_columns[0].column_def.clone().unwrap();
-        let constrait = assert_ts_column(&ts_column);
+        let constraint = assert_ts_column(&ts_column);
         assert!(
-            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
         );
     }
