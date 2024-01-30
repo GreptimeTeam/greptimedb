@@ -14,6 +14,57 @@
 
 use datatypes::prelude::ConcreteDataType;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
+
+use crate::adapter::error::{InvalidQuerySnafu, Result};
+
+/// a set of column indices that are "keys" for the collection.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
+pub struct Key {
+    pub column_indices: Vec<usize>,
+}
+
+impl Key {
+    /// create a new Key
+    pub fn new() -> Self {
+        Self {
+            column_indices: Vec::new(),
+        }
+    }
+
+    /// create a new Key from a vector of column indices
+    pub fn from(mut column_indices: Vec<usize>) -> Self {
+        column_indices.sort_unstable();
+        Self { column_indices }
+    }
+
+    /// Add a column to Key
+    pub fn add_col(&mut self, col: usize) {
+        self.column_indices.push(col);
+    }
+
+    /// Add columns to Key
+    pub fn add_cols<I>(&mut self, cols: I)
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        self.column_indices.extend(cols);
+    }
+
+    // Remove a column from Key
+    pub fn remove_col(&mut self, col: usize) {
+        self.column_indices.retain(|&r| r != col);
+    }
+
+    // get all column
+    pub fn get(&self) -> &Vec<usize> {
+        &self.column_indices
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.column_indices.is_empty()
+    }
+}
 
 /// The type of a relation.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
@@ -30,7 +81,7 @@ pub struct RelationType {
     /// A collection can contain multiple sets of keys, although it is common to
     /// have either zero or one sets of key indices.
     #[serde(default)]
-    pub keys: Vec<Vec<usize>>,
+    pub keys: Vec<Key>,
     /// optionally indicate the column that is TIME INDEX
     pub time_index: Option<usize>,
 }
@@ -53,11 +104,12 @@ impl RelationType {
         }
     }
 
-    /// Adds a new key for the relation.
+    /// Adds a new key for the relation. Also sorts the key indices.
     pub fn with_key(mut self, mut indices: Vec<usize>) -> Self {
         indices.sort_unstable();
-        if !self.keys.contains(&indices) {
-            self.keys.push(indices);
+        let key = Key::from(indices);
+        if !self.keys.contains(&key) {
+            self.keys.push(key);
         }
         self
     }
@@ -80,7 +132,7 @@ impl RelationType {
             if key.is_empty() {
                 (0..self.column_types.len()).collect()
             } else {
-                key.clone()
+                key.get().clone()
             }
         } else {
             (0..self.column_types.len()).collect()
@@ -93,15 +145,6 @@ impl RelationType {
     /// nullability of `self` is at least as strict as `other`, and that all keys of `other`
     /// contain some key of `self` (as a set of key columns is less strict than any subset).
     pub fn subtypes(&self, other: &RelationType) -> bool {
-        let all_keys = other.keys.iter().all(|key1| {
-            self.keys
-                .iter()
-                .any(|key2| key1.iter().all(|k| key2.contains(k)))
-        });
-        if !all_keys {
-            return false;
-        }
-
         if self.column_types.len() != other.column_types.len() {
             return false;
         }
@@ -114,6 +157,18 @@ impl RelationType {
                 return false;
             }
         }
+
+        let all_keys = other.keys.iter().all(|key1| {
+            self.keys.iter().any(|key2| {
+                key1.column_indices
+                    .iter()
+                    .all(|k| key2.column_indices.contains(k))
+            })
+        });
+        if !all_keys {
+            return false;
+        }
+
         true
     }
 }
@@ -129,7 +184,7 @@ impl RelationType {
 pub struct ColumnType {
     /// The underlying scalar type (e.g., Int32 or String) of this column.
     pub scalar_type: ConcreteDataType,
-    /// Whether this datum can be null.`
+    /// Whether this datum can be null.
     #[serde(default = "return_true")]
     pub nullable: bool,
 }
@@ -171,17 +226,25 @@ impl RelationDesc {
     ///
     /// Panics if the arity of the `RelationType` is not equal to the number of
     /// items in `names`.
-    pub fn new<I, N>(typ: RelationType, names: I) -> Self
+    pub fn try_new<I, N>(typ: RelationType, names: I) -> Result<Self>
     where
         I: IntoIterator<Item = N>,
         N: Into<ColumnName>,
     {
         let names: Vec<_> = names.into_iter().map(|name| name.into()).collect();
-        assert_eq!(typ.column_types.len(), names.len());
-        RelationDesc { typ, names }
+        ensure!(
+            typ.arity() == names.len(),
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Length mismatch between RelationType {:?} and column names {:?}",
+                    typ.column_types, names
+                )
+            }
+        );
+        Ok(RelationDesc { typ, names })
     }
 
-    pub fn from_names_and_types<I, T, N>(iter: I) -> Self
+    pub fn try_from_names_and_types<I, T, N>(iter: I) -> Result<Self>
     where
         I: IntoIterator<Item = (N, T)>,
         T: Into<ColumnType>,
@@ -190,7 +253,7 @@ impl RelationDesc {
         let (names, types): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
         let types = types.into_iter().map(Into::into).collect();
         let typ = RelationType::new(types);
-        Self::new(typ, names)
+        Self::try_new(typ, names)
     }
     /// Concatenates a `RelationDesc` onto the end of this `RelationDesc`.
     pub fn concat(mut self, other: Self) -> Self {
@@ -198,7 +261,11 @@ impl RelationDesc {
         self.names.extend(other.names);
         self.typ.column_types.extend(other.typ.column_types);
         for k in other.typ.keys {
-            let k = k.into_iter().map(|idx| idx + self_len).collect();
+            let k = k
+                .column_indices
+                .into_iter()
+                .map(|idx| idx + self_len)
+                .collect();
             self = self.with_key(k);
         }
         self
@@ -229,16 +296,12 @@ impl RelationDesc {
     /// Builds a new relation description with the column names replaced with
     /// new names.
     ///
-    /// # Panics
-    ///
-    /// Panics if the arity of the relation type does not match the number of
-    /// items in `names`.
-    pub fn with_names<I, N>(self, names: I) -> Self
+    pub fn try_with_names<I, N>(self, names: I) -> Result<Self>
     where
         I: IntoIterator<Item = N>,
         N: Into<ColumnName>,
     {
-        Self::new(self.typ, names)
+        Self::try_new(self.typ, names)
     }
 
     /// Computes the number of columns in the relation.

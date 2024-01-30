@@ -23,8 +23,8 @@ use std::slice::SliceIndex;
 use api::helper::{pb_value_to_value_ref, value_to_grpc_value};
 use api::v1::Row as ProtoRow;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
-use datatypes::types::cast_with_opt;
 use datatypes::value::Value;
 use itertools::Itertools;
 pub(crate) use relation::{RelationDesc, RelationType};
@@ -48,12 +48,7 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
         Value::DateTime(ts) => Ok(ts.val()),
         arg => {
             let arg_ty = arg.data_type();
-            let res = cast_with_opt(
-                arg,
-                &ConcreteDataType::datetime_datatype(),
-                &CastOption { strict: true },
-            )
-            .context({
+            let res = cast(arg, &ConcreteDataType::datetime_datatype()).context({
                 CastValueSnafu {
                     from: arg_ty,
                     to: ConcreteDataType::datetime_datatype(),
@@ -107,8 +102,8 @@ impl Row {
         }
     }
     /// unpack a row into a vector of values
-    pub fn unpack(&self) -> Vec<Value> {
-        self.inner.clone()
+    pub fn unpack(self) -> Vec<Value> {
+        self.inner
     }
     pub fn extend<I>(&mut self, iter: I)
     where

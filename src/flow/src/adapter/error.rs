@@ -35,18 +35,23 @@ pub enum Error {
         source: EvalError,
         location: Location,
     },
+
     #[snafu(display("Table not found: {name}"))]
     TableNotFound { name: String, location: Location },
+
     #[snafu(display("Table already exist: {name}"))]
     TableAlreadyExist { name: String, location: Location },
+
     #[snafu(display("Failed to join task"))]
     JoinTask {
         #[snafu(source)]
         error: tokio::task::JoinError,
         location: Location,
     },
+
     #[snafu(display("Invalid query: {reason}"))]
     InvalidQuery { reason: String, location: Location },
+
     #[snafu(display("No protobuf type for value: {value}"))]
     NoProtoType { value: Value, location: Location },
 }
