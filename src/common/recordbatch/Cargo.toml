@@ -14,6 +14,7 @@ datafusion.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 paste = "1.0"
+pin-project.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
