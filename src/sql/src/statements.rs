@@ -859,6 +859,7 @@ mod tests {
         {
             Value::Timestamp(ts) => {
                 assert_eq!(1645459261000000000, ts.value());
+                assert_eq!("2022-02-21 16:01:01+0000", ts.to_iso8601_string());
                 assert_eq!(TimeUnit::Nanosecond, ts.unit());
             }
             _ => {
@@ -944,6 +945,60 @@ mod tests {
     }
 
     #[test]
+    pub fn test_sql_column_def_to_grpc_column_def_with_timezone() {
+        let column_def = ColumnDef {
+            name: "col".into(),
+            // MILLISECOND
+            data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
+            collation: None,
+            options: vec![ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Default(Expr::Value(SqlValue::SingleQuotedString(
+                    "2024-01-30T00:01:01".to_string(),
+                ))),
+            }],
+        };
+
+        // with timezone "Asia/Shanghai"
+        let grpc_column_def = sql_column_def_to_grpc_column_def(
+            &column_def,
+            Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
+        )
+        .unwrap();
+        assert_eq!("col", grpc_column_def.name);
+        assert!(grpc_column_def.is_nullable); // nullable when options are empty
+        assert_eq!(
+            ColumnDataType::TimestampMillisecond as i32,
+            grpc_column_def.data_type
+        );
+        assert!(!grpc_column_def.default_constraint.is_empty());
+
+        let constrait =
+            ColumnDefaultConstraint::try_from(&grpc_column_def.default_constraint[..]).unwrap();
+        assert!(
+            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+                         if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
+        );
+
+        // without timezone
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
+        assert_eq!("col", grpc_column_def.name);
+        assert!(grpc_column_def.is_nullable); // nullable when options are empty
+        assert_eq!(
+            ColumnDataType::TimestampMillisecond as i32,
+            grpc_column_def.data_type
+        );
+        assert!(!grpc_column_def.default_constraint.is_empty());
+
+        let constrait =
+            ColumnDefaultConstraint::try_from(&grpc_column_def.default_constraint[..]).unwrap();
+        assert!(
+            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+                         if ts.to_iso8601_string() == "2024-01-30 00:01:01+0000")
+        );
+    }
+
+    #[test]
     pub fn test_has_primary_key_option() {
         let column_def = ColumnDef {
             name: "col".into(),
@@ -1019,6 +1074,60 @@ mod tests {
         assert_eq!(
             column_schema.metadata().get(COMMENT_KEY),
             Some(&"test comment".to_string())
+        );
+    }
+
+    #[test]
+    pub fn test_column_def_to_schema_timestamp_with_timezone() {
+        let column_def = ColumnDef {
+            name: "col".into(),
+            // MILLISECOND
+            data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
+            collation: None,
+            options: vec![ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Default(Expr::Value(SqlValue::SingleQuotedString(
+                    "2024-01-30T00:01:01".to_string(),
+                ))),
+            }],
+        };
+
+        // with timezone "Asia/Shanghai"
+
+        let column_schema = column_def_to_schema(
+            &column_def,
+            false,
+            Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!("col", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            column_schema.data_type
+        );
+        assert!(column_schema.is_nullable());
+
+        let constrait = column_schema.default_constraint().unwrap();
+        assert!(
+            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+                         if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
+        );
+
+        // without timezone
+        let column_schema = column_def_to_schema(&column_def, false, None).unwrap();
+
+        assert_eq!("col", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            column_schema.data_type
+        );
+        assert!(column_schema.is_nullable());
+
+        let constrait = column_schema.default_constraint().unwrap();
+        assert!(
+            matches!(constrait, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+                         if ts.to_iso8601_string() == "2024-01-30 00:01:01+0000")
         );
     }
 
