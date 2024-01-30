@@ -61,8 +61,16 @@ impl Key {
         &self.column_indices
     }
 
+    /// True if Key is empty
     pub fn is_empty(&self) -> bool {
         self.column_indices.is_empty()
+    }
+
+    /// True if all columns in self are also in other
+    pub fn subset_of(&self, other: &Key) -> bool {
+        self.column_indices
+            .iter()
+            .all(|c| other.column_indices.contains(c))
     }
 }
 
@@ -158,11 +166,10 @@ impl RelationType {
             }
         }
 
-        let all_keys = other.keys.iter().all(|key1| {
-            self.keys
-                .iter()
-                .any(|key2| key1.get().iter().all(|k| key2.get().contains(k)))
-        });
+        let all_keys = other
+            .keys
+            .iter()
+            .all(|key1| self.keys.iter().any(|key2| key1.subset_of(key2)));
         if !all_keys {
             return false;
         }
