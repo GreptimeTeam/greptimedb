@@ -156,7 +156,11 @@ pub async fn from_output(
                 if let Some(physical_plan) = physical_plan {
                     let mut result_map = HashMap::new();
                     collect_plan_metrics(physical_plan, &mut result_map);
-                    http_record_output.metrics = result_map;
+                    let re = result_map
+                        .into_iter()
+                        .map(|(k, v)| (k, Value::from(v)))
+                        .collect();
+                    http_record_output.metrics = re;
                 }
                 results.push(GreptimeQueryOutput::Records(http_record_output))
             }
@@ -179,22 +183,31 @@ pub async fn from_output(
     Ok(results)
 }
 
-fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, result_map: &mut HashMap<String, Value>) {
+fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, result_map: &mut HashMap<String, u64>) {
     if let Some(m) = plan.metrics() {
         m.iter().for_each(|m| match m.value() {
             MetricValue::Count { name, count } => {
-                if name.starts_with(GREPTIME_EXEC_PREFIX) && count.value() > 0 {
-                    result_map.insert(name.to_string(), Value::from(count.value()));
+                let value = count.value() as u64;
+                if name.starts_with(GREPTIME_EXEC_PREFIX) && value > 0 {
+                    result_map
+                        .entry(name.to_string())
+                        .and_modify(|v| *v += value)
+                        .or_insert(value);
                 }
             }
             MetricValue::Gauge { name, gauge } => {
-                if name.starts_with(GREPTIME_EXEC_PREFIX) && gauge.value() > 0 {
-                    result_map.insert(name.to_string(), Value::from(gauge.value()));
+                let value = gauge.value() as u64;
+                if name.starts_with(GREPTIME_EXEC_PREFIX) && value > 0 {
+                    result_map
+                        .entry(name.to_string())
+                        .and_modify(|v| *v += value)
+                        .or_insert(value);
                 }
             }
             MetricValue::Time { name, time } => {
                 if name.starts_with(GREPTIME_EXEC_PREFIX) {
-                    result_map.insert(name.to_string(), Value::from(time.value()));
+                    // override
+                    result_map.insert(name.to_string(), time.value() as u64);
                 }
             }
             _ => {}
