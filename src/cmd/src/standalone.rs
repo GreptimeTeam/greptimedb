@@ -380,8 +380,7 @@ impl StartCommand {
 
         info!("Building standalone instance with {opts:#?}");
 
-        set_default_timezone(opts.frontend.default_timezone.as_deref())
-            .context(InitTimezoneSnafu)?;
+        set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
@@ -437,11 +436,11 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
-        let servers = Services::new(opts.clone(), Arc::new(frontend.clone()), fe_plugins)
+        let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
             .build()
             .context(StartFrontendSnafu)?;
         frontend
-            .build_servers(opts, servers)
+            .build_servers(fe_opts, servers)
             .context(StartFrontendSnafu)?;
 
         Ok(Instance {
