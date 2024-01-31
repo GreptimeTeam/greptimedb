@@ -298,6 +298,10 @@ mod tests {
             .unwrap()
             .val();
         assert_eq!(28800000, ts);
+        let ts = DateTime::from_str("1970-01-01 00:00:00.042+0000", None)
+            .unwrap()
+            .val();
+        assert_eq!(42, ts);
 
         // the string has the time zone info, the argument doesn't change the result
         let ts = DateTime::from_str(
