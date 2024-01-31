@@ -48,6 +48,7 @@ mod truncate_test;
 use std::any::Any;
 use std::sync::Arc;
 
+use api::v1::OpType;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -66,7 +67,7 @@ use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
 use crate::region::RegionUsage;
-use crate::request::WorkerRequest;
+use crate::request::{SenderWriteRequest, WorkerRequest, WriteRequest};
 use crate::worker::WorkerGroup;
 
 pub const MITO_ENGINE_NAME: &str = "mito";
@@ -221,13 +222,33 @@ impl EngineInner {
         region_id: RegionId,
         requests: Vec<RegionRequest>,
     ) -> Result<AffectedRows> {
-        let mut tasks = Vec::with_capacity(requests.len());
+        let mut write_requests = Vec::with_capacity(requests.len());
+        let mut receivers = Vec::with_capacity(requests.len());
         for request in requests {
-            tasks.push(self.handle_request(region_id, request));
+            let req = match request {
+                RegionRequest::Put(v) => WriteRequest::new(region_id, OpType::Put, v.rows)?,
+                _ => unreachable!(),
+            };
+            let (sender, receiver) = oneshot::channel();
+            write_requests.push(SenderWriteRequest {
+                sender: sender.into(),
+                request: req,
+            });
+            receivers.push(receiver);
         }
-        futures_util::future::try_join_all(tasks)
+        self.workers
+            .submit_to_worker(region_id, WorkerRequest::Writes(write_requests))
+            .await?;
+
+        let rets = futures_util::future::try_join_all(receivers)
             .await
-            .map(|results| results.into_iter().sum())
+            .context(RecvSnafu)?;
+
+        let mut affected_rows = 0;
+        for ret in rets {
+            affected_rows += ret?;
+        }
+        Ok(affected_rows)
     }
 
     /// Handles the scan `request` and returns a [Scanner] for the `request`.

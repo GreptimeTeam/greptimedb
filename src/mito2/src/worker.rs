@@ -554,6 +554,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::Write(sender_req) => {
                     write_requests.push(sender_req);
                 }
+                WorkerRequest::Writes(sender_reqs) => write_requests.extend(sender_reqs),
                 WorkerRequest::Ddl(sender_req) => {
                     ddl_requests.push(sender_req);
                 }
