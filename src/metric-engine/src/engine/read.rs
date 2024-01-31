@@ -29,6 +29,7 @@ use crate::engine::MetricEngineInner;
 use crate::error::{
     InvalidMetadataSnafu, LogicalRegionNotFoundSnafu, MitoReadOperationSnafu, Result,
 };
+use crate::metrics::MITO_OPERATION_ELAPSED;
 use crate::utils;
 
 impl MetricEngineInner {
@@ -56,6 +57,10 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream> {
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["read_physical"])
+            .start_timer();
+
         self.mito
             .handle_query(region_id, request)
             .await
@@ -67,6 +72,10 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream> {
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["read"])
+            .start_timer();
+
         let physical_region_id = self.get_physical_region_id(logical_region_id).await?;
         let data_region_id = utils::to_data_region_id(physical_region_id);
         let request = self

@@ -133,6 +133,10 @@ To write and query data, GreptimeDB is compatible with multiple [protocols and c
 - [GreptimeDB Rust Client](https://github.com/GreptimeTeam/greptimedb-client-rust)
 - [GreptimeDB JavaScript Client](https://github.com/GreptimeTeam/greptime-js-sdk)
 
+### Grafana Dashboard
+
+Our official Grafana dashboard is available at [grafana](./grafana/README.md) directory.
+
 ## Project Status
 
 This project is in its early stage and under heavy development. We move fast and

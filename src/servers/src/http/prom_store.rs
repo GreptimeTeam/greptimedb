@@ -59,12 +59,12 @@ pub async fn route_write_without_metric_engine(
     Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<(StatusCode, ())> {
-    let request = decode_remote_write_request(body).await?;
     let db = params.db.clone().unwrap_or_default();
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
 
+    let request = decode_remote_write_request(body).await?;
     // reject if physical table is specified when metric engine is disabled
     if params.physical_table.is_some() {
         return UnexpectedPhysicalTableSnafu {}.fail();
@@ -81,17 +81,17 @@ pub async fn remote_write(
     Extension(mut query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<(StatusCode, ())> {
-    let request = decode_remote_write_request(body).await?;
     let db = params.db.clone().unwrap_or_default();
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
+
+    let request = decode_remote_write_request(body).await?;
     if let Some(physical_table) = params.physical_table {
         let mut new_query_ctx = query_ctx.as_ref().clone();
         new_query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
         query_ctx = Arc::new(new_query_ctx);
     }
-
-    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
-        .with_label_values(&[db.as_str()])
-        .start_timer();
 
     handler.write(request, query_ctx, true).await?;
     Ok((StatusCode::NO_CONTENT, ()))
@@ -117,12 +117,13 @@ pub async fn remote_read(
     Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<PromStoreResponse> {
-    let request = decode_remote_read_request(body).await?;
     let db = params.db.clone().unwrap_or_default();
-
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
+
+    let request = decode_remote_read_request(body).await?;
+
     handler.read(request, query_ctx).await
 }
 

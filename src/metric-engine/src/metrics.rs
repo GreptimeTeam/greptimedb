@@ -17,6 +17,9 @@
 use lazy_static::lazy_static;
 use prometheus::*;
 
+/// Stage label.
+pub const OPERATION_LABEL: &str = "operation";
+
 lazy_static! {
     /// Gauge for opened regions
     pub static ref PHYSICAL_REGION_COUNT: IntGauge =
@@ -37,4 +40,13 @@ lazy_static! {
     /// Counter for forbidden operations
     pub static ref FORBIDDEN_OPERATION_COUNT: IntCounter =
         register_int_counter!("greptime_metric_engine_forbidden_request", "metric forbidden request").unwrap();
+
+    /// Histogram for underlying mito operations
+    pub static ref MITO_OPERATION_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_metric_engine_mito_op_elapsed",
+        "metric engine's mito operation elapsed",
+        &[OPERATION_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+    )
+    .unwrap();
 }

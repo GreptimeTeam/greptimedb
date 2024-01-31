@@ -786,8 +786,10 @@ fn ensure_value_lists_strictly_increased<'a>(
                         }
                     }
 
-                    let x = sql_value_to_value(column_name, &cdt, x)?;
-                    let y = sql_value_to_value(column_name, &cdt, y)?;
+                    // We only want to comnpare the `x` and `y` values,
+                    // so the `timezone` can be ignored.
+                    let x = sql_value_to_value(column_name, &cdt, x, None)?;
+                    let y = sql_value_to_value(column_name, &cdt, y, None)?;
                     match x.cmp(&y) {
                         Ordering::Less => break,
                         Ordering::Equal => equal_tuples += 1,
