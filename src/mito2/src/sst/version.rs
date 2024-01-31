@@ -55,7 +55,7 @@ impl SstVersion {
     ) {
         for file in files_to_add {
             let level = file.level;
-            let _ = self.levels[level as usize]
+            self.levels[level as usize]
                 .files
                 .entry(file.file_id)
                 .or_insert_with(|| FileHandle::new(file, file_purger.clone()));
