@@ -442,7 +442,9 @@ impl ErrorExt for Error {
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
 
-            ParseProcedureId { .. } | InvalidNumTopics { .. } | EmptyCreateTableTasks { .. } => StatusCode::InvalidArguments,
+            ParseProcedureId { .. } | InvalidNumTopics { .. } | EmptyCreateTableTasks { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 
