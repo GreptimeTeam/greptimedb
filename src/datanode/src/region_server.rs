@@ -531,7 +531,13 @@ impl RegionServerInner {
                         break;
                     }
                 }
-                None => engine = Some(curr),
+                None => {
+                    if curr.name() != METRIC_ENGINE_NAME {
+                        break;
+                    } else {
+                        engine = Some(curr);
+                    }
+                }
             }
         }
 
