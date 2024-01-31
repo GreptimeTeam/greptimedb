@@ -139,7 +139,7 @@ impl GreptimeDbStandaloneBuilder {
         let table_meta_allocator = TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
-            table_metadata_manager.clone(),
+            table_metadata_manager.table_name_manager().clone(),
         );
 
         let ddl_task_executor = Arc::new(

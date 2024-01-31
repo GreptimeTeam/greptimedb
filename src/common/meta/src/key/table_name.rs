@@ -144,6 +144,7 @@ impl TableNameValue {
     }
 }
 
+#[derive(Clone)]
 pub struct TableNameManager {
     kv_backend: KvBackendRef,
 }

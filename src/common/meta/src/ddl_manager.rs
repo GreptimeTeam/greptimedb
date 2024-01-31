@@ -644,11 +644,11 @@ mod tests {
             procedure_manager.clone(),
             Arc::new(DummyDatanodeManager),
             Arc::new(DummyCacheInvalidator),
-            table_metadata_manager,
+            table_metadata_manager.clone(),
             TableMetadataAllocator::new(
                 Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
                 Arc::new(WalOptionsAllocator::default()),
-                Arc::new(TableMetadataManager::new(kv_backend)),
+                table_metadata_manager.table_name_manager().clone(),
             ),
             Arc::new(MemoryRegionKeeper::default()),
         );

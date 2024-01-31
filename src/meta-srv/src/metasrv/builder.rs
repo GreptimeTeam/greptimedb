@@ -225,7 +225,7 @@ impl MetaSrvBuilder {
             TableMetadataAllocator::with_peer_allocator(
                 sequence,
                 wal_options_allocator.clone(),
-                table_metadata_manager.clone(),
+                table_metadata_manager.table_name_manager().clone(),
                 peer_allocator,
             )
         });
