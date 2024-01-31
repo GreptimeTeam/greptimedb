@@ -5201,6 +5201,7 @@ dependencies = [
  "common-time",
  "datafusion",
  "datatypes",
+ "futures-util",
  "lazy_static",
  "mito2",
  "mur3",

@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::{AffectedRows, RegionRequest};
+use crate::region_request::{AffectedRows, RegionPutRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
 /// The result of setting readonly for the region.
@@ -130,6 +130,13 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<AffectedRows, BoxedError>;
+
+    async fn handle_inserts(
+        &self,
+        _insert_requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows, BoxedError> {
+        unimplemented!("handle_inserts is not implemented")
+    }
 
     /// Handles substrait query and return a stream of record batches
     async fn handle_query(
