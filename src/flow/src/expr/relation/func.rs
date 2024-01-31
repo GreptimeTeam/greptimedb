@@ -19,6 +19,7 @@ use datatypes::value::{OrderedF32, OrderedF64, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
+use crate::expr::relation::accum::Accum;
 use crate::repr::Diff;
 
 /// `sum(i*)->i64, sum(u*)->u64`
@@ -110,182 +111,24 @@ impl AggregateFunc {
         }
     }
 
-    /// Eval value, diff with accumlator
-    /// 
-    /// Expect self to be accumlatable aggregate functio, i.e. sum/count
+    /// Eval value, diff with accumulator
     ///
-    /// TODO(discord9): deal with overflow&better accumlator
+    /// Expect self to be accumulable aggregate functio, i.e. sum/count
+    ///
+    /// TODO(discord9): deal with overflow&better accumulator
     pub fn eval_diff_accumulable<I>(
         &self,
         accum: Vec<Value>,
         value_diffs: I,
-    ) -> Result<Value, EvalError>
+    ) -> Result<(Value, Vec<Value>), EvalError>
     where
         I: IntoIterator<Item = (Value, Diff)>,
     {
-        // TODO(discord9): sum
-        match self {
-            AggregateFunc::SumInt16 | AggregateFunc::SumInt32 | AggregateFunc::SumInt64 => {
-                let accum = if let Some(accum) = accum.first() {
-                    accum.as_value_ref().as_i64().map_err(|err| {
-                        TypeMismatchSnafu {
-                            expected: ConcreteDataType::int64_datatype(),
-                            actual: accum.data_type(),
-                        }
-                        .build()
-                    })?
-                } else {
-                    None
-                };
-                match self {
-                    AggregateFunc::SumInt16 => sum_accum_diffs::<I, i16, i64>(accum, value_diffs),
-                    AggregateFunc::SumInt32 => sum_accum_diffs::<I, i32, i64>(accum, value_diffs),
-                    AggregateFunc::SumInt64 => sum_accum_diffs::<I, i64, i64>(accum, value_diffs),
-
-                    _ => unreachable!(),
-                }
-            }
-            AggregateFunc::SumUInt16 | AggregateFunc::SumUInt32 | AggregateFunc::SumUInt64 => {
-                let accum = if let Some(accum) = accum.first() {
-                    accum.as_value_ref().as_u64().map_err(|err| {
-                        TypeMismatchSnafu {
-                            expected: ConcreteDataType::uint64_datatype(),
-                            actual: accum.data_type(),
-                        }
-                        .build()
-                    })?
-                } else {
-                    None
-                };
-                match self {
-                    AggregateFunc::SumUInt16 => sum_accum_diffs::<I, u16, u64>(accum, value_diffs),
-                    AggregateFunc::SumUInt32 => sum_accum_diffs::<I, u32, u64>(accum, value_diffs),
-                    AggregateFunc::SumUInt64 => sum_accum_diffs::<I, u64, u64>(accum, value_diffs),
-                    _ => unreachable!(),
-                }
-            }
-            AggregateFunc::SumFloat32 => {
-                let accum = if let Some(accum) = accum.first() {
-                    accum.as_value_ref().as_f32().map_err(|err| {
-                        TypeMismatchSnafu {
-                            expected: ConcreteDataType::float32_datatype(),
-                            actual: accum.data_type(),
-                        }
-                        .build()
-                    })?
-                } else {
-                    None
-                };
-                sum_accum_diffs::<I, f32, f32>(accum, value_diffs)
-            }
-            AggregateFunc::SumFloat64 => {
-                let accum = if let Some(accum) = accum.first() {
-                    accum.as_value_ref().as_f64().map_err(|err| {
-                        TypeMismatchSnafu {
-                            expected: ConcreteDataType::float64_datatype(),
-                            actual: accum.data_type(),
-                        }
-                        .build()
-                    })?
-                } else {
-                    None
-                };
-                sum_accum_diffs::<I, f64, f64>(accum, value_diffs)
-            }
-
-            AggregateFunc::Count => count_accum_diff(accum, value_diffs),
-            _ => {
-                let values_only = value_diffs.into_iter().map(|e| e.0);
-                self.eval(values_only)
-            }
-        }
+        let mut old_accum = Accum::try_into_accum(self, accum)?;
+        old_accum.update_batch(self, value_diffs)?;
+        let res = old_accum.eval(self)?;
+        Ok((res, old_accum.into_state()))
     }
-}
-
-/// TODO(discord9): deal with overflow
-fn sum_accum_diffs<I, ValueType, ResultType>(
-    accum: Option<ResultType>,
-    value_diffs: I,
-) -> Result<Value, EvalError>
-where
-    I: IntoIterator<Item = (Value, Diff)>,
-    ValueType: TryFrom<Value>,
-    <ValueType as TryFrom<Value>>::Error: std::fmt::Debug,
-    Value: From<Option<ValueType>>,
-    ResultType: From<ValueType>
-        + std::iter::Sum
-        + Into<Value>
-        + std::ops::Add<Output = ResultType>
-        + std::ops::Sub<Output = ResultType>
-        + std::default::Default,
-{
-    // If no row qualifies, then the result of COUNT is 0 (zero), and the result of any other aggregate function is the null value.
-    let mut values = value_diffs
-        .into_iter()
-        .filter(|v| !v.0.is_null())
-        .peekable();
-    let ret = if values.peek().is_none() {
-        Value::Null
-    } else {
-        let res_ty_lst = values
-            .map(|(v, d)| {
-                ValueType::try_from(v)
-                    .map(|v| (ResultType::from(v), d))
-                    .map_err(|err| {
-                        TryFromValueSnafu {
-                            msg: format!("type: {}, msg: {:?}", type_name::<ValueType>(), err),
-                        }
-                        .build()
-                    })
-            })
-            .collect::<Result<Vec<_>, EvalError>>()?
-            .into_iter();
-        let x = res_ty_lst
-            .fold(accum, |state, next| match (state, next) {
-                (Some(state), next) => Some(match next.1 {
-                    1 => state + next.0,
-                    -1 => state - next.0,
-                    _ => unreachable!("multicity of diff not supported"),
-                }),
-                (None, next) => Some(match next.1 {
-                    1 => next.0,
-                    -1 => ResultType::default() - next.0,
-                    _ => unreachable!("multicity of diff not supported"),
-                }),
-            })
-            .expect("not all values are null"); // invariant: values are not null after filter
-        x.into()
-    };
-    Ok(ret)
-}
-
-fn count_accum_diff<I>(accum: Vec<Value>, value_diffs: I) -> Result<Value, EvalError>
-where
-    I: IntoIterator<Item = (Value, Diff)>,
-{
-    let mut accum = if let Some(accum) = accum.first() {
-        // invariant: accum is i64
-        accum
-            .as_value_ref()
-            .as_i64()
-            .map_err(|err| {
-                TryFromValueSnafu {
-                    msg: format!("type: i64, msg: {:?}", err),
-                }
-                .build()
-            })?
-            .expect("Non Null accumulator")
-    } else {
-        0
-    };
-    for (value, diff) in value_diffs {
-        match diff {
-            1 => accum += 1,
-            -1 => accum -= 1,
-            _ => unreachable!("multicity of diff not supported"),
-        }
-    }
-    Ok(Value::from(accum))
 }
 
 fn max_string<I>(values: I) -> Result<Value, EvalError>

@@ -13,11 +13,10 @@
 // limitations under the License.
 
 //! Accumulators for aggregate functions that's is accumulatable. i.e. sum/count
-//! Currently support
 //!
+//! Currently support sum, count, any, all
 
 use std::fmt::Display;
-use std::os::linux::raw::stat;
 
 use common_decimal::Decimal128;
 use datatypes::data_type::ConcreteDataType;
@@ -71,6 +70,23 @@ pub enum Accum {
 }
 
 impl Accum {
+    pub fn try_into_accum(aggr_fn: &AggregateFunc, state: Vec<Value>) -> Result<Self, EvalError> {
+        match aggr_fn {
+            AggregateFunc::Any | AggregateFunc::All => Self::try_into_bool(state),
+            AggregateFunc::Count
+            | AggregateFunc::SumInt16
+            | AggregateFunc::SumInt32
+            | AggregateFunc::SumInt64
+            | AggregateFunc::SumUInt16
+            | AggregateFunc::SumUInt32
+            | AggregateFunc::SumUInt64 => Self::try_into_number(state),
+            AggregateFunc::SumFloat32 | AggregateFunc::SumFloat64 => Self::try_into_float(state),
+            _ => Err(InternalSnafu {
+                reason: format!("Aggregation function: {:?} is not accumulable.", aggr_fn),
+            }
+            .build()),
+        }
+    }
     pub fn try_into_bool(state: Vec<Value>) -> Result<Self, EvalError> {
         if state.len() != 2 {
             return Err(InternalSnafu {
