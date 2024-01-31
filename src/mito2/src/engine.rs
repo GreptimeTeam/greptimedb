@@ -216,6 +216,20 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
+    async fn handle_requests(
+        &self,
+        region_id: RegionId,
+        requests: Vec<RegionRequest>,
+    ) -> Result<AffectedRows> {
+        let mut tasks = Vec::with_capacity(requests.len());
+        for request in requests {
+            tasks.push(self.handle_request(region_id, request));
+        }
+        futures_util::future::try_join_all(tasks)
+            .await
+            .map(|results| results.into_iter().sum())
+    }
+
     /// Handles the scan `request` and returns a [Scanner] for the `request`.
     fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
         // Reading a region doesn't need to go through the region worker thread.
@@ -288,6 +302,17 @@ impl RegionEngine for MitoEngine {
     ) -> Result<AffectedRows, BoxedError> {
         self.inner
             .handle_request(region_id, request)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    async fn handle_requests(
+        &self,
+        region_id: RegionId,
+        requests: Vec<RegionRequest>,
+    ) -> Result<AffectedRows, BoxedError> {
+        self.inner
+            .handle_requests(region_id, requests)
             .await
             .map_err(BoxedError::new)
     }

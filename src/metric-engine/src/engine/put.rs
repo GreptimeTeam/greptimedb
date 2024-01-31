@@ -22,7 +22,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
 };
-use store_api::region_request::{AffectedRows, RegionPutRequest};
+use store_api::region_request::{AffectedRows, RegionPutRequest, RegionRequest};
 use store_api::storage::{RegionId, TableId};
 
 use crate::engine::MetricEngineInner;
@@ -138,14 +138,19 @@ impl MetricEngineInner {
                 )
         };
 
-        let mut tasks = vec![];
+        let mut tasks = Vec::with_capacity(group_by_physical_region.len());
         for (physical_region_id, requests) in group_by_physical_region {
             let data_region_id = to_data_region_id(physical_region_id);
+            let mut batch_requests = Vec::with_capacity(requests.len());
             for (logical_region_id, mut request) in requests {
                 self.verify_put_request(logical_region_id, physical_region_id, &request)?;
                 self.modify_rows(logical_region_id.table_id(), &mut request.rows)?;
-                tasks.push(self.data_region.write_data(data_region_id, request));
+                batch_requests.push(RegionRequest::Put(request));
             }
+            tasks.push(
+                self.data_region
+                    .write_data_batch(data_region_id, batch_requests),
+            );
         }
 
         futures_util::future::try_join_all(tasks.into_iter())

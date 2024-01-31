@@ -131,6 +131,14 @@ pub trait RegionEngine: Send + Sync {
         request: RegionRequest,
     ) -> Result<AffectedRows, BoxedError>;
 
+    async fn handle_requests(
+        &self,
+        _region_id: RegionId,
+        _requests: Vec<RegionRequest>,
+    ) -> Result<AffectedRows, BoxedError> {
+        unimplemented!("handle_requests is not implemented")
+    }
+
     async fn handle_inserts(
         &self,
         _insert_requests: Vec<(RegionId, RegionPutRequest)>,

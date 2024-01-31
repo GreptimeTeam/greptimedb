@@ -5291,6 +5291,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "futures",
+ "futures-util",
  "humantime-serde",
  "index",
  "lazy_static",
