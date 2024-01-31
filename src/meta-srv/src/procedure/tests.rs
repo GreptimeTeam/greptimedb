@@ -98,12 +98,16 @@ fn create_table_task(table_name: Option<&str>) -> CreateTableTask {
 
 #[test]
 fn test_region_request_builder() {
-    let procedure = CreateTableProcedure::new(
+    let mut procedure = CreateTableProcedure::new(
         1,
         create_table_task(None),
+        test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
+    );
+
+    procedure.set_allocated_metadata(
+        1024,
         TableRouteValue::physical(test_data::new_region_routes()),
         HashMap::default(),
-        test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
     );
 
     let template = procedure.new_region_request_builder(None).unwrap();
@@ -192,9 +196,13 @@ async fn test_on_datanode_create_regions() {
     let mut procedure = CreateTableProcedure::new(
         1,
         create_table_task(None),
-        TableRouteValue::physical(region_routes),
-        HashMap::default(),
         test_data::new_ddl_context(datanode_manager),
+    );
+
+    procedure.set_allocated_metadata(
+        42,
+        TableRouteValue::physical(test_data::new_region_routes()),
+        HashMap::default(),
     );
 
     let expected_created_regions = Arc::new(Mutex::new(HashSet::from([

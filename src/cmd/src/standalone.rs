@@ -21,7 +21,7 @@ use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
-use common_meta::ddl::table_meta::TableMetadataAllocator;
+use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -419,11 +419,11 @@ impl StartCommand {
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
-        let table_meta_allocator = TableMetadataAllocator::new(
+        let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
             table_metadata_manager.table_name_manager().clone(),
-        );
+        ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
             table_metadata_manager,
@@ -458,7 +458,7 @@ impl StartCommand {
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
         datanode_manager: DatanodeManagerRef,
-        table_meta_allocator: TableMetadataAllocator,
+        table_meta_allocator: TableMetadataAllocatorRef,
     ) -> Result<DdlTaskExecutorRef> {
         let ddl_task_executor: DdlTaskExecutorRef = Arc::new(
             DdlManager::try_new(

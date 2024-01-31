@@ -21,7 +21,7 @@ use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::datanode_manager::DatanodeManagerRef;
-use common_meta::ddl::table_meta::TableMetadataAllocator;
+use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -211,7 +211,7 @@ impl MetaSrvBuilder {
             options.wal.clone(),
             kv_backend.clone(),
         ));
-        let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
+        let table_metadata_allocator = Arc::new(table_metadata_allocator.unwrap_or_else(|| {
             let sequence = Arc::new(
                 SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
                     .initial(MIN_USER_TABLE_ID as u64)
@@ -228,7 +228,7 @@ impl MetaSrvBuilder {
                 table_metadata_manager.table_name_manager().clone(),
                 peer_allocator,
             )
-        });
+        }));
 
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
@@ -238,7 +238,7 @@ impl MetaSrvBuilder {
             &procedure_manager,
             &mailbox,
             &table_metadata_manager,
-            table_metadata_allocator,
+            &table_metadata_allocator,
             &opening_region_keeper,
         )?;
 
@@ -386,7 +386,7 @@ fn build_ddl_manager(
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
-    table_metadata_allocator: TableMetadataAllocator,
+    table_metadata_allocator: &TableMetadataAllocatorRef,
     memory_region_keeper: &MemoryRegionKeeperRef,
 ) -> Result<DdlManagerRef> {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {
@@ -413,7 +413,7 @@ fn build_ddl_manager(
             datanode_clients,
             cache_invalidator,
             table_metadata_manager.clone(),
-            table_metadata_allocator,
+            table_metadata_allocator.clone(),
             memory_region_keeper.clone(),
         )
         .context(error::InitDdlManagerSnafu)?,

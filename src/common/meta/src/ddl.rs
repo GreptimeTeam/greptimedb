@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionNumber, TableId};
 
+use self::table_meta::TableMetadataAllocatorRef;
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
 use crate::error::Result;
@@ -73,4 +74,5 @@ pub struct DdlContext {
     pub cache_invalidator: CacheInvalidatorRef,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub memory_region_keeper: MemoryRegionKeeperRef,
+    pub table_metadata_allocator: TableMetadataAllocatorRef,
 }
