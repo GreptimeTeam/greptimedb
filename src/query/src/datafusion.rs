@@ -55,7 +55,7 @@ pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, CreateSchemaSnafu, DataFusionSnafu,
     MissingTableMutationHandlerSnafu, MissingTimestampColumnSnafu, QueryExecutionSnafu, Result,
-    TableNotFoundSnafu, UnimplementedSnafu, UnsupportedExprSnafu,
+    TableMutationSnafu, TableNotFoundSnafu, UnimplementedSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -190,6 +190,7 @@ impl DatafusionQueryEngine {
             .context(MissingTableMutationHandlerSnafu)?
             .delete(request, query_ctx)
             .await
+            .context(TableMutationSnafu)
     }
 
     #[tracing::instrument(skip_all)]
@@ -211,6 +212,7 @@ impl DatafusionQueryEngine {
             .context(MissingTableMutationHandlerSnafu)?
             .insert(request, query_ctx)
             .await
+            .context(TableMutationSnafu)
     }
 
     async fn find_table(&self, table_name: &ResolvedTableReference<'_>) -> Result<TableRef> {

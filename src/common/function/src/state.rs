@@ -11,13 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use crate::handlers::{MetaServiceHandlerRef, TableMutationHandlerRef};
 
-pub mod scalars;
-mod system;
-mod table;
-
-pub mod function;
-pub mod function_registry;
-pub mod handlers;
-pub mod helper;
-pub mod state;
+/// Shared state for SQL functions.
+#[derive(Clone, Default)]
+pub struct FunctionState {
+    // The table mutation handler
+    pub table_mutation_handler: Option<TableMutationHandlerRef>,
+    // The meta service handler
+    pub meta_service_handler: Option<MetaServiceHandlerRef>,
+}

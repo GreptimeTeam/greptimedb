@@ -169,6 +169,18 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to do table mutation"))]
+    TableMutation {
+        source: BoxedError,
+        location: Location,
+    },
+
+    #[snafu(display("Missing TableMutationHandler, not expected"))]
+    MissingTableMutationHandler { location: Location },
+
+    #[snafu(display("Missing MetaServiceHandler, not expected"))]
+    MissingMetaServiceHandler { location: Location },
+
     #[snafu(display("Invalid function args: {}", err_msg))]
     InvalidFuncArgs { err_msg: String, location: Location },
 }
@@ -197,9 +209,10 @@ impl ErrorExt for Error {
             | Error::ConvertArrowSchema { source, .. }
             | Error::FromArrowArray { source, .. } => source.status_code(),
 
-            Error::ExecuteRepeatedly { .. } | Error::GeneralDataFusion { .. } => {
-                StatusCode::Unexpected
-            }
+            Error::MissingTableMutationHandler { .. }
+            | Error::MissingMetaServiceHandler { .. }
+            | Error::ExecuteRepeatedly { .. }
+            | Error::GeneralDataFusion { .. } => StatusCode::Unexpected,
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }
@@ -208,6 +221,7 @@ impl ErrorExt for Error {
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
             Error::ExecutePhysicalPlan { source, .. } => source.status_code(),
             Error::Execute { source, .. } => source.status_code(),
+            Error::TableMutation { source, .. } => source.status_code(),
         }
     }
 

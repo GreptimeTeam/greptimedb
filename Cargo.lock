@@ -1779,7 +1779,9 @@ dependencies = [
 name = "common-function"
 version = "0.6.0"
 dependencies = [
+ "api",
  "arc-swap",
+ "async-trait",
  "build-data",
  "chrono-tz 0.6.3",
  "common-error",
@@ -1798,6 +1800,7 @@ dependencies = [
  "session",
  "snafu",
  "statrs",
+ "table",
 ]
 
 [[package]]
@@ -6036,6 +6039,7 @@ dependencies = [
  "common-catalog",
  "common-datasource",
  "common-error",
+ "common-function",
  "common-grpc-expr",
  "common-macro",
  "common-meta",

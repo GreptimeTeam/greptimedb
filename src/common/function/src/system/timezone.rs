@@ -22,13 +22,13 @@ use datatypes::vectors::{StringVector, VectorRef};
 
 use crate::function::{Function, FunctionContext};
 
-/// A function to return current schema name.
+/// A function to return current session timezone.
 #[derive(Clone, Debug, Default)]
-pub struct DatabaseFunction;
+pub struct TimezoneFunction;
 
-const NAME: &str = "database";
+const NAME: &str = "timezone";
 
-impl Function for DatabaseFunction {
+impl Function for TimezoneFunction {
     fn name(&self) -> &str {
         NAME
     }
@@ -42,15 +42,15 @@ impl Function for DatabaseFunction {
     }
 
     fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let db = func_ctx.query_ctx.current_schema();
+        let tz = func_ctx.query_ctx.timezone().to_string();
 
-        Ok(Arc::new(StringVector::from_slice(&[db])) as _)
+        Ok(Arc::new(StringVector::from_slice(&[&tz])) as _)
     }
 }
 
-impl fmt::Display for DatabaseFunction {
+impl fmt::Display for TimezoneFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DATABASE")
+        write!(f, "TIMEZONE")
     }
 }
 
@@ -64,8 +64,8 @@ mod tests {
     use super::*;
     #[test]
     fn test_build_function() {
-        let build = DatabaseFunction;
-        assert_eq!("database", build.name());
+        let build = TimezoneFunction;
+        assert_eq!("timezone", build.name());
         assert_eq!(
             ConcreteDataType::string_datatype(),
             build.return_type(&[]).unwrap()
@@ -77,13 +77,11 @@ mod tests {
                          } if  valid_types == vec![]
         ));
 
-        let query_ctx = QueryContextBuilder::default()
-            .current_schema("test_db".to_string())
-            .build();
+        let query_ctx = QueryContextBuilder::default().build();
 
         let func_ctx = FunctionContext { query_ctx };
         let vector = build.eval(func_ctx, &[]).unwrap();
-        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_db"]));
+        let expect: VectorRef = Arc::new(StringVector::from(vec!["UTC"]));
         assert_eq!(expect, vector);
     }
 }

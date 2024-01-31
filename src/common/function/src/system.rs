@@ -14,12 +14,14 @@
 
 mod build;
 mod database;
+mod timezone;
 mod version;
 
 use std::sync::Arc;
 
 use build::BuildFunction;
 use database::DatabaseFunction;
+use timezone::TimezoneFunction;
 use version::VersionFunction;
 
 use crate::function_registry::FunctionRegistry;
@@ -31,5 +33,6 @@ impl SystemFunction {
         registry.register(Arc::new(BuildFunction));
         registry.register(Arc::new(VersionFunction));
         registry.register(Arc::new(DatabaseFunction));
+        registry.register(Arc::new(TimezoneFunction));
     }
 }

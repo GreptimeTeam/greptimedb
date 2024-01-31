@@ -1,0 +1,43 @@
+use std::fmt::{self};
+use std::sync::Arc;
+
+use common_query::error::{MissingTableMutationHandlerSnafu, Result};
+use common_query::prelude::{Signature, Volatility};
+use datatypes::prelude::{ConcreteDataType, ScalarVector};
+use datatypes::vectors::{StringVector, VectorRef};
+
+use crate::function::{Function, FunctionContext};
+
+#[derive(Clone, Debug, Default)]
+pub struct MigrateRegionFunction;
+
+const NAME: &str = "migrate_region";
+
+impl Function for MigrateregionFunction {
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::string_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::uniform(0,
+                           vec![], Volatility::Immutable)
+    }
+
+    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+        let pid = func_ctx.state.table_mutation_handler
+            .context(MissingTableMutationHandlerSnafu)?
+            .migrate_region();
+
+        Ok(Arc::new(StringVector::from_slice(&[db])) as _)
+    }
+}
+
+impl fmt::Display for MigrateregionFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MIGRATE_REGION")
+    }
+}
