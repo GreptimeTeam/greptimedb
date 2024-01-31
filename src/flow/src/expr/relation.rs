@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::expr::ScalarExpr;
 
 mod func;
+mod accum;
 
 /// Describes an aggregation expression.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

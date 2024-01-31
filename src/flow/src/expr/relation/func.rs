@@ -21,9 +21,9 @@ use serde::{Deserialize, Serialize};
 use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
 use crate::repr::Diff;
 
-/// sum(i*)->i64, sum(u*)->u64
+/// `sum(i*)->i64, sum(u*)->u64`
 ///
-/// count()->i64
+/// `count()->i64`
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub enum AggregateFunc {
     MaxInt16,
@@ -106,16 +106,18 @@ impl AggregateFunc {
             AggregateFunc::Count => count(values),
             AggregateFunc::All => all(values),
             AggregateFunc::Any => any(values),
-            _ => todo!(),
+            _ => todo!("Timestamp related aggregate functions not implemented"),
         }
     }
 
-    /// Eval value, diff with accum
+    /// Eval value, diff with accumlator
+    /// 
+    /// Expect self to be accumlatable aggregate functio, i.e. sum/count
     ///
-    /// TODO(discord9): deal with overflow
-    pub fn eval_diff_accum<I>(
+    /// TODO(discord9): deal with overflow&better accumlator
+    pub fn eval_diff_accumulable<I>(
         &self,
-        accum: Option<Value>,
+        accum: Vec<Value>,
         value_diffs: I,
     ) -> Result<Value, EvalError>
     where
@@ -124,7 +126,7 @@ impl AggregateFunc {
         // TODO(discord9): sum
         match self {
             AggregateFunc::SumInt16 | AggregateFunc::SumInt32 | AggregateFunc::SumInt64 => {
-                let accum = if let Some(accum) = accum {
+                let accum = if let Some(accum) = accum.first() {
                     accum.as_value_ref().as_i64().map_err(|err| {
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::int64_datatype(),
@@ -144,7 +146,7 @@ impl AggregateFunc {
                 }
             }
             AggregateFunc::SumUInt16 | AggregateFunc::SumUInt32 | AggregateFunc::SumUInt64 => {
-                let accum = if let Some(accum) = accum {
+                let accum = if let Some(accum) = accum.first() {
                     accum.as_value_ref().as_u64().map_err(|err| {
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::uint64_datatype(),
@@ -163,7 +165,7 @@ impl AggregateFunc {
                 }
             }
             AggregateFunc::SumFloat32 => {
-                let accum = if let Some(accum) = accum {
+                let accum = if let Some(accum) = accum.first() {
                     accum.as_value_ref().as_f32().map_err(|err| {
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::float32_datatype(),
@@ -177,7 +179,7 @@ impl AggregateFunc {
                 sum_accum_diffs::<I, f32, f32>(accum, value_diffs)
             }
             AggregateFunc::SumFloat64 => {
-                let accum = if let Some(accum) = accum {
+                let accum = if let Some(accum) = accum.first() {
                     accum.as_value_ref().as_f64().map_err(|err| {
                         TypeMismatchSnafu {
                             expected: ConcreteDataType::float64_datatype(),
@@ -257,11 +259,11 @@ where
     Ok(ret)
 }
 
-fn count_accum_diff<I>(accum: Option<Value>, value_diffs: I) -> Result<Value, EvalError>
+fn count_accum_diff<I>(accum: Vec<Value>, value_diffs: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = (Value, Diff)>,
 {
-    let mut accum = if let Some(accum) = accum {
+    let mut accum = if let Some(accum) = accum.first() {
         // invariant: accum is i64
         accum
             .as_value_ref()
