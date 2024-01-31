@@ -16,6 +16,8 @@
 //! - Flushes mutable parts to immutable parts
 //! - Merges small immutable parts into a big immutable part
 
+#[allow(unused)]
+mod index;
 mod mutable;
 mod tree;
 
@@ -35,6 +37,17 @@ use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
 };
+
+/// Id of a shard.
+pub(crate) type ShardId = u32;
+/// Index of a primary key in a shard.
+pub(crate) type PkIndex = u16;
+/// Id of a primary key.
+#[allow(unused)]
+pub(crate) struct PkId {
+    pub(crate) shard_id: ShardId,
+    pub(crate) pk_index: PkIndex,
+}
 
 /// Config for the merge tree memtable.
 #[derive(Debug, Default, Clone)]
