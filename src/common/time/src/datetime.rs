@@ -24,8 +24,8 @@ use crate::timezone::{get_timezone, Timezone};
 use crate::util::{datetime_to_utc, format_utc_datetime};
 use crate::{Date, Interval};
 
-const DATETIME_FORMAT: &str = "%F %T";
-const DATETIME_FORMAT_WITH_TZ: &str = "%F %T%z";
+const DATETIME_FORMAT: &str = "%F %H:%M:%S%.f";
+const DATETIME_FORMAT_WITH_TZ: &str = "%F %H:%M:%S%.f%z";
 
 /// [DateTime] represents the **milliseconds elapsed since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.
 #[derive(
@@ -248,6 +248,18 @@ mod tests {
                 .unwrap()
                 .val()
         );
+        assert_eq!(
+            42,
+            DateTime::from_str("1970-01-01 08:00:00.042", None)
+                .unwrap()
+                .val()
+        );
+        assert_eq!(
+            42,
+            DateTime::from_str("1970-01-01 08:00:00.042424", None)
+                .unwrap()
+                .val()
+        );
 
         assert_eq!(
             0,
@@ -286,6 +298,10 @@ mod tests {
             .unwrap()
             .val();
         assert_eq!(28800000, ts);
+        let ts = DateTime::from_str("1970-01-01 00:00:00.042+0000", None)
+            .unwrap()
+            .val();
+        assert_eq!(42, ts);
 
         // the string has the time zone info, the argument doesn't change the result
         let ts = DateTime::from_str(
