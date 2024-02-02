@@ -2068,17 +2068,11 @@ name = "common-test-util"
 version = "0.6.0"
 dependencies = [
  "client",
- "common-error",
  "common-query",
  "common-recordbatch",
- "common-time",
  "once_cell",
  "rand",
- "serde",
- "strum 0.25.0",
  "tempfile",
- "tinytemplate",
- "tokio",
 ]
 
 [[package]]
@@ -9333,11 +9327,11 @@ dependencies = [
  "common-grpc",
  "common-query",
  "common-recordbatch",
- "common-test-util",
  "common-time",
  "serde",
  "serde_json",
  "sqlness",
+ "tinytemplate",
  "tokio",
 ]
 

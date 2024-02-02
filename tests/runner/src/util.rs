@@ -13,9 +13,17 @@
 // limitations under the License.
 
 use std::fmt::Display;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpSocket;
+use tokio::time;
+
+/// Check port every 0.1 second.
+const PORT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 const NULL_DATA_PLACEHOLDER: &str = "NULL";
 
 /// Helper struct for iterate over column with null_mask
@@ -92,6 +100,25 @@ pub fn get_binary_dir(mode: &str) -> PathBuf {
     workspace_root.push(mode);
 
     workspace_root
+}
+
+/// Spin-waiting a socket address is available, or timeout.
+/// Returns whether the addr is up.
+pub async fn check_port(ip_addr: SocketAddr, timeout: Duration) -> bool {
+    let check_task = async {
+        loop {
+            let socket = TcpSocket::new_v4().expect("Cannot create v4 socket");
+            match socket.connect(ip_addr).await {
+                Ok(mut stream) => {
+                    let _ = stream.shutdown().await;
+                    break;
+                }
+                Err(_) => time::sleep(PORT_CHECK_INTERVAL).await,
+            }
+        }
+    };
+
+    tokio::time::timeout(timeout, check_task).await.is_ok()
 }
 
 /// Get the path of sqlness config dir `tests/conf`.

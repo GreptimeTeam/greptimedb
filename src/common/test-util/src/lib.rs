@@ -18,8 +18,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
-pub mod config;
-pub mod display;
 pub mod ports;
 pub mod recordbatch;
 pub mod temp_dir;

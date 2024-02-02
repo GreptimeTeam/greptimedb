@@ -18,21 +18,21 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use client::error::ServerSnafu;
-use client::{Client, Database as DB, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{
+    Client, Database as DB, Error as ClientError, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+};
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_test_util::config::{ConfigTemplate, ConfigValues};
-use common_test_util::display::ResultDisplayer;
-use common_test_util::ports::check_connectable;
+use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
+use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::util;
@@ -248,7 +248,7 @@ impl Env {
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
 
-        if check_connectable(&check_ip_addr, Duration::from_secs(1)).await {
+        if util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(1)).await {
             panic!(
                 "Port {check_ip_addr} is already in use, please check and retry.",
                 check_ip_addr = check_ip_addr
@@ -274,7 +274,7 @@ impl Env {
                 panic!("Failed to start the DB with subcommand {subcommand},Error: {error}")
             });
 
-        if !check_connectable(&check_ip_addr, Duration::from_secs(10)).await {
+        if !util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
             Env::stop_server(&mut process);
             panic!("{subcommand} doesn't up in 10 seconds, quit.")
         }
@@ -346,30 +346,44 @@ impl Env {
 
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
     fn generate_config_file(&self, subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
-        let config_template = ConfigTemplate::from_str(subcommand).unwrap();
+        let mut tt = TinyTemplate::new();
+
+        let mut path = util::sqlness_conf_path();
+        path.push(format!("{subcommand}-test.toml.template"));
+        let template = std::fs::read_to_string(path).unwrap();
+        tt.add_template(subcommand, &template).unwrap();
+
+        #[derive(Serialize)]
+        struct Context {
+            wal_dir: String,
+            data_home: String,
+            procedure_dir: String,
+            is_raft_engine: bool,
+            kafka_wal_broker_endpoints: String,
+        }
 
         let data_home = self.data_home.join(format!("greptimedb-{subcommand}"));
         std::fs::create_dir_all(data_home.as_path()).unwrap();
 
         let wal_dir = data_home.join("wal").display().to_string();
         let procedure_dir = data_home.join("procedure").display().to_string();
-
-        let config_values = ConfigValues {
+        let ctx = Context {
             wal_dir,
             data_home: data_home.display().to_string(),
             procedure_dir,
             is_raft_engine: db_ctx.is_raft_engine(),
             kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
-            grpc_addr: SERVER_ADDR.to_string(),
         };
+        let rendered = tt.render(subcommand, &ctx).unwrap();
 
-        let conf_file = common_test_util::config::generate_config_file(
-            config_template,
-            config_values,
-            &data_home,
-        );
+        let conf_file = data_home
+            .join(format!("{subcommand}-{}.toml", db_ctx.time))
+            .display()
+            .to_string();
+        println!("Generating {subcommand} config file in {conf_file}, full content:\n{rendered}");
+        std::fs::write(&conf_file, rendered).unwrap();
 
-        data_home.join(conf_file).display().to_string()
+        conf_file
     }
 
     /// Build the DB with `cargo build --bin greptime`
@@ -428,7 +442,9 @@ impl Database for GreptimeDB {
                 .expect("Illegal `USE` statement: expecting a database.")
                 .trim_end_matches(';');
             client.set_schema(database);
-            Box::new(ResultDisplayer(Ok(Output::AffectedRows(0)))) as _
+            Box::new(ResultDisplayer {
+                result: Ok(Output::AffectedRows(0)),
+            }) as _
         } else if query.trim().to_lowercase().starts_with("set time_zone") {
             // set time_zone='xxx'
             let timezone = query
@@ -443,7 +459,9 @@ impl Database for GreptimeDB {
 
             client.set_timezone(timezone);
 
-            Box::new(ResultDisplayer(Ok(Output::AffectedRows(0)))) as _
+            Box::new(ResultDisplayer {
+                result: Ok(Output::AffectedRows(0)),
+            }) as _
         } else {
             let mut result = client.sql(&query).await;
             if let Ok(Output::Stream(stream)) = result {
@@ -460,7 +478,7 @@ impl Database for GreptimeDB {
                     }
                 }
             }
-            Box::new(ResultDisplayer(result)) as _
+            Box::new(ResultDisplayer { result }) as _
         }
     }
 }
@@ -539,5 +557,40 @@ impl GreptimeDBContext {
 
     fn reset_datanode_id(&self) {
         self.datanode_id.store(0, Ordering::Relaxed);
+    }
+}
+
+struct ResultDisplayer {
+    result: Result<Output, ClientError>,
+}
+
+impl Display for ResultDisplayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.result {
+            Ok(result) => match result {
+                Output::AffectedRows(rows) => {
+                    write!(f, "Affected Rows: {rows}")
+                }
+                Output::RecordBatches(recordbatches) => {
+                    let pretty = recordbatches.pretty_print().map_err(|e| e.to_string());
+                    match pretty {
+                        Ok(s) => write!(f, "{s}"),
+                        Err(e) => {
+                            write!(f, "Failed to pretty format {recordbatches:?}, error: {e}")
+                        }
+                    }
+                }
+                Output::Stream(_) => unreachable!(),
+            },
+            Err(e) => {
+                let status_code = e.status_code();
+                let root_cause = e.output_msg();
+                write!(
+                    f,
+                    "Error: {}({status_code}), {root_cause}",
+                    status_code as u32
+                )
+            }
+        }
     }
 }
