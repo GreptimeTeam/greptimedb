@@ -5,9 +5,9 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+api.workspace = true
 arc-swap = "1.0"
 async-trait.workspace = true
-api.workspace = true
 build-data = "0.1"
 chrono-tz = "0.6"
 common-error.workspace = true
