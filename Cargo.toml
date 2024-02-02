@@ -96,7 +96,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/QuenKar/greptime-proto.git", rev = "c34685f51fd4c548af5ca6395f0a18bff5a4e79c" }
+greptime-proto = { git = "https://github.com/QuenKar/greptime-proto.git", rev = "5e5bcdb0f64bfc9a6c03d81bf1155ec32464d353" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
