@@ -161,22 +161,6 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
             IntervalMonthDayNanoValue,
             interval_month_day_nano_values
         ),
-        (DurationSecond, DurationSecondValue, duration_second_values),
-        (
-            DurationMillisecond,
-            DurationMillisecondValue,
-            duration_millisecond_values
-        ),
-        (
-            DurationMicrosecond,
-            DurationMicrosecondValue,
-            duration_microsecond_values
-        ),
-        (
-            DurationNanosecond,
-            DurationNanosecondValue,
-            duration_nanosecond_values
-        ),
         (Decimal128, Decimal128Value, decimal128_values),
     );
 
