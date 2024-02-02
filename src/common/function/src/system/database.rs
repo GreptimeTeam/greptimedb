@@ -81,7 +81,10 @@ mod tests {
             .current_schema("test_db".to_string())
             .build();
 
-        let func_ctx = FunctionContext { query_ctx };
+        let func_ctx = FunctionContext {
+            query_ctx,
+            ..Default::default()
+        };
         let vector = build.eval(func_ctx, &[]).unwrap();
         let expect: VectorRef = Arc::new(StringVector::from(vec!["test_db"]));
         assert_eq!(expect, vector);

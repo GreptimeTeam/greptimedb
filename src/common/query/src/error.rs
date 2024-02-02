@@ -169,6 +169,9 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to join thread"))]
+    ThreadJoin { location: Location },
+
     #[snafu(display("Failed to do table mutation"))]
     TableMutation {
         source: BoxedError,
@@ -212,6 +215,7 @@ impl ErrorExt for Error {
             Error::MissingTableMutationHandler { .. }
             | Error::MissingMetaServiceHandler { .. }
             | Error::ExecuteRepeatedly { .. }
+            | Error::ThreadJoin { .. }
             | Error::GeneralDataFusion { .. } => StatusCode::Unexpected,
 
             Error::UnsupportedInputDataType { .. }

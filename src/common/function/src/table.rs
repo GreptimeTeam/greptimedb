@@ -20,9 +20,11 @@ use migrate_region::MigrateRegionFunction;
 
 use crate::function_registry::FunctionRegistry;
 
+/// Table functions
 pub(crate) struct TableFunction;
 
 impl TableFunction {
+    /// Register all table functions to [`FunctionRegistry`].
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(MigrateRegionFunction));
     }

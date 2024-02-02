@@ -107,7 +107,7 @@ mod tests {
         }
 
         // create a udf and test it again
-        let udf = create_udf(f.clone(), query_ctx);
+        let udf = create_udf(f.clone(), query_ctx, Arc::new(FunctionState::default()));
 
         assert_eq!("test_and", udf.name);
         assert_eq!(f.signature(), udf.signature);

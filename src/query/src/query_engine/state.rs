@@ -120,7 +120,7 @@ impl QueryEngineState {
             catalog_manager: catalog_list,
             function_state: Arc::new(FunctionState {
                 table_mutation_handler,
-                // FIXME(dennis)
+                // FIXME(dennis): implemented in the following PR.
                 meta_service_handler: None,
             }),
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),

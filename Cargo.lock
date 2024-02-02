@@ -1788,6 +1788,7 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-runtime",
+ "common-telemetry",
  "common-time",
  "datafusion",
  "datatypes",

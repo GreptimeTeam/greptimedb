@@ -1,19 +1,30 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::fmt::{self};
-use std::sync::Arc;
 use std::time::Duration;
 
+use common_query::error::Error::ThreadJoin;
 use common_query::error::{
     InvalidFuncArgsSnafu, InvalidInputTypeSnafu, MissingTableMutationHandlerSnafu, Result,
 };
 use common_query::prelude::{Signature, TypeSignature, Volatility};
-use datatypes::prelude::{
-    ConcreteDataType, MutableVector, ScalarVector, ScalarVectorBuilder, Vector,
-};
+use common_telemetry::logging::error;
+use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder};
 use datatypes::value::Value;
-use datatypes::vectors::{
-    ConstantVector, StringVector, StringVectorBuilder, UInt64Vector, VectorRef,
-};
-use snafu::{OptionExt, ResultExt};
+use datatypes::vectors::{StringVectorBuilder, VectorRef};
+use snafu::{Location, OptionExt, ResultExt};
 
 use crate::function::{Function, FunctionContext};
 
@@ -21,6 +32,18 @@ use crate::function::{Function, FunctionContext};
 pub struct MigrateRegionFunction;
 
 const NAME: &str = "migrate_region";
+const DEFAULT_REPLAY_TIMEOUT_SECS: u64 = 10;
+
+fn cast_u64_vector(vector: &VectorRef) -> Result<VectorRef> {
+    vector
+        .cast(&ConcreteDataType::uint64_datatype())
+        .context(InvalidInputTypeSnafu {
+            err_msg: format!(
+                "Failed to cast input into uint64, actual type: {:#?}",
+                vector.data_type(),
+            ),
+        })
+}
 
 impl Function for MigrateRegionFunction {
     fn name(&self) -> &str {
@@ -44,45 +67,22 @@ impl Function for MigrateRegionFunction {
     }
 
     fn eval(&self, func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        let u64_type = ConcreteDataType::uint64_datatype();
-
-        let (region_id, from_peer, to_peer, replay_timeout, len) = match columns.len() {
+        let (region_ids, from_peers, to_peers, replay_timeouts) = match columns.len() {
             3 => {
-                let len = columns[0].len();
-                let region_id = columns[0].cast(&u64_type).context(InvalidInputTypeSnafu {
-                    err_msg: "Failed to cast input into uint64",
-                })?;
-                let from_peer = columns[1].cast(&u64_type).context(InvalidInputTypeSnafu {
-                    err_msg: "Failed to cast input into uint64",
-                })?;
-                let to_peer = columns[2].cast(&u64_type).context(InvalidInputTypeSnafu {
-                    err_msg: "Failed to cast input into uint64",
-                })?;
+                let region_ids = cast_u64_vector(&columns[0])?;
+                let from_peers = cast_u64_vector(&columns[1])?;
+                let to_peers = cast_u64_vector(&columns[2])?;
 
-                (region_id, from_peer, to_peer, None, len)
+                (region_ids, from_peers, to_peers, None)
             }
 
             4 => {
-                let region_id = columns[0].cast(&u64_type).context(InvalidInputTypeSnafu {
-                    err_msg: "Failed to cast input into uint64",
-                })?;
-                let from_peer = columns[1].cast(&u64_type).context(InvalidInputTypeSnafu {
-                    err_msg: "Failed to cast input into uint64",
-                })?;
-                let to_peer = columns[2].cast(&u64_type).context(InvalidInputTypeSnafu {
-                    err_msg: "Failed to cast input into uint64",
-                })?;
-                let replay_timeout = columns[3].cast(&u64_type).context(InvalidInputTypeSnafu {
-                    err_msg: "Failed to cast input into uint64",
-                })?;
+                let region_ids = cast_u64_vector(&columns[0])?;
+                let from_peers = cast_u64_vector(&columns[1])?;
+                let to_peers = cast_u64_vector(&columns[2])?;
+                let replay_timeouts = cast_u64_vector(&columns[3])?;
 
-                (
-                    region_id,
-                    from_peer,
-                    to_peer,
-                    Some(replay_timeout),
-                    columns[0].len(),
-                )
+                (region_ids, from_peers, to_peers, Some(replay_timeouts))
             }
 
             size => {
@@ -96,16 +96,17 @@ impl Function for MigrateRegionFunction {
             }
         };
 
-        let results = std::thread::spawn(move || {
+        std::thread::spawn(move || {
+            let len = region_ids.len();
             let mut results = StringVectorBuilder::with_capacity(len);
 
             for index in 0..len {
-                let region_id = region_id.get(index);
-                let from_peer = from_peer.get(index);
-                let to_peer = to_peer.get(index);
-                let replay_timeout = match &replay_timeout {
-                    Some(replay_timeout) => replay_timeout.get(index),
-                    None => Value::UInt64(10000),
+                let region_id = region_ids.get(index);
+                let from_peer = from_peers.get(index);
+                let to_peer = to_peers.get(index);
+                let replay_timeout = match &replay_timeouts {
+                    Some(replay_timeouts) => replay_timeouts.get(index),
+                    None => Value::UInt64(DEFAULT_REPLAY_TIMEOUT_SECS),
                 };
 
                 match (region_id, from_peer, to_peer, replay_timeout) {
@@ -143,9 +144,12 @@ impl Function for MigrateRegionFunction {
             Ok(results.to_vector())
         })
         .join()
-        .unwrap();
-
-        results
+        .map_err(|e| {
+            error!(e ;"Join thread error");
+            ThreadJoin {
+                location: Location::default(),
+            }
+        })?
     }
 }
 
@@ -153,4 +157,9 @@ impl fmt::Display for MigrateRegionFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "MIGRATE_REGION")
     }
+}
+
+#[cfg(test)]
+mod tests {
+    // FIXME(dennis): test in the following PR.
 }

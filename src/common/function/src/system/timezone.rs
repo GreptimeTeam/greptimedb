@@ -79,7 +79,10 @@ mod tests {
 
         let query_ctx = QueryContextBuilder::default().build();
 
-        let func_ctx = FunctionContext { query_ctx };
+        let func_ctx = FunctionContext {
+            query_ctx,
+            ..Default::default()
+        };
         let vector = build.eval(func_ctx, &[]).unwrap();
         let expect: VectorRef = Arc::new(StringVector::from(vec!["UTC"]));
         assert_eq!(expect, vector);

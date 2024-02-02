@@ -98,11 +98,12 @@ impl TableMutationHandler for TableMutationOperator {
 
     async fn migrate_region(
         &self,
-        region_id: u64,
-        from_peer: u64,
-        to_peer: u64,
-        replay_timeout: Duration,
+        _region_id: u64,
+        _from_peer: u64,
+        _to_peer: u64,
+        _replay_timeout: Duration,
     ) -> QueryResult<String> {
-        Ok("3".to_string())
+        // FIXME(dennis): implemented in the following PR.
+        todo!();
     }
 }

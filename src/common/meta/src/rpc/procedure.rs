@@ -48,3 +48,53 @@ pub fn procedure_state_to_pb_response(state: &ProcedureState) -> PbProcedureStat
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_procedure::Error;
+    use snafu::Location;
+
+    use super::*;
+
+    #[test]
+    fn test_pid_pb_pid_conversion() {
+        let pid = ProcedureId::random();
+
+        let pb_pid = pid_to_pb_pid(pid);
+
+        assert_eq!(pid, pb_pid_to_pid(&pb_pid).unwrap());
+    }
+
+    #[test]
+    fn test_procedure_state_to_pb_response() {
+        let state = ProcedureState::Running;
+        let resp = procedure_state_to_pb_response(&state);
+        assert_eq!(PbProcedureStatus::Running as i32, resp.status);
+        assert!(resp.error.is_empty());
+
+        let state = ProcedureState::Done { output: None };
+        let resp = procedure_state_to_pb_response(&state);
+        assert_eq!(PbProcedureStatus::Done as i32, resp.status);
+        assert!(resp.error.is_empty());
+
+        let state = ProcedureState::Retrying {
+            error: Arc::new(Error::ManagerNotStart {
+                location: Location::default(),
+            }),
+        };
+        let resp = procedure_state_to_pb_response(&state);
+        assert_eq!(PbProcedureStatus::Retrying as i32, resp.status);
+        assert_eq!("Procedure Manager is stopped", resp.error);
+
+        let state = ProcedureState::Failed {
+            error: Arc::new(Error::ManagerNotStart {
+                location: Location::default(),
+            }),
+        };
+        let resp = procedure_state_to_pb_response(&state);
+        assert_eq!(PbProcedureStatus::Failed as i32, resp.status);
+        assert_eq!("Procedure Manager is stopped", resp.error);
+    }
+}
