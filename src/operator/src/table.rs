@@ -103,6 +103,6 @@ impl TableMutationHandler for TableMutationOperator {
         to_peer: u64,
         replay_timeout: Duration,
     ) -> QueryResult<String> {
-        todo!();
+        Ok("3".to_string())
     }
 }

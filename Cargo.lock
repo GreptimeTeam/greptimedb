@@ -1787,6 +1787,7 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-query",
+ "common-runtime",
  "common-time",
  "datafusion",
  "datatypes",

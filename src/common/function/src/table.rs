@@ -16,10 +16,14 @@ mod migrate_region;
 
 use std::sync::Arc;
 
+use migrate_region::MigrateRegionFunction;
+
 use crate::function_registry::FunctionRegistry;
 
 pub(crate) struct TableFunction;
 
 impl TableFunction {
-    pub fn register(registry: &FunctionRegistry) {}
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(MigrateRegionFunction));
+    }
 }

@@ -229,6 +229,15 @@ impl ConcreteDataType {
         ]
     }
 
+    pub fn unsigned_integers() -> Vec<ConcreteDataType> {
+        vec![
+            ConcreteDataType::uint8_datatype(),
+            ConcreteDataType::uint16_datatype(),
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+        ]
+    }
+
     /// Convert arrow data type to [ConcreteDataType].
     ///
     /// # Panics
