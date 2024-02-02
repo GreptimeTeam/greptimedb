@@ -25,7 +25,7 @@ download_binary() {
     else
         echo " === Download binary ver: $ver"
         echo " === Download binary url: $url"
-        curl --connect-timeout 5 --retry-all-errors --retry 5 --retry-delay 1 -L "$url" -o "$bin_tar"
+        curl --connect-timeout 5 --retry 5 --retry-delay 1 -L "$url" -o "$bin_tar"
     fi
 
     mkdir -p ./bins/$ver
