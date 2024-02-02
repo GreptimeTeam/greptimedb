@@ -9954,16 +9954,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3369f5ac52d5eb6ab48c6b4ffdc8efbcad6b89c765749064ba298f2c68a16a76"
 
 [[package]]
-name = "tests-compatibility"
-version = "0.6.0"
-dependencies = [
- "client",
- "common-telemetry",
- "common-test-util",
- "tokio",
-]
-
-[[package]]
 name = "tests-fuzz"
 version = "0.6.0"
 dependencies = [

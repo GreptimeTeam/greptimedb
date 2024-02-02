@@ -57,7 +57,6 @@ members = [
     "tests-fuzz",
     "tests-integration",
     "tests/runner",
-    "tests-compatibility",
 ]
 resolver = "2"
 

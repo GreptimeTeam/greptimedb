@@ -1,1 +1,0 @@
-{"actions":[{"Edit":{"files_to_add":[{"region_id":4398046511104,"file_id":"0ae10fd3-68d6-4929-858e-2a1c1442a091","time_range":[{"value":1703576791287,"unit":"Millisecond"},{"value":1703577385721,"unit":"Millisecond"}],"level":0,"file_size":32062}],"files_to_remove":[],"compaction_time_window":null,"flushed_entry_id":18721,"flushed_sequence":18723}}]}
