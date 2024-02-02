@@ -368,17 +368,16 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
-        let mut fe_opts = opts.frontend.clone();
+        info!("Standalone start command: {:#?}", self);
+        info!("Building standalone instance with {opts:#?}");
+
+        let mut fe_opts = opts.frontend;
         #[allow(clippy::unnecessary_mut_passed)]
         let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
             .await
             .context(StartFrontendSnafu)?;
 
-        let dn_opts = opts.datanode.clone();
-
-        info!("Standalone start command: {:#?}", self);
-
-        info!("Building standalone instance with {opts:#?}");
+        let dn_opts = opts.datanode;
 
         set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
