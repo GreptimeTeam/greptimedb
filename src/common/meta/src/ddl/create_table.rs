@@ -25,6 +25,7 @@ use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
+use futures_util::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
@@ -247,10 +248,10 @@ impl CreateTableProcedure {
                 let datanode = datanode.clone();
                 let requester = requester.clone();
                 create_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await {
-                        return Err(handle_operate_region_error(datanode)(err));
-                    }
-                    Ok(())
+                    requester
+                        .handle(request)
+                        .await
+                        .map_err(handle_operate_region_error(datanode))
                 });
             }
         }
