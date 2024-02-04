@@ -70,9 +70,9 @@ ddl_timeout = "10s"
 connect_timeout = "1s"
 tcp_nodelay = true
 # The configuration about the cache of the Metadata.
-cached_max_capacity = 100000
-cached_ttl = "10m"
-cached_tti = "5m"
+metadata_cache_max_capacity = 100000
+metadata_cache_ttl = "10m"
+metadata_cache_tti = "5m"
 
 # Log options, see `standalone.example.toml`
 # [logging]

@@ -229,18 +229,18 @@ impl StartCommand {
             msg: "'meta_client'",
         })?;
 
-        let cached_max_capacity = meta_client_options.cached_max_capacity;
-        let cached_ttl = meta_client_options.cached_ttl;
-        let cached_tti = meta_client_options.cached_tti;
+        let cache_max_capacity = meta_client_options.metadata_cache_max_capacity;
+        let cache_ttl = meta_client_options.metadata_cache_ttl;
+        let cache_tti = meta_client_options.metadata_cache_tti;
 
         let meta_client = FeInstance::create_meta_client(meta_client_options)
             .await
             .context(StartFrontendSnafu)?;
 
         let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
-            .cached_max_capacity(cached_max_capacity)
-            .cached_ttl_second(cached_ttl)
-            .cached_tti_second(cached_tti)
+            .max_cache_capacity(cache_max_capacity)
+            .cache_ttl(cache_ttl)
+            .cache_tti(cache_tti)
             .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
 

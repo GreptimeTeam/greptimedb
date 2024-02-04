@@ -39,52 +39,48 @@ use crate::metrics::{
     METRIC_CATALOG_KV_BATCH_GET, METRIC_CATALOG_KV_GET, METRIC_CATALOG_KV_REMOTE_GET,
 };
 
-const DEFAULT_CACHE_MAX_CAPACITY: u64 = 10000;
-const DEFAULT_CACHE_TTL_SECOND: u64 = 10 * 60;
-const DEFAULT_CACHE_TTI_SECOND: u64 = 5 * 60;
+const DEFAULT_MAX_CACHE_CAPACITY: u64 = 10000;
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const DEFAULT_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
 pub struct CachedMetaKvBackendBuilder {
-    cached_max_capacity: Option<u64>,
-    cached_ttl: Option<Duration>,
-    cached_tti: Option<Duration>,
+    max_cache_capacity: Option<u64>,
+    cache_ttl: Option<Duration>,
+    cache_tti: Option<Duration>,
     meta_client: Arc<MetaClient>,
 }
 
 impl CachedMetaKvBackendBuilder {
     pub fn new(meta_client: Arc<MetaClient>) -> Self {
         Self {
-            cached_max_capacity: None,
-            cached_ttl: None,
-            cached_tti: None,
+            max_cache_capacity: None,
+            cache_ttl: None,
+            cache_tti: None,
             meta_client,
         }
     }
 
-    pub fn cached_max_capacity(mut self, cache_max_capacity: u64) -> Self {
-        self.cached_max_capacity.replace(cache_max_capacity);
+    pub fn max_cache_capacity(mut self, cache_max_capacity: u64) -> Self {
+        self.max_cache_capacity.replace(cache_max_capacity);
         self
     }
 
-    pub fn cached_ttl_second(mut self, cache_ttl: Duration) -> Self {
-        self.cached_ttl.replace(cache_ttl);
+    pub fn cache_ttl(mut self, cache_ttl: Duration) -> Self {
+        self.cache_ttl.replace(cache_ttl);
         self
     }
 
-    pub fn cached_tti_second(mut self, cache_tti: Duration) -> Self {
-        self.cached_tti.replace(cache_tti);
+    pub fn cache_tti(mut self, cache_tti: Duration) -> Self {
+        self.cache_tti.replace(cache_tti);
         self
     }
 
     pub fn build(self) -> CachedMetaKvBackend {
         let cache_max_capacity = self
-            .cached_max_capacity
-            .unwrap_or(DEFAULT_CACHE_MAX_CAPACITY);
-        let cache_ttl = self
-            .cached_ttl
-            .unwrap_or(Duration::from_secs(DEFAULT_CACHE_TTL_SECOND));
-        let cache_tti = self
-            .cached_tti
-            .unwrap_or(Duration::from_secs(DEFAULT_CACHE_TTI_SECOND));
+            .max_cache_capacity
+            .unwrap_or(DEFAULT_MAX_CACHE_CAPACITY);
+        let cache_ttl = self.cache_ttl.unwrap_or(DEFAULT_CACHE_TTL);
+        let cache_tti = self.cache_tti.unwrap_or(DEFAULT_CACHE_TTI);
 
         let cache = Arc::new(
             CacheBuilder::new(cache_max_capacity)
@@ -188,9 +184,7 @@ impl KvBackend for CachedMetaKvBackend {
             }
         }
 
-        let batch_get_req = BatchGetRequest {
-            keys: unhit_keys.clone(),
-        };
+        let batch_get_req = BatchGetRequest::new().with_keys(unhit_keys.clone());
 
         let pre_version = self.version();
 
@@ -295,6 +289,8 @@ impl KvBackend for CachedMetaKvBackend {
             err_msg: e.to_string(),
         });
 
+        // "invalidate_key" and "cache.try_get_with_by_ref" are not mutually exclusive. So we need
+        // to use the version mechanism to prevent expired data from being put into the cache.
         if pre_version
             .lock()
             .unwrap()
@@ -322,9 +318,9 @@ impl CachedMetaKvBackend {
     #[cfg(test)]
     fn wrap(kv_backend: KvBackendRef) -> Self {
         let cache = Arc::new(
-            CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
-                .time_to_live(Duration::from_secs(DEFAULT_CACHE_TTL_SECOND))
-                .time_to_idle(Duration::from_secs(DEFAULT_CACHE_TTI_SECOND))
+            CacheBuilder::new(DEFAULT_MAX_CACHE_CAPACITY)
+                .time_to_live(DEFAULT_CACHE_TTL)
+                .time_to_idle(DEFAULT_CACHE_TTI)
                 .build(),
         );
 
