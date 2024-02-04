@@ -26,6 +26,7 @@ order by table_schema, table_name;
 | greptime      | information_schema | key_column_usage                      | LOCAL TEMPORARY | 16       |             |
 | greptime      | information_schema | optimizer_trace                       | LOCAL TEMPORARY | 17       |             |
 | greptime      | information_schema | parameters                            | LOCAL TEMPORARY | 18       |             |
+| greptime      | information_schema | partitions                            | LOCAL TEMPORARY | 28       |             |
 | greptime      | information_schema | profiling                             | LOCAL TEMPORARY | 19       |             |
 | greptime      | information_schema | referential_constraints               | LOCAL TEMPORARY | 20       |             |
 | greptime      | information_schema | routines                              | LOCAL TEMPORARY | 21       |             |
@@ -182,6 +183,32 @@ select * from information_schema.columns order by table_schema, table_name, colu
 | greptime      | information_schema | parameters                            | specific_catalog                  | String    | FIELD         |                | No          | String      |                |
 | greptime      | information_schema | parameters                            | specific_name                     | String    | FIELD         |                | No          | String      |                |
 | greptime      | information_schema | parameters                            | specific_schema                   | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | partitions                            | avg_row_length                    | Int64     | FIELD         |                | Yes         | Int64       |                |
+| greptime      | information_schema | partitions                            | check_time                        | DateTime  | FIELD         |                | Yes         | DateTime    |                |
+| greptime      | information_schema | partitions                            | checksum                          | Int64     | FIELD         |                | Yes         | Int64       |                |
+| greptime      | information_schema | partitions                            | create_time                       | DateTime  | FIELD         |                | Yes         | DateTime    |                |
+| greptime      | information_schema | partitions                            | data_free                         | Int64     | FIELD         |                | Yes         | Int64       |                |
+| greptime      | information_schema | partitions                            | data_length                       | Int64     | FIELD         |                | Yes         | Int64       |                |
+| greptime      | information_schema | partitions                            | greptime_partition_id             | UInt64    | FIELD         |                | Yes         | UInt64      |                |
+| greptime      | information_schema | partitions                            | index_length                      | Int64     | FIELD         |                | Yes         | Int64       |                |
+| greptime      | information_schema | partitions                            | max_data_length                   | Int64     | FIELD         |                | Yes         | Int64       |                |
+| greptime      | information_schema | partitions                            | nodegroup                         | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | partitions                            | partition_comment                 | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | partitions                            | partition_description             | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | partitions                            | partition_expression              | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | partitions                            | partition_method                  | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | partitions                            | partition_name                    | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | partitions                            | partition_ordinal_position        | Int64     | FIELD         |                | Yes         | Int64       |                |
+| greptime      | information_schema | partitions                            | subpartition_expression           | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | partitions                            | subpartition_method               | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | partitions                            | subpartition_name                 | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | partitions                            | subpartition_ordinal_position     | Int64     | FIELD         |                | Yes         | Int64       |                |
+| greptime      | information_schema | partitions                            | table_catalog                     | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | partitions                            | table_name                        | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | partitions                            | table_rows                        | Int64     | FIELD         |                | Yes         | Int64       |                |
+| greptime      | information_schema | partitions                            | table_schema                      | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | partitions                            | tablespace_name                   | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | partitions                            | update_time                       | DateTime  | FIELD         |                | Yes         | DateTime    |                |
 | greptime      | information_schema | profiling                             | block_ops_in                      | Int64     | FIELD         |                | No          | Int64       |                |
 | greptime      | information_schema | profiling                             | block_ops_out                     | Int64     | FIELD         |                | No          | Int64       |                |
 | greptime      | information_schema | profiling                             | context_involuntary               | Int64     | FIELD         |                | No          | Int64       |                |

@@ -164,6 +164,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to find table partitions: #{table}"))]
+    FindPartitions {
+        source: partition::error::Error,
+        table: String,
+    },
+
     #[snafu(display("Failed to read system catalog table records"))]
     ReadSystemCatalog {
         location: Location,
@@ -254,10 +260,12 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidKey { .. }
             | Error::SchemaNotFound { .. }
-            | Error::TableNotFound { .. }
             | Error::CatalogNotFound { .. }
+            | Error::FindPartitions { .. }
             | Error::InvalidEntryType { .. }
             | Error::ParallelOpenTable { .. } => StatusCode::Unexpected,
+
+            Error::TableNotFound { .. } => StatusCode::TableNotFound,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue { .. }

@@ -15,6 +15,7 @@
 mod columns;
 mod key_column_usage;
 mod memory_table;
+mod partitions;
 mod predicate;
 mod runtime_metrics;
 mod schemata;
@@ -47,6 +48,7 @@ use self::columns::InformationSchemaColumns;
 use crate::error::Result;
 use crate::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
+use crate::information_schema::partitions::InformationSchemaPartitions;
 use crate::information_schema::runtime_metrics::InformationSchemaMetrics;
 use crate::information_schema::schemata::InformationSchemaSchemata;
 use crate::information_schema::tables::InformationSchemaTables;
@@ -74,6 +76,7 @@ lazy_static! {
         TRIGGERS,
         GLOBAL_STATUS,
         SESSION_STATUS,
+        PARTITIONS,
     ];
 }
 
@@ -226,6 +229,11 @@ impl InformationSchemaProvider {
                 self.catalog_manager.clone(),
             )) as _),
             RUNTIME_METRICS => Some(Arc::new(InformationSchemaMetrics::new())),
+            PARTITIONS => Some(Arc::new(InformationSchemaPartitions::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+
             _ => None,
         }
     }

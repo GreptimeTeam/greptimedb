@@ -39,3 +39,4 @@ pub const TRIGGERS: &str = "triggers";
 pub const GLOBAL_STATUS: &str = "global_status";
 pub const SESSION_STATUS: &str = "session_status";
 pub const RUNTIME_METRICS: &str = "runtime_metrics";
+pub const PARTITIONS: &str = "partitions";
