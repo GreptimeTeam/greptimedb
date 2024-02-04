@@ -30,6 +30,8 @@ use crate::{
     repr::Row,
 };
 
+/// UnmaterializableFunc is a function that can't be eval independently,
+/// and require special handling
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub enum UnmaterializableFunc {
     Now,

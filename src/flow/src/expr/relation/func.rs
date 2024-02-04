@@ -23,9 +23,17 @@ use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
 use crate::expr::relation::accum::Accum;
 use crate::repr::Diff;
 
+/// Aggregate functions that can be applied to a group of rows.
+///
+/// `Mean` function is deliberately not included as it can be computed from `Sum` and `Count`, whose state can be better managed.
+///
+/// type of the input and output of the aggregate function:
+///
 /// `sum(i*)->i64, sum(u*)->u64`
 ///
 /// `count()->i64`
+///
+/// `min/max(T)->T`
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub enum AggregateFunc {
     MaxInt16,

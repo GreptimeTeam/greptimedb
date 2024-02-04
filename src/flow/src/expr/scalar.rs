@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 
+/// A scalar expression, which can be evaluated to a value.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScalarExpr {
     /// A column of the input row
