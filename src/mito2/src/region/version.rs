@@ -77,7 +77,7 @@ impl VersionControl {
     }
 
     /// Freezes the mutable memtable if it is not empty.
-    pub(crate) fn freeze_mutable(&self, _builder: &MemtableBuilderRef) -> Result<()> {
+    pub(crate) fn freeze_mutable(&self) -> Result<()> {
         let version = self.current().version;
         if version.memtables.mutable.is_empty() {
             return Ok(());

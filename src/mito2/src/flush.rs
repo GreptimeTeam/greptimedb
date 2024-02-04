@@ -31,7 +31,6 @@ use crate::config::MitoConfig;
 use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
-use crate::memtable::MemtableBuilderRef;
 use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
@@ -198,7 +197,6 @@ pub(crate) struct RegionFlushTask {
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
 
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) memtable_builder: MemtableBuilderRef,
     pub(crate) file_purger: FilePurgerRef,
     pub(crate) listener: WorkerListener,
     pub(crate) engine_config: Arc<MitoConfig>,
@@ -466,11 +464,9 @@ impl FlushScheduler {
         }
 
         // Now we can flush the region directly.
-        version_control
-            .freeze_mutable(&task.memtable_builder)
-            .inspect(|e| {
-                error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
-            })?;
+        version_control.freeze_mutable().inspect(|e| {
+            error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
+        })?;
         // Submit a flush job.
         let job = task.into_flush_job(version_control);
         if let Err(e) = self.scheduler.schedule(job) {
@@ -769,7 +765,6 @@ mod tests {
             senders: Vec::new(),
             request_sender: tx,
             access_layer: env.access_layer.clone(),
-            memtable_builder: builder.memtable_builder(),
             file_purger: builder.file_purger(),
             listener: WorkerListener::default(),
             engine_config: Arc::new(MitoConfig::default()),
