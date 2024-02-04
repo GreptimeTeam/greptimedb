@@ -39,7 +39,6 @@ pub enum AggregateFunc {
     MaxString,
     MaxDate,
     MaxTimestamp,
-    MaxTimestampTz,
     MinInt16,
     MinInt32,
     MinInt64,
@@ -52,7 +51,6 @@ pub enum AggregateFunc {
     MinString,
     MinDate,
     MinTimestamp,
-    MinTimestampTz,
     SumInt16,
     SumInt32,
     SumInt64,
@@ -67,6 +65,56 @@ pub enum AggregateFunc {
 }
 
 impl AggregateFunc {
+    pub fn is_max(&self) -> bool {
+        matches!(
+            self,
+            AggregateFunc::MaxInt16
+                | AggregateFunc::MaxInt32
+                | AggregateFunc::MaxInt64
+                | AggregateFunc::MaxUInt16
+                | AggregateFunc::MaxUInt32
+                | AggregateFunc::MaxUInt64
+                | AggregateFunc::MaxFloat32
+                | AggregateFunc::MaxFloat64
+                | AggregateFunc::MaxBool
+                | AggregateFunc::MaxString
+                | AggregateFunc::MaxDate
+                | AggregateFunc::MaxTimestamp
+        )
+    }
+
+    pub fn is_min(&self) -> bool {
+        matches!(
+            self,
+            AggregateFunc::MinInt16
+                | AggregateFunc::MinInt32
+                | AggregateFunc::MinInt64
+                | AggregateFunc::MinUInt16
+                | AggregateFunc::MinUInt32
+                | AggregateFunc::MinUInt64
+                | AggregateFunc::MinFloat32
+                | AggregateFunc::MinFloat64
+                | AggregateFunc::MinBool
+                | AggregateFunc::MinString
+                | AggregateFunc::MinDate
+                | AggregateFunc::MinTimestamp
+        )
+    }
+
+    pub fn is_sum(&self) -> bool {
+        matches!(
+            self,
+            AggregateFunc::SumInt16
+                | AggregateFunc::SumInt32
+                | AggregateFunc::SumInt64
+                | AggregateFunc::SumUInt16
+                | AggregateFunc::SumUInt32
+                | AggregateFunc::SumUInt64
+                | AggregateFunc::SumFloat32
+                | AggregateFunc::SumFloat64
+        )
+    }
+
     pub fn eval<I>(&self, values: I) -> Result<Value, EvalError>
     where
         I: IntoIterator<Item = Value>,
