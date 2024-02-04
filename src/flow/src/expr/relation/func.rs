@@ -177,7 +177,11 @@ impl AggregateFunc {
     where
         I: IntoIterator<Item = (Value, Diff)>,
     {
-        let mut accum = Accum::try_into_accum(self, accum)?;
+        let mut accum = if accum.is_empty() {
+            Accum::new_accum(self)?
+        } else {
+            Accum::try_into_accum(self, accum)?
+        };
         accum.update_batch(self, value_diffs)?;
         let res = accum.eval(self)?;
         Ok((res, accum.into_state()))
@@ -334,4 +338,22 @@ where
             (Value::Null, _) | (_, Value::Null) => Value::Null,
             _ => Value::Boolean(true),
         }))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_sum() {
+        let values = vec![
+            Value::from(1i32),
+            Value::from(2i32),
+            Value::from(3i32),
+            Value::from(4i32),
+            Value::from(5i32),
+        ];
+        let res = AggregateFunc::SumInt32.eval(values).unwrap();
+        assert_eq!(res, Value::from(15i64));
+    }
 }

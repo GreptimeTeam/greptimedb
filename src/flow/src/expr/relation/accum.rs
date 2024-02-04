@@ -70,6 +70,37 @@ pub enum Accum {
 }
 
 impl Accum {
+    pub fn new_accum(aggr_fn: &AggregateFunc) -> Result<Self, EvalError> {
+        Ok(match aggr_fn {
+            AggregateFunc::Any | AggregateFunc::All => Self::Bool {
+                trues: 0,
+                falses: 0,
+            },
+            AggregateFunc::Count
+            | AggregateFunc::SumInt16
+            | AggregateFunc::SumInt32
+            | AggregateFunc::SumInt64
+            | AggregateFunc::SumUInt16
+            | AggregateFunc::SumUInt32
+            | AggregateFunc::SumUInt64 => Self::SimpleNumber {
+                accum: 0,
+                non_nulls: 0,
+            },
+            AggregateFunc::SumFloat32 | AggregateFunc::SumFloat64 => Self::Float {
+                accum: OrderedF64::from(0.0),
+                pos_infs: 0,
+                neg_infs: 0,
+                nans: 0,
+                non_nulls: 0,
+            },
+            _ => {
+                return Err(InternalSnafu {
+                    reason: format!("Aggregation function: {:?} is not accumulable.", aggr_fn),
+                }
+                .build())
+            }
+        })
+    }
     pub fn try_into_accum(aggr_fn: &AggregateFunc, state: Vec<Value>) -> Result<Self, EvalError> {
         match aggr_fn {
             AggregateFunc::Any | AggregateFunc::All => Self::try_into_bool(state),
@@ -197,6 +228,7 @@ impl Accum {
             }
             Self::SimpleNumber { accum, non_nulls } => {
                 for (v, diff) in value_diffs.into_iter() {
+                    let ty = v.data_type();
                     let v = match v {
                         Value::Int16(x) => Some(i128::from(x)),
                         Value::Int32(x) => Some(i128::from(x)),
@@ -217,7 +249,7 @@ impl Accum {
                             if diff <= 0 {
                                 return Err(InternalSnafu {
                                     reason: "SimpleNumber Accumulator does not support non-monotonic input for max aggregation".to_string(),
-                                });
+                                }.build());
                             }
                             *accum = std::cmp::max(*accum, v);
                         } else if aggr_fn.is_min() {
@@ -225,7 +257,7 @@ impl Accum {
                             if diff <= 0 {
                                 return Err(InternalSnafu {
                                     reason: "SimpleNumber Accumulator does not support non-monotonic input for min aggregation".to_string(),
-                                });
+                                }.build());
                             }
                             *accum = std::cmp::min(*accum, v);
                         } else {
@@ -234,27 +266,25 @@ impl Accum {
                                     "SimpleNumber Accumulator does not support this aggregation function: {:?}",
                                     aggr_fn
                                 ),
-                            });
+                            }.build());
                         }
+                    } else if matches!(aggr_fn, AggregateFunc::Count) {
+                        continue;
                     } else {
-                        if matches!(aggr_fn, AggregateFunc::Count) {
-                            continue;
-                        } else {
-                            let expected_datatype = match aggr_fn {
-                                AggregateFunc::SumInt16 => ConcreteDataType::int16_datatype(),
-                                AggregateFunc::SumInt32 => ConcreteDataType::int32_datatype(),
-                                AggregateFunc::SumInt64 => ConcreteDataType::int64_datatype(),
-                                AggregateFunc::SumUInt16 => ConcreteDataType::uint16_datatype(),
-                                AggregateFunc::SumUInt32 => ConcreteDataType::uint32_datatype(),
-                                AggregateFunc::SumUInt64 => ConcreteDataType::uint64_datatype(),
-                                _ => unreachable!(),
-                            };
-                            Err(TypeMismatchSnafu {
-                                expected: expected_datatype,
-                                actual: x.data_type(),
-                            }
-                            .build())?
+                        let expected_datatype = match aggr_fn {
+                            AggregateFunc::SumInt16 => ConcreteDataType::int16_datatype(),
+                            AggregateFunc::SumInt32 => ConcreteDataType::int32_datatype(),
+                            AggregateFunc::SumInt64 => ConcreteDataType::int64_datatype(),
+                            AggregateFunc::SumUInt16 => ConcreteDataType::uint16_datatype(),
+                            AggregateFunc::SumUInt32 => ConcreteDataType::uint32_datatype(),
+                            AggregateFunc::SumUInt64 => ConcreteDataType::uint64_datatype(),
+                            _ => unreachable!(),
+                        };
+                        Err(TypeMismatchSnafu {
+                            expected: expected_datatype,
+                            actual: ty,
                         }
+                        .build())?
                     }
 
                     *non_nulls += diff;
@@ -268,8 +298,9 @@ impl Accum {
                 non_nulls,
             } => {
                 for (v, diff) in value_diffs.into_iter() {
+                    let ty = v.data_type();
                     let v = match v {
-                        Value::Float32(x) => Some(OrderedF64::from(x)),
+                        Value::Float32(x) => Some(OrderedF64::from(*x as f64)),
                         Value::Float64(x) => Some(OrderedF64::from(x)),
                         _ => None,
                     };
@@ -282,49 +313,45 @@ impl Accum {
                             } else {
                                 *neg_infs += diff;
                             }
-                        } else {
-                            if aggr_fn.is_sum() {
-                                *accum += (x * OrderedF64::from(diff as f64)).0 as f64;
-                            } else if aggr_fn.is_max() {
-                                // min/max is accumulative only if input is monotonic(no delete)
-                                if diff <= 0 {
-                                    return Err(InternalSnafu {
-                                        reason: "SimpleNumber Accumulator does not support non-monotonic input for max aggregation".to_string(),
-                                    });
-                                }
-                                *accum = std::cmp::max(*accum, x as f64);
-                            } else if aggr_fn.is_min() {
-                                // min/max is accumulative only if input is monotonic(no delete)
-                                if diff <= 0 {
-                                    return Err(InternalSnafu {
-                                        reason: "SimpleNumber Accumulator does not support non-monotonic input for max aggregation".to_string(),
-                                    });
-                                }
-                                *accum = std::cmp::min(*accum, x as f64);
-                            } else {
+                        } else if aggr_fn.is_sum() {
+                            *accum += *(x * OrderedF64::from(diff as f64));
+                        } else if aggr_fn.is_max() {
+                            // min/max is accumulative only if input is monotonic(no delete)
+                            if diff <= 0 {
                                 return Err(InternalSnafu {
-                                    reason: format!(
-                                        "Float Accumulator does not support this aggregation function: {:?}",
-                                        aggr_fn
-                                    ),
-                                });
+                                    reason: "SimpleNumber Accumulator does not support non-monotonic input for max aggregation".to_string(),
+                                }.build());
                             }
-                        }
-                    } else {
-                        if matches!(aggr_fn, AggregateFunc::Count) {
-                            continue;
+                            *accum = std::cmp::max(*accum, x);
+                        } else if aggr_fn.is_min() {
+                            // min/max is accumulative only if input is monotonic(no delete)
+                            if diff <= 0 {
+                                return Err(InternalSnafu {
+                                    reason: "SimpleNumber Accumulator does not support non-monotonic input for max aggregation".to_string(),
+                                }.build());
+                            }
+                            *accum = std::cmp::min(*accum, x);
                         } else {
-                            let expected_datatype = match aggr_fn {
-                                AggregateFunc::SumFloat32 => ConcreteDataType::float32_datatype(),
-                                AggregateFunc::SumFloat64 => ConcreteDataType::float64_datatype(),
-                                _ => unreachable!(),
-                            };
-                            Err(TypeMismatchSnafu {
-                                expected: expected_datatype,
-                                actual: x.data_type(),
-                            }
-                            .build())?
+                            return Err(InternalSnafu {
+                                reason: format!(
+                                    "Float Accumulator does not support this aggregation function: {:?}",
+                                    aggr_fn
+                                ),
+                            }.build());
                         }
+                    } else if matches!(aggr_fn, AggregateFunc::Count) {
+                        continue;
+                    } else {
+                        let expected_datatype = match aggr_fn {
+                            AggregateFunc::SumFloat32 => ConcreteDataType::float32_datatype(),
+                            AggregateFunc::SumFloat64 => ConcreteDataType::float64_datatype(),
+                            _ => unreachable!(),
+                        };
+                        Err(TypeMismatchSnafu {
+                            expected: expected_datatype,
+                            actual: ty,
+                        }
+                        .build())?
                     }
                     *non_nulls += diff;
                 }
