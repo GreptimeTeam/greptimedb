@@ -466,7 +466,11 @@ impl FlushScheduler {
         }
 
         // Now we can flush the region directly.
-        version_control.freeze_mutable(&task.memtable_builder);
+        version_control
+            .freeze_mutable(&task.memtable_builder)
+            .inspect(|e| {
+                error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
+            })?;
         // Submit a flush job.
         let job = task.into_flush_job(version_control);
         if let Err(e) = self.scheduler.schedule(job) {

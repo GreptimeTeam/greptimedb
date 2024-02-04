@@ -70,7 +70,9 @@ impl Memtable for EmptyMemtable {
         true
     }
 
-    fn mark_immutable(&self) -> Result<()> {}
+    fn freeze(&self) -> Result<()> {
+        Ok(())
+    }
 
     fn stats(&self) -> MemtableStats {
         MemtableStats::default()

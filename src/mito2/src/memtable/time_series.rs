@@ -228,7 +228,7 @@ impl Memtable for TimeSeriesMemtable {
         self.series_set.series.read().unwrap().is_empty()
     }
 
-    fn mark_immutable(&self) -> Result<()> {
+    fn freeze(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
 
         Ok(())

@@ -82,8 +82,8 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
 
-    /// Mark the memtable as immutable.
-    fn mark_immutable(&self) -> Result<()>;
+    /// Marks the memtable as immutable.
+    fn freeze(&self) -> Result<()>;
 
     /// Returns the [MemtableStats] info of Memtable.
     fn stats(&self) -> MemtableStats;

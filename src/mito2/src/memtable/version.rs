@@ -17,7 +17,9 @@
 use std::sync::Arc;
 
 use smallvec::SmallVec;
+use store_api::metadata::RegionMetadataRef;
 
+use crate::error::Result;
 use crate::memtable::{MemtableId, MemtableRef};
 
 /// A version of current memtables in a region.
@@ -61,17 +63,21 @@ impl MemtableVersion {
     /// memtable.
     ///
     /// Returns `None` if the mutable memtable is empty.
-    #[must_use]
-    pub(crate) fn freeze_mutable(&self, mutable: MemtableRef) -> Option<MemtableVersion> {
-        debug_assert!(mutable.is_empty());
+    pub(crate) fn freeze_mutable(
+        &self,
+        metadata: &RegionMetadataRef,
+    ) -> Result<Option<MemtableVersion>> {
         if self.mutable.is_empty() {
             // No need to freeze the mutable memtable.
-            return None;
+            return Ok(None);
         }
 
         // Marks the mutable memtable as immutable so it can free the memory usage from our
         // soft limit.
-        self.mutable.mark_immutable();
+        self.mutable.freeze()?;
+        // Fork the memtable.
+        let mutable = self.mutable.fork(self.mutable.id() + 1, metadata);
+
         // Pushes the mutable memtable to immutable list.
         let immutables = self
             .immutables
@@ -79,10 +85,10 @@ impl MemtableVersion {
             .cloned()
             .chain([self.mutable.clone()])
             .collect();
-        Some(MemtableVersion {
+        Ok(Some(MemtableVersion {
             mutable,
             immutables,
-        })
+        }))
     }
 
     /// Removes memtables by ids from immutable memtables.

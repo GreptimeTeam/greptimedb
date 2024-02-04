@@ -117,7 +117,7 @@ impl Memtable for MergeTreeMemtable {
         self.tree.is_empty()
     }
 
-    fn mark_immutable(&self) -> Result<()> {
+    fn freeze(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
 
         // TODO(yingwen): Freeze the tree.
