@@ -299,7 +299,7 @@ impl SeriesSet {
 
     /// Iterates all series in [SeriesSet].
     fn iter_series(&self, projection: HashSet<ColumnId>, predicate: Option<Predicate>) -> Iter {
-        let (_, primary_key_schema) = primary_key_builders(&self.region_metadata, 1);
+        let primary_key_schema = primary_key_schema(&self.region_metadata);
         let primary_key_datatypes = self
             .region_metadata
             .primary_key_columns()
@@ -318,27 +318,20 @@ impl SeriesSet {
     }
 }
 
-/// Creates primary key array builders and arrow's schema for primary keys of given region schema.
-fn primary_key_builders(
-    region_metadata: &RegionMetadataRef,
-    num_pk_rows: usize,
-) -> (Vec<Box<dyn MutableVector>>, arrow::datatypes::SchemaRef) {
-    let (builders, fields): (_, Vec<_>) = region_metadata
+/// Creates an arrow [SchemaRef](arrow::datatypes::SchemaRef) that only contains primary keys
+/// of given region schema
+fn primary_key_schema(region_metadata: &RegionMetadataRef) -> arrow::datatypes::SchemaRef {
+    let fields = region_metadata
         .primary_key_columns()
         .map(|pk| {
-            (
-                pk.column_schema
-                    .data_type
-                    .create_mutable_vector(num_pk_rows),
-                arrow::datatypes::Field::new(
-                    pk.column_schema.name.clone(),
-                    pk.column_schema.data_type.as_arrow_type(),
-                    pk.column_schema.is_nullable(),
-                ),
+            arrow::datatypes::Field::new(
+                pk.column_schema.name.clone(),
+                pk.column_schema.data_type.as_arrow_type(),
+                pk.column_schema.is_nullable(),
             )
         })
-        .unzip();
-    (builders, Arc::new(arrow::datatypes::Schema::new(fields)))
+        .collect::<Vec<_>>();
+    Arc::new(arrow::datatypes::Schema::new(fields))
 }
 
 /// Metrics for reading the memtable.
