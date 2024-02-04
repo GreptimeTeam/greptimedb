@@ -228,8 +228,10 @@ impl Memtable for TimeSeriesMemtable {
         self.series_set.series.read().unwrap().is_empty()
     }
 
-    fn mark_immutable(&self) {
+    fn mark_immutable(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
+
+        Ok(())
     }
 
     fn stats(&self) -> MemtableStats {
