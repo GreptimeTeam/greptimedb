@@ -110,6 +110,15 @@ impl CachedMetaKvBackendBuilder {
 
 pub type CacheBackendRef = Arc<Cache<Vec<u8>, KeyValue>>;
 
+/// A wrapper of `MetaKvBackend` with cache support.
+///
+/// CachedMetaKvBackend is mainly used to read MetaData information from MetaSrv, and provides
+/// cache for get and batch_get. One way to trigger cache invalidation of CachedMetaKvBackend:
+/// when Metadata information changes, Metasrv will broadcast a MetaData invalidation request.
+///
+/// Therefore, it is recommended to use CachedMetaKvBackend to only read MetaData related
+/// information. Note: If you read other information, you may read expired data, which depends on
+/// TTL and TTI for cache.
 pub struct CachedMetaKvBackend {
     kv_backend: KvBackendRef,
     cache: CacheBackendRef,
@@ -171,15 +180,17 @@ impl KvBackend for CachedMetaKvBackend {
         let mut kvs = Vec::with_capacity(req.keys.len());
         let mut unhit_keys = Vec::with_capacity(req.keys.len());
 
-        for key in req.keys.iter() {
-            if let Some(val) = self.cache.get(key).await {
+        for key in req.keys {
+            if let Some(val) = self.cache.get(&key).await {
                 kvs.push(val);
             } else {
-                unhit_keys.push(key.clone());
+                unhit_keys.push(key);
             }
         }
 
-        let batch_get_req = BatchGetRequest { keys: unhit_keys };
+        let batch_get_req = BatchGetRequest {
+            keys: unhit_keys.clone(),
+        };
 
         let pre_version = self.version();
 
@@ -190,7 +201,7 @@ impl KvBackend for CachedMetaKvBackend {
         }
 
         if !self.validate_version(pre_version) {
-            for key in req.keys.iter() {
+            for key in unhit_keys.iter() {
                 self.cache.invalidate(key).await;
             }
         }
