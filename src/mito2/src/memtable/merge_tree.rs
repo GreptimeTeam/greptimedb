@@ -148,6 +148,10 @@ impl Memtable for MergeTreeMemtable {
             time_range: Some((min_timestamp, max_timestamp)),
         }
     }
+
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+        unimplemented!()
+    }
 }
 
 impl MergeTreeMemtable {

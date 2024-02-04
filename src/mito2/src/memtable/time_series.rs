@@ -257,6 +257,14 @@ impl Memtable for TimeSeriesMemtable {
             time_range: Some((min_timestamp, max_timestamp)),
         }
     }
+
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+        Arc::new(TimeSeriesMemtable::new(
+            metadata.clone(),
+            id,
+            self.alloc_tracker.write_buffer_manager(),
+        ))
+    }
 }
 
 type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;

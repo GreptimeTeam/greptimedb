@@ -75,6 +75,10 @@ impl Memtable for EmptyMemtable {
     fn stats(&self) -> MemtableStats {
         MemtableStats::default()
     }
+
+    fn fork(&self, id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
+        Arc::new(EmptyMemtable::new(id))
+    }
 }
 
 /// Empty memtable builder.
