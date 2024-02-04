@@ -27,7 +27,6 @@ use snafu::{Location, Snafu};
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
-#[derive(Clone)]
 pub enum EvalError {
     #[snafu(display("Division by zero"))]
     DivisionByZero { location: Location },
