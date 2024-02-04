@@ -53,7 +53,6 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
                     from: arg_ty,
                     to: ConcreteDataType::datetime_datatype(),
                 }
-                .build()
             })?;
             if let Value::DateTime(ts) = res {
                 Ok(ts.val())
