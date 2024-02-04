@@ -14,6 +14,7 @@
 
 use std::any::type_name;
 
+use common_time::{Date, DateTime};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use serde::{Deserialize, Serialize};
@@ -38,7 +39,7 @@ pub enum AggregateFunc {
     MaxBool,
     MaxString,
     MaxDate,
-    MaxTimestamp,
+    MaxDateTime,
     MinInt16,
     MinInt32,
     MinInt64,
@@ -50,7 +51,7 @@ pub enum AggregateFunc {
     MinBool,
     MinString,
     MinDate,
-    MinTimestamp,
+    MinDateTime,
     SumInt16,
     SumInt32,
     SumInt64,
@@ -79,7 +80,7 @@ impl AggregateFunc {
                 | AggregateFunc::MaxBool
                 | AggregateFunc::MaxString
                 | AggregateFunc::MaxDate
-                | AggregateFunc::MaxTimestamp
+                | AggregateFunc::MaxDateTime
         )
     }
 
@@ -97,7 +98,7 @@ impl AggregateFunc {
                 | AggregateFunc::MinBool
                 | AggregateFunc::MinString
                 | AggregateFunc::MinDate
-                | AggregateFunc::MinTimestamp
+                | AggregateFunc::MinDateTime
         )
     }
 
@@ -130,6 +131,8 @@ impl AggregateFunc {
             AggregateFunc::MaxFloat32 => max_value::<I, OrderedF32>(values),
             AggregateFunc::MaxFloat64 => max_value::<I, OrderedF64>(values),
             AggregateFunc::MaxBool => max_value::<I, bool>(values),
+            AggregateFunc::MaxDate => max_value::<I, Date>(values),
+            AggregateFunc::MaxDateTime => max_value::<I, DateTime>(values),
             AggregateFunc::MaxString => max_string(values),
 
             AggregateFunc::MinInt16 => min_value::<I, i16>(values),
@@ -141,6 +144,8 @@ impl AggregateFunc {
             AggregateFunc::MinFloat32 => min_value::<I, OrderedF32>(values),
             AggregateFunc::MinFloat64 => min_value::<I, OrderedF64>(values),
             AggregateFunc::MinBool => min_value::<I, bool>(values),
+            AggregateFunc::MinDate => min_value::<I, Date>(values),
+            AggregateFunc::MinDateTime => min_value::<I, DateTime>(values),
             AggregateFunc::MinString => min_string(values),
 
             AggregateFunc::SumInt16 => sum_value::<I, i16, i64>(values),
@@ -172,10 +177,10 @@ impl AggregateFunc {
     where
         I: IntoIterator<Item = (Value, Diff)>,
     {
-        let mut old_accum = Accum::try_into_accum(self, accum)?;
-        old_accum.update_batch(self, value_diffs)?;
-        let res = old_accum.eval(self)?;
-        Ok((res, old_accum.into_state()))
+        let mut accum = Accum::try_into_accum(self, accum)?;
+        accum.update_batch(self, value_diffs)?;
+        let res = accum.eval(self)?;
+        Ok((res, accum.into_state()))
     }
 }
 
