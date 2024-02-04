@@ -200,7 +200,7 @@ impl MergeTree {
         }
     }
 
-    pub(crate) fn write_with_key(&self, primary_key: &[u8], kv: KeyValue) -> Result<()> {
+    fn write_with_key(&self, primary_key: &[u8], kv: KeyValue) -> Result<()> {
         // Safety: `write()` ensures this is not None.
         let cache = self.pk_id_cache.as_ref().unwrap();
         if let Some(pk_id) = cache.get(primary_key) {
@@ -211,17 +211,21 @@ impl MergeTree {
 
         // The pk is not in the cache, we need to write the pk to the index.
         let pk_id = self.write_primary_key(primary_key)?;
+        // Also writes the pk to the cache.
+        self.add_pk_to_cache(primary_key, pk_id);
+        // Writes data.
         self.write_with_id(pk_id, kv);
+
         Ok(())
     }
 
-    pub(crate) fn write_with_id(&self, pk_id: PkId, kv: KeyValue) {
+    fn write_with_id(&self, pk_id: PkId, kv: KeyValue) {
         let mut parts = self.parts.write().unwrap();
         assert!(!parts.immutable);
         parts.data_buffer.write_row(pk_id, kv)
     }
 
-    pub(crate) fn write_primary_key(&self, key: &[u8]) -> Result<PkId> {
+    fn write_primary_key(&self, key: &[u8]) -> Result<PkId> {
         let index = {
             let parts = self.parts.read().unwrap();
             assert!(!parts.immutable);
@@ -230,6 +234,16 @@ impl MergeTree {
         };
 
         index.write_primary_key(key)
+    }
+
+    fn add_pk_to_cache(&self, primary_key: &[u8], pk_id: PkId) {
+        let Some(pk_id_cache) = &self.pk_id_cache else {
+            return;
+        };
+        pk_id_cache.insert(primary_key.to_vec(), pk_id);
+        CACHE_BYTES
+            .with_label_values(&[PK_ID_TYPE])
+            .add(pk_id_cache_weight(primary_key, &pk_id).into())
     }
 }
 
@@ -247,14 +261,14 @@ struct TreeParts {
 /// Maps primary key to [PkId].
 type PkIdCache = Cache<Vec<u8>, PkId>;
 
-fn pk_id_cache_weight(k: &Vec<u8>, _v: &PkId) -> u32 {
+fn pk_id_cache_weight(k: &[u8], _v: &PkId) -> u32 {
     (k.len() + std::mem::size_of::<PkId>()) as u32
 }
 
 fn new_cache(cache_size: u64) -> PkIdCache {
-    Cache::builder()
+    PkIdCache::builder()
         .max_capacity(cache_size)
-        .weigher(pk_id_cache_weight)
+        .weigher(|k, v| pk_id_cache_weight(k.as_slice(), v))
         .eviction_listener(|k, v, _cause| {
             let size = pk_id_cache_weight(&k, &v);
             CACHE_BYTES
