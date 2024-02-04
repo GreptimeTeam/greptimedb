@@ -152,7 +152,7 @@ impl Memtable for MergeTreeMemtable {
         }
     }
 
-    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+    fn fork(&self, _id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
         unimplemented!()
     }
 }
