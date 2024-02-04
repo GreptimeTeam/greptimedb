@@ -30,6 +30,7 @@ use crate::memtable::merge_tree::{PkId, PkIndex, ShardId};
 const MAX_KEYS_PER_BLOCK: u16 = 256;
 
 /// Config for the index.
+#[derive(Debug, Clone)]
 pub(crate) struct IndexConfig {
     /// Max keys in an index shard.
     pub(crate) max_keys_per_shard: usize,
@@ -64,6 +65,25 @@ impl KeyIndex {
         let reader = shard.scan_shard()?;
 
         Ok(Box::new(reader))
+    }
+
+    /// Freezes the index.
+    pub(crate) fn freeze(&self) -> Result<()> {
+        let mut shard = self.shard.write().unwrap();
+        shard.freeze()
+    }
+
+    /// Returns a new index for write.
+    ///
+    /// Callers must freeze the index first.
+    pub(crate) fn fork(&self) -> KeyIndex {
+        let current_shard = self.shard.read().unwrap();
+        let shard = current_shard.fork();
+
+        KeyIndex {
+            config: self.config.clone(),
+            shard: RwLock::new(shard),
+        }
     }
 }
 
@@ -120,6 +140,25 @@ impl MutableShard {
 
         Ok(ReaderMerger::from_readers(readers))
     }
+
+    fn freeze(&mut self) -> Result<()> {
+        if self.key_buffer.is_empty() {
+            return Ok(());
+        }
+
+        let dict_block = self.key_buffer.finish()?;
+        self.dict_blocks.push(Arc::new(dict_block));
+        Ok(())
+    }
+
+    fn fork(&self) -> MutableShard {
+        MutableShard {
+            shard_id: self.shard_id,
+            key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
+            dict_blocks: self.dict_blocks.clone(),
+            num_keys: self.num_keys,
+        }
+    }
 }
 
 // TODO(yingwen): Bench using custom container for binary and ids so we can
@@ -158,6 +197,10 @@ impl KeyBuffer {
 
     fn len(&self) -> usize {
         self.primary_key_builder.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.primary_key_builder.is_empty()
     }
 
     /// Gets the primary key by its index.

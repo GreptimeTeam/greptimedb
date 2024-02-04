@@ -40,6 +40,8 @@ const DATA_INIT_CAP: usize = 8;
 
 /// The merge tree.
 pub(crate) struct MergeTree {
+    /// Config of the tree.
+    config: MergeTreeConfig,
     /// Metadata of the region.
     pub(crate) metadata: RegionMetadataRef,
     /// Primary key codec.
@@ -79,6 +81,7 @@ impl MergeTree {
         };
 
         MergeTree {
+            config: config.clone(),
             metadata,
             row_codec: Arc::new(row_codec),
             pk_id_cache,
@@ -88,6 +91,9 @@ impl MergeTree {
 
     // FIXME(yingwen): We should use actual size of parts.
     /// Write key-values into the tree.
+    ///
+    /// # Panics
+    /// Panics if the tree is immutable.
     pub(crate) fn write(&self, kvs: &KeyValues, metrics: &mut WriteMetrics) -> Result<()> {
         let mut primary_key = Vec::new();
         let has_pk = !self.metadata.primary_key.is_empty();
@@ -150,9 +156,48 @@ impl MergeTree {
         unimplemented!()
     }
 
-    /// Freezes this tree and returns a new mutable tree.
-    pub(crate) fn freeze(&self) {
-        unimplemented!()
+    /// Marks the tree as immutable.
+    ///
+    /// Once the tree becomes immutable, callers should not write to it again.
+    pub(crate) fn freeze(&self) -> Result<()> {
+        let mut parts = self.parts.write().unwrap();
+        parts.immutable = true;
+        // Freezes the index.
+        if let Some(index) = &parts.index {
+            index.freeze()?;
+        }
+
+        Ok(())
+    }
+
+    /// Forks an immutable tree. Returns a mutable tree that inherits the index
+    /// and cache of this tree.
+    pub(crate) fn fork(&self, metadata: RegionMetadataRef) -> MergeTree {
+        if metadata.primary_key != self.metadata.primary_key {
+            // The priamry key is changed. We can't reuse fields.
+            return MergeTree::new(metadata, &self.config);
+        }
+
+        let current_parts = self.parts.read().unwrap();
+        let index = current_parts
+            .index
+            .as_ref()
+            .map(|index| Arc::new(index.fork()));
+        // New parts.
+        let parts = TreeParts {
+            immutable: false,
+            index,
+            data_buffer: DataBuffer::with_capacity(metadata.clone(), DATA_INIT_CAP),
+        };
+
+        MergeTree {
+            config: self.config.clone(),
+            metadata,
+            // We can reuse row codec.
+            row_codec: self.row_codec.clone(),
+            pk_id_cache: self.pk_id_cache.clone(),
+            parts: RwLock::new(parts),
+        }
     }
 
     pub(crate) fn write_with_key(&self, primary_key: &[u8], kv: KeyValue) -> Result<()> {
@@ -172,12 +217,14 @@ impl MergeTree {
 
     pub(crate) fn write_with_id(&self, pk_id: PkId, kv: KeyValue) {
         let mut parts = self.parts.write().unwrap();
+        assert!(!parts.immutable);
         parts.data_buffer.write_row(pk_id, kv)
     }
 
     pub(crate) fn write_primary_key(&self, key: &[u8]) -> Result<PkId> {
         let index = {
             let parts = self.parts.read().unwrap();
+            assert!(!parts.immutable);
             // Safety: The region has primary keys.
             parts.index.clone().unwrap()
         };
