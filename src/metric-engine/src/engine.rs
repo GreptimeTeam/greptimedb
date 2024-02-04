@@ -28,7 +28,6 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
 use store_api::metadata::RegionMetadataRef;
@@ -133,7 +132,7 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Flush(_) => todo!(),
             RegionRequest::Compact(_) => todo!(),
             RegionRequest::Truncate(_) => todo!(),
-            /// It always Ok(0), all data is latest.
+            // It always Ok(0), all data is the latest.
             RegionRequest::Catchup(_) => Ok(0),
         };
 
