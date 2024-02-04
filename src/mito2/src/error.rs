@@ -549,6 +549,13 @@ pub enum Error {
         source: common_recordbatch::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to encode memtable to Parquet bytes"))]
+    EncodeMemtable {
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -650,6 +657,7 @@ impl ErrorExt for Error {
             StaleLogEntry { .. } => StatusCode::Unexpected,
             FilterRecordBatch { source, .. } => source.status_code(),
             Upload { .. } => StatusCode::StorageUnavailable,
+            EncodeMemtable { .. } => StatusCode::Internal,
         }
     }
 

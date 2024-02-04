@@ -162,6 +162,28 @@ pub(crate) fn build_key_values_with_ts_seq(
     timestamps: impl Iterator<Item = i64>,
     sequence: SequenceNumber,
 ) -> KeyValues {
+    let timestamps = timestamps.collect::<Vec<_>>();
+    let values = timestamps.iter().map(|v| Some(*v as f64));
+
+    build_key_values_with_ts_seq_values(
+        schema,
+        k0,
+        k1,
+        timestamps.iter().copied(),
+        values,
+        sequence,
+    )
+}
+
+/// Builds key values with timestamps (ms) and sequences for test.
+pub(crate) fn build_key_values_with_ts_seq_values(
+    schema: &RegionMetadataRef,
+    k0: String,
+    k1: i64,
+    timestamps: impl Iterator<Item = i64>,
+    values: impl Iterator<Item = Option<f64>>,
+    sequence: SequenceNumber,
+) -> KeyValues {
     let column_schema = schema
         .column_metadatas
         .iter()
@@ -176,7 +198,8 @@ pub(crate) fn build_key_values_with_ts_seq(
         .collect();
 
     let rows = timestamps
-        .map(|ts| Row {
+        .zip(values)
+        .map(|(ts, v)| Row {
             values: vec![
                 api::v1::Value {
                     value_data: Some(ValueData::StringValue(k0.clone())),
@@ -191,7 +214,7 @@ pub(crate) fn build_key_values_with_ts_seq(
                     value_data: Some(ValueData::I64Value(ts)),
                 },
                 api::v1::Value {
-                    value_data: Some(ValueData::F64Value(ts as f64)),
+                    value_data: v.map(ValueData::F64Value),
                 },
             ],
         })
