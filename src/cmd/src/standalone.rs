@@ -213,6 +213,10 @@ impl App for Instance {
             .await
             .context(StartWalOptionsAllocatorSnafu)?;
 
+        plugins::start_frontend_plugins(self.frontend.plugins().clone())
+            .await
+            .context(StartFrontendSnafu)?;
+
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
     }
