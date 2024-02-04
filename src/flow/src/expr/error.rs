@@ -47,8 +47,7 @@ pub enum EvalError {
     CastValue {
         from: ConcreteDataType,
         to: ConcreteDataType,
-        /// can't use `datatypes::Error` due to derive requirement
-        msg: String,
+        source: datatypes::Error,
         location: Location,
     },
 

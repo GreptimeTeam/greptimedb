@@ -48,11 +48,10 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
         Value::DateTime(ts) => Ok(ts.val()),
         arg => {
             let arg_ty = arg.data_type();
-            let res = cast(arg, &ConcreteDataType::datetime_datatype()).map_err(|e| {
+            let res = cast(arg, &ConcreteDataType::datetime_datatype()).context({
                 CastValueSnafu {
                     from: arg_ty,
                     to: ConcreteDataType::datetime_datatype(),
-                    msg: e.to_string(),
                 }
                 .build()
             })?;
