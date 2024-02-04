@@ -27,7 +27,7 @@ pub enum ScalarExpr {
     Column(usize),
     /// A literal value.
     /// Extra type info to know original type even when it is null
-    Literal(Result<Value, EvalError>, ConcreteDataType),
+    Literal(Value, ConcreteDataType),
     /// A call to an unmaterializable function.
     ///
     /// These functions cannot be evaluated by `ScalarExpr::eval`. They must
@@ -78,7 +78,7 @@ impl ScalarExpr {
     pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
         match self {
             ScalarExpr::Column(index) => Ok(values[*index].clone()),
-            ScalarExpr::Literal(row_res, _ty) => row_res.clone(),
+            ScalarExpr::Literal(row_res, _ty) => Ok(row_res.clone()),
             ScalarExpr::CallUnmaterializable(f) => OptimizeSnafu {
                 reason: "Can't eval unmaterializable function".to_string(),
             }
@@ -133,62 +133,48 @@ impl ScalarExpr {
         support
     }
 
-    pub fn as_literal(&self) -> Option<Result<Value, &EvalError>> {
+    pub fn as_literal(&self) -> Option<Value> {
         if let ScalarExpr::Literal(lit, _column_type) = self {
-            Some(lit.as_ref().map(|row| row.clone()))
+            Some(lit.clone())
         } else {
             None
         }
     }
 
     pub fn is_literal(&self) -> bool {
-        matches!(self, ScalarExpr::Literal(_, _))
+        matches!(self, ScalarExpr::Literal(..))
     }
 
     pub fn is_literal_true(&self) -> bool {
-        Some(Ok(Value::Boolean(true))) == self.as_literal()
+        Some(Value::Boolean(true)) == self.as_literal()
     }
 
     pub fn is_literal_false(&self) -> bool {
-        Some(Ok(Value::Boolean(false))) == self.as_literal()
+        Some(Value::Boolean(false)) == self.as_literal()
     }
 
     pub fn is_literal_null(&self) -> bool {
-        Some(Ok(Value::Null)) == self.as_literal()
-    }
-
-    pub fn is_literal_ok(&self) -> bool {
-        matches!(self, ScalarExpr::Literal(Ok(_), _typ))
-    }
-
-    pub fn is_literal_err(&self) -> bool {
-        matches!(self, ScalarExpr::Literal(Err(_), _typ))
+        Some(Value::Null) == self.as_literal()
     }
 
     pub fn literal_null() -> Self {
-        ScalarExpr::Literal(Ok(Value::Null), ConcreteDataType::null_datatype())
+        ScalarExpr::Literal(Value::Null, ConcreteDataType::null_datatype())
     }
 
-    pub fn literal(res: Result<Value, EvalError>, typ: ConcreteDataType) -> Self {
+    pub fn literal(res: Value, typ: ConcreteDataType) -> Self {
         ScalarExpr::Literal(res, typ)
     }
 
     pub fn literal_ok(val: Value, typ: ConcreteDataType) -> Self {
-        ScalarExpr::Literal(Ok(val), typ)
+        ScalarExpr::Literal(val, typ)
     }
 
     pub fn literal_false() -> Self {
-        ScalarExpr::Literal(
-            Ok(Value::Boolean(false)),
-            ConcreteDataType::boolean_datatype(),
-        )
+        ScalarExpr::Literal(Value::Boolean(false), ConcreteDataType::boolean_datatype())
     }
 
     pub fn literal_true() -> Self {
-        ScalarExpr::Literal(
-            Ok(Value::Boolean(true)),
-            ConcreteDataType::boolean_datatype(),
-        )
+        ScalarExpr::Literal(Value::Boolean(true), ConcreteDataType::boolean_datatype())
     }
 }
 
