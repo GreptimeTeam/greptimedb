@@ -96,8 +96,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-## FIXME(dennis): after merging https://github.com/GreptimeTeam/greptime-proto/pull/137
-greptime-proto = { git = "https://github.com/killme2008/greptime-proto.git", rev = "e114e7db7e82192a098d242f6767c551fbf9c28d" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "96f1f0404f421ee560a4310c73c5071e49168168" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
