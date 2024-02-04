@@ -17,6 +17,8 @@
 //! - Merges small immutable parts into a big immutable part
 
 #[allow(unused)]
+mod data;
+#[allow(unused)]
 mod index;
 mod mutable;
 mod tree;
