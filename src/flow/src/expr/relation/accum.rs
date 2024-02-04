@@ -19,6 +19,7 @@
 use std::fmt::Display;
 
 use common_decimal::Decimal128;
+use common_time::{Date, DateTime};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, OrderedFloat, Value};
 use hydroflow::futures::stream::Concat;
@@ -72,7 +73,10 @@ pub enum Accum {
 impl Accum {
     pub fn new_accum(aggr_fn: &AggregateFunc) -> Result<Self, EvalError> {
         Ok(match aggr_fn {
-            AggregateFunc::Any | AggregateFunc::All => Self::Bool {
+            AggregateFunc::Any
+            | AggregateFunc::All
+            | AggregateFunc::MaxBool
+            | AggregateFunc::MinBool => Self::Bool {
                 trues: 0,
                 falses: 0,
             },
@@ -84,6 +88,28 @@ impl Accum {
             | AggregateFunc::SumUInt32
             | AggregateFunc::SumUInt64 => Self::SimpleNumber {
                 accum: 0,
+                non_nulls: 0,
+            },
+            AggregateFunc::MaxInt16
+            | AggregateFunc::MaxInt32
+            | AggregateFunc::MaxInt64
+            | AggregateFunc::MaxUInt16
+            | AggregateFunc::MaxUInt32
+            | AggregateFunc::MaxUInt64
+            | AggregateFunc::MaxDate
+            | AggregateFunc::MaxDateTime => Self::SimpleNumber {
+                accum: i128::MIN,
+                non_nulls: 0,
+            },
+            AggregateFunc::MinInt16
+            | AggregateFunc::MinInt32
+            | AggregateFunc::MinInt64
+            | AggregateFunc::MinUInt16
+            | AggregateFunc::MinUInt32
+            | AggregateFunc::MinUInt64
+            | AggregateFunc::MinDate
+            | AggregateFunc::MinDateTime => Self::SimpleNumber {
+                accum: i128::MAX,
                 non_nulls: 0,
             },
             AggregateFunc::SumFloat32 | AggregateFunc::SumFloat64 => Self::Float {
@@ -103,14 +129,33 @@ impl Accum {
     }
     pub fn try_into_accum(aggr_fn: &AggregateFunc, state: Vec<Value>) -> Result<Self, EvalError> {
         match aggr_fn {
-            AggregateFunc::Any | AggregateFunc::All => Self::try_into_bool(state),
+            AggregateFunc::Any
+            | AggregateFunc::All
+            | AggregateFunc::MaxBool
+            | AggregateFunc::MinBool => Self::try_into_bool(state),
             AggregateFunc::Count
             | AggregateFunc::SumInt16
             | AggregateFunc::SumInt32
             | AggregateFunc::SumInt64
             | AggregateFunc::SumUInt16
             | AggregateFunc::SumUInt32
-            | AggregateFunc::SumUInt64 => Self::try_into_number(state),
+            | AggregateFunc::SumUInt64
+            | AggregateFunc::MaxInt16
+            | AggregateFunc::MaxInt32
+            | AggregateFunc::MaxInt64
+            | AggregateFunc::MaxUInt16
+            | AggregateFunc::MaxUInt32
+            | AggregateFunc::MaxUInt64
+            | AggregateFunc::MaxDate
+            | AggregateFunc::MaxDateTime
+            | AggregateFunc::MinInt16
+            | AggregateFunc::MinInt32
+            | AggregateFunc::MinInt64
+            | AggregateFunc::MinUInt16
+            | AggregateFunc::MinUInt32
+            | AggregateFunc::MinUInt64
+            | AggregateFunc::MinDate
+            | AggregateFunc::MinDateTime => Self::try_into_number(state),
             AggregateFunc::SumFloat32 | AggregateFunc::SumFloat64 => Self::try_into_float(state),
             _ => Err(InternalSnafu {
                 reason: format!("Aggregation function: {:?} is not accumulable.", aggr_fn),
@@ -260,6 +305,7 @@ impl Accum {
                                 }.build());
                             }
                             *accum = std::cmp::min(*accum, v);
+                        } else if matches!(aggr_fn, AggregateFunc::Count) {
                         } else {
                             return Err(InternalSnafu {
                                 reason: format!(
@@ -269,7 +315,6 @@ impl Accum {
                             }.build());
                         }
                     } else if matches!(aggr_fn, AggregateFunc::Count) {
-                        continue;
                     } else {
                         let expected_datatype = match aggr_fn {
                             AggregateFunc::SumInt16 => ConcreteDataType::int16_datatype(),
@@ -340,7 +385,11 @@ impl Accum {
                             }.build());
                         }
                     } else if matches!(aggr_fn, AggregateFunc::Count) {
-                        continue;
+                        return Err(InternalSnafu {
+                            reason: "Count aggregation is not suppose to use Float Accumulator"
+                                .to_string(),
+                        }
+                        .build());
                     } else {
                         let expected_datatype = match aggr_fn {
                             AggregateFunc::SumFloat32 => ConcreteDataType::float32_datatype(),
@@ -365,6 +414,8 @@ impl Accum {
             Self::Bool { trues, falses } => match aggr_fn {
                 AggregateFunc::Any => Ok(Value::from(*trues > 0)),
                 AggregateFunc::All => Ok(Value::from(*falses == 0)),
+                AggregateFunc::MaxBool => Ok(Value::from(*trues > 0)),
+                AggregateFunc::MinBool => Ok(Value::from(*falses == 0)),
                 _ => Err(InternalSnafu {
                     reason: format!(
                         "Bool Accumulator does not support this aggregation function: {:?}",
@@ -381,9 +432,25 @@ impl Accum {
                 AggregateFunc::SumUInt16 | AggregateFunc::SumUInt32 | AggregateFunc::SumUInt64 => {
                     Ok(Value::from(*accum as u64))
                 }
+                AggregateFunc::MaxInt16 => Ok(Value::Int16(*accum as i16)),
+                AggregateFunc::MaxInt32 => Ok(Value::Int32(*accum as i32)),
+                AggregateFunc::MaxInt64 => Ok(Value::Int64(*accum as i64)),
+                AggregateFunc::MaxUInt16 => Ok(Value::UInt16(*accum as u16)),
+                AggregateFunc::MaxUInt32 => Ok(Value::UInt32(*accum as u32)),
+                AggregateFunc::MaxUInt64 => Ok(Value::UInt64(*accum as u64)),
+                AggregateFunc::MaxDate => Ok(Value::Date(Date::from(*accum as i32))),
+                AggregateFunc::MaxDateTime => Ok(Value::DateTime(DateTime::from(*accum as i64))),
+                AggregateFunc::MinInt16 => Ok(Value::Int16(*accum as i16)),
+                AggregateFunc::MinInt32 => Ok(Value::Int32(*accum as i32)),
+                AggregateFunc::MinInt64 => Ok(Value::Int64(*accum as i64)),
+                AggregateFunc::MinUInt16 => Ok(Value::UInt16(*accum as u16)),
+                AggregateFunc::MinUInt32 => Ok(Value::UInt32(*accum as u32)),
+                AggregateFunc::MinUInt64 => Ok(Value::UInt64(*accum as u64)),
+                AggregateFunc::MinDate => Ok(Value::Date(Date::from(*accum as i32))),
+                AggregateFunc::MinDateTime => Ok(Value::DateTime(DateTime::from(*accum as i64))),
                 _ => Err(InternalSnafu {
                     reason: format!(
-                        "Bool Accumulator does not support this aggregation function: {:?}",
+                        "SimpleNumber Accumulator does not support this aggregation function: {:?}",
                         aggr_fn
                     ),
                 }
@@ -400,7 +467,7 @@ impl Accum {
                 AggregateFunc::SumFloat64 => Ok(Value::Float64(*accum)),
                 _ => Err(InternalSnafu {
                     reason: format!(
-                        "Bool Accumulator does not support this aggregation function: {:?}",
+                        "Float Accumulator does not support this aggregation function: {:?}",
                         aggr_fn
                     ),
                 }

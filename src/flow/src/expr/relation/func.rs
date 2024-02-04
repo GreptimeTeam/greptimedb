@@ -212,7 +212,7 @@ where
 fn max_value<I, TypedValue>(values: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
-    TypedValue: TryFrom<Value> + Ord,
+    TypedValue: TryFrom<Value> + Ord + std::fmt::Debug,
     <TypedValue as TryFrom<Value>>::Error: std::fmt::Debug,
     Value: From<Option<TypedValue>>,
 {
@@ -227,7 +227,11 @@ where
             }
             .build()
         })?;
-        x = x.map(|x| x.max(v));
+        x = if let Some(old) = x {
+            Some(old.max(v))
+        } else {
+            Some(v)
+        };
     }
     Ok(x.into())
 }
@@ -271,7 +275,11 @@ where
             }
             .build()
         })?;
-        x = x.map(|x| x.min(v));
+        x = if let Some(old) = x {
+            Some(old.min(v))
+        } else {
+            Some(v)
+        };
     }
     Ok(x.into())
 }
@@ -310,7 +318,7 @@ fn count<I>(values: I) -> Result<Value, EvalError>
 where
     I: IntoIterator<Item = Value>,
 {
-    let x = values.into_iter().filter(|v| !v.is_null()).count() as i64;
+    let x = values.into_iter().filter(|v| !v.is_null()).count() as u64;
     Ok(Value::from(x))
 }
 
@@ -342,7 +350,52 @@ where
 
 #[cfg(test)]
 mod test {
+    use common_decimal::Decimal128;
+
     use super::*;
+
+    #[test]
+    fn test_count() {
+        let values = vec![
+            Value::from(1i32),
+            Value::from(2i32),
+            Value::from(3i32),
+            Value::from(4i32),
+            Value::from(5i32),
+        ];
+        let res = AggregateFunc::Count.eval(values).unwrap();
+        assert_eq!(res, Value::from(5u64));
+
+        // test delta without accum
+        let values = vec![
+            (Value::from(1i32), 1),
+            (Value::from(2i32), 1),
+            (Value::from(3i32), 1),
+            (Value::from(4i32), 1),
+            (Value::from(5i32), 1),
+        ];
+        let accum = vec![];
+        let (res, accum) = AggregateFunc::Count
+            .eval_diff_accumulable(accum, values)
+            .unwrap();
+        assert_eq!(res, Value::from(5u64));
+        assert_eq!(
+            accum,
+            vec![Value::from(Decimal128::new(0, 38, 0)), Value::from(5i64)]
+        );
+
+        // test delta with accum
+        let values = vec![(Value::from(1i32), 1), (Value::from(2i32), 1)];
+        let accum = vec![Value::from(Decimal128::new(0, 38, 0)), Value::from(3i64)];
+        let (res, accum) = AggregateFunc::Count
+            .eval_diff_accumulable(accum, values)
+            .unwrap();
+        assert_eq!(res, Value::from(5u64));
+        assert_eq!(
+            accum,
+            vec![Value::from(Decimal128::new(0, 38, 0)), Value::from(5i64)]
+        );
+    }
 
     #[test]
     fn test_sum() {
@@ -355,5 +408,121 @@ mod test {
         ];
         let res = AggregateFunc::SumInt32.eval(values).unwrap();
         assert_eq!(res, Value::from(15i64));
+
+        // test delta without accum
+        let values = vec![
+            (Value::from(1i32), 1),
+            (Value::from(2i32), 1),
+            (Value::from(3i32), 1),
+            (Value::from(4i32), 1),
+            (Value::from(5i32), 1),
+        ];
+        let accum = vec![];
+        let (res, accum) = AggregateFunc::SumInt32
+            .eval_diff_accumulable(accum, values)
+            .unwrap();
+        assert_eq!(res, Value::from(15i64));
+        assert_eq!(
+            accum,
+            vec![Value::from(Decimal128::new(15, 38, 0)), Value::from(5i64)]
+        );
+
+        // test delta with sum
+        let values = vec![(Value::from(1i32), 1), (Value::from(2i32), 1)];
+        let accum = vec![Value::from(Decimal128::new(10, 38, 0)), Value::from(3i64)];
+        let (res, accum) = AggregateFunc::SumInt32
+            .eval_diff_accumulable(accum, values)
+            .unwrap();
+        assert_eq!(res, Value::from(13i64));
+        assert_eq!(
+            accum,
+            vec![Value::from(Decimal128::new(13, 38, 0)), Value::from(5i64)]
+        );
+    }
+
+    #[test]
+    fn test_max() {
+        let values = vec![
+            Value::from(1i32),
+            Value::from(2i32),
+            Value::from(3i32),
+            Value::from(4i32),
+            Value::from(5i32),
+        ];
+        let res = AggregateFunc::MaxInt32.eval(values).unwrap();
+        assert_eq!(res, Value::from(5i32));
+
+        // test delta without accum
+        let values = vec![
+            (Value::from(1i32), 1),
+            (Value::from(2i32), 1),
+            (Value::from(3i32), 1),
+            (Value::from(4i32), 1),
+            (Value::from(5i32), 1),
+        ];
+        let accum = vec![];
+        let (res, accum) = AggregateFunc::MaxInt32
+            .eval_diff_accumulable(accum, values)
+            .unwrap();
+        assert_eq!(res, Value::from(5i32));
+        assert_eq!(
+            accum,
+            vec![Value::from(Decimal128::new(5, 38, 0)), Value::from(5i64)]
+        );
+
+        // test delta with sum
+        let values = vec![(Value::from(1i32), 1), (Value::from(2i32), 1)];
+        let accum = vec![Value::from(Decimal128::new(10, 38, 0)), Value::from(3i64)];
+        let (res, accum) = AggregateFunc::MaxInt32
+            .eval_diff_accumulable(accum, values)
+            .unwrap();
+        assert_eq!(res, Value::from(10i32));
+        assert_eq!(
+            accum,
+            vec![Value::from(Decimal128::new(10, 38, 0)), Value::from(5i64)]
+        );
+    }
+
+    #[test]
+    fn test_min() {
+        let values = vec![
+            Value::from(1i32),
+            Value::from(2i32),
+            Value::from(3i32),
+            Value::from(4i32),
+            Value::from(5i32),
+        ];
+        let res = AggregateFunc::MinInt32.eval(values).unwrap();
+        assert_eq!(res, Value::from(1i32));
+
+        // test delta without accum
+        let values = vec![
+            (Value::from(1i32), 1),
+            (Value::from(2i32), 1),
+            (Value::from(3i32), 1),
+            (Value::from(4i32), 1),
+            (Value::from(5i32), 1),
+        ];
+        let accum = vec![];
+        let (res, accum) = AggregateFunc::MinInt32
+            .eval_diff_accumulable(accum, values)
+            .unwrap();
+        assert_eq!(res, Value::from(1i32));
+        assert_eq!(
+            accum,
+            vec![Value::from(Decimal128::new(1, 38, 0)), Value::from(5i64)]
+        );
+
+        // test delta with sum
+        let values = vec![(Value::from(1i32), 1), (Value::from(2i32), 1)];
+        let accum = vec![Value::from(Decimal128::new(10, 38, 0)), Value::from(3i64)];
+        let (res, accum) = AggregateFunc::MinInt32
+            .eval_diff_accumulable(accum, values)
+            .unwrap();
+        assert_eq!(res, Value::from(1i32));
+        assert_eq!(
+            accum,
+            vec![Value::from(Decimal128::new(1, 38, 0)), Value::from(5i64)]
+        );
     }
 }
