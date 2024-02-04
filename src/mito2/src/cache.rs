@@ -45,6 +45,8 @@ const VECTOR_TYPE: &str = "vector";
 const PAGE_TYPE: &str = "page";
 // Metrics type key for files on the local store.
 const FILE_TYPE: &str = "file";
+/// Metrics type key for pkid index in the memtable.
+pub(crate) const PK_ID_TYPE: &str = "pkid";
 
 /// Manages cached data for the engine.
 ///

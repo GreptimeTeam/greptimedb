@@ -16,10 +16,9 @@
 //! - Flushes mutable parts to immutable parts
 //! - Merges small immutable parts into a big immutable part
 
-#[allow(unused)]
 mod data;
-#[allow(unused)]
 mod index;
+// TODO(yingwen): Remove this mod.
 mod mutable;
 mod tree;
 
@@ -27,6 +26,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common_base::readable_size::ReadableSize;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
@@ -45,15 +45,30 @@ pub(crate) type ShardId = u32;
 /// Index of a primary key in a shard.
 pub(crate) type PkIndex = u16;
 /// Id of a primary key.
-#[allow(unused)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct PkId {
     pub(crate) shard_id: ShardId,
     pub(crate) pk_index: PkIndex,
 }
 
 /// Config for the merge tree memtable.
-#[derive(Debug, Default, Clone)]
-pub struct MergeTreeConfig {}
+#[derive(Debug, Clone)]
+pub struct MergeTreeConfig {
+    /// Max keys in an index shard.
+    index_max_keys_per_shard: usize,
+    /// Max capacity of pk cache size.
+    pk_cache_size: ReadableSize,
+}
+
+impl Default for MergeTreeConfig {
+    fn default() -> Self {
+        Self {
+            // TODO(yingwen): Use 4096 or find a proper value.
+            index_max_keys_per_shard: 8192,
+            pk_cache_size: ReadableSize::mb(256),
+        }
+    }
+}
 
 /// Memtable based on a merge tree.
 pub struct MergeTreeMemtable {

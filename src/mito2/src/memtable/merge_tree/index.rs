@@ -35,21 +35,14 @@ pub(crate) struct IndexConfig {
     pub(crate) max_keys_per_shard: usize,
 }
 
-impl Default for IndexConfig {
-    fn default() -> Self {
-        Self {
-            // TODO(yingwen): Use 4096 or find a proper value.
-            max_keys_per_shard: 8192,
-        }
-    }
-}
-
 /// Primary key index.
 pub(crate) struct KeyIndex {
     config: IndexConfig,
     // TODO(yingwen): 1. Support multiple shard.
     shard: RwLock<MutableShard>,
 }
+
+pub(crate) type KeyIndexRef = Arc<KeyIndex>;
 
 impl KeyIndex {
     pub(crate) fn new(config: IndexConfig) -> KeyIndex {
@@ -59,11 +52,11 @@ impl KeyIndex {
         }
     }
 
-    pub(crate) fn add_primary_key(&self, key: &[u8]) -> Result<PkId> {
+    pub(crate) fn write_primary_key(&self, key: &[u8]) -> Result<PkId> {
         let mut shard = self.shard.write().unwrap();
-        let pkid = shard.try_add_primary_key(&self.config, key)?;
+        let pk_id = shard.try_add_primary_key(&self.config, key)?;
         // TODO(yingwen): Switch shard if current shard is full.
-        Ok(pkid.expect("shard is full"))
+        Ok(pk_id.expect("shard is full"))
     }
 
     pub(crate) fn scan_index(&self) -> Result<BoxedIndexReader> {
@@ -393,3 +386,5 @@ impl IndexReader for ReaderMerger {
         }
     }
 }
+
+// TODO(yingwen): Tests
