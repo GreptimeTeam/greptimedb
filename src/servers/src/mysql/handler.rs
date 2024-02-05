@@ -388,8 +388,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
         }
 
-        if let Some(c) = catalog_from_db {
-            self.session.set_catalog(c.into())
+        if catalog_from_db.is_some() {
+            self.session.set_catalog(catalog)
         }
         self.session.set_schema(schema.into());
 
