@@ -61,11 +61,12 @@ impl KeyIndex {
         Ok(pk_id.expect("shard is full"))
     }
 
-    pub(crate) fn scan_index(&self) -> Result<BoxedIndexReader> {
+    pub(crate) fn scan_shard(&self, shard_id: ShardId) -> Result<ShardReader> {
         let shard = self.shard.read().unwrap();
+        assert_eq!(shard.shard_id, shard_id);
         let reader = shard.scan_shard()?;
 
-        Ok(Box::new(reader))
+        Ok(reader)
     }
 
     /// Freezes the index.
@@ -158,14 +159,14 @@ impl Shard {
         }))
     }
 
-    fn scan_shard(&self) -> Result<BlocksReader> {
-        let sorted_pk_indices = self.pk_to_index.values().copied().collect();
+    fn scan_shard(&self) -> Result<ShardReader> {
+        let pk_indices = self.sorted_pk_indices();
         let block = self.key_buffer.finish_cloned();
         let mut blocks = Vec::with_capacity(self.dict_blocks.len() + 1);
         blocks.extend_from_slice(&self.dict_blocks);
         blocks.push(block);
 
-        Ok(BlocksReader::new(blocks, sorted_pk_indices))
+        Ok(ShardReader::new(blocks, pk_indices))
     }
 
     fn freeze(&mut self) -> Result<()> {
@@ -192,6 +193,14 @@ impl Shard {
             num_keys: self.num_keys,
             shared_index: self.shared_index.clone(),
         }
+    }
+
+    fn sorted_pk_indices(&self) -> Vec<PkIndex> {
+        if let Some(shared_index) = &self.shared_index {
+            return shared_index.values().copied().collect();
+        }
+
+        self.pk_to_index.values().copied().collect()
     }
 }
 
@@ -315,16 +324,16 @@ pub(crate) trait IndexReader: Send {
 
 pub(crate) type BoxedIndexReader = Box<dyn IndexReader>;
 
-pub(crate) struct BlocksReader {
+pub(crate) struct ShardReader {
     blocks: Vec<DictBlock>,
     sorted_pk_indices: Vec<PkIndex>,
     /// Current offset in the `sorted_pk_indices`.
     offset: usize,
 }
 
-impl BlocksReader {
-    fn new(blocks: Vec<DictBlock>, sorted_pk_indices: Vec<PkIndex>) -> BlocksReader {
-        BlocksReader {
+impl ShardReader {
+    fn new(blocks: Vec<DictBlock>, sorted_pk_indices: Vec<PkIndex>) -> ShardReader {
+        ShardReader {
             blocks,
             sorted_pk_indices,
             offset: 0,
@@ -335,9 +344,18 @@ impl BlocksReader {
         let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
         self.blocks[block_idx as usize].key_by_pk_index(pk_index)
     }
+
+    fn compute_pk_weights(&self, pk_weights: &mut Vec<u16>) {
+        pk_weights.clear();
+        pk_weights.resize(self.sorted_pk_indices.len(), 0);
+
+        for (weight, pk_index) in self.sorted_pk_indices.iter().enumerate() {
+            pk_weights[*pk_index as usize] = weight as u16;
+        }
+    }
 }
 
-impl IndexReader for BlocksReader {
+impl IndexReader for ShardReader {
     fn is_valid(&self) -> bool {
         self.offset < self.sorted_pk_indices.len()
     }
@@ -408,7 +426,7 @@ mod tests {
         expect.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         let mut result = Vec::with_capacity(expect.len());
-        let mut reader = index.scan_index().unwrap();
+        let mut reader = index.scan_shard(0).unwrap();
         while reader.is_valid() {
             result.push((reader.current_key().to_vec(), reader.current_pk_index()));
             reader.next();
