@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ops::Div;
-
 use common_time::DateTime;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
@@ -23,10 +21,8 @@ use hydroflow::bincode::Error;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use super::ScalarExpr;
 use crate::expr::error::{CastValueSnafu, DivisionByZeroSnafu};
-use crate::expr::InvalidArgumentSnafu;
-// TODO(discord9): more function & eval
+use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
 use crate::{
     expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu},
     repr::Row,
