@@ -70,3 +70,4 @@ uuid.workspace = true
 common-procedure-test.workspace = true
 common-test-util.workspace = true
 log-store.workspace = true
+rand.workspace = true

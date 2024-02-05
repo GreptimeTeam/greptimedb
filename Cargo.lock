@@ -5303,6 +5303,7 @@ dependencies = [
  "prometheus",
  "prost 0.12.3",
  "puffin",
+ "rand",
  "regex",
  "serde",
  "serde_json",

@@ -46,6 +46,7 @@ pub(crate) type ShardId = u32;
 pub(crate) type PkIndex = u16;
 /// Id of a primary key.
 #[allow(unused)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PkId {
     pub(crate) shard_id: ShardId,
     pub(crate) pk_index: PkIndex,
