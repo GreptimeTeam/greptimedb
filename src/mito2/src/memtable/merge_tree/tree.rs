@@ -18,13 +18,11 @@ use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use common_time::Timestamp;
-use moka::sync::Cache;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::cache::PK_ID_TYPE;
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::DataBuffer;
@@ -32,7 +30,6 @@ use crate::memtable::merge_tree::index::{IndexConfig, KeyIndex, KeyIndexRef};
 use crate::memtable::merge_tree::mutable::WriteMetrics;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
 use crate::memtable::{BoxedBatchIterator, KeyValues};
-use crate::metrics::CACHE_BYTES;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Initial capacity for the data buffer.
@@ -46,9 +43,6 @@ pub(crate) struct MergeTree {
     pub(crate) metadata: RegionMetadataRef,
     /// Primary key codec.
     row_codec: Arc<McmpRowCodec>,
-    // TODO(yingwen): The pk id cache allocates many small objects. We might need some benchmarks to see whether
-    // it is necessary to use another way to get the id from pk.
-    pk_id_cache: Option<PkIdCache>,
     parts: RwLock<TreeParts>,
 }
 
@@ -63,9 +57,6 @@ impl MergeTree {
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))
                 .collect(),
         );
-        let pk_id_cache = (!metadata.primary_key.is_empty()
-            && config.pk_cache_size.as_bytes() != 0)
-            .then(|| new_cache(config.pk_cache_size.as_bytes()));
 
         let index = (!metadata.primary_key.is_empty()).then(|| {
             Arc::new(KeyIndex::new(IndexConfig {
@@ -83,7 +74,6 @@ impl MergeTree {
             config: config.clone(),
             metadata,
             row_codec: Arc::new(row_codec),
-            pk_id_cache,
             parts: RwLock::new(parts),
         }
     }
@@ -172,7 +162,7 @@ impl MergeTree {
     }
 
     /// Forks an immutable tree. Returns a mutable tree that inherits the index
-    /// and cache of this tree.
+    /// of this tree.
     pub(crate) fn fork(&self, metadata: RegionMetadataRef) -> MergeTree {
         if metadata.primary_key != self.metadata.primary_key {
             // The priamry key is changed. We can't reuse fields.
@@ -196,24 +186,13 @@ impl MergeTree {
             metadata,
             // We can reuse row codec.
             row_codec: self.row_codec.clone(),
-            pk_id_cache: self.pk_id_cache.clone(),
             parts: RwLock::new(parts),
         }
     }
 
     fn write_with_key(&self, primary_key: &[u8], kv: KeyValue) -> Result<()> {
-        // Safety: `write()` ensures this is not None.
-        let cache = self.pk_id_cache.as_ref().unwrap();
-        if let Some(pk_id) = cache.get(primary_key) {
-            // The pk is in the cache.
-            self.write_with_id(pk_id, kv);
-            return Ok(());
-        }
-
-        // The pk is not in the cache, we need to write the pk to the index.
+        // Write the pk to the index.
         let pk_id = self.write_primary_key(primary_key)?;
-        // Also writes the pk to the cache.
-        self.add_pk_to_cache(primary_key, pk_id);
         // Writes data.
         self.write_with_id(pk_id, kv);
 
@@ -236,16 +215,6 @@ impl MergeTree {
 
         index.write_primary_key(key)
     }
-
-    fn add_pk_to_cache(&self, primary_key: &[u8], pk_id: PkId) {
-        let Some(pk_id_cache) = &self.pk_id_cache else {
-            return;
-        };
-        pk_id_cache.insert(primary_key.to_vec(), pk_id);
-        CACHE_BYTES
-            .with_label_values(&[PK_ID_TYPE])
-            .add(pk_id_cache_weight(primary_key, &pk_id).into())
-    }
 }
 
 struct TreeParts {
@@ -257,24 +226,4 @@ struct TreeParts {
     index: Option<KeyIndexRef>,
     /// Data buffer of the tree.
     data_buffer: DataBuffer,
-}
-
-/// Maps primary key to [PkId].
-type PkIdCache = Cache<Vec<u8>, PkId>;
-
-fn pk_id_cache_weight(k: &[u8], _v: &PkId) -> u32 {
-    (k.len() + std::mem::size_of::<PkId>()) as u32
-}
-
-fn new_cache(cache_size: u64) -> PkIdCache {
-    PkIdCache::builder()
-        .max_capacity(cache_size)
-        .weigher(|k, v| pk_id_cache_weight(k.as_slice(), v))
-        .eviction_listener(|k, v, _cause| {
-            let size = pk_id_cache_weight(&k, &v);
-            CACHE_BYTES
-                .with_label_values(&[PK_ID_TYPE])
-                .sub(size.into());
-        })
-        .build()
 }

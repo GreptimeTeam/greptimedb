@@ -56,8 +56,6 @@ pub(crate) struct PkId {
 pub struct MergeTreeConfig {
     /// Max keys in an index shard.
     index_max_keys_per_shard: usize,
-    /// Max capacity of pk cache size.
-    pk_cache_size: ReadableSize,
 }
 
 impl Default for MergeTreeConfig {
@@ -65,7 +63,6 @@ impl Default for MergeTreeConfig {
         Self {
             // TODO(yingwen): Use 4096 or find a proper value.
             index_max_keys_per_shard: 8192,
-            pk_cache_size: ReadableSize::mb(256),
         }
     }
 }
@@ -154,6 +151,8 @@ impl Memtable for MergeTreeMemtable {
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         let tree = self.tree.fork(metadata.clone());
 
+        // TODO(yingwen): We should also add the size of the index to the alloc
+        // tracker.
         Arc::new(MergeTreeMemtable::with_tree(
             id,
             tree,
