@@ -20,17 +20,14 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use api::v1::OpType;
-use common_telemetry::{debug, error, trace};
+use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_telemetry::{debug, error};
 use common_time::Timestamp;
-use datafusion::physical_plan::PhysicalExpr;
-use datafusion_common::ScalarValue;
-use datafusion_expr::ColumnarValue;
 use datatypes::arrow;
-use datatypes::arrow::array::{ArrayRef, BooleanArray};
-use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::arrow::array::ArrayRef;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector, VectorRef};
-use datatypes::value::ValueRef;
+use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
     Helper, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
 };
@@ -39,10 +36,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::error::{
-    ComputeArrowSnafu, ConvertVectorSnafu, NewRecordBatchSnafu, PrimaryKeyLengthMismatchSnafu,
-    Result,
-};
+use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
@@ -315,48 +309,39 @@ impl SeriesSet {
 
     /// Iterates all series in [SeriesSet].
     fn iter_series(&self, projection: HashSet<ColumnId>, predicate: Option<Predicate>) -> Iter {
-        let (primary_key_builders, primary_key_schema) =
-            primary_key_builders(&self.region_metadata, 1);
+        let primary_key_schema = primary_key_schema(&self.region_metadata);
+        let primary_key_datatypes = self
+            .region_metadata
+            .primary_key_columns()
+            .map(|pk| pk.column_schema.data_type.clone())
+            .collect();
 
-        let physical_exprs: Vec<_> = predicate
-            .and_then(|p| p.to_physical_exprs(&primary_key_schema).ok())
-            .unwrap_or_default();
-
-        Iter {
-            metadata: self.region_metadata.clone(),
-            series: self.series.clone(),
+        Iter::new(
+            self.region_metadata.clone(),
+            self.series.clone(),
             projection,
-            last_key: None,
-            predicate: physical_exprs,
-            pk_schema: primary_key_schema,
-            primary_key_builders,
-            codec: self.codec.clone(),
-            metrics: Metrics::default(),
-        }
+            predicate,
+            primary_key_schema,
+            primary_key_datatypes,
+            self.codec.clone(),
+        )
     }
 }
 
-/// Creates primary key array builders and arrow's schema for primary keys of given region schema.
-fn primary_key_builders(
-    region_metadata: &RegionMetadataRef,
-    num_pk_rows: usize,
-) -> (Vec<Box<dyn MutableVector>>, arrow::datatypes::SchemaRef) {
-    let (builders, fields): (_, Vec<_>) = region_metadata
+/// Creates an arrow [SchemaRef](arrow::datatypes::SchemaRef) that only contains primary keys
+/// of given region schema
+fn primary_key_schema(region_metadata: &RegionMetadataRef) -> arrow::datatypes::SchemaRef {
+    let fields = region_metadata
         .primary_key_columns()
         .map(|pk| {
-            (
-                pk.column_schema
-                    .data_type
-                    .create_mutable_vector(num_pk_rows),
-                arrow::datatypes::Field::new(
-                    pk.column_schema.name.clone(),
-                    pk.column_schema.data_type.as_arrow_type(),
-                    pk.column_schema.is_nullable(),
-                ),
+            arrow::datatypes::Field::new(
+                pk.column_schema.name.clone(),
+                pk.column_schema.data_type.as_arrow_type(),
+                pk.column_schema.is_nullable(),
             )
         })
-        .unzip();
-    (builders, Arc::new(arrow::datatypes::Schema::new(fields)))
+        .collect::<Vec<_>>();
+    Arc::new(arrow::datatypes::Schema::new(fields))
 }
 
 /// Metrics for reading the memtable.
@@ -379,11 +364,43 @@ struct Iter {
     series: Arc<SeriesRwLockMap>,
     projection: HashSet<ColumnId>,
     last_key: Option<Vec<u8>>,
-    predicate: Vec<Arc<dyn PhysicalExpr>>,
+    predicate: Vec<SimpleFilterEvaluator>,
     pk_schema: arrow::datatypes::SchemaRef,
-    primary_key_builders: Vec<Box<dyn MutableVector>>,
+    pk_datatypes: Vec<ConcreteDataType>,
     codec: Arc<McmpRowCodec>,
     metrics: Metrics,
+}
+
+impl Iter {
+    pub(crate) fn new(
+        metadata: RegionMetadataRef,
+        series: Arc<SeriesRwLockMap>,
+        projection: HashSet<ColumnId>,
+        predicate: Option<Predicate>,
+        pk_schema: arrow::datatypes::SchemaRef,
+        pk_datatypes: Vec<ConcreteDataType>,
+        codec: Arc<McmpRowCodec>,
+    ) -> Self {
+        let simple_filters = predicate
+            .map(|p| {
+                p.exprs()
+                    .iter()
+                    .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Self {
+            metadata,
+            series,
+            projection,
+            last_key: None,
+            predicate: simple_filters,
+            pk_schema,
+            pk_datatypes,
+            codec,
+            metrics: Metrics::default(),
+        }
+    }
 }
 
 impl Drop for Iter {
@@ -425,7 +442,7 @@ impl Iterator for Iter {
                     &self.codec,
                     primary_key.as_slice(),
                     &mut series,
-                    &mut self.primary_key_builders,
+                    &self.pk_datatypes,
                     self.pk_schema.clone(),
                     &self.predicate,
                 )
@@ -456,88 +473,48 @@ fn prune_primary_key(
     codec: &Arc<McmpRowCodec>,
     pk: &[u8],
     series: &mut Series,
-    builders: &mut [Box<dyn MutableVector>],
+    datatypes: &[ConcreteDataType],
     pk_schema: arrow::datatypes::SchemaRef,
-    predicate: &[Arc<dyn PhysicalExpr>],
+    predicates: &[SimpleFilterEvaluator],
 ) -> bool {
     // no primary key, we simply return true.
     if pk_schema.fields().is_empty() {
         return true;
     }
 
-    if let Some(rb) = series.pk_cache.as_ref() {
-        prune_inner(predicate, rb).unwrap_or(true)
+    // retrieve primary key values from cache or decode from bytes.
+    let pk_values = if let Some(pk_values) = series.pk_cache.as_ref() {
+        pk_values
     } else {
-        let rb = match pk_to_record_batch(codec, pk, builders, pk_schema) {
-            Ok(rb) => rb,
-            Err(e) => {
-                error!(e; "Failed to build record batch from primary keys");
-                return true;
-            }
-        };
-        let res = prune_inner(predicate, &rb).unwrap_or(true);
-        series.update_pk_cache(rb);
-        res
-    }
-}
+        let pk_values = codec.decode(pk);
+        if let Err(e) = pk_values {
+            error!(e; "Failed to decode primary key");
+            return true;
+        }
+        series.update_pk_cache(pk_values.unwrap());
+        series.pk_cache.as_ref().unwrap()
+    };
 
-fn prune_inner(predicates: &[Arc<dyn PhysicalExpr>], primary_key: &RecordBatch) -> Result<bool> {
-    for expr in predicates {
-        // evaluate every filter against primary key
-        let Ok(eva) = expr.evaluate(primary_key) else {
+    // evaluate predicates against primary key values
+    let mut result = true;
+    for predicate in predicates {
+        // ignore predicates that are not referencing primary key columns
+        let Ok(index) = pk_schema.index_of(predicate.column_name()) else {
             continue;
         };
-        let result = match eva {
-            ColumnarValue::Array(array) => {
-                let predicate_array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                predicate_array
-                    .into_iter()
-                    .map(|x| x.unwrap_or(true))
-                    .next()
-                    .unwrap_or(true)
-            }
-            // result was a column
-            ColumnarValue::Scalar(ScalarValue::Boolean(v)) => v.unwrap_or(true),
-            _ => {
-                unreachable!("Unexpected primary key record batch evaluation result: {:?}, primary key: {:?}", eva, primary_key);
-            }
-        };
-        trace!(
-            "Evaluate primary key {:?} against filter: {:?}, result: {:?}",
-            primary_key,
-            expr,
-            result
-        );
-        if !result {
-            return Ok(false);
-        }
+        // Safety: arrow schema and datatypes are constructed from the same source.
+        let scalar_value = pk_values[index]
+            .try_to_scalar_value(&datatypes[index])
+            .unwrap();
+        result &= predicate.evaluate_scalar(&scalar_value).unwrap_or(true);
     }
-    Ok(true)
-}
 
-fn pk_to_record_batch(
-    codec: &Arc<McmpRowCodec>,
-    bytes: &[u8],
-    builders: &mut [Box<dyn MutableVector>],
-    pk_schema: arrow::datatypes::SchemaRef,
-) -> Result<RecordBatch> {
-    let pk_values = codec.decode(bytes).unwrap();
-
-    let arrays = builders
-        .iter_mut()
-        .zip(pk_values.iter())
-        .map(|(builder, pk_value)| {
-            builder.push_value_ref(pk_value.as_value_ref());
-            builder.to_vector().to_arrow_array()
-        })
-        .collect();
-
-    RecordBatch::try_new(pk_schema, arrays).context(NewRecordBatchSnafu)
+    result
 }
 
 /// A `Series` holds a list of field values of some given primary key.
 struct Series {
-    pk_cache: Option<RecordBatch>,
+    pk_cache: Option<Vec<Value>>,
     active: ValueBuilder,
     frozen: Vec<Values>,
 }
@@ -556,8 +533,8 @@ impl Series {
         self.active.push(ts, sequence, op_type as u8, values);
     }
 
-    fn update_pk_cache(&mut self, pk_batch: RecordBatch) {
-        self.pk_cache = Some(pk_batch);
+    fn update_pk_cache(&mut self, pk_values: Vec<Value>) {
+        self.pk_cache = Some(pk_values);
     }
 
     /// Freezes the active part and push it to `frozen`.

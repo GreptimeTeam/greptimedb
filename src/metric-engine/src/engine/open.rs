@@ -26,7 +26,7 @@ use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use super::MetricEngineInner;
-use crate::error::{Error, LogicalRegionNotFoundSnafu, OpenMitoRegionSnafu, Result};
+use crate::error::{OpenMitoRegionSnafu, Result};
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils;
 

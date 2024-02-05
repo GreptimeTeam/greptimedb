@@ -53,7 +53,7 @@ runs:
       uses: docker/setup-buildx-action@v2
 
     - name: Download amd64 artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.amd64-artifact-name }}
 
@@ -66,7 +66,7 @@ runs:
         mv ${{ inputs.amd64-artifact-name }} amd64
 
     - name: Download arm64 artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       if: ${{ inputs.arm64-artifact-name }}
       with:
         name: ${{ inputs.arm64-artifact-name }}

@@ -33,7 +33,7 @@ impl StatementExecutor {
         stmt: DescribeTable,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
+        let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), &query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 

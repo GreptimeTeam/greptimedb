@@ -3397,6 +3397,7 @@ version = "0.6.0"
 dependencies = [
  "api",
  "bimap",
+ "common-decimal",
  "common-error",
  "common-macro",
  "common-meta",

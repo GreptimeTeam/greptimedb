@@ -91,7 +91,7 @@ pub fn get_workspace_root() -> String {
     runner_crate_path.into_os_string().into_string().unwrap()
 }
 
-pub fn get_binary_dir(mode: &str) -> String {
+pub fn get_binary_dir(mode: &str) -> PathBuf {
     // first go to the workspace root.
     let mut workspace_root = PathBuf::from(get_workspace_root());
 
@@ -99,7 +99,7 @@ pub fn get_binary_dir(mode: &str) -> String {
     workspace_root.push("target");
     workspace_root.push(mode);
 
-    workspace_root.into_os_string().into_string().unwrap()
+    workspace_root
 }
 
 /// Spin-waiting a socket address is available, or timeout.

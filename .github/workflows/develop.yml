@@ -9,6 +9,7 @@ on:
       - '.dockerignore'
       - 'docker/**'
       - '.gitignore'
+      - 'grafana/**'
   push:
     branches:
       - main
@@ -19,6 +20,7 @@ on:
       - '.dockerignore'
       - 'docker/**'
       - '.gitignore'
+      - 'grafana/**'
   workflow_dispatch:
 
 name: CI
@@ -56,6 +58,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with: 
+          # Shares across multiple jobs
+          # Shares with `Clippy` job
+          shared-key: "check-lint"
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
 
@@ -71,13 +77,16 @@ jobs:
           toolchain: stable
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with: 
+          # Shares across multiple jobs
+          shared-key: "check-toml"
       - name: Install taplo
         run: cargo +stable install taplo-cli --version ^0.8 --locked
       - name: Run taplo
         run: taplo format --check
 
-  sqlness:
-    name: Sqlness Test
+  build:
+    name: Build GreptimeDB binaries
     if: github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
@@ -87,15 +96,50 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-binaries"
+      - name: Build greptime binaries
+        shell: bash
+        run: cargo build
+      - name: Pack greptime binaries
+        shell: bash
+        run: |
+          mkdir bins && \
+          mv ./target/debug/greptime bins && \
+          mv ./target/debug/sqlness-runner bins
+      - name: Print greptime binaries info
+        run: ls -lh bins
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: bins
+          version: current
+
+  sqlness:
+    name: Sqlness Test
+    if: github.event.pull_request.draft == false
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04 ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
-        run: cargo sqlness
+        run: ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3
@@ -107,6 +151,7 @@ jobs:
   sqlness-kafka-wal:
     name: Sqlness Test with Kafka Wal
     if: github.event.pull_request.draft == false
+    needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -114,19 +159,18 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
       - name: Setup kafka server
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
-        run: cargo sqlness -w kafka -k 127.0.0.1:9092
+        run: ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3
@@ -151,6 +195,9 @@ jobs:
           components: rustfmt
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with: 
+          # Shares across multiple jobs
+          shared-key: "check-rust-fmt"
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
 
@@ -170,6 +217,10 @@ jobs:
           components: clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with: 
+          # Shares across multiple jobs
+          # Shares with `Check` job
+          shared-key: "check-lint"
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -192,6 +243,9 @@ jobs:
           components: llvm-tools-preview
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov

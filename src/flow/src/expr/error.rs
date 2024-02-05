@@ -29,7 +29,7 @@ use snafu::{Location, Snafu};
 #[stack_trace_debug]
 pub enum EvalError {
     #[snafu(display("Division by zero"))]
-    DivisionByZero,
+    DivisionByZero { location: Location },
 
     #[snafu(display("Type mismatch: expected {expected}, actual {actual}"))]
     TypeMismatch {

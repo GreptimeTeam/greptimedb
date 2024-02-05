@@ -55,10 +55,10 @@ impl SstVersion {
     ) {
         for file in files_to_add {
             let level = file.level;
-            let handle = FileHandle::new(file, file_purger.clone());
-            let file_id = handle.file_id();
-            let old = self.levels[level as usize].files.insert(file_id, handle);
-            assert!(old.is_none(), "Adds an existing file: {file_id}");
+            self.levels[level as usize]
+                .files
+                .entry(file.file_id)
+                .or_insert_with(|| FileHandle::new(file, file_purger.clone()));
         }
     }
 
@@ -156,4 +156,33 @@ fn new_level_meta_vec() -> LevelMetaArray {
         .collect::<Vec<_>>()
         .try_into()
         .unwrap() // safety: LevelMetaArray is a fixed length array with length MAX_LEVEL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::new_noop_file_purger;
+
+    #[test]
+    fn test_add_files() {
+        let purger = new_noop_file_purger();
+
+        let files = (1..=3)
+            .map(|_| FileMeta {
+                file_id: FileId::random(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+
+        let mut version = SstVersion::new();
+        // files[1] is added multiple times, and that's ok.
+        version.add_files(purger.clone(), files[..=1].iter().cloned());
+        version.add_files(purger, files[1..].iter().cloned());
+
+        let added_files = &version.levels()[0].files;
+        assert_eq!(added_files.len(), 3);
+        files.iter().for_each(|f| {
+            assert!(added_files.contains_key(&f.file_id));
+        });
+    }
 }
