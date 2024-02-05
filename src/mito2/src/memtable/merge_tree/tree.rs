@@ -49,7 +49,6 @@ pub(crate) struct MergeTree {
     // TODO(yingwen): The pk id cache allocates many small objects. We might need some benchmarks to see whether
     // it is necessary to use another way to get the id from pk.
     pk_id_cache: Option<PkIdCache>,
-    // TODO(yingwen): Freeze parts.
     parts: RwLock<TreeParts>,
 }
 

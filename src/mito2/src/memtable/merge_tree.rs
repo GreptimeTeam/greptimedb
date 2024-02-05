@@ -118,7 +118,8 @@ impl Memtable for MergeTreeMemtable {
     fn freeze(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
 
-        // TODO(yingwen): Freeze the tree.
+        self.tree.freeze()?;
+
         Ok(())
     }
 
@@ -150,8 +151,14 @@ impl Memtable for MergeTreeMemtable {
         }
     }
 
-    fn fork(&self, _id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
-        unimplemented!()
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+        let tree = self.tree.fork(metadata.clone());
+
+        Arc::new(MergeTreeMemtable::with_tree(
+            id,
+            tree,
+            self.alloc_tracker.write_buffer_manager(),
+        ))
     }
 }
 
@@ -163,9 +170,17 @@ impl MergeTreeMemtable {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: &MergeTreeConfig,
     ) -> Self {
+        Self::with_tree(id, MergeTree::new(metadata, config), write_buffer_manager)
+    }
+
+    fn with_tree(
+        id: MemtableId,
+        tree: MergeTree,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+    ) -> Self {
         Self {
             id,
-            tree: Arc::new(MergeTree::new(metadata, config)),
+            tree: Arc::new(tree),
             alloc_tracker: AllocTracker::new(write_buffer_manager),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
