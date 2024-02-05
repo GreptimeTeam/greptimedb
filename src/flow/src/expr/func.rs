@@ -21,12 +21,11 @@ use hydroflow::bincode::Error;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::expr::error::{CastValueSnafu, DivisionByZeroSnafu};
-use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
-use crate::{
-    expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu},
-    repr::Row,
+use crate::expr::error::{
+    CastValueSnafu, DivisionByZeroSnafu, EvalError, TryFromValueSnafu, TypeMismatchSnafu,
 };
+use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
+use crate::repr::Row;
 
 /// UnmaterializableFunc is a function that can't be eval independently,
 /// and require special handling
