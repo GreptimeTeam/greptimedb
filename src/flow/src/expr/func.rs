@@ -101,3 +101,26 @@ pub enum VariadicFunc {
     And,
     Or,
 }
+
+impl UnaryFunc {
+    pub fn eval(&self, values: &[Value], expr: &ScalarExpr) -> Result<Value, EvalError> {
+        todo!()
+    }
+}
+
+impl BinaryFunc {
+    pub fn eval(
+        &self,
+        values: &[Value],
+        expr1: &ScalarExpr,
+        expr2: &ScalarExpr,
+    ) -> Result<Value, EvalError> {
+        todo!()
+    }
+}
+
+impl VariadicFunc {
+    pub fn eval(&self, values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
+        todo!()
+    }
+}
