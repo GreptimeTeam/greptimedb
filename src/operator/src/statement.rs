@@ -160,7 +160,7 @@ impl StatementExecutor {
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
@@ -168,7 +168,7 @@ impl StatementExecutor {
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
@@ -186,7 +186,7 @@ impl StatementExecutor {
 
             Statement::ShowCreateTable(show) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(&show.table_name, query_ctx.clone())
+                    table_idents_to_full_name(&show.table_name, &query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
 
@@ -298,9 +298,10 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         CopyTable::To(arg) => arg,
         CopyTable::From(arg) => arg,
     };
-    let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_name, query_ctx)
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
+    let (catalog_name, schema_name, table_name) =
+        table_idents_to_full_name(&table_name, &query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
 
     let pattern = with
         .get(common_datasource::file_format::FILE_PATTERN)

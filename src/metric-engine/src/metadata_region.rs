@@ -229,13 +229,11 @@ impl MetadataRegion {
         format!("{COLUMN_PREFIX}{}_", region_id.as_u64())
     }
 
-    #[allow(dead_code)]
     pub fn parse_region_key(key: &str) -> Option<&str> {
         key.strip_prefix(REGION_PREFIX)
     }
 
     /// Parse column key to (logical_region_id, column_name)
-    #[allow(dead_code)]
     pub fn parse_column_key(key: &str) -> Result<Option<(RegionId, String)>> {
         if let Some(stripped) = key.strip_prefix(COLUMN_PREFIX) {
             let mut iter = stripped.split('_');
@@ -271,7 +269,6 @@ impl MetadataRegion {
 // simulate to `KvBackend`
 //
 // methods in this block assume the given region id is transformed.
-#[allow(unused_variables)]
 impl MetadataRegion {
     /// Put if not exist, return if this put operation is successful (error other
     /// than "key already exist" will be wrapped in [Err]).

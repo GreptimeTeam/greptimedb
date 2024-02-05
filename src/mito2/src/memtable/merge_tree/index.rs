@@ -15,7 +15,7 @@
 //! Primary key index of the merge tree.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::{Arc, RwLock};
 
 use datatypes::arrow::array::{Array, ArrayBuilder, BinaryArray, BinaryBuilder};
@@ -93,8 +93,10 @@ impl KeyIndex {
 /// Mutable shard for the index.
 struct MutableShard {
     shard_id: ShardId,
+    // TODO(yingwen): Reuse keys.
+    pk_to_index: BTreeMap<Vec<u8>, PkIndex>,
     key_buffer: KeyBuffer,
-    dict_blocks: Vec<DictBlockRef>,
+    dict_blocks: Vec<DictBlock>,
     num_keys: usize,
 }
 
@@ -102,6 +104,7 @@ impl MutableShard {
     fn new(shard_id: ShardId) -> MutableShard {
         MutableShard {
             shard_id,
+            pk_to_index: BTreeMap::new(),
             key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
             dict_blocks: Vec::new(),
             num_keys: 0,
@@ -114,14 +117,24 @@ impl MutableShard {
             return Ok(None);
         }
 
+        // Already in the shard.
+        if let Some(pk_index) = self.pk_to_index.get(key).copied() {
+            return Ok(Some(PkId {
+                shard_id: self.shard_id,
+                pk_index,
+            }));
+        }
+        // A new key.
+
         if self.key_buffer.len() >= MAX_KEYS_PER_BLOCK.into() {
             // The write buffer is full.
-            let dict_block = self.key_buffer.finish()?;
-            self.dict_blocks.push(Arc::new(dict_block));
+            let dict_block = self.key_buffer.finish();
+            self.dict_blocks.push(dict_block);
         }
 
         // Safety: we check the buffer length.
         let pk_index = self.key_buffer.push_key(key);
+        self.pk_to_index.insert(key.to_vec(), pk_index);
         self.num_keys += 1;
 
         Ok(Some(PkId {
@@ -130,15 +143,14 @@ impl MutableShard {
         }))
     }
 
-    fn scan_shard(&self) -> Result<ReaderMerger> {
-        let block = self.key_buffer.finish_cloned()?;
-        let mut readers = Vec::with_capacity(self.dict_blocks.len() + 1);
-        readers.push(DictBlockReader::new(Arc::new(block)));
-        for block in &self.dict_blocks {
-            readers.push(DictBlockReader::new(block.clone()));
-        }
+    fn scan_shard(&self) -> Result<BlocksReader> {
+        let sorted_pk_indices = self.pk_to_index.values().copied().collect();
+        let block = self.key_buffer.finish_cloned();
+        let mut blocks = Vec::with_capacity(self.dict_blocks.len() + 1);
+        blocks.extend_from_slice(&self.dict_blocks);
+        blocks.push(block);
 
-        Ok(ReaderMerger::from_readers(readers))
+        Ok(BlocksReader::new(blocks, sorted_pk_indices))
     }
 
     fn freeze(&mut self) -> Result<()> {
@@ -146,14 +158,15 @@ impl MutableShard {
             return Ok(());
         }
 
-        let dict_block = self.key_buffer.finish()?;
-        self.dict_blocks.push(Arc::new(dict_block));
+        let dict_block = self.key_buffer.finish();
+        self.dict_blocks.push(dict_block);
         Ok(())
     }
 
     fn fork(&self) -> MutableShard {
         MutableShard {
             shard_id: self.shard_id,
+            pk_to_index: BTreeMap::new(),
             key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
             dict_blocks: self.dict_blocks.clone(),
             num_keys: self.num_keys,
@@ -219,64 +232,29 @@ impl KeyBuffer {
         &values[start as usize..end as usize]
     }
 
-    fn finish(&mut self) -> Result<DictBlock> {
-        // TODO(yingwen): We can check whether keys are already sorted first. But
-        // we might need some benchmarks.
+    fn finish(&mut self) -> DictBlock {
         let primary_key = self.primary_key_builder.finish();
-        // Also resets the pk index for the next block.
-        self.next_pk_index = 0;
 
-        DictBlock::try_from_unsorted(primary_key)
+        DictBlock::from_unsorted(primary_key)
     }
 
-    fn finish_cloned(&self) -> Result<DictBlock> {
+    fn finish_cloned(&self) -> DictBlock {
         let primary_key = self.primary_key_builder.finish_cloned();
 
-        DictBlock::try_from_unsorted(primary_key)
+        DictBlock::from_unsorted(primary_key)
     }
 }
 
+// The array should be cheap to clone.
+#[derive(Clone)]
 struct DictBlock {
-    /// Sorted primary key buffer.
+    /// Primary key buffer (unsorted).
     primary_key: BinaryArray,
-    /// PkIndex sorted by primary keys.
-    ordered_pk_index: Vec<PkIndex>,
-    /// Sort weight of each PkIndex. It also maps the PkIndex to the position
-    /// of the primary key in the sorted key buffer.
-    index_weight: Vec<u16>,
 }
 
-type DictBlockRef = Arc<DictBlock>;
-
 impl DictBlock {
-    fn try_from_unsorted(primary_key: BinaryArray) -> Result<Self> {
-        assert!(primary_key.len() <= PkIndex::MAX.into());
-
-        // Sort by primary key.
-        let indices =
-            compute::sort_to_indices(&primary_key, None, None).context(ComputeArrowSnafu)?;
-        let primary_key = compute::take(&primary_key, &indices, None).context(ComputeArrowSnafu)?;
-
-        // Weight of each pk index. We have check the length of the primary key.
-        let index_weight: Vec<_> = indices.values().iter().map(|idx| *idx as u16).collect();
-
-        let mut ordered_pk_index = vec![0; primary_key.len()];
-        for (pk_index, dest_pos) in index_weight.iter().enumerate() {
-            debug_assert!(pk_index <= PkIndex::MAX.into());
-
-            ordered_pk_index[*dest_pos as usize] = pk_index as PkIndex;
-        }
-
-        let dict = DictBlock {
-            primary_key: primary_key
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap()
-                .clone(),
-            ordered_pk_index,
-            index_weight,
-        };
-        Ok(dict)
+    fn from_unsorted(primary_key: BinaryArray) -> Self {
+        Self { primary_key }
     }
 
     fn len(&self) -> usize {
@@ -285,19 +263,8 @@ impl DictBlock {
 
     /// Get key by [PkIndex].
     fn key_by_pk_index(&self, index: PkIndex) -> &[u8] {
-        // Casting index to usize is safe.
-        let pos = self.index_weight[index as usize];
-        self.key_at(pos as usize)
-    }
-
-    /// Get key at position.
-    fn key_at(&self, pos: usize) -> &[u8] {
-        self.primary_key.value(pos)
-    }
-
-    /// Get [PkIndex] at position.
-    fn pk_index_at(&self, pos: usize) -> PkIndex {
-        self.ordered_pk_index[pos]
+        let pos = index % MAX_KEYS_PER_BLOCK;
+        self.primary_key.value(pos as usize)
     }
 }
 
@@ -327,106 +294,105 @@ pub(crate) trait IndexReader: Send {
 
 pub(crate) type BoxedIndexReader = Box<dyn IndexReader>;
 
-struct DictBlockReader {
-    block: DictBlockRef,
-    current: usize,
+pub(crate) struct BlocksReader {
+    blocks: Vec<DictBlock>,
+    sorted_pk_indices: Vec<PkIndex>,
+    /// Current offset in the `sorted_pk_indices`.
+    offset: usize,
 }
 
-impl DictBlockReader {
-    fn new(block: DictBlockRef) -> Self {
-        Self { block, current: 0 }
+impl BlocksReader {
+    fn new(blocks: Vec<DictBlock>, sorted_pk_indices: Vec<PkIndex>) -> BlocksReader {
+        BlocksReader {
+            blocks,
+            sorted_pk_indices,
+            offset: 0,
+        }
+    }
+
+    fn key_by_pk_index(&self, pk_index: PkIndex) -> &[u8] {
+        let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
+        self.blocks[block_idx as usize].key_by_pk_index(pk_index)
     }
 }
 
-impl IndexReader for DictBlockReader {
+impl IndexReader for BlocksReader {
     fn is_valid(&self) -> bool {
-        self.current < self.block.len()
+        self.offset < self.sorted_pk_indices.len()
     }
 
     fn current_key(&self) -> &[u8] {
-        self.block.key_at(self.current)
+        let pk_index = self.current_pk_index();
+        self.key_by_pk_index(pk_index)
     }
 
     fn current_pk_index(&self) -> PkIndex {
-        self.block.pk_index_at(self.current)
+        assert!(self.is_valid());
+        self.sorted_pk_indices[self.offset]
     }
 
     fn next(&mut self) {
         assert!(self.is_valid());
-        self.current += 1;
+        self.offset += 1;
     }
 }
 
-/// Wrapper for heap merge.
-///
-/// Reader inside the wrapper must be valid.
-struct HeapWrapper(DictBlockReader);
+#[cfg(test)]
+mod tests {
+    use rand::Rng;
 
-impl PartialEq for HeapWrapper {
-    fn eq(&self, other: &HeapWrapper) -> bool {
-        self.0.current_key() == other.0.current_key()
-    }
-}
+    use super::*;
 
-impl Eq for HeapWrapper {}
-
-impl PartialOrd for HeapWrapper {
-    fn partial_cmp(&self, other: &HeapWrapper) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for HeapWrapper {
-    fn cmp(&self, other: &HeapWrapper) -> Ordering {
-        // The std binary heap is a max heap, but we want the nodes are ordered in
-        // ascend order, so we compare the nodes in reverse order.
-        other.0.current_key().cmp(self.0.current_key())
-    }
-}
-
-struct ReaderMerger {
-    heap: BinaryHeap<HeapWrapper>,
-}
-
-impl ReaderMerger {
-    fn from_readers(readers: Vec<DictBlockReader>) -> ReaderMerger {
-        let heap = readers
-            .into_iter()
-            .filter_map(|reader| {
-                if reader.is_valid() {
-                    Some(HeapWrapper(reader))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        ReaderMerger { heap }
-    }
-}
-
-impl IndexReader for ReaderMerger {
-    fn is_valid(&self) -> bool {
-        !self.heap.is_empty()
-    }
-
-    fn current_key(&self) -> &[u8] {
-        self.heap.peek().unwrap().0.current_key()
-    }
-
-    fn current_pk_index(&self) -> PkIndex {
-        self.heap.peek().unwrap().0.current_pk_index()
-    }
-
-    fn next(&mut self) {
-        while let Some(mut top) = self.heap.pop() {
-            top.0.next();
-            if top.0.is_valid() {
-                self.heap.push(top);
-                break;
-            }
-            // Top is exhausted, try next node.
+    fn prepare_input_keys(num_keys: usize) -> Vec<Vec<u8>> {
+        let prefix = ["a", "b", "c", "d", "e", "f"];
+        let mut rng = rand::thread_rng();
+        let mut keys = Vec::with_capacity(num_keys);
+        for i in 0..num_keys {
+            let prefix_idx = rng.gen_range(0..prefix.len());
+            // We don't need to decode the priamry key in index's test so we format the string
+            // into the key.
+            let key = format!("{}{}", prefix[prefix_idx], i);
+            keys.push(key.into_bytes());
         }
+
+        keys
+    }
+
+    #[test]
+    fn test_write_scan_single_shard() {
+        let num_keys = MAX_KEYS_PER_BLOCK * 2 + MAX_KEYS_PER_BLOCK / 2;
+        let keys = prepare_input_keys(num_keys.into());
+
+        let index = KeyIndex::new(IndexConfig {
+            max_keys_per_shard: (MAX_KEYS_PER_BLOCK * 3).into(),
+        });
+        let mut last_pk_id = None;
+        for key in &keys {
+            let pk_id = index.write_primary_key(key).unwrap();
+            last_pk_id = Some(pk_id);
+        }
+        assert_eq!(
+            PkId {
+                shard_id: 0,
+                pk_index: num_keys - 1,
+            },
+            last_pk_id.unwrap()
+        );
+
+        let mut expect: Vec<_> = keys
+            .into_iter()
+            .enumerate()
+            .map(|(i, key)| (key, i as PkIndex))
+            .collect();
+        expect.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        let mut result = Vec::with_capacity(expect.len());
+        let mut reader = index.scan_index().unwrap();
+        while reader.is_valid() {
+            result.push((reader.current_key().to_vec(), reader.current_pk_index()));
+            reader.next();
+        }
+        assert_eq!(expect, result);
     }
 }
 

@@ -79,10 +79,6 @@ impl VersionControlBuilder {
         self.file_purger.clone()
     }
 
-    pub(crate) fn memtable_builder(&self) -> MemtableBuilderRef {
-        self.memtable_builder.clone()
-    }
-
     pub(crate) fn push_l0_file(&mut self, start_ms: i64, end_ms: i64) -> &mut Self {
         let file_id = FileId::random();
         self.files.insert(

@@ -62,6 +62,11 @@ struct Args {
     /// from starting a kafka cluster, and use the given endpoint as kafka backend.
     #[clap(short, long)]
     kafka_wal_broker_endpoints: Option<String>,
+
+    /// The path to the directory where GreptimeDB's binaries resides.
+    /// If not set, sqlness will build GreptimeDB on the fly.
+    #[clap(long)]
+    bins_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -94,6 +99,9 @@ async fn main() {
         },
     };
 
-    let runner = Runner::new(config, Env::new(data_home, args.server_addr, wal));
+    let runner = Runner::new(
+        config,
+        Env::new(data_home, args.server_addr, wal, args.bins_dir),
+    );
     runner.run().await.unwrap();
 }

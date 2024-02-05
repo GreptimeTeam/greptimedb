@@ -105,7 +105,7 @@ impl GrpcQueryHandler for Instance {
                         // TODO(weny): supports to create multiple region table.
                         let _ = self
                             .statement_executor
-                            .create_table_inner(&mut expr, None)
+                            .create_table_inner(&mut expr, None, &ctx)
                             .await?;
                         Output::AffectedRows(0)
                     }

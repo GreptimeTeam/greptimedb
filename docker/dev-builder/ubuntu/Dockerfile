@@ -40,7 +40,7 @@ RUN apt-get -y purge python3.8 && \
 # wildcard here. However, that requires the git's config files and the submodules all owned by the very same user.
 # It's troublesome to do this since the dev build runs in Docker, which is under user "root"; while outside the Docker,
 # it can be a different user that have prepared the submodules.
-RUN git config --global --add safe.directory ‘*’
+RUN git config --global --add safe.directory *
 
 # Install Python dependencies.
 COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirements.txt
