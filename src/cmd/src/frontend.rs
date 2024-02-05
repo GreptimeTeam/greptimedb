@@ -238,7 +238,7 @@ impl StartCommand {
             .context(StartFrontendSnafu)?;
 
         let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
-            .max_cache_capacity(cache_max_capacity)
+            .cache_max_capacity(cache_max_capacity)
             .cache_ttl(cache_ttl)
             .cache_tti(cache_tti)
             .build();

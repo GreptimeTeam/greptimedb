@@ -39,12 +39,12 @@ use crate::metrics::{
     METRIC_CATALOG_KV_BATCH_GET, METRIC_CATALOG_KV_GET, METRIC_CATALOG_KV_REMOTE_GET,
 };
 
-const DEFAULT_MAX_CACHE_CAPACITY: u64 = 10000;
+const DEFAULT_CACHE_MAX_CAPACITY: u64 = 10000;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
 pub struct CachedMetaKvBackendBuilder {
-    max_cache_capacity: Option<u64>,
+    cache_max_capacity: Option<u64>,
     cache_ttl: Option<Duration>,
     cache_tti: Option<Duration>,
     meta_client: Arc<MetaClient>,
@@ -53,15 +53,15 @@ pub struct CachedMetaKvBackendBuilder {
 impl CachedMetaKvBackendBuilder {
     pub fn new(meta_client: Arc<MetaClient>) -> Self {
         Self {
-            max_cache_capacity: None,
+            cache_max_capacity: None,
             cache_ttl: None,
             cache_tti: None,
             meta_client,
         }
     }
 
-    pub fn max_cache_capacity(mut self, cache_max_capacity: u64) -> Self {
-        self.max_cache_capacity.replace(cache_max_capacity);
+    pub fn cache_max_capacity(mut self, cache_max_capacity: u64) -> Self {
+        self.cache_max_capacity.replace(cache_max_capacity);
         self
     }
 
@@ -77,8 +77,8 @@ impl CachedMetaKvBackendBuilder {
 
     pub fn build(self) -> CachedMetaKvBackend {
         let cache_max_capacity = self
-            .max_cache_capacity
-            .unwrap_or(DEFAULT_MAX_CACHE_CAPACITY);
+            .cache_max_capacity
+            .unwrap_or(DEFAULT_CACHE_MAX_CAPACITY);
         let cache_ttl = self.cache_ttl.unwrap_or(DEFAULT_CACHE_TTL);
         let cache_tti = self.cache_tti.unwrap_or(DEFAULT_CACHE_TTI);
 
@@ -108,11 +108,11 @@ pub type CacheBackendRef = Arc<Cache<Vec<u8>, KeyValue>>;
 
 /// A wrapper of `MetaKvBackend` with cache support.
 ///
-/// CachedMetaKvBackend is mainly used to read MetaData information from MetaSrv, and provides
+/// CachedMetaKvBackend is mainly used to read metadata information from Metasrv, and provides
 /// cache for get and batch_get. One way to trigger cache invalidation of CachedMetaKvBackend:
-/// when Metadata information changes, Metasrv will broadcast a MetaData invalidation request.
+/// when metadata information changes, Metasrv will broadcast a metadata invalidation request.
 ///
-/// Therefore, it is recommended to use CachedMetaKvBackend to only read MetaData related
+/// Therefore, it is recommended to use CachedMetaKvBackend to only read metadata related
 /// information. Note: If you read other information, you may read expired data, which depends on
 /// TTL and TTI for cache.
 pub struct CachedMetaKvBackend {
@@ -289,7 +289,7 @@ impl KvBackend for CachedMetaKvBackend {
             err_msg: e.to_string(),
         });
 
-        // "invalidate_key" and "cache.try_get_with_by_ref" are not mutually exclusive. So we need
+        // "cache.invalidate_key" and "cache.try_get_with_by_ref" are not mutually exclusive. So we need
         // to use the version mechanism to prevent expired data from being put into the cache.
         if pre_version
             .lock()
@@ -318,7 +318,7 @@ impl CachedMetaKvBackend {
     #[cfg(test)]
     fn wrap(kv_backend: KvBackendRef) -> Self {
         let cache = Arc::new(
-            CacheBuilder::new(DEFAULT_MAX_CACHE_CAPACITY)
+            CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
                 .time_to_live(DEFAULT_CACHE_TTL)
                 .time_to_idle(DEFAULT_CACHE_TTI)
                 .build(),
