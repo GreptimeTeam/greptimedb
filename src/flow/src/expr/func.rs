@@ -62,19 +62,7 @@ impl UnaryFunc {
                 Ok(Value::from(!bool))
             }
             Self::IsNull => Ok(Value::from(arg.is_null())),
-            Self::IsTrue => {
-                let bool = if let Value::Boolean(bool) = arg {
-                    Ok(bool)
-                } else {
-                    TypeMismatchSnafu {
-                        expected: ConcreteDataType::boolean_datatype(),
-                        actual: arg.data_type(),
-                    }
-                    .fail()?
-                }?;
-                Ok(Value::from(bool))
-            }
-            Self::IsFalse => {
+            Self::IsTrue | Self::IsFalse => {
                 let bool = if let Value::Boolean(bool) = arg {
                     Ok(bool)
                 } else {
