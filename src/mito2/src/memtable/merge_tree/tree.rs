@@ -151,8 +151,10 @@ impl MergeTree {
 
     /// Returns true if the tree is empty.
     pub(crate) fn is_empty(&self) -> bool {
+        let parts = self.parts.read().unwrap();
         // Gets whether the memtable is empty from the data part.
-        unimplemented!()
+        parts.data_buffer.is_empty()
+        // TODO(yingwen): Also consider other parts if we freeze the data buffer.
     }
 
     /// Marks the tree as immutable.

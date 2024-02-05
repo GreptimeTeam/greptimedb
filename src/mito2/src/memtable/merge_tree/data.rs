@@ -125,6 +125,11 @@ impl DataBuffer {
     pub fn num_rows(&self) -> usize {
         self.ts_builder.len()
     }
+
+    /// Returns whether the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.num_rows() == 0
+    }
 }
 
 struct DataPartEncoder<'a> {
