@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Div;
+
 use common_time::DateTime;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
@@ -22,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use super::ScalarExpr;
-use crate::expr::error::CastValueSnafu;
+use crate::expr::error::{CastValueSnafu, DivisionByZeroSnafu};
 use crate::expr::InvalidArgumentSnafu;
 // TODO(discord9): more function & eval
 use crate::{
@@ -305,7 +307,7 @@ fn or(values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
 
 fn add<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Add<Output = T>,
+    T: TryFrom<Value, Error = datatypes::Error> + num_traits::Num,
     Value: From<T>,
 {
     let left = T::try_from(left)
@@ -319,7 +321,7 @@ where
 
 fn sub<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Sub<Output = T>,
+    T: TryFrom<Value, Error = datatypes::Error> + num_traits::Num,
     Value: From<T>,
 {
     let left = T::try_from(left)
@@ -333,7 +335,7 @@ where
 
 fn mul<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Mul<Output = T>,
+    T: TryFrom<Value, Error = datatypes::Error> + num_traits::Num,
     Value: From<T>,
 {
     let left = T::try_from(left)
@@ -347,7 +349,7 @@ where
 
 fn div<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Div<Output = T>,
+    T: TryFrom<Value, Error = datatypes::Error> + num_traits::Num,
     <T as TryFrom<Value>>::Error: std::fmt::Debug,
     Value: From<T>,
 {
@@ -357,12 +359,15 @@ where
     let right = T::try_from(right)
         .map_err(|e| e.to_string())
         .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    if right.is_zero() {
+        return Err(DivisionByZeroSnafu {}.build());
+    }
     Ok(Value::from(left / right))
 }
 
 fn rem<T>(left: Value, right: Value) -> Result<Value, EvalError>
 where
-    T: TryFrom<Value, Error = datatypes::Error> + std::ops::Rem<Output = T>,
+    T: TryFrom<Value, Error = datatypes::Error> + num_traits::Num,
     <T as TryFrom<Value>>::Error: std::fmt::Debug,
     Value: From<T>,
 {
@@ -373,4 +378,27 @@ where
         .map_err(|e| e.to_string())
         .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
     Ok(Value::from(left % right))
+}
+
+#[test]
+fn test_num_ops() {
+    let left = Value::from(10);
+    let right = Value::from(3);
+    let res = add::<i32>(left.clone(), right.clone()).unwrap();
+    assert_eq!(res, Value::from(13));
+    let res = sub::<i32>(left.clone(), right.clone()).unwrap();
+    assert_eq!(res, Value::from(7));
+    let res = mul::<i32>(left.clone(), right.clone()).unwrap();
+    assert_eq!(res, Value::from(30));
+    let res = div::<i32>(left.clone(), right.clone()).unwrap();
+    assert_eq!(res, Value::from(3));
+    let res = rem::<i32>(left.clone(), right.clone()).unwrap();
+    assert_eq!(res, Value::from(1));
+
+    let values = vec![Value::from(true), Value::from(false)];
+    let exprs = vec![ScalarExpr::Column(0), ScalarExpr::Column(1)];
+    let res = and(&values, &exprs).unwrap();
+    assert_eq!(res, Value::from(false));
+    let res = or(&values, &exprs).unwrap();
+    assert_eq!(res, Value::from(true));
 }
