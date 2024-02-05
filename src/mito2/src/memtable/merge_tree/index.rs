@@ -39,8 +39,9 @@ pub(crate) struct IndexConfig {
 /// Primary key index.
 pub(crate) struct KeyIndex {
     config: IndexConfig,
-    // TODO(yingwen): 1. Support multiple shard.
-    shard: RwLock<MutableShard>,
+    // TODO(yingwen): Support multiple shard.
+    /// Mutable shard.
+    shard: RwLock<Shard>,
 }
 
 pub(crate) type KeyIndexRef = Arc<KeyIndex>;
@@ -49,7 +50,7 @@ impl KeyIndex {
     pub(crate) fn new(config: IndexConfig) -> KeyIndex {
         KeyIndex {
             config,
-            shard: RwLock::new(MutableShard::new(0)),
+            shard: RwLock::new(Shard::new(0)),
         }
     }
 
@@ -87,27 +88,32 @@ impl KeyIndex {
     }
 }
 
+type PkIndexMap = BTreeMap<Vec<u8>, PkIndex>;
+
 // TODO(yingwen): Support partition index (partition by a column, e.g. table_id) to
 // reduce null columns and eliminate lock contention. We only need to partition the
 // write buffer but modify dicts with partition lock held.
 /// Mutable shard for the index.
-struct MutableShard {
+struct Shard {
     shard_id: ShardId,
     // TODO(yingwen): Reuse keys.
-    pk_to_index: BTreeMap<Vec<u8>, PkIndex>,
+    pk_to_index: PkIndexMap,
     key_buffer: KeyBuffer,
     dict_blocks: Vec<DictBlock>,
     num_keys: usize,
+    // TODO(yingwen): Serialize the shard instead of keeping the map.
+    shared_index: Option<Arc<PkIndexMap>>,
 }
 
-impl MutableShard {
-    fn new(shard_id: ShardId) -> MutableShard {
-        MutableShard {
+impl Shard {
+    fn new(shard_id: ShardId) -> Shard {
+        Shard {
             shard_id,
             pk_to_index: BTreeMap::new(),
             key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
             dict_blocks: Vec::new(),
             num_keys: 0,
+            shared_index: None,
         }
     }
 
@@ -115,6 +121,15 @@ impl MutableShard {
         // The shard is full.
         if self.num_keys >= config.max_keys_per_shard {
             return Ok(None);
+        }
+
+        // The shard is immutable, find in the shared index.
+        if let Some(shared_index) = &self.shared_index {
+            let pk_id = shared_index.get(key).map(|pk_index| PkId {
+                shard_id: self.shard_id,
+                pk_index: *pk_index,
+            });
+            return Ok(pk_id);
         }
 
         // Already in the shard.
@@ -160,16 +175,22 @@ impl MutableShard {
 
         let dict_block = self.key_buffer.finish();
         self.dict_blocks.push(dict_block);
+
+        // Freezes the pk to index map.
+        let pk_to_index = std::mem::take(&mut self.pk_to_index);
+        self.shared_index = Some(Arc::new(pk_to_index));
+
         Ok(())
     }
 
-    fn fork(&self) -> MutableShard {
-        MutableShard {
+    fn fork(&self) -> Shard {
+        Shard {
             shard_id: self.shard_id,
             pk_to_index: BTreeMap::new(),
             key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
             dict_blocks: self.dict_blocks.clone(),
             num_keys: self.num_keys,
+            shared_index: self.shared_index.clone(),
         }
     }
 }
@@ -395,5 +416,3 @@ mod tests {
         assert_eq!(expect, result);
     }
 }
-
-// TODO(yingwen): Tests
