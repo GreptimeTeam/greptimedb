@@ -241,16 +241,13 @@ impl VariadicFunc {
 fn and(values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
     // If any is false, then return false. Else, if any is null, then return null. Else, return true.
     let mut null = false;
-    let mut err = None;
     for expr in exprs {
         match expr.eval(values) {
             Ok(Value::Boolean(true)) => {}
             Ok(Value::Boolean(false)) => return Ok(Value::Boolean(false)), // short-circuit
             Ok(Value::Null) => null = true,
             Err(this_err) => {
-                if err.is_none() {
-                    err = Some(this_err)
-                }
+                return Err(this_err);
             } // retain first error encountered
             Ok(x) => InvalidArgumentSnafu {
                 reason: format!(
@@ -262,26 +259,22 @@ fn and(values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
             .fail()?,
         }
     }
-    match (err, null) {
-        (Some(err), _) => Err(err),
-        (None, true) => Ok(Value::Null),
-        (None, false) => Ok(Value::Boolean(true)),
+    match null {
+        true => Ok(Value::Null),
+        false => Ok(Value::Boolean(true)),
     }
 }
 
 fn or(values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
     // If any is false, then return false. Else, if any is null, then return null. Else, return true.
     let mut null = false;
-    let mut err = None;
     for expr in exprs {
         match expr.eval(values) {
             Ok(Value::Boolean(true)) => return Ok(Value::Boolean(true)), // short-circuit
-            Ok(Value::Boolean(false)) => {}                              // short-circuit
+            Ok(Value::Boolean(false)) => {}
             Ok(Value::Null) => null = true,
             Err(this_err) => {
-                if err.is_none() {
-                    err = Some(this_err)
-                }
+                return Err(this_err);
             } // retain first error encountered
             Ok(x) => InvalidArgumentSnafu {
                 reason: format!(
@@ -293,10 +286,9 @@ fn or(values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
             .fail()?,
         }
     }
-    match (err, null) {
-        (Some(err), _) => Err(err),
-        (None, true) => Ok(Value::Null),
-        (None, false) => Ok(Value::Boolean(false)),
+    match null {
+        true => Ok(Value::Null),
+        false => Ok(Value::Boolean(false)),
     }
 }
 
@@ -305,12 +297,8 @@ where
     T: TryFrom<Value, Error = datatypes::Error> + num_traits::Num,
     Value: From<T>,
 {
-    let left = T::try_from(left)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
-    let right = T::try_from(right)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let left = T::try_from(left).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
+    let right = T::try_from(right).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
     Ok(Value::from(left + right))
 }
 
@@ -319,12 +307,8 @@ where
     T: TryFrom<Value, Error = datatypes::Error> + num_traits::Num,
     Value: From<T>,
 {
-    let left = T::try_from(left)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
-    let right = T::try_from(right)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let left = T::try_from(left).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
+    let right = T::try_from(right).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
     Ok(Value::from(left - right))
 }
 
@@ -333,12 +317,8 @@ where
     T: TryFrom<Value, Error = datatypes::Error> + num_traits::Num,
     Value: From<T>,
 {
-    let left = T::try_from(left)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
-    let right = T::try_from(right)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let left = T::try_from(left).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
+    let right = T::try_from(right).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
     Ok(Value::from(left * right))
 }
 
@@ -348,12 +328,8 @@ where
     <T as TryFrom<Value>>::Error: std::fmt::Debug,
     Value: From<T>,
 {
-    let left = T::try_from(left)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
-    let right = T::try_from(right)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let left = T::try_from(left).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
+    let right = T::try_from(right).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
     if right.is_zero() {
         return Err(DivisionByZeroSnafu {}.build());
     }
@@ -366,12 +342,8 @@ where
     <T as TryFrom<Value>>::Error: std::fmt::Debug,
     Value: From<T>,
 {
-    let left = T::try_from(left)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
-    let right = T::try_from(right)
-        .map_err(|e| e.to_string())
-        .map_err(|e| TryFromValueSnafu { msg: e }.build())?;
+    let left = T::try_from(left).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
+    let right = T::try_from(right).map_err(|e| TryFromValueSnafu { msg: e.to_string() }.build())?;
     Ok(Value::from(left % right))
 }
 
