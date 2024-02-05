@@ -215,6 +215,8 @@ mod tests {
             let num = code as u32;
             assert_eq!(StatusCode::from_u32(num), Some(code));
         }
+
+        assert_eq!(StatusCode::from_u32(10000), None);
     }
 
     #[test]
