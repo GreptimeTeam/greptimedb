@@ -29,6 +29,7 @@ use std::time::Duration;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
+use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId, MemtableRef};
@@ -76,14 +77,16 @@ impl VersionControl {
     }
 
     /// Freezes the mutable memtable if it is not empty.
-    pub(crate) fn freeze_mutable(&self, builder: &MemtableBuilderRef) {
+    pub(crate) fn freeze_mutable(&self) -> Result<()> {
         let version = self.current().version;
         if version.memtables.mutable.is_empty() {
-            return;
+            return Ok(());
         }
-        let new_mutable = builder.build(&version.metadata);
         // Safety: Immutable memtable is None.
-        let new_memtables = version.memtables.freeze_mutable(new_mutable).unwrap();
+        let new_memtables = version
+            .memtables
+            .freeze_mutable(&version.metadata)?
+            .unwrap();
         // Create a new version with memtable switched.
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
@@ -93,6 +96,8 @@ impl VersionControl {
 
         let mut version_data = self.data.write().unwrap();
         version_data.version = new_version;
+
+        Ok(())
     }
 
     /// Apply edit to current version.

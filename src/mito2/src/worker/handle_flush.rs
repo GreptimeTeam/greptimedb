@@ -143,7 +143,6 @@ impl<S> RegionWorkerLoop<S> {
             senders: Vec::new(),
             request_sender: self.sender.clone(),
             access_layer: region.access_layer.clone(),
-            memtable_builder: self.memtable_builder.clone(),
             file_purger: region.file_purger.clone(),
             listener: self.listener.clone(),
             engine_config,

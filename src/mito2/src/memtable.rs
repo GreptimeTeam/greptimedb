@@ -81,11 +81,14 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
 
-    /// Mark the memtable as immutable.
-    fn mark_immutable(&self);
+    /// Marks the memtable as immutable.
+    fn freeze(&self) -> Result<()>;
 
     /// Returns the [MemtableStats] info of Memtable.
     fn stats(&self) -> MemtableStats;
+
+    /// Forks this memtable and returns a new mutable memtable with specific memtable `id`.
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -156,6 +159,11 @@ impl AllocTracker {
     /// Returns bytes allocated.
     pub(crate) fn bytes_allocated(&self) -> usize {
         self.bytes_allocated.load(Ordering::Relaxed)
+    }
+
+    /// Returns the write buffer manager.
+    pub(crate) fn write_buffer_manager(&self) -> Option<WriteBufferManagerRef> {
+        self.write_buffer_manager.clone()
     }
 }
 

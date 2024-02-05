@@ -100,8 +100,11 @@ impl Memtable for MergeTreeMemtable {
         self.tree.is_empty()
     }
 
-    fn mark_immutable(&self) {
+    fn freeze(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
+
+        // TODO(yingwen): Freeze the tree.
+        Ok(())
     }
 
     fn stats(&self) -> MemtableStats {
@@ -130,6 +133,10 @@ impl Memtable for MergeTreeMemtable {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
         }
+    }
+
+    fn fork(&self, _id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
+        unimplemented!()
     }
 }
 

@@ -67,10 +67,16 @@ impl Memtable for EmptyMemtable {
         true
     }
 
-    fn mark_immutable(&self) {}
+    fn freeze(&self) -> Result<()> {
+        Ok(())
+    }
 
     fn stats(&self) -> MemtableStats {
         MemtableStats::default()
+    }
+
+    fn fork(&self, id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
+        Arc::new(EmptyMemtable::new(id))
     }
 }
 

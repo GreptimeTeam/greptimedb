@@ -234,8 +234,10 @@ impl Memtable for TimeSeriesMemtable {
         self.series_set.series.read().unwrap().is_empty()
     }
 
-    fn mark_immutable(&self) {
+    fn freeze(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
+
+        Ok(())
     }
 
     fn stats(&self) -> MemtableStats {
@@ -262,6 +264,14 @@ impl Memtable for TimeSeriesMemtable {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
         }
+    }
+
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+        Arc::new(TimeSeriesMemtable::new(
+            metadata.clone(),
+            id,
+            self.alloc_tracker.write_buffer_manager(),
+        ))
     }
 }
 
