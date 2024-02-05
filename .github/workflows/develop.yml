@@ -58,6 +58,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with: 
+          # Shares across multiple jobs
+          # Shares with `Clippy` job
+          shared-key: "check-lint"
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
 
@@ -73,6 +77,9 @@ jobs:
           toolchain: stable
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with: 
+          # Shares across multiple jobs
+          shared-key: "check-toml"
       - name: Install taplo
         run: cargo +stable install taplo-cli --version ^0.8 --locked
       - name: Run taplo
@@ -93,6 +100,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-binaries"
       - name: Build greptime binaries
         shell: bash
         run: cargo build
@@ -185,6 +195,9 @@ jobs:
           components: rustfmt
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with: 
+          # Shares across multiple jobs
+          shared-key: "check-rust-fmt"
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
 
@@ -204,6 +217,10 @@ jobs:
           components: clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with: 
+          # Shares across multiple jobs
+          # Shares with `Check` job
+          shared-key: "check-lint"
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -226,6 +243,9 @@ jobs:
           components: llvm-tools-preview
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
