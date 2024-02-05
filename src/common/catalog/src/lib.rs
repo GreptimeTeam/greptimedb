@@ -56,11 +56,9 @@ pub fn build_db_string(catalog: &str, schema: &str) -> String {
 /// - if `[<catalog>-]` is provided, we split database name with `-` and use
 /// `<catalog>` and `<schema>`.
 pub fn parse_catalog_and_schema_from_db_string(db: &str) -> (&str, &str) {
-    let parts = db.splitn(2, '-').collect::<Vec<&str>>();
-    if parts.len() == 2 {
-        (parts[0], parts[1])
-    } else {
-        (DEFAULT_CATALOG_NAME, db)
+    match parse_optional_catalog_and_schema_from_db_string(db) {
+        (Some(catalog), schema) => (catalog, schema),
+        (None, schema) => (DEFAULT_CATALOG_NAME, schema),
     }
 }
 
