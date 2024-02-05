@@ -222,7 +222,6 @@ struct TreeParts {
     immutable: bool,
     /// Index part of the tree. If the region doesn't have a primary key, this field
     /// is `None`.
-    // TODO(yingwen): Support freezing the index.
     index: Option<KeyIndexRef>,
     /// Data buffer of the tree.
     data_buffer: DataBuffer,
