@@ -35,7 +35,6 @@ use crate::{
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub enum UnmaterializableFunc {
     Now,
-    CurrentDatabase,
     CurrentSchema,
 }
 

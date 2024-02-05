@@ -48,6 +48,11 @@ pub enum AggregateFunc {
     MaxString,
     MaxDate,
     MaxDateTime,
+    MaxTimestamp,
+    MaxTime,
+    MaxDuration,
+    MaxInterval,
+
     MinInt16,
     MinInt32,
     MinInt64,
@@ -60,6 +65,11 @@ pub enum AggregateFunc {
     MinString,
     MinDate,
     MinDateTime,
+    MinTimestamp,
+    MinTime,
+    MinDuration,
+    MinInterval,
+
     SumInt16,
     SumInt32,
     SumInt64,
@@ -68,6 +78,7 @@ pub enum AggregateFunc {
     SumUInt64,
     SumFloat32,
     SumFloat64,
+
     Count,
     Any,
     All,
