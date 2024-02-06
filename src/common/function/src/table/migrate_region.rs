@@ -145,7 +145,7 @@ impl Function for MigrateRegionFunction {
         })
         .join()
         .map_err(|e| {
-            error!(e ;"Join thread error");
+            error!(e; "Join thread error");
             ThreadJoin {
                 location: Location::default(),
             }
