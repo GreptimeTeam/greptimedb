@@ -560,7 +560,9 @@ impl Drop for ParquetReader {
             self.reader_builder.file_handle.region_id(),
             self.reader_builder.file_handle.file_id(),
             self.reader_builder.file_handle.time_range(),
-            self.row_groups.len(),
+            self.metrics.num_row_groups_unfiltered
+                - self.metrics.num_row_groups_inverted_index_filtered
+                - self.metrics.num_row_groups_min_max_filtered,
             self.metrics.num_row_groups_unfiltered,
             self.metrics
         );
