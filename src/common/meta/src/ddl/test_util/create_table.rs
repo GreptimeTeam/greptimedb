@@ -14,10 +14,15 @@
 
 use std::collections::HashMap;
 
+use api::v1::column_def::try_as_column_schema;
 use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
-use common_catalog::consts::MITO2_ENGINE;
+use chrono::DateTime;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO2_ENGINE};
+use datatypes::schema::RawSchema;
 use derive_builder::Builder;
 use store_api::storage::TableId;
+use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
+use table::requests::TableOptions;
 
 #[derive(Default, Builder)]
 pub struct TestColumnDef {
@@ -56,14 +61,15 @@ impl From<TestColumnDef> for ColumnDef {
 #[derive(Default, Builder)]
 #[builder(default)]
 pub struct TestCreateTableExpr {
-    #[builder(setter(into))]
+    #[builder(setter(into), default = "DEFAULT_CATALOG_NAME.to_string()")]
     catalog_name: String,
-    #[builder(setter(into))]
+    #[builder(setter(into), default = "DEFAULT_SCHEMA_NAME.to_string()")]
     schema_name: String,
     #[builder(setter(into))]
     table_name: String,
     #[builder(setter(into))]
     desc: String,
+    #[builder(setter(into))]
     column_defs: Vec<ColumnDef>,
     #[builder(setter(into))]
     time_index: String,
@@ -105,5 +111,55 @@ impl From<TestCreateTableExpr> for CreateTableExpr {
             table_id: table_id.map(|id| api::v1::TableId { id }),
             engine,
         }
+    }
+}
+
+/// Builds [RawTableInfo] from [CreateTableExpr].
+pub fn build_raw_table_info_from_expr(expr: &CreateTableExpr) -> RawTableInfo {
+    RawTableInfo {
+        ident: TableIdent {
+            table_id: expr
+                .table_id
+                .as_ref()
+                .map(|table_id| table_id.id)
+                .unwrap_or(0),
+            version: 1,
+        },
+        name: expr.table_name.to_string(),
+        desc: Some(expr.desc.to_string()),
+        catalog_name: expr.catalog_name.to_string(),
+        schema_name: expr.schema_name.to_string(),
+        meta: RawTableMeta {
+            schema: RawSchema {
+                column_schemas: expr
+                    .column_defs
+                    .iter()
+                    .map(|column| try_as_column_schema(column).unwrap())
+                    .collect(),
+                timestamp_index: expr
+                    .column_defs
+                    .iter()
+                    .position(|column| column.semantic_type() == SemanticType::Timestamp),
+                version: 0,
+            },
+            primary_key_indices: expr
+                .primary_keys
+                .iter()
+                .map(|key| {
+                    expr.column_defs
+                        .iter()
+                        .position(|column| &column.name == key)
+                        .unwrap()
+                })
+                .collect(),
+            value_indices: vec![],
+            engine: expr.engine.to_string(),
+            next_column_id: expr.column_defs.len() as u32,
+            region_numbers: vec![],
+            options: TableOptions::default(),
+            created_on: DateTime::default(),
+            partition_key_indices: vec![],
+        },
+        table_type: TableType::Base,
     }
 }
