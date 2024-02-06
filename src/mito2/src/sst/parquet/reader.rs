@@ -278,7 +278,7 @@ impl ParquetReaderBuilder {
         if num_row_groups == 0 {
             return BTreeMap::default();
         }
-        metrics.num_row_groups_unfiltered += num_row_groups;
+        metrics.num_row_groups_before_filtering += num_row_groups;
 
         self.prune_row_groups_by_inverted_index(parquet_meta, metrics)
             .await
@@ -358,7 +358,7 @@ impl ParquetReaderBuilder {
                 let (row_selection, skipped) =
                     row_selection_from_row_ranges(row_ranges, total_row_count);
 
-                metrics.num_rows_in_row_group_unfiltered += total_row_count;
+                metrics.num_rows_in_row_group_before_filtering += total_row_count;
                 metrics.num_rows_in_row_group_inverted_index_filtered += skipped;
 
                 (row_group_id, Some(row_selection))
@@ -411,16 +411,16 @@ impl ParquetReaderBuilder {
 /// Parquet reader metrics.
 #[derive(Debug, Default)]
 struct Metrics {
-    /// Number of unfiltered row groups.
-    num_row_groups_unfiltered: usize,
+    /// Number of row groups before filtering.
+    num_row_groups_before_filtering: usize,
     /// Number of row groups filtered by inverted index.
     num_row_groups_inverted_index_filtered: usize,
     /// Number of row groups filtered by min-max index.
     num_row_groups_min_max_filtered: usize,
     /// Number of rows filtered by precise filter.
     num_rows_precise_filtered: usize,
-    /// Number of rows in row group unfiltered.
-    num_rows_in_row_group_unfiltered: usize,
+    /// Number of rows in row group before filtering.
+    num_rows_in_row_group_before_filtering: usize,
     /// Number of rows in row group filtered by inverted index.
     num_rows_in_row_group_inverted_index_filtered: usize,
     /// Duration to build the parquet reader.
@@ -560,10 +560,10 @@ impl Drop for ParquetReader {
             self.reader_builder.file_handle.region_id(),
             self.reader_builder.file_handle.file_id(),
             self.reader_builder.file_handle.time_range(),
-            self.metrics.num_row_groups_unfiltered
+            self.metrics.num_row_groups_before_filtering
                 - self.metrics.num_row_groups_inverted_index_filtered
                 - self.metrics.num_row_groups_min_max_filtered,
-            self.metrics.num_row_groups_unfiltered,
+            self.metrics.num_row_groups_before_filtering,
             self.metrics
         );
 
@@ -578,20 +578,20 @@ impl Drop for ParquetReader {
             .with_label_values(&["parquet"])
             .inc_by(self.metrics.num_rows as u64);
         READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["unfiltered"])
-            .inc_by(self.metrics.num_row_groups_unfiltered as u64);
+            .with_label_values(&["before_filtering"])
+            .inc_by(self.metrics.num_row_groups_before_filtering as u64);
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["inverted_index_filtered"])
             .inc_by(self.metrics.num_row_groups_inverted_index_filtered as u64);
         READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["min_max_index_filtered"])
+            .with_label_values(&["minmax_index_filtered"])
             .inc_by(self.metrics.num_row_groups_min_max_filtered as u64);
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
             .inc_by(self.metrics.num_rows_precise_filtered as u64);
         READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["unfiltered"])
-            .inc_by(self.metrics.num_rows_in_row_group_unfiltered as u64);
+            .with_label_values(&["before_filtering"])
+            .inc_by(self.metrics.num_rows_in_row_group_before_filtering as u64);
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["inverted_index_filtered"])
             .inc_by(self.metrics.num_rows_in_row_group_inverted_index_filtered as u64);
