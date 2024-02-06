@@ -549,6 +549,13 @@ pub enum Error {
         source: common_recordbatch::error::Error,
         location: Location,
     },
+
+    #[snafu(display("BiError, first: {first}, second: {second}"))]
+    BiError {
+        first: Box<Error>,
+        second: Box<Error>,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -650,6 +657,7 @@ impl ErrorExt for Error {
             StaleLogEntry { .. } => StatusCode::Unexpected,
             FilterRecordBatch { source, .. } => source.status_code(),
             Upload { .. } => StatusCode::StorageUnavailable,
+            BiError { .. } => StatusCode::Internal,
         }
     }
 
