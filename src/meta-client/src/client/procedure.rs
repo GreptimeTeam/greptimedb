@@ -229,7 +229,7 @@ impl Inner {
         );
 
         self.with_retry(
-            "migrate_region",
+            "migrate region",
             move |mut client| {
                 let req = req.clone();
 
