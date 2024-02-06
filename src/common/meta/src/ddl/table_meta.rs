@@ -23,7 +23,7 @@ use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::ddl::{TableMetadata, TableMetadataAllocatorContext};
-use crate::error::{Result, TableNotFoundSnafu, UnsupportedSnafu};
+use crate::error::{self, Result, TableNotFoundSnafu, UnsupportedSnafu};
 use crate::key::table_name::{TableNameKey, TableNameManager};
 use crate::key::table_route::{LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteValue};
 use crate::peer::Peer;
@@ -124,6 +124,12 @@ impl TableMetadataAllocator {
         task: &CreateTableTask,
     ) -> Result<TableRouteValue> {
         let regions = task.partitions.len();
+        ensure!(
+            regions > 0,
+            error::UnexpectedSnafu {
+                err_msg: "The number of partitions must be greater than 0"
+            }
+        );
 
         let table_route = if task.create_table.engine == METRIC_ENGINE
             && let Some(physical_table_name) = task

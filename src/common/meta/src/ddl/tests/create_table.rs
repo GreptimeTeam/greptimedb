@@ -155,6 +155,22 @@ async fn test_on_prepare_without_create_if_table_exists() {
     assert_eq!(procedure.table_id(), 1024);
 }
 
+#[tokio::test]
+async fn test_on_prepare_with_no_partition_err() {
+    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(datanode_manager);
+    let cluster_id = 1;
+    let mut task = test_create_table_task("foo");
+    task.partitions = vec![];
+    task.create_table.create_if_not_exists = true;
+    let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, Error::Unexpected { .. });
+    assert!(err
+        .to_string()
+        .contains("The number of partitions must be greater than 0"),);
+}
+
 #[derive(Clone)]
 pub struct RetryErrorDatanodeHandler;
 
