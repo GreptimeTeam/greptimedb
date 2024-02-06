@@ -25,7 +25,7 @@ use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder}
 use store_api::storage::RegionId;
 
 use crate::manifest::action::RegionEdit;
-use crate::memtable::{MemtableBuilder, MemtableBuilderRef};
+use crate::memtable::MemtableBuilder;
 use crate::region::version::{Version, VersionBuilder, VersionControl};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;

@@ -16,10 +16,9 @@
 //! - Flushes mutable parts to immutable parts
 //! - Merges small immutable parts into a big immutable part
 
-#[allow(unused)]
 mod data;
-#[allow(unused)]
 mod index;
+// TODO(yingwen): Remove this mod.
 mod mutable;
 mod tree;
 
@@ -27,6 +26,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
+use common_base::readable_size::ReadableSize;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
@@ -45,7 +45,6 @@ pub(crate) type ShardId = u32;
 /// Index of a primary key in a shard.
 pub(crate) type PkIndex = u16;
 /// Id of a primary key.
-#[allow(unused)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PkId {
     pub(crate) shard_id: ShardId,
@@ -53,8 +52,20 @@ pub(crate) struct PkId {
 }
 
 /// Config for the merge tree memtable.
-#[derive(Debug, Default, Clone)]
-pub struct MergeTreeConfig {}
+#[derive(Debug, Clone)]
+pub struct MergeTreeConfig {
+    /// Max keys in an index shard.
+    index_max_keys_per_shard: usize,
+}
+
+impl Default for MergeTreeConfig {
+    fn default() -> Self {
+        Self {
+            // TODO(yingwen): Use 4096 or find a proper value.
+            index_max_keys_per_shard: 8192,
+        }
+    }
+}
 
 /// Memtable based on a merge tree.
 pub struct MergeTreeMemtable {
@@ -104,7 +115,8 @@ impl Memtable for MergeTreeMemtable {
     fn freeze(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
 
-        // TODO(yingwen): Freeze the tree.
+        self.tree.freeze()?;
+
         Ok(())
     }
 
@@ -136,8 +148,14 @@ impl Memtable for MergeTreeMemtable {
         }
     }
 
-    fn fork(&self, _id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
-        unimplemented!()
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+        let tree = self.tree.fork(metadata.clone());
+
+        Arc::new(MergeTreeMemtable::with_tree(
+            id,
+            tree,
+            self.alloc_tracker.write_buffer_manager(),
+        ))
     }
 }
 
@@ -149,10 +167,28 @@ impl MergeTreeMemtable {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: &MergeTreeConfig,
     ) -> Self {
+        Self::with_tree(id, MergeTree::new(metadata, config), write_buffer_manager)
+    }
+
+    /// Creates a mutable memtable from the tree.
+    ///
+    /// It also adds the bytes used by shared parts (e.g. index) to the memory usage.
+    fn with_tree(
+        id: MemtableId,
+        tree: MergeTree,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+    ) -> Self {
+        let alloc_tracker = AllocTracker::new(write_buffer_manager);
+        // Track space allocated by the tree.
+        let allocated = tree.shared_memory_size();
+        // Here we still add the bytes of shared parts to the tracker as the old memtable
+        // will release its tracker soon.
+        alloc_tracker.on_allocation(allocated);
+
         Self {
             id,
-            tree: Arc::new(MergeTree::new(metadata, config)),
-            alloc_tracker: AllocTracker::new(write_buffer_manager),
+            tree: Arc::new(tree),
+            alloc_tracker,
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
         }

@@ -23,6 +23,7 @@ use datatypes::arrow::compute;
 use snafu::ResultExt;
 
 use crate::error::{ComputeArrowSnafu, Result};
+use crate::memtable::merge_tree::mutable::WriteMetrics;
 use crate::memtable::merge_tree::{PkId, PkIndex, ShardId};
 
 // TODO(yingwen): Consider using byte size to manage block.
@@ -30,78 +31,118 @@ use crate::memtable::merge_tree::{PkId, PkIndex, ShardId};
 const MAX_KEYS_PER_BLOCK: u16 = 256;
 
 /// Config for the index.
+#[derive(Debug, Clone)]
 pub(crate) struct IndexConfig {
     /// Max keys in an index shard.
     pub(crate) max_keys_per_shard: usize,
 }
 
-impl Default for IndexConfig {
-    fn default() -> Self {
-        Self {
-            // TODO(yingwen): Use 4096 or find a proper value.
-            max_keys_per_shard: 8192,
-        }
-    }
-}
-
 /// Primary key index.
 pub(crate) struct KeyIndex {
     config: IndexConfig,
-    // TODO(yingwen): 1. Support multiple shard.
-    shard: RwLock<MutableShard>,
+    // TODO(yingwen): Support multiple shard.
+    shard: RwLock<Shard>,
 }
+
+pub(crate) type KeyIndexRef = Arc<KeyIndex>;
 
 impl KeyIndex {
     pub(crate) fn new(config: IndexConfig) -> KeyIndex {
         KeyIndex {
             config,
-            shard: RwLock::new(MutableShard::new(0)),
+            shard: RwLock::new(Shard::new(0)),
         }
     }
 
-    pub(crate) fn write_primary_key(&self, key: &[u8]) -> Result<PkId> {
+    pub(crate) fn write_primary_key(&self, key: &[u8], metrics: &mut WriteMetrics) -> Result<PkId> {
         let mut shard = self.shard.write().unwrap();
-        let pkid = shard.try_add_primary_key(&self.config, key)?;
+        let pk_id = shard.try_add_primary_key(&self.config, key, metrics)?;
         // TODO(yingwen): Switch shard if current shard is full.
-        Ok(pkid.expect("shard is full"))
+        Ok(pk_id.expect("shard is full"))
     }
 
-    pub(crate) fn scan_index(&self) -> Result<BoxedIndexReader> {
+    pub(crate) fn scan_shard(&self, shard_id: ShardId) -> Result<ShardReader> {
         let shard = self.shard.read().unwrap();
+        assert_eq!(shard.shard_id, shard_id);
         let reader = shard.scan_shard()?;
 
-        Ok(Box::new(reader))
+        Ok(reader)
+    }
+
+    /// Freezes the index.
+    pub(crate) fn freeze(&self) -> Result<()> {
+        let mut shard = self.shard.write().unwrap();
+        shard.freeze()
+    }
+
+    /// Returns a new index for write.
+    ///
+    /// Callers must freeze the index first.
+    pub(crate) fn fork(&self) -> KeyIndex {
+        let current_shard = self.shard.read().unwrap();
+        let shard = current_shard.fork();
+
+        KeyIndex {
+            config: self.config.clone(),
+            shard: RwLock::new(shard),
+        }
+    }
+
+    pub(crate) fn memory_size(&self) -> usize {
+        self.shard.read().unwrap().memory_size()
     }
 }
+
+type PkIndexMap = BTreeMap<Vec<u8>, PkIndex>;
 
 // TODO(yingwen): Support partition index (partition by a column, e.g. table_id) to
 // reduce null columns and eliminate lock contention. We only need to partition the
 // write buffer but modify dicts with partition lock held.
 /// Mutable shard for the index.
-struct MutableShard {
+struct Shard {
     shard_id: ShardId,
     // TODO(yingwen): Reuse keys.
-    pk_to_index: BTreeMap<Vec<u8>, PkIndex>,
+    pk_to_index: PkIndexMap,
     key_buffer: KeyBuffer,
     dict_blocks: Vec<DictBlock>,
     num_keys: usize,
+    /// Bytes allocated by keys in the [Shard::pk_to_index].
+    key_bytes_in_index: usize,
+    // TODO(yingwen): Serialize the shard instead of keeping the map.
+    shared_index: Option<Arc<PkIndexMap>>,
 }
 
-impl MutableShard {
-    fn new(shard_id: ShardId) -> MutableShard {
-        MutableShard {
+impl Shard {
+    fn new(shard_id: ShardId) -> Shard {
+        Shard {
             shard_id,
             pk_to_index: BTreeMap::new(),
             key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
             dict_blocks: Vec::new(),
             num_keys: 0,
+            key_bytes_in_index: 0,
+            shared_index: None,
         }
     }
 
-    fn try_add_primary_key(&mut self, config: &IndexConfig, key: &[u8]) -> Result<Option<PkId>> {
+    fn try_add_primary_key(
+        &mut self,
+        config: &IndexConfig,
+        key: &[u8],
+        metrics: &mut WriteMetrics,
+    ) -> Result<Option<PkId>> {
         // The shard is full.
         if self.num_keys >= config.max_keys_per_shard {
             return Ok(None);
+        }
+
+        // The shard is immutable, find in the shared index.
+        if let Some(shared_index) = &self.shared_index {
+            let pk_id = shared_index.get(key).map(|pk_index| PkId {
+                shard_id: self.shard_id,
+                pk_index: *pk_index,
+            });
+            return Ok(pk_id);
         }
 
         // Already in the shard.
@@ -124,20 +165,69 @@ impl MutableShard {
         self.pk_to_index.insert(key.to_vec(), pk_index);
         self.num_keys += 1;
 
+        // Since we store the key two times so the bytes usage doubled.
+        metrics.key_bytes += key.len() * 2;
+        self.key_bytes_in_index += key.len();
+
         Ok(Some(PkId {
             shard_id: self.shard_id,
             pk_index,
         }))
     }
 
-    fn scan_shard(&self) -> Result<BlocksReader> {
-        let sorted_pk_indices = self.pk_to_index.values().copied().collect();
+    fn scan_shard(&self) -> Result<ShardReader> {
+        let pk_indices = self.sorted_pk_indices();
         let block = self.key_buffer.finish_cloned();
         let mut blocks = Vec::with_capacity(self.dict_blocks.len() + 1);
         blocks.extend_from_slice(&self.dict_blocks);
         blocks.push(block);
 
-        Ok(BlocksReader::new(blocks, sorted_pk_indices))
+        Ok(ShardReader::new(blocks, pk_indices))
+    }
+
+    fn freeze(&mut self) -> Result<()> {
+        if self.key_buffer.is_empty() {
+            return Ok(());
+        }
+
+        let dict_block = self.key_buffer.finish();
+        self.dict_blocks.push(dict_block);
+
+        // Freezes the pk to index map.
+        let pk_to_index = std::mem::take(&mut self.pk_to_index);
+        self.shared_index = Some(Arc::new(pk_to_index));
+
+        Ok(())
+    }
+
+    fn fork(&self) -> Shard {
+        Shard {
+            shard_id: self.shard_id,
+            pk_to_index: BTreeMap::new(),
+            key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
+            dict_blocks: self.dict_blocks.clone(),
+            num_keys: self.num_keys,
+            key_bytes_in_index: self.key_bytes_in_index,
+            shared_index: self.shared_index.clone(),
+        }
+    }
+
+    fn sorted_pk_indices(&self) -> Vec<PkIndex> {
+        if let Some(shared_index) = &self.shared_index {
+            return shared_index.values().copied().collect();
+        }
+
+        self.pk_to_index.values().copied().collect()
+    }
+
+    fn memory_size(&self) -> usize {
+        self.key_bytes_in_index
+            + self.key_buffer.buffer_memory_size()
+            + self
+                .dict_blocks
+                .iter()
+                .map(|block| block.buffer_memory_size())
+                .sum::<usize>()
     }
 }
 
@@ -179,6 +269,10 @@ impl KeyBuffer {
         self.primary_key_builder.len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.primary_key_builder.is_empty()
+    }
+
     /// Gets the primary key by its index.
     ///
     /// # Panics
@@ -197,6 +291,10 @@ impl KeyBuffer {
 
     fn finish(&mut self) -> DictBlock {
         let primary_key = self.primary_key_builder.finish();
+        // Reserve capacity for the new builder. `finish()` the builder will leave the builder
+        // empty with capacity 0.
+        // TODO(yingwen): Do we need to reserve capacity for data?
+        self.primary_key_builder = BinaryBuilder::with_capacity(primary_key.len(), 0);
 
         DictBlock::from_unsorted(primary_key)
     }
@@ -205,6 +303,16 @@ impl KeyBuffer {
         let primary_key = self.primary_key_builder.finish_cloned();
 
         DictBlock::from_unsorted(primary_key)
+    }
+
+    fn buffer_memory_size(&self) -> usize {
+        self.primary_key_builder.values_slice().len()
+            + std::mem::size_of_val(self.primary_key_builder.offsets_slice())
+            + self
+                .primary_key_builder
+                .validity_slice()
+                .map(|v| v.len())
+                .unwrap_or(0)
     }
 }
 
@@ -228,6 +336,10 @@ impl DictBlock {
     fn key_by_pk_index(&self, index: PkIndex) -> &[u8] {
         let pos = index % MAX_KEYS_PER_BLOCK;
         self.primary_key.value(pos as usize)
+    }
+
+    fn buffer_memory_size(&self) -> usize {
+        self.primary_key.get_buffer_memory_size()
     }
 }
 
@@ -257,16 +369,16 @@ pub(crate) trait IndexReader: Send {
 
 pub(crate) type BoxedIndexReader = Box<dyn IndexReader>;
 
-pub(crate) struct BlocksReader {
+pub(crate) struct ShardReader {
     blocks: Vec<DictBlock>,
     sorted_pk_indices: Vec<PkIndex>,
     /// Current offset in the `sorted_pk_indices`.
     offset: usize,
 }
 
-impl BlocksReader {
-    fn new(blocks: Vec<DictBlock>, sorted_pk_indices: Vec<PkIndex>) -> BlocksReader {
-        BlocksReader {
+impl ShardReader {
+    fn new(blocks: Vec<DictBlock>, sorted_pk_indices: Vec<PkIndex>) -> ShardReader {
+        ShardReader {
             blocks,
             sorted_pk_indices,
             offset: 0,
@@ -277,9 +389,18 @@ impl BlocksReader {
         let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
         self.blocks[block_idx as usize].key_by_pk_index(pk_index)
     }
+
+    fn compute_pk_weights(&self, pk_weights: &mut Vec<u16>) {
+        pk_weights.clear();
+        pk_weights.resize(self.sorted_pk_indices.len(), 0);
+
+        for (weight, pk_index) in self.sorted_pk_indices.iter().enumerate() {
+            pk_weights[*pk_index as usize] = weight as u16;
+        }
+    }
 }
 
-impl IndexReader for BlocksReader {
+impl IndexReader for ShardReader {
     fn is_valid(&self) -> bool {
         self.offset < self.sorted_pk_indices.len()
     }
@@ -330,8 +451,9 @@ mod tests {
             max_keys_per_shard: (MAX_KEYS_PER_BLOCK * 3).into(),
         });
         let mut last_pk_id = None;
+        let mut metrics = WriteMetrics::default();
         for key in &keys {
-            let pk_id = index.write_primary_key(key).unwrap();
+            let pk_id = index.write_primary_key(key, &mut metrics).unwrap();
             last_pk_id = Some(pk_id);
         }
         assert_eq!(
@@ -341,6 +463,8 @@ mod tests {
             },
             last_pk_id.unwrap()
         );
+        let key_bytes: usize = keys.iter().map(|key| key.len() * 2).sum();
+        assert_eq!(key_bytes, metrics.key_bytes);
 
         let mut expect: Vec<_> = keys
             .into_iter()
@@ -350,11 +474,32 @@ mod tests {
         expect.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         let mut result = Vec::with_capacity(expect.len());
-        let mut reader = index.scan_index().unwrap();
+        let mut reader = index.scan_shard(0).unwrap();
         while reader.is_valid() {
             result.push((reader.current_key().to_vec(), reader.current_pk_index()));
             reader.next();
         }
         assert_eq!(expect, result);
+    }
+
+    #[test]
+    fn test_index_memory_size() {
+        let index = KeyIndex::new(IndexConfig {
+            max_keys_per_shard: (MAX_KEYS_PER_BLOCK * 3).into(),
+        });
+        let mut metrics = WriteMetrics::default();
+        // 513 keys
+        let num_keys = MAX_KEYS_PER_BLOCK * 2 + 1;
+        // Writes 2 blocks
+        for i in 0..num_keys {
+            // Each key is 5 bytes.
+            let key = format!("{i:05}");
+            index
+                .write_primary_key(key.as_bytes(), &mut metrics)
+                .unwrap();
+        }
+        // num_keys * 5 * 2
+        assert_eq!(5130, metrics.key_bytes);
+        assert_eq!(8850, index.memory_size());
     }
 }
