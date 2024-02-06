@@ -59,7 +59,7 @@ impl Function for MigrateRegionFunction {
             vec![
                 // migrate_region(region_id, from_peer, to_peer)
                 TypeSignature::Uniform(3, ConcreteDataType::numerics()),
-                // migrate_region(region_id, from_peer, to_peer, timeout)
+                // migrate_region(region_id, from_peer, to_peer, timeout(secs))
                 TypeSignature::Uniform(4, ConcreteDataType::numerics()),
             ],
             Volatility::Immutable,
