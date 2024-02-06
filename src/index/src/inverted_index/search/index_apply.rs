@@ -22,6 +22,19 @@ pub use predicates_apply::PredicatesIndexApplier;
 use crate::inverted_index::error::Result;
 use crate::inverted_index::format::reader::InvertedIndexReader;
 
+/// The output of an apply operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplyOutput {
+    /// The list of indices that match the predicates.
+    pub matched_segment_ids: BTreeSet<usize>,
+
+    /// The total number of rows in the index.
+    pub total_row_count: usize,
+
+    /// The number of rows in each segment.
+    pub segment_row_count: usize,
+}
+
 /// A trait for processing and transforming indices obtained from an inverted index.
 ///
 /// Applier instances are reusable and work with various `InvertedIndexReader` instances,
@@ -35,7 +48,7 @@ pub trait IndexApplier: Send + Sync {
         &self,
         context: SearchContext,
         reader: &mut (dyn InvertedIndexReader + 'a),
-    ) -> Result<BTreeSet<usize>>;
+    ) -> Result<ApplyOutput>;
 
     /// Returns the memory usage of the applier.
     fn memory_usage(&self) -> usize;

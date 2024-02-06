@@ -84,7 +84,7 @@ impl SstIndexCreator {
         index_store: ObjectStore,
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
-        row_group_size: NonZeroUsize,
+        segment_row_count: NonZeroUsize,
     ) -> Self {
         // `memory_usage_threshold` is the total memory usage threshold of the index creation,
         // so we need to divide it by the number of columns
@@ -96,7 +96,7 @@ impl SstIndexCreator {
             intermediate_manager,
         ));
         let sorter = ExternalSorter::factory(temp_file_provider.clone() as _, memory_threshold);
-        let index_creator = Box::new(SortIndexCreator::new(sorter, row_group_size));
+        let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
         Self {

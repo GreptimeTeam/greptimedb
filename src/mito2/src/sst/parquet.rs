@@ -20,6 +20,7 @@ pub(crate) mod metadata;
 mod page_reader;
 pub mod reader;
 pub mod row_group;
+mod row_selection;
 mod stats;
 pub mod writer;
 
@@ -38,6 +39,8 @@ pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
 pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 1024;
 /// Default row group size for parquet files.
 const DEFAULT_ROW_GROUP_SIZE: usize = 100 * DEFAULT_READ_BATCH_SIZE;
+/// Default segment row count for inverted index.
+const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 
 /// Parquet write options.
 #[derive(Debug)]
@@ -46,6 +49,8 @@ pub struct WriteOptions {
     pub write_buffer_size: ReadableSize,
     /// Row group size.
     pub row_group_size: usize,
+    /// Segment row count for inverted index.
+    pub index_segment_row_count: usize,
 }
 
 impl Default for WriteOptions {
@@ -53,6 +58,7 @@ impl Default for WriteOptions {
         WriteOptions {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
+            index_segment_row_count: DEFAULT_INDEX_SEGMENT_ROW_COUNT,
         }
     }
 }
