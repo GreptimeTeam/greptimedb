@@ -28,6 +28,16 @@ use snafu::{Location, OptionExt, ResultExt};
 
 use crate::function::{Function, FunctionContext};
 
+/// A function to migrate a region from source peer to target peer.
+/// Returns the submitted procedure id if success. Only available in cluster mode.
+///
+/// - `migrate_region(region_id, from_peer, to_peer)`, with default replay WAL timeout(10 seconds).
+/// - `migrate_region(region_id, from_peer, to_peer, timeout(secs))`
+///
+/// The parameters:
+/// - `region_id`:  the region id
+/// - `from_peer`:  the source peer id
+/// - `to_peer`:  the target peer id
 #[derive(Clone, Debug, Default)]
 pub struct MigrateRegionFunction;
 
