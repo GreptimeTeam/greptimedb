@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::type_name;
-
 use common_time::{Date, DateTime};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
@@ -86,60 +85,63 @@ pub enum AggregateFunc {
 
 impl AggregateFunc {
     pub fn is_max(&self) -> bool {
+        use AggregateFunc::*;
         matches!(
             self,
-            AggregateFunc::MaxInt16
-                | AggregateFunc::MaxInt32
-                | AggregateFunc::MaxInt64
-                | AggregateFunc::MaxUInt16
-                | AggregateFunc::MaxUInt32
-                | AggregateFunc::MaxUInt64
-                | AggregateFunc::MaxFloat32
-                | AggregateFunc::MaxFloat64
-                | AggregateFunc::MaxBool
-                | AggregateFunc::MaxString
-                | AggregateFunc::MaxDate
-                | AggregateFunc::MaxDateTime
-                | AggregateFunc::MaxTimestamp
-                | AggregateFunc::MaxTime
-                | AggregateFunc::MaxDuration
-                | AggregateFunc::MaxInterval
+            MaxInt16
+                | MaxInt32
+                | MaxInt64
+                | MaxUInt16
+                | MaxUInt32
+                | MaxUInt64
+                | MaxFloat32
+                | MaxFloat64
+                | MaxBool
+                | MaxString
+                | MaxDate
+                | MaxDateTime
+                | MaxTimestamp
+                | MaxTime
+                | MaxDuration
+                | MaxInterval
         )
     }
 
     pub fn is_min(&self) -> bool {
+        use AggregateFunc::*;
         matches!(
             self,
-            AggregateFunc::MinInt16
-                | AggregateFunc::MinInt32
-                | AggregateFunc::MinInt64
-                | AggregateFunc::MinUInt16
-                | AggregateFunc::MinUInt32
-                | AggregateFunc::MinUInt64
-                | AggregateFunc::MinFloat32
-                | AggregateFunc::MinFloat64
-                | AggregateFunc::MinBool
-                | AggregateFunc::MinString
-                | AggregateFunc::MinDate
-                | AggregateFunc::MinDateTime
-                | AggregateFunc::MinTimestamp
-                | AggregateFunc::MinTime
-                | AggregateFunc::MinDuration
-                | AggregateFunc::MinInterval
+            MinInt16
+                | MinInt32
+                | MinInt64
+                | MinUInt16
+                | MinUInt32
+                | MinUInt64
+                | MinFloat32
+                | MinFloat64
+                | MinBool
+                | MinString
+                | MinDate
+                | MinDateTime
+                | MinTimestamp
+                | MinTime
+                | MinDuration
+                | MinInterval
         )
     }
 
     pub fn is_sum(&self) -> bool {
+        use AggregateFunc::*;
         matches!(
             self,
-            AggregateFunc::SumInt16
-                | AggregateFunc::SumInt32
-                | AggregateFunc::SumInt64
-                | AggregateFunc::SumUInt16
-                | AggregateFunc::SumUInt32
-                | AggregateFunc::SumUInt64
-                | AggregateFunc::SumFloat32
-                | AggregateFunc::SumFloat64
+            SumInt16
+                | SumInt32
+                | SumInt64
+                | SumUInt16
+                | SumUInt32
+                | SumUInt64
+                | SumFloat32
+                | SumFloat64
         )
     }
 }
