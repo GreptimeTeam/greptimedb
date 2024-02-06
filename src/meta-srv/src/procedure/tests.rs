@@ -17,11 +17,12 @@ use std::sync::{Arc, Mutex};
 
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
+use api::v1::meta::Partition;
 use api::v1::region::region_request::{self, Body as PbRegionRequest};
 use api::v1::region::{CreateRequest as PbCreateRegionRequest, RegionColumnDef};
 use api::v1::{
     region, AddColumn, AddColumnLocation, AddColumns, AlterExpr, ColumnDataType,
-    ColumnDef as PbColumnDef, CreateTableExpr, DropColumn, DropColumns, SemanticType,
+    ColumnDef as PbColumnDef, DropColumn, DropColumns, SemanticType,
 };
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::MITO2_ENGINE;
@@ -30,6 +31,8 @@ use common_meta::ddl::alter_table::AlterTableProcedure;
 use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, CreateTablesState};
 use common_meta::ddl::create_table::*;
 use common_meta::ddl::drop_table::DropTableProcedure;
+use common_meta::ddl::test_util::create_table::build_raw_table_info_from_expr;
+use common_meta::ddl::test_util::{TestColumnDefBuilder, TestCreateTableExprBuilder};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::DeserializedValueWithBytes;
@@ -42,58 +45,60 @@ use crate::procedure::utils::mock::EchoRegionServer;
 use crate::procedure::utils::test_data;
 
 fn create_table_task(table_name: Option<&str>) -> CreateTableTask {
-    let create_table_expr = CreateTableExpr {
-        catalog_name: "my_catalog".to_string(),
-        schema_name: "my_schema".to_string(),
-        table_name: table_name.unwrap_or("my_table").to_string(),
-        desc: "blabla".to_string(),
-        column_defs: vec![
-            PbColumnDef {
-                name: "ts".to_string(),
-                data_type: ColumnDataType::TimestampMillisecond as i32,
-                is_nullable: false,
-                default_constraint: vec![],
-                semantic_type: SemanticType::Timestamp as i32,
-                comment: String::new(),
-                ..Default::default()
-            },
-            PbColumnDef {
-                name: "my_tag1".to_string(),
-                data_type: ColumnDataType::String as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-                semantic_type: SemanticType::Tag as i32,
-                comment: String::new(),
-                ..Default::default()
-            },
-            PbColumnDef {
-                name: "my_tag2".to_string(),
-                data_type: ColumnDataType::String as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-                semantic_type: SemanticType::Tag as i32,
-                comment: String::new(),
-                ..Default::default()
-            },
-            PbColumnDef {
-                name: "my_field_column".to_string(),
-                data_type: ColumnDataType::Int32 as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-                semantic_type: SemanticType::Field as i32,
-                comment: String::new(),
-                ..Default::default()
-            },
-        ],
-        time_index: "ts".to_string(),
-        primary_keys: vec!["my_tag2".to_string(), "my_tag1".to_string()],
-        create_if_not_exists: false,
-        table_options: HashMap::new(),
-        table_id: None,
-        engine: MITO2_ENGINE.to_string(),
-    };
+    let expr = TestCreateTableExprBuilder::default()
+        .catalog_name("my_catalog")
+        .schema_name("my_schema")
+        .table_name(table_name.unwrap_or("my_table"))
+        .desc("blabla")
+        .column_defs([
+            TestColumnDefBuilder::default()
+                .name("ts")
+                .data_type(ColumnDataType::TimestampMillisecond)
+                .is_nullable(false)
+                .semantic_type(SemanticType::Timestamp)
+                .build()
+                .unwrap()
+                .into(),
+            TestColumnDefBuilder::default()
+                .name("my_tag1")
+                .data_type(ColumnDataType::String)
+                .is_nullable(true)
+                .semantic_type(SemanticType::Tag)
+                .build()
+                .unwrap()
+                .into(),
+            TestColumnDefBuilder::default()
+                .name("my_tag2")
+                .data_type(ColumnDataType::String)
+                .is_nullable(true)
+                .semantic_type(SemanticType::Tag)
+                .build()
+                .unwrap()
+                .into(),
+            TestColumnDefBuilder::default()
+                .name("my_field_column")
+                .data_type(ColumnDataType::Int32)
+                .is_nullable(true)
+                .semantic_type(SemanticType::Field)
+                .build()
+                .unwrap()
+                .into(),
+        ])
+        .time_index("ts")
+        .primary_keys(vec!["my_tag2".into(), "my_tag1".into()])
+        .build()
+        .unwrap()
+        .into();
 
-    CreateTableTask::new(create_table_expr, vec![], test_data::new_table_info())
+    let table_info = build_raw_table_info_from_expr(&expr);
+    CreateTableTask::new(
+        expr,
+        vec![Partition {
+            column_list: vec![],
+            value_list: vec![],
+        }],
+        table_info,
+    )
 }
 
 #[test]
