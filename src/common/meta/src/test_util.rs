@@ -17,9 +17,17 @@ use std::sync::Arc;
 use api::v1::region::{QueryRequest, RegionRequest};
 use common_recordbatch::SendableRecordBatchStream;
 
-use crate::datanode_manager::{Datanode, DatanodeManager, DatanodeRef};
+use crate::cache_invalidator::DummyCacheInvalidator;
+use crate::datanode_manager::{Datanode, DatanodeManager, DatanodeManagerRef, DatanodeRef};
+use crate::ddl::table_meta::TableMetadataAllocator;
+use crate::ddl::DdlContext;
 use crate::error::Result;
+use crate::key::TableMetadataManager;
+use crate::kv_backend::memory::MemoryKvBackend;
 use crate::peer::Peer;
+use crate::region_keeper::MemoryRegionKeeper;
+use crate::sequence::SequenceBuilder;
+use crate::wal_options_allocator::WalOptionsAllocator;
 
 pub type AffectedRows = u64;
 
@@ -65,5 +73,27 @@ impl<T: MockDatanodeHandler + 'static> DatanodeManager for MockDatanodeManager<T
             peer: peer.clone(),
             handler: self.handler.clone(),
         })
+    }
+}
+
+/// Returns a test purpose [DdlContext].
+pub fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+
+    DdlContext {
+        datanode_manager,
+        cache_invalidator: Arc::new(DummyCacheInvalidator),
+        memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
+        table_metadata_allocator: Arc::new(TableMetadataAllocator::new(
+            Arc::new(
+                SequenceBuilder::new("test", kv_backend)
+                    .initial(1024)
+                    .build(),
+            ),
+            Arc::new(WalOptionsAllocator::default()),
+            table_metadata_manager.table_name_manager().clone(),
+        )),
+        table_metadata_manager,
     }
 }
