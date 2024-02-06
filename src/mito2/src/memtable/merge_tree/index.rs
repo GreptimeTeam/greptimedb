@@ -308,7 +308,7 @@ impl KeyBuffer {
 
     fn buffer_memory_size(&self) -> usize {
         self.primary_key_builder.values_slice().len()
-            + self.primary_key_builder.offsets_slice().len() * std::mem::size_of::<i32>()
+            + std::mem::size_of_val(self.primary_key_builder.offsets_slice())
             + self
                 .primary_key_builder
                 .validity_slice()
