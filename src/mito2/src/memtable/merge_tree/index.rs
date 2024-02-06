@@ -23,6 +23,7 @@ use datatypes::arrow::compute;
 use snafu::ResultExt;
 
 use crate::error::{ComputeArrowSnafu, Result};
+use crate::memtable::merge_tree::mutable::WriteMetrics;
 use crate::memtable::merge_tree::{PkId, PkIndex, ShardId};
 
 // TODO(yingwen): Consider using byte size to manage block.
@@ -54,9 +55,9 @@ impl KeyIndex {
         }
     }
 
-    pub(crate) fn write_primary_key(&self, key: &[u8]) -> Result<PkId> {
+    pub(crate) fn write_primary_key(&self, key: &[u8], metrics: &mut WriteMetrics) -> Result<PkId> {
         let mut shard = self.shard.write().unwrap();
-        let pk_id = shard.try_add_primary_key(&self.config, key)?;
+        let pk_id = shard.try_add_primary_key(&self.config, key, metrics)?;
         // TODO(yingwen): Switch shard if current shard is full.
         Ok(pk_id.expect("shard is full"))
     }
@@ -118,7 +119,12 @@ impl Shard {
         }
     }
 
-    fn try_add_primary_key(&mut self, config: &IndexConfig, key: &[u8]) -> Result<Option<PkId>> {
+    fn try_add_primary_key(
+        &mut self,
+        config: &IndexConfig,
+        key: &[u8],
+        metrics: &mut WriteMetrics,
+    ) -> Result<Option<PkId>> {
         // The shard is full.
         if self.num_keys >= config.max_keys_per_shard {
             return Ok(None);
@@ -152,6 +158,9 @@ impl Shard {
         let pk_index = self.key_buffer.push_key(key);
         self.pk_to_index.insert(key.to_vec(), pk_index);
         self.num_keys += 1;
+
+        // Since we store the key two times so the bytes usage doubled.
+        metrics.key_bytes += key.len() * 2;
 
         Ok(Some(PkId {
             shard_id: self.shard_id,
@@ -406,8 +415,9 @@ mod tests {
             max_keys_per_shard: (MAX_KEYS_PER_BLOCK * 3).into(),
         });
         let mut last_pk_id = None;
+        let mut metrics = WriteMetrics::default();
         for key in &keys {
-            let pk_id = index.write_primary_key(key).unwrap();
+            let pk_id = index.write_primary_key(key, &mut metrics).unwrap();
             last_pk_id = Some(pk_id);
         }
         assert_eq!(
@@ -417,6 +427,8 @@ mod tests {
             },
             last_pk_id.unwrap()
         );
+        let key_bytes: usize = keys.iter().map(|key| key.len() * 2).sum();
+        assert_eq!(key_bytes, metrics.key_bytes);
 
         let mut expect: Vec<_> = keys
             .into_iter()

@@ -117,11 +117,8 @@ impl MergeTree {
             self.row_codec
                 .encode_to_vec(kv.primary_keys(), &mut primary_key)?;
 
-            // Add bytes used by the primary key.
-            metrics.key_bytes += primary_key.len();
-
             // Write rows with primary keys.
-            self.write_with_key(&primary_key, kv)?;
+            self.write_with_key(&primary_key, kv, metrics)?;
         }
 
         metrics.value_bytes +=
@@ -190,9 +187,14 @@ impl MergeTree {
         }
     }
 
-    fn write_with_key(&self, primary_key: &[u8], kv: KeyValue) -> Result<()> {
+    fn write_with_key(
+        &self,
+        primary_key: &[u8],
+        kv: KeyValue,
+        metrics: &mut WriteMetrics,
+    ) -> Result<()> {
         // Write the pk to the index.
-        let pk_id = self.write_primary_key(primary_key)?;
+        let pk_id = self.write_primary_key(primary_key, metrics)?;
         // Writes data.
         self.write_with_id(pk_id, kv);
 
@@ -205,7 +207,7 @@ impl MergeTree {
         parts.data_buffer.write_row(pk_id, kv)
     }
 
-    fn write_primary_key(&self, key: &[u8]) -> Result<PkId> {
+    fn write_primary_key(&self, key: &[u8], metrics: &mut WriteMetrics) -> Result<PkId> {
         let index = {
             let parts = self.parts.read().unwrap();
             assert!(!parts.immutable);
@@ -213,7 +215,7 @@ impl MergeTree {
             parts.index.clone().unwrap()
         };
 
-        index.write_primary_key(key)
+        index.write_primary_key(key, metrics)
     }
 }
 
