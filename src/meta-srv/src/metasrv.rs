@@ -376,7 +376,7 @@ impl MetaSrv {
         &self,
         cluster_id: ClusterId,
         peer_id: u64,
-    ) -> error::Result<Option<Peer>> {
+    ) -> Result<Option<Peer>> {
         lookup_alive_datanode_peer(
             cluster_id,
             peer_id,
