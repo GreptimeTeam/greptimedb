@@ -33,6 +33,8 @@ pub mod create_table;
 mod create_table_template;
 pub mod drop_table;
 pub mod table_meta;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
 pub mod truncate_table;
 pub mod utils;
 
