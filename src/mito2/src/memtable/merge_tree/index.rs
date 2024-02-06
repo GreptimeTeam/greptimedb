@@ -41,7 +41,6 @@ pub(crate) struct IndexConfig {
 pub(crate) struct KeyIndex {
     config: IndexConfig,
     // TODO(yingwen): Support multiple shard.
-    /// Mutable shard.
     shard: RwLock<Shard>,
 }
 

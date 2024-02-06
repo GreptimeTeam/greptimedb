@@ -78,11 +78,11 @@ impl MergeTree {
         }
     }
 
-    // FIXME(yingwen): We should use actual size of parts.
+    // TODO(yingwen): The size computed from values is inaccurate.
     /// Write key-values into the tree.
     ///
     /// # Panics
-    /// Panics if the tree is immutable.
+    /// Panics if the tree is immutable (frozen).
     pub(crate) fn write(&self, kvs: &KeyValues, metrics: &mut WriteMetrics) -> Result<()> {
         let mut primary_key = Vec::new();
         let has_pk = !self.metadata.primary_key.is_empty();
