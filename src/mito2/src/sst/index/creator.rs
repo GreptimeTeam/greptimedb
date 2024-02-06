@@ -32,7 +32,7 @@ use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu,
+    BiSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu,
     PushIndexValueSnafu, Result,
 };
 use crate::metrics::{
@@ -249,8 +249,21 @@ impl SstIndexCreator {
             self.index_creator.finish(&mut index_writer),
             puffin_writer.add_blob(blob)
         );
-        index_finish.context(IndexFinishSnafu)?;
-        puffin_add_blob.context(PuffinAddBlobSnafu)?;
+
+        match (
+            puffin_add_blob.context(PuffinAddBlobSnafu),
+            index_finish.context(IndexFinishSnafu),
+        ) {
+            (Err(e1), Err(e2)) => BiSnafu {
+                first: Box::new(e1),
+                second: Box::new(e2),
+            }
+            .fail()?,
+
+            (Ok(_), e @ Err(_)) => e?,
+            (e @ Err(_), Ok(_)) => e?,
+            _ => {}
+        }
 
         let byte_count = puffin_writer.finish().await.context(PuffinFinishSnafu)?;
         guard.inc_byte_count(byte_count);
