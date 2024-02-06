@@ -16,16 +16,20 @@ use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::meta::Partition;
 use api::v1::region::{QueryRequest, RegionRequest};
 use api::v1::{ColumnDataType, SemanticType};
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use common_procedure::Status;
+use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
+use common_procedure_test::MockContextProvider;
 use common_recordbatch::SendableRecordBatchStream;
+use common_telemetry::debug;
 
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::test_util::create_table::build_raw_table_info_from_expr;
 use crate::ddl::test_util::{TestColumnDefBuilder, TestCreateTableExprBuilder};
+use crate::error;
 use crate::error::{Error, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::peer::Peer;
@@ -81,7 +85,11 @@ fn test_create_table_task(name: &str) -> CreateTableTask {
     let table_info = build_raw_table_info_from_expr(&create_table);
     CreateTableTask {
         create_table,
-        partitions: vec![],
+        // Single region
+        partitions: vec![Partition {
+            column_list: vec![],
+            value_list: vec![],
+        }],
         table_info,
     }
 }
@@ -145,4 +153,88 @@ async fn test_on_prepare_without_create_if_table_exists() {
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Executing { persist: true });
     assert_eq!(procedure.table_id(), 1024);
+}
+
+#[derive(Clone)]
+pub struct RetryErrorDatanodeHandler;
+
+#[async_trait::async_trait]
+impl MockDatanodeHandler for RetryErrorDatanodeHandler {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<AffectedRows> {
+        debug!("Returning retry later for request: {request:?}, peer: {peer:?}");
+        Err(Error::RetryLater {
+            source: BoxedError::new(
+                error::UnexpectedSnafu {
+                    err_msg: "retry later",
+                }
+                .build(),
+            ),
+        })
+    }
+
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        _request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn test_on_datanode_create_regions_should_retry() {
+    common_telemetry::init_default_ut_logging();
+    let datanode_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
+    let ddl_context = new_ddl_context(datanode_manager);
+    let cluster_id = 1;
+    let task = test_create_table_task("foo");
+    assert!(!task.create_table.create_if_not_exists);
+    let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context);
+    procedure.on_prepare().await.unwrap();
+    let ctx = ProcedureContext {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(MockContextProvider::default()),
+    };
+    let error = procedure.execute(&ctx).await.unwrap_err();
+    assert!(error.is_retry_later());
+}
+
+#[derive(Clone)]
+pub struct UnexpectedErrorDatanodeHandler;
+
+#[async_trait::async_trait]
+impl MockDatanodeHandler for UnexpectedErrorDatanodeHandler {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<AffectedRows> {
+        debug!("Returning mock error for request: {request:?}, peer: {peer:?}");
+        error::UnexpectedSnafu {
+            err_msg: "mock error",
+        }
+        .fail()
+    }
+
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        _request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn test_on_datanode_create_regions_should_not_retry() {
+    common_telemetry::init_default_ut_logging();
+    let datanode_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+    let ddl_context = new_ddl_context(datanode_manager);
+    let cluster_id = 1;
+    let task = test_create_table_task("foo");
+    assert!(!task.create_table.create_if_not_exists);
+    let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context);
+    procedure.on_prepare().await.unwrap();
+    let ctx = ProcedureContext {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(MockContextProvider::default()),
+    };
+    let error = procedure.execute(&ctx).await.unwrap_err();
+    assert!(!error.is_retry_later());
 }

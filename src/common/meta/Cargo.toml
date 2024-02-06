@@ -19,6 +19,7 @@ common-catalog.workspace = true
 common-error.workspace = true
 common-grpc-expr.workspace = true
 common-macro.workspace = true
+common-procedure-test.workspace = true
 common-procedure.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
