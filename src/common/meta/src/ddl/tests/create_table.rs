@@ -238,3 +238,75 @@ async fn test_on_datanode_create_regions_should_not_retry() {
     let error = procedure.execute(&ctx).await.unwrap_err();
     assert!(!error.is_retry_later());
 }
+
+#[derive(Clone)]
+pub struct NaiveDatanodeHandler;
+
+#[async_trait::async_trait]
+impl MockDatanodeHandler for NaiveDatanodeHandler {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<AffectedRows> {
+        debug!("Returning Ok(0) for request: {request:?}, peer: {peer:?}");
+        Ok(0)
+    }
+
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        _request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn test_on_create_metadata_error() {
+    common_telemetry::init_default_ut_logging();
+    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(datanode_manager);
+    let cluster_id = 1;
+    let task = test_create_table_task("foo");
+    assert!(!task.create_table.create_if_not_exists);
+    let mut procedure = CreateTableProcedure::new(cluster_id, task.clone(), ddl_context.clone());
+    procedure.on_prepare().await.unwrap();
+    let ctx = ProcedureContext {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(MockContextProvider::default()),
+    };
+    procedure.execute(&ctx).await.unwrap();
+    let mut task = task;
+    // Creates table metadata(different with the task)
+    task.table_info.ident.table_id = procedure.table_id();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    // Triggers procedure to create table metadata
+    let error = procedure.execute(&ctx).await.unwrap_err();
+    assert!(!error.is_retry_later());
+}
+
+#[tokio::test]
+async fn test_on_create_metadata() {
+    common_telemetry::init_default_ut_logging();
+    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(datanode_manager);
+    let cluster_id = 1;
+    let task = test_create_table_task("foo");
+    assert!(!task.create_table.create_if_not_exists);
+    let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context);
+    procedure.on_prepare().await.unwrap();
+    let ctx = ProcedureContext {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(MockContextProvider::default()),
+    };
+    procedure.execute(&ctx).await.unwrap();
+    // Triggers procedure to create table metadata
+    let status = procedure.execute(&ctx).await.unwrap();
+    let table_id = status.downcast_output_ref::<u32>().unwrap();
+    assert_eq!(*table_id, 1024);
+}

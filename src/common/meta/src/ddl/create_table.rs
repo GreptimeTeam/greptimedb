@@ -284,6 +284,10 @@ impl CreateTableProcedure {
         Ok(Status::executing(false))
     }
 
+    /// Creates table metadata
+    ///
+    /// Abort(not-retry):
+    /// - Failed to create table metadata.
     async fn on_create_metadata(&self) -> Result<Status> {
         let table_id = self.table_id();
         let manager = &self.context.table_metadata_manager;
