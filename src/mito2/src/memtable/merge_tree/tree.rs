@@ -14,10 +14,13 @@
 
 //! Implementation of the memtable merge tree.
 
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use common_time::Timestamp;
+use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::record_batch::RecordBatch;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -26,10 +29,11 @@ use table::predicate::Predicate;
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::DataBuffer;
-use crate::memtable::merge_tree::index::{IndexConfig, KeyIndex, KeyIndexRef};
+use crate::memtable::merge_tree::index::{IndexConfig, KeyIndex, KeyIndexRef, ShardReader};
 use crate::memtable::merge_tree::mutable::WriteMetrics;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
 use crate::memtable::{BoxedBatchIterator, KeyValues};
+use crate::read::{Batch, BatchBuilder};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Initial capacity for the data buffer.
@@ -130,9 +134,29 @@ impl MergeTree {
     /// Scans the tree.
     pub(crate) fn scan(
         &self,
-        _projection: Option<&[ColumnId]>,
-        _predicate: Option<Predicate>,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
+        assert!(predicate.is_none(), "Predicate is unsupported");
+        // Creates the projection set.
+        let projection: HashSet<_> = if let Some(projection) = projection {
+            projection.iter().copied().collect()
+        } else {
+            self.metadata.field_columns().map(|c| c.column_id).collect()
+        };
+
+        let index = {
+            let parts = self.parts.read().unwrap();
+            parts.index.clone()
+        };
+        let index_reader = index.as_ref().map(|index| index.scan_shard(0)).transpose()?;
+
+        let iter = ShardIter {
+            metadata: self.metadata.clone(),
+            index_reader,
+            projection,
+        };
+        
         todo!()
     }
 
@@ -237,4 +261,47 @@ struct TreeParts {
     index: Option<KeyIndexRef>,
     /// Data buffer of the tree.
     data_buffer: DataBuffer,
+}
+
+struct ShardIter {
+    metadata: RegionMetadataRef,
+    index_reader: Option<ShardReader>,
+    projection: HashSet<ColumnId>,
+}
+
+impl Iterator for ShardIter {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unimplemented!()
+    }
+}
+
+impl ShardIter {
+    /// Converts [RecordBatch] to [Batch].
+    fn convert_record_batch(
+        &self,
+        primary_key: &[u8],
+        record_batch: &RecordBatch,
+    ) -> Result<Batch> {
+        let mut builder = BatchBuilder::new(primary_key.to_vec())
+            .timestamps_array(Self::record_batch_timestamps(record_batch).clone())?
+            .sequences_array(Self::record_batch_sequences(record_batch).clone())?
+            .op_types_array(Self::record_batch_op_types(record_batch).clone())?;
+        // TODO(yingwen): fields.
+
+        unimplemented!()
+    }
+
+    fn record_batch_timestamps(record_batch: &RecordBatch) -> &ArrayRef {
+        unimplemented!()
+    }
+
+    fn record_batch_sequences(record_batch: &RecordBatch) -> &ArrayRef {
+        unimplemented!()
+    }
+
+    fn record_batch_op_types(record_batch: &RecordBatch) -> &ArrayRef {
+        unimplemented!()
+    }
 }
