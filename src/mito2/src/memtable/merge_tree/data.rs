@@ -15,6 +15,8 @@
 //! The value part of key-value separated merge-tree structure.
 
 use std::cmp::{Ordering, Reverse};
+use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -22,7 +24,7 @@ use datatypes::arrow;
 use datatypes::arrow::array::{RecordBatch, UInt32Array};
 use datatypes::arrow::datatypes::{Field, Schema, SchemaRef};
 use datatypes::data_type::DataType;
-use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, Value, Vector, VectorRef};
+use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, Vector, VectorRef};
 use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
 use datatypes::vectors::{
@@ -38,15 +40,46 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use crate::error;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::{PkId, ShardId};
-use crate::memtable::BoxedBatchIterator;
+use crate::memtable::merge_tree::{PkId, PkIndex, ShardId};
 
 pub const PK_INDEX_COLUMN_NAME: &str = "pk_index";
+
+/// Data part batches returns by `DataParts::read`.
+pub struct DataBatch {
+    /// Record batch of data.
+    rb: RecordBatch,
+    /// The ranges of all primary key offsets inside batch.
+    pk_index_ranges: HashMap<PkIndex, Range<usize>>,
+}
+
+/// Data parts including an active writing part and several frozen parts.
+pub struct DataParts {
+    active: DataBuffer,
+    frozen: Vec<DataPart>, // todo(hl): merge all frozen parts into one parquet-encoded bytes.
+}
+
+impl DataParts {
+    /// Writes one row into active part.
+    pub fn write_row(&mut self, pk_id: PkId, kv: KeyValue) {
+        self.active.write_row(pk_id, kv);
+    }
+
+    /// Reads data from all parts including active and frozen parts.
+    pub fn read(&mut self, pk_weights: &[u16]) -> Result<Vec<DataBatch>> {
+        let mut batches = Vec::with_capacity(1 + self.frozen.len());
+        batches.push(self.active.read(pk_weights)?);
+        for p in &self.frozen {
+            batches.push(p.read(pk_weights)?);
+        }
+        Ok(batches)
+    }
+}
 
 /// Buffer for the value part (TSID, ts, field columns) in a shard.
 pub struct DataBuffer {
     shard_id: ShardId,
     metadata: RegionMetadataRef,
+    data_part_schema: SchemaRef,
     /// Data types for field columns.
     field_types: Vec<ConcreteDataType>,
     /// Builder for primary key index.
@@ -76,9 +109,11 @@ impl DataBuffer {
             .collect::<Vec<_>>();
         let field_builders = (0..field_types.len()).map(|_| None).collect();
 
+        let data_part_schema = memtable_schema_to_encoded_schema(&metadata);
         Self {
             shard_id: 0,
             metadata,
+            data_part_schema,
             field_types,
             pk_index_builder: pk_id_builder,
             ts_builder,
@@ -110,15 +145,18 @@ impl DataBuffer {
     }
 
     /// Freezes `DataBuffer` to bytes. Use `pk_weights` to convert pk_id to pk sort order.
+    /// `freeze` clears the buffers of builders.
     pub fn freeze(&mut self, pk_weights: &[u16]) -> Result<DataPart> {
         let encoder = DataPartEncoder::new(&self.metadata, pk_weights);
         let encoded = encoder.write(self)?;
         Ok(DataPart::Parquet(encoded))
     }
 
-    pub fn iter(&self) -> Result<impl Iterator<Item = RecordBatch>> {
+    /// Reads batches from data buffer without resetting builder's buffers.
+    pub fn read(&mut self, pk_weights: &[u16]) -> Result<DataBatch> {
+        let batches =
+            data_buffer_to_record_batches(self.data_part_schema.clone(), self, pk_weights, true)?;
         todo!();
-        Ok(std::iter::empty())
     }
 
     /// Returns num of rows in data buffer.
@@ -138,16 +176,15 @@ impl<'a> DataPartEncoder<'a> {
         Self { schema, pk_weights }
     }
 
-    pub fn write(&self, source: &DataBuffer) -> Result<Bytes> {
+    pub fn write(&self, source: &mut DataBuffer) -> Result<Vec<u8>> {
         let mut bytes = Vec::with_capacity(1024);
         let mut writer = ArrowWriter::try_new(&mut bytes, self.schema.clone(), None)
             .context(error::EncodeMemtableSnafu)?;
-        let batches = data_buffer_to_record_batches(self.schema.clone(), source, self.pk_weights)?;
-        for rb in batches {
-            writer.write(&rb).context(error::EncodeMemtableSnafu)?;
-        }
+        let rb =
+            data_buffer_to_record_batches(self.schema.clone(), source, self.pk_weights, false)?;
+        writer.write(&rb).context(error::EncodeMemtableSnafu)?;
         let _file_meta = writer.close().context(error::EncodeMemtableSnafu)?;
-        Ok(Bytes::from(bytes))
+        Ok(bytes)
     }
 }
 
@@ -200,18 +237,30 @@ impl Ord for InnerKey {
     }
 }
 
-/// Converts `DataBuffer` to record batches.
+/// Converts `DataBuffer` to record batches, with rows sorted according to pk_weights.
 fn data_buffer_to_record_batches(
     schema: SchemaRef,
-    buffer: &DataBuffer,
+    buffer: &mut DataBuffer,
     pk_weights: &[u16],
-) -> Result<Vec<RecordBatch>> {
+    keep_data: bool,
+) -> Result<RecordBatch> {
     let num_rows = buffer.ts_builder.len();
 
-    let pk_index_v = buffer.pk_index_builder.finish_cloned();
-    let ts_v = buffer.ts_builder.to_vector_cloned();
-    let sequence_v = buffer.sequence_builder.finish_cloned();
-    let op_type_v = buffer.op_type_builder.finish_cloned();
+    let (pk_index_v, ts_v, sequence_v, op_type_v) = if keep_data {
+        (
+            buffer.pk_index_builder.finish_cloned(),
+            buffer.ts_builder.to_vector_cloned(),
+            buffer.sequence_builder.finish_cloned(),
+            buffer.op_type_builder.finish_cloned(),
+        )
+    } else {
+        (
+            buffer.pk_index_builder.finish(),
+            buffer.ts_builder.to_vector(),
+            buffer.sequence_builder.finish(),
+            buffer.op_type_builder.finish(),
+        )
+    };
 
     let mut rows = build_rows_to_sort(pk_weights, &pk_index_v, &ts_v, &sequence_v);
 
@@ -242,14 +291,20 @@ fn data_buffer_to_record_batches(
             .context(error::ComputeArrowSnafu)?,
     );
 
-    for (idx, c) in buffer.field_builders.iter().enumerate() {
+    for (idx, c) in buffer.field_builders.iter_mut().enumerate() {
         let array = match c {
             None => {
                 let mut single_null = buffer.field_types[idx].create_mutable_vector(num_rows);
                 single_null.push_nulls(num_rows);
-                single_null.to_vector_cloned().to_arrow_array()
+                single_null.to_vector().to_arrow_array()
             }
-            Some(v) => v.to_vector_cloned().to_arrow_array(),
+            Some(v) => {
+                if keep_data {
+                    v.to_vector_cloned().to_arrow_array()
+                } else {
+                    v.to_vector().to_arrow_array()
+                }
+            }
         };
 
         columns.push(
@@ -258,9 +313,7 @@ fn data_buffer_to_record_batches(
         );
     }
 
-    Ok(vec![
-        RecordBatch::try_new(schema, columns).context(error::NewRecordBatchSnafu)?
-    ])
+    RecordBatch::try_new(schema, columns).context(error::NewRecordBatchSnafu)
 }
 
 fn build_rows_to_sort(
@@ -323,11 +376,11 @@ fn build_rows_to_sort(
 
 /// Format of immutable data part.
 pub enum DataPart {
-    Parquet(Bytes),
+    Parquet(Vec<u8>),
 }
 
 impl DataPart {
-    pub fn iter(&self) -> Result<BoxedBatchIterator> {
+    pub fn read(&self, _pk_weights: &[u16]) -> Result<DataBatch> {
         todo!()
     }
 }
@@ -342,19 +395,17 @@ mod tests {
     use super::*;
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
-    #[test]
-    fn test_data_buffer_to_record_batches() {
+    fn check_test_data_buffer_to_record_batches(keep_data: bool) {
         let meta = metadata_for_test();
         let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
 
         write_rows_to_buffer(&mut buffer, &meta, 0, vec![1, 2], vec![Some(0.1), None], 1);
         write_rows_to_buffer(&mut buffer, &meta, 1, vec![1, 2], vec![Some(1.1), None], 2);
         write_rows_to_buffer(&mut buffer, &meta, 0, vec![2], vec![Some(1.1)], 3);
-
+        assert_eq!(5, buffer.num_rows());
         let schema = memtable_schema_to_encoded_schema(&meta);
-        let mut rbs = data_buffer_to_record_batches(schema, &buffer, &[3, 1]).unwrap();
-        assert_eq!(1, rbs.len());
-        let batch = rbs.pop().unwrap();
+        let batch = data_buffer_to_record_batches(schema, &mut buffer, &[3, 1], keep_data).unwrap();
+
         assert_eq!(
             vec![1, 2, 1, 2],
             batch
@@ -392,6 +443,18 @@ mod tests {
                 .iter()
                 .collect::<Vec<_>>()
         );
+
+        if keep_data {
+            assert_eq!(5, buffer.num_rows());
+        } else {
+            assert_eq!(0, buffer.num_rows());
+        }
+    }
+
+    #[test]
+    fn test_data_buffer_to_record_batches() {
+        check_test_data_buffer_to_record_batches(true);
+        check_test_data_buffer_to_record_batches(false);
     }
 
     fn write_rows_to_buffer(
@@ -444,12 +507,12 @@ mod tests {
         assert_eq!(4, buffer.num_rows());
 
         let mut encoder = DataPartEncoder::new(&meta, &[0, 1, 2]);
-        let encoded = encoder.write(&buffer).unwrap();
+        let encoded = encoder.write(&mut buffer).unwrap();
         let s = String::from_utf8_lossy(encoded.as_bytes());
         assert!(s.starts_with("PAR1"));
         assert!(s.ends_with("PAR1"));
 
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(encoded).unwrap();
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(encoded)).unwrap();
         let mut reader = builder.build().unwrap();
         let batch = reader.next().unwrap().unwrap();
         assert_eq!(3, batch.num_rows());
