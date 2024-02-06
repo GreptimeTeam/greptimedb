@@ -33,7 +33,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
-use crate::ddl::utils::{handle_operate_region_error, handle_retry_error, region_storage_path};
+use crate::ddl::utils::{add_peer_context_if_need, handle_retry_error, region_storage_path};
 use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
 use crate::error::{self, Result, TableRouteNotFoundSnafu};
 use crate::key::table_name::TableNameKey;
@@ -45,7 +45,6 @@ use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
 use crate::{metrics, ClusterId};
-
 pub struct CreateTableProcedure {
     pub context: DdlContext,
     pub creator: TableCreator,
@@ -169,6 +168,20 @@ impl CreateTableProcedure {
         Ok(CreateRequestBuilder::new(template, physical_table_id))
     }
 
+    /// Creates regions on datanodes
+    ///
+    /// Abort(non-retry):
+    /// - Failed to create [CreateRequestBuilder].
+    /// - Failed to get the table route of physical table (for logical table).
+    ///
+    /// Retry:
+    /// - If the underlying servers returns one of the following [Code](tonic::status::Code):
+    ///   - [Code::Cancelled](tonic::status::Code::Cancelled)
+    ///   - [Code::Unknown](tonic::status::Code::Unknown)
+    ///   - [Code::DeadlineExceeded](tonic::status::Code::DeadlineExceeded)
+    ///   - [Code::ResourceExhausted](tonic::status::Code::ResourceExhausted)
+    ///   - [Code::Aborted](tonic::status::Code::Aborted)
+    ///   - [Code::Unavailable](tonic::status::Code::Unavailable)
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
         // Safety: the table route must be allocated.
         match &self.creator.data.table_route.clone().unwrap() {
@@ -254,7 +267,7 @@ impl CreateTableProcedure {
                     requester
                         .handle(request)
                         .await
-                        .map_err(handle_operate_region_error(datanode))
+                        .map_err(add_peer_context_if_need(datanode))
                 });
             }
         }

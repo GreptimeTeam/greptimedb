@@ -31,7 +31,7 @@ use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
-use crate::ddl::utils::{handle_operate_region_error, handle_retry_error, region_storage_path};
+use crate::ddl::utils::{add_peer_context_if_need, handle_retry_error, region_storage_path};
 use crate::ddl::DdlContext;
 use crate::error::{Result, TableAlreadyExistsSnafu};
 use crate::key::table_name::TableNameKey;
@@ -239,7 +239,7 @@ impl CreateLogicalTablesProcedure {
             };
             create_region_tasks.push(async move {
                 if let Err(err) = requester.handle(request).await {
-                    return Err(handle_operate_region_error(datanode)(err));
+                    return Err(add_peer_context_if_need(datanode)(err));
                 }
                 Ok(())
             });

@@ -27,19 +27,17 @@ use crate::key::TableMetadataManagerRef;
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 
-pub fn handle_operate_region_error(datanode: Peer) -> impl FnOnce(Error) -> Error {
+/// Adds [Peer] context if the error is unretryable.
+pub fn add_peer_context_if_need(datanode: Peer) -> impl FnOnce(Error) -> Error {
     move |err| {
-        if matches!(err, Error::RetryLater { .. }) {
-            Error::RetryLater {
-                source: BoxedError::new(err),
-            }
-        } else {
-            Error::OperateDatanode {
+        if !err.is_retry_later() {
+            return Error::OperateDatanode {
                 location: location!(),
                 peer: datanode,
                 source: BoxedError::new(err),
-            }
+            };
         }
+        err
     }
 }
 
