@@ -81,12 +81,6 @@ pub fn join_path(parent: &str, child: &str) -> String {
     normalize_path(&output)
 }
 
-/// Modified from the `opendal::raw::normalize_path`
-///
-/// # The different
-///
-/// It only keeps `/` ahead if the original path starts with `/`.
-///
 /// Make sure all operation are constructed by normalized path:
 ///
 /// - Path endswith `/` means it's a dir path.
@@ -95,7 +89,7 @@ pub fn join_path(parent: &str, child: &str) -> String {
 /// # Normalize Rules
 ///
 /// - All whitespace will be trimmed: ` abc/def ` => `abc/def`
-/// - **(Removed❗️)** ~~ All leading / will be trimmed: `///abc` => `abc`~~
+/// - Repeated leading / will be trimmed: `///abc` => `/abc`
 /// - Internal // will be replaced by /: `abc///def` => `abc/def`
 /// - Empty path will be `/`: `` => `/`
 pub fn normalize_path(path: &str) -> String {
@@ -113,7 +107,7 @@ pub fn normalize_path(path: &str) -> String {
     let mut p = path
         .split('/')
         .filter(|v| !v.is_empty())
-        .collect::<Vec<&str>>()
+        .collect::<Vec<_>>()
         .join("/");
 
     // If path is not starting with `\` but it should
