@@ -48,6 +48,12 @@ pub struct MockDatanodeManager<T> {
     handler: T,
 }
 
+impl<T> MockDatanodeManager<T> {
+    pub fn new(handler: T) -> Self {
+        Self { handler }
+    }
+}
+
 /// A mock struct implements [Datanode].
 #[derive(Clone)]
 struct MockDatanode<T> {
