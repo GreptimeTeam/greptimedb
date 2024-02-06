@@ -25,7 +25,6 @@ use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
-use futures_util::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
@@ -85,7 +84,7 @@ impl CreateTableProcedure {
         &self.creator.data.task.table_info
     }
 
-    fn table_id(&self) -> TableId {
+    pub(crate) fn table_id(&self) -> TableId {
         self.table_info().ident.table_id
     }
 
@@ -111,7 +110,11 @@ impl CreateTableProcedure {
     /// On the prepare step, it performs:
     /// - Checks whether the table exists.
     /// - Allocates the table id.
-    async fn on_prepare(&mut self) -> Result<Status> {
+    ///
+    /// Abort(non-retry):
+    /// - TableName exists and `create_if_not_exists` is false.
+    /// - Failed to allocate [TableMetadata].
+    pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
         let expr = &self.creator.data.task.create_table;
         let table_name_value = self
             .context
