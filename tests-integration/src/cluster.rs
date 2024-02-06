@@ -20,7 +20,7 @@ use std::time::Duration;
 use api::v1::meta::Role;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
-use catalog::kvbackend::{CachedMetaKvBackend, MetaKvBackend};
+use catalog::kvbackend::{CachedMetaKvBackendBuilder, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
@@ -350,11 +350,14 @@ impl GreptimeDbClusterBuilder {
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
-        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
+        let cached_meta_backend =
+            Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(meta_backend.clone())),
+            Arc::new(InvalidateTableCacheHandler::new(
+                cached_meta_backend.clone(),
+            )),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -363,12 +366,13 @@ impl GreptimeDbClusterBuilder {
             Arc::new(handlers_executor),
         );
 
-        let instance = FrontendBuilder::new(meta_backend.clone(), datanode_clients, meta_client)
-            .with_cache_invalidator(meta_backend)
-            .with_heartbeat_task(heartbeat_task)
-            .try_build()
-            .await
-            .unwrap();
+        let instance =
+            FrontendBuilder::new(cached_meta_backend.clone(), datanode_clients, meta_client)
+                .with_cache_invalidator(cached_meta_backend)
+                .with_heartbeat_task(heartbeat_task)
+                .try_build()
+                .await
+                .unwrap();
 
         Arc::new(instance)
     }
