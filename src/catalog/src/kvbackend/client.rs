@@ -174,17 +174,17 @@ impl KvBackend for CachedMetaKvBackend {
         let _timer = METRIC_CATALOG_KV_BATCH_GET.start_timer();
 
         let mut kvs = Vec::with_capacity(req.keys.len());
-        let mut unhit_keys = Vec::with_capacity(req.keys.len());
+        let mut miss_keys = Vec::with_capacity(req.keys.len());
 
         for key in req.keys {
             if let Some(val) = self.cache.get(&key).await {
                 kvs.push(val);
             } else {
-                unhit_keys.push(key);
+                miss_keys.push(key);
             }
         }
 
-        let batch_get_req = BatchGetRequest::new().with_keys(unhit_keys.clone());
+        let batch_get_req = BatchGetRequest::new().with_keys(miss_keys.clone());
 
         let pre_version = self.version();
 
@@ -195,7 +195,7 @@ impl KvBackend for CachedMetaKvBackend {
         }
 
         if !self.validate_version(pre_version) {
-            for key in unhit_keys.iter() {
+            for key in miss_keys.iter() {
                 self.cache.invalidate(key).await;
             }
         }
