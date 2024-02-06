@@ -88,6 +88,10 @@ impl KeyIndex {
             shard: RwLock::new(shard),
         }
     }
+
+    pub(crate) fn memory_size(&self) -> usize {
+        self.shard.read().unwrap().memory_size()
+    }
 }
 
 type PkIndexMap = BTreeMap<Vec<u8>, PkIndex>;
@@ -103,6 +107,8 @@ struct Shard {
     key_buffer: KeyBuffer,
     dict_blocks: Vec<DictBlock>,
     num_keys: usize,
+    /// Bytes allocated by keys in the [Shard::pk_to_index].
+    key_bytes_in_index: usize,
     // TODO(yingwen): Serialize the shard instead of keeping the map.
     shared_index: Option<Arc<PkIndexMap>>,
 }
@@ -115,6 +121,7 @@ impl Shard {
             key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
             dict_blocks: Vec::new(),
             num_keys: 0,
+            key_bytes_in_index: 0,
             shared_index: None,
         }
     }
@@ -161,6 +168,7 @@ impl Shard {
 
         // Since we store the key two times so the bytes usage doubled.
         metrics.key_bytes += key.len() * 2;
+        self.key_bytes_in_index += key.len();
 
         Ok(Some(PkId {
             shard_id: self.shard_id,
@@ -200,6 +208,7 @@ impl Shard {
             key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
             dict_blocks: self.dict_blocks.clone(),
             num_keys: self.num_keys,
+            key_bytes_in_index: self.key_bytes_in_index,
             shared_index: self.shared_index.clone(),
         }
     }
@@ -210,6 +219,16 @@ impl Shard {
         }
 
         self.pk_to_index.values().copied().collect()
+    }
+
+    fn memory_size(&self) -> usize {
+        self.key_bytes_in_index
+            + self.key_buffer.buffer_memory_size()
+            + self
+                .dict_blocks
+                .iter()
+                .map(|block| block.buffer_memory_size())
+                .sum::<usize>()
     }
 }
 
@@ -273,6 +292,10 @@ impl KeyBuffer {
 
     fn finish(&mut self) -> DictBlock {
         let primary_key = self.primary_key_builder.finish();
+        // Reserve capacity for the new builder. `finish()` the builder will leave the builder
+        // empty with capacity 0.
+        // TODO(yingwen): Do we need to reserve capacity for data?
+        self.primary_key_builder = BinaryBuilder::with_capacity(primary_key.len(), 0);
 
         DictBlock::from_unsorted(primary_key)
     }
@@ -281,6 +304,16 @@ impl KeyBuffer {
         let primary_key = self.primary_key_builder.finish_cloned();
 
         DictBlock::from_unsorted(primary_key)
+    }
+
+    fn buffer_memory_size(&self) -> usize {
+        self.primary_key_builder.values_slice().len()
+            + self.primary_key_builder.offsets_slice().len() * std::mem::size_of::<i32>()
+            + self
+                .primary_key_builder
+                .validity_slice()
+                .map(|v| v.len())
+                .unwrap_or(0)
     }
 }
 
@@ -304,6 +337,10 @@ impl DictBlock {
     fn key_by_pk_index(&self, index: PkIndex) -> &[u8] {
         let pos = index % MAX_KEYS_PER_BLOCK;
         self.primary_key.value(pos as usize)
+    }
+
+    fn buffer_memory_size(&self) -> usize {
+        self.primary_key.get_buffer_memory_size()
     }
 }
 
@@ -444,5 +481,26 @@ mod tests {
             reader.next();
         }
         assert_eq!(expect, result);
+    }
+
+    #[test]
+    fn test_index_memory_size() {
+        let index = KeyIndex::new(IndexConfig {
+            max_keys_per_shard: (MAX_KEYS_PER_BLOCK * 3).into(),
+        });
+        let mut metrics = WriteMetrics::default();
+        // 513 keys
+        let num_keys = MAX_KEYS_PER_BLOCK * 2 + 1;
+        // Writes 2 blocks
+        for i in 0..num_keys {
+            // Each key is 5 bytes.
+            let key = format!("{i:05}");
+            index
+                .write_primary_key(key.as_bytes(), &mut metrics)
+                .unwrap();
+        }
+        // num_keys * 5 * 2
+        assert_eq!(5130, metrics.key_bytes);
+        assert_eq!(8850, index.memory_size());
     }
 }

@@ -187,6 +187,16 @@ impl MergeTree {
         }
     }
 
+    /// Returns the memory size of shared parts.
+    pub(crate) fn shared_memory_size(&self) -> usize {
+        let parts = self.parts.read().unwrap();
+        parts
+            .index
+            .as_ref()
+            .map(|index| index.memory_size())
+            .unwrap_or(0)
+    }
+
     fn write_with_key(
         &self,
         primary_key: &[u8],

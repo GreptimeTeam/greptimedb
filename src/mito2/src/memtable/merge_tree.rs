@@ -151,8 +151,6 @@ impl Memtable for MergeTreeMemtable {
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         let tree = self.tree.fork(metadata.clone());
 
-        // TODO(yingwen): We should also add the size of the index to the alloc
-        // tracker.
         Arc::new(MergeTreeMemtable::with_tree(
             id,
             tree,
@@ -172,15 +170,25 @@ impl MergeTreeMemtable {
         Self::with_tree(id, MergeTree::new(metadata, config), write_buffer_manager)
     }
 
+    /// Creates a mutable memtable from the tree.
+    ///
+    /// It also adds the bytes used by shared parts (e.g. index) to the memory usage.
     fn with_tree(
         id: MemtableId,
         tree: MergeTree,
         write_buffer_manager: Option<WriteBufferManagerRef>,
     ) -> Self {
+        let alloc_tracker = AllocTracker::new(write_buffer_manager);
+        // Track space allocated by the tree.
+        let allocated = tree.shared_memory_size();
+        // Here we still add the bytes of shared parts to the tracker as the old memtable
+        // will release its tracker soon.
+        alloc_tracker.on_allocation(allocated);
+
         Self {
             id,
             tree: Arc::new(tree),
-            alloc_tracker: AllocTracker::new(write_buffer_manager),
+            alloc_tracker,
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
         }
