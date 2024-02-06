@@ -57,6 +57,18 @@ impl Status {
         Status::Done { output: None }
     }
 
+    /// Downcasts [Status::Done]'s output to &T
+    ///  #Panic:
+    /// - if [Status] is not the [Status::Done].
+    /// - if the output is None.
+    pub fn downcast_output_ref<T: 'static>(&self) -> Option<&T> {
+        if let Status::Done { output } = self {
+            output.as_ref().unwrap().downcast_ref()
+        } else {
+            unreachable!("")
+        }
+    }
+
     /// Returns a [Status::Done] with output.
     pub fn done_with_output<T: Any + Send + Sync>(output: T) -> Status {
         Status::Done {
