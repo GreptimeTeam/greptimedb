@@ -15,6 +15,7 @@
 use crate::handlers::{MetaServiceHandlerRef, TableMutationHandlerRef};
 
 /// Shared state for SQL functions.
+/// The handlers in state may be `None` in cli command-line or test cases.
 #[derive(Clone, Default)]
 pub struct FunctionState {
     // The table mutation handler
