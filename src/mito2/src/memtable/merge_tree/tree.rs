@@ -149,14 +149,17 @@ impl MergeTree {
             let parts = self.parts.read().unwrap();
             parts.index.clone()
         };
-        let index_reader = index.as_ref().map(|index| index.scan_shard(0)).transpose()?;
+        let index_reader = index
+            .as_ref()
+            .map(|index| index.scan_shard(0))
+            .transpose()?;
 
         let iter = ShardIter {
             metadata: self.metadata.clone(),
             index_reader,
             projection,
         };
-        
+
         todo!()
     }
 
