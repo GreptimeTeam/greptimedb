@@ -30,6 +30,7 @@ derive_builder.workspace = true
 etcd-client.workspace = true
 futures-util.workspace = true
 futures.workspace = true
+hex = { version = "0.4" }
 humantime-serde.workspace = true
 lazy_static.workspace = true
 prometheus.workspace = true

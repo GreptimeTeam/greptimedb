@@ -23,7 +23,11 @@ use crate::error::{ParseProcedureIdSnafu, Result};
 
 /// Cast the protobuf [`ProcedureId`] to common [`ProcedureId`].
 pub fn pb_pid_to_pid(pid: &PbProcedureId) -> Result<ProcedureId> {
-    ProcedureId::parse_str(&String::from_utf8_lossy(&pid.key)).context(ParseProcedureIdSnafu)
+    ProcedureId::parse_str(&String::from_utf8_lossy(&pid.key)).with_context(|_| {
+        ParseProcedureIdSnafu {
+            key: hex::encode(&pid.key),
+        }
+    })
 }
 
 /// Cast the common [`ProcedureId`] to protobuf [`ProcedureId`].

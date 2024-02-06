@@ -1927,6 +1927,7 @@ dependencies = [
  "etcd-client",
  "futures",
  "futures-util",
+ "hex",
  "humantime-serde",
  "hyper",
  "lazy_static",

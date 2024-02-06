@@ -100,9 +100,10 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Failed to parse procedure id"))]
+    #[snafu(display("Failed to parse procedure id: {key}"))]
     ParseProcedureId {
         location: Location,
+        key: String,
         #[snafu(source)]
         error: common_procedure::ParseIdError,
     },
