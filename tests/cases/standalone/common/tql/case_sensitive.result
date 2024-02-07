@@ -1,0 +1,77 @@
+create table "MemAvailable" (ts timestamp time index, instance string primary key, val double);
+
+Affected Rows: 0
+
+create table "MemTotal" (ts timestamp time index, instance string primary key, val double);
+
+Affected Rows: 0
+
+insert into "MemAvailable" values
+    (0, 'host0', 10),
+    (5000, 'host0', 20),
+    (10000, 'host0', 30),
+    (0, 'host1', 40),
+    (5000, 'host1', 50),
+    (10000, 'host1', 60);
+
+Affected Rows: 6
+
+insert into "MemTotal" values
+    (0, 'host0', 100),
+    (5000, 'host0', 100),
+    (10000, 'host0', 100),
+    (0, 'host1', 100),
+    (5000, 'host1', 100),
+    (10000, 'host1', 100);
+
+Affected Rows: 6
+
+select * from information_schema.tables where table_type = 'BASE TABLE' order by table_id;
+
++---------------+--------------+--------------+------------+----------+--------+
+| table_catalog | table_schema | table_name   | table_type | table_id | engine |
++---------------+--------------+--------------+------------+----------+--------+
+| greptime      | public       | MemAvailable | BASE TABLE | 1024     | mito   |
+| greptime      | public       | MemTotal     | BASE TABLE | 1025     | mito   |
++---------------+--------------+--------------+------------+----------+--------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0,10,'5s') sum(MemAvailable / 4) + sum(MemTotal / 4);
+
++---------------------+---------------------------------------------------------------------+
+| ts                  | MemAvailable.SUM(val / Float64(4)) + MemTotal.SUM(val / Float64(4)) |
++---------------------+---------------------------------------------------------------------+
+| 1970-01-01T00:00:00 | 62.5                                                                |
+| 1970-01-01T00:00:05 | 67.5                                                                |
+| 1970-01-01T00:00:10 | 72.5                                                                |
++---------------------+---------------------------------------------------------------------+
+
+drop table "MemTotal";
+
+Affected Rows: 0
+
+create schema "AnotherSchema";
+
+Affected Rows: 1
+
+create table "AnotherSchema"."MemTotal" (ts timestamp time index, instance string primary key, val double);
+
+Affected Rows: 0
+
+tql eval (0,10,'5s') sum(MemAvailable / 4) + sum(MemTotal / 4);
+
+Error: 4001(TableNotFound), Table not found: greptime.public.MemTotal
+
+-- Cross schema is not supported
+tql eval (0,10,'5s') sum(MemAvailable / 4) + sum({__name__="AnotherSchema.MemTotal"} / 4);
+
+Error: 4001(TableNotFound), Table not found: greptime.public.AnotherSchema.MemTotal
+
+drop table "MemAvailable";
+
+Affected Rows: 0
+
+drop table "AnotherSchema"."MemTotal";
+
+Affected Rows: 0
+
