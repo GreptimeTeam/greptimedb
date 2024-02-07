@@ -1915,9 +1915,6 @@ impl PromPlanner {
             .chain(field_columns_iter)
             .collect::<Result<Vec<_>>>()?;
 
-        common_telemetry::info!("[DEBUG] input: {:?}", input);
-        common_telemetry::info!("[DEBUG] project_fields: {:?}", project_fields);
-
         LogicalPlanBuilder::from(input)
             .project(project_fields)
             .context(DataFusionPlanningSnafu)?
