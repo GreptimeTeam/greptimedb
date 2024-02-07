@@ -83,6 +83,7 @@ pub mod otlp;
 pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
+mod prometheus_resp;
 pub mod script;
 
 pub mod arrow_result;
