@@ -19,6 +19,7 @@ async-trait.workspace = true
 bytes.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-recordbatch.workspace = true
 common-runtime.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true

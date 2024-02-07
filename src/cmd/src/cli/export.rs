@@ -58,8 +58,8 @@ pub struct ExportCommand {
     #[clap(long)]
     output_dir: String,
 
-    /// The name of the catalog to export. Default to "greptime-*"".
-    #[clap(long, default_value = "")]
+    /// The name of the catalog to export.
+    #[clap(long, default_value = "greptime-*")]
     database: String,
 
     /// Parallelism of the export.

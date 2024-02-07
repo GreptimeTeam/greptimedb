@@ -15,7 +15,7 @@ runs:
     #   |- greptime-darwin-amd64-v0.5.0.sha256sum/greptime-darwin-amd64-v0.5.0.sha256sum
     #   ...
     - name: Download artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
 
     - name: Create git tag for release
       if: ${{ github.event_name != 'push' }} # Meaning this is a scheduled or manual workflow.

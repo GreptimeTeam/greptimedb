@@ -14,13 +14,13 @@
 
 use std::result;
 
-use api::v1::meta::submit_ddl_task_request::Task;
+use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
     AlterTableTask as PbAlterTableTask, AlterTableTasks as PbAlterTableTasks,
     CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
-    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks, Partition,
-    SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
-    SubmitDdlTaskResponse as PbSubmitDdlTaskResponse, TruncateTableTask as PbTruncateTableTask,
+    DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
+    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
+    TruncateTableTask as PbTruncateTableTask,
 };
 use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr};
 use base64::engine::general_purpose;
@@ -146,7 +146,7 @@ pub struct SubmitDdlTaskRequest {
     pub task: DdlTask,
 }
 
-impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
+impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
     type Error = error::Error;
 
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
@@ -198,27 +198,32 @@ pub struct SubmitDdlTaskResponse {
     pub table_ids: Vec<TableId>,
 }
 
-impl TryFrom<PbSubmitDdlTaskResponse> for SubmitDdlTaskResponse {
+impl TryFrom<PbDdlTaskResponse> for SubmitDdlTaskResponse {
     type Error = error::Error;
 
-    fn try_from(resp: PbSubmitDdlTaskResponse) -> Result<Self> {
+    fn try_from(resp: PbDdlTaskResponse) -> Result<Self> {
         let table_id = resp.table_id.map(|t| t.id);
-        let table_ids = resp.table_ids.iter().map(|t| t.id).collect();
+        let table_ids = resp.table_ids.into_iter().map(|t| t.id).collect();
         Ok(Self {
-            key: resp.key,
+            key: resp.pid.map(|pid| pid.key).unwrap_or_default(),
             table_id,
             table_ids,
         })
     }
 }
 
-impl From<SubmitDdlTaskResponse> for PbSubmitDdlTaskResponse {
+impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
     fn from(val: SubmitDdlTaskResponse) -> Self {
         Self {
-            key: val.key,
+            pid: Some(ProcedureId { key: val.key }),
             table_id: val
                 .table_id
                 .map(|table_id| api::v1::meta::TableId { id: table_id }),
+            table_ids: val
+                .table_ids
+                .into_iter()
+                .map(|id| api::v1::meta::TableId { id })
+                .collect(),
             ..Default::default()
         }
     }

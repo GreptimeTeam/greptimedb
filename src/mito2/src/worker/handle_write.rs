@@ -60,7 +60,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        let mut region_ctxs = self.prepare_region_write_ctx(write_requests);
+        // Prepare write context.
+        let mut region_ctxs = {
+            let _timer = WRITE_STAGE_ELAPSED
+                .with_label_values(&["prepare_ctx"])
+                .start_timer();
+            self.prepare_region_write_ctx(write_requests)
+        };
 
         // Write to WAL.
         {

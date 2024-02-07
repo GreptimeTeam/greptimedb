@@ -1,0 +1,72 @@
+--- alter table to add new column with default timestamp values aware of session timezone test ---
+CREATE TABLE test1 (i INTEGER, j TIMESTAMP time index, PRIMARY KEY(i));
+
+Affected Rows: 0
+
+INSERT INTO test1 values (1, 1), (2, 2);
+
+Affected Rows: 2
+
+SELECT * FROM test1;
+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 2 | 1970-01-01T00:00:00.002 |
++---+-------------------------+
+
+--- add ts1 column ---
+ALTER TABLE test1 ADD COLUMN ts1 TIMESTAMP DEFAULT '2024-01-30 00:01:01' PRIMARY KEY;
+
+Affected Rows: 0
+
+INSERT INTO test1 values (3, 3, DEFAULT), (4, 4,  '2024-01-31 00:01:01');
+
+Affected Rows: 2
+
+SELECT i, ts1 FROM test1;
+
++---+---------------------+
+| i | ts1                 |
++---+---------------------+
+| 1 | 2024-01-30T00:01:01 |
+| 2 | 2024-01-30T00:01:01 |
+| 3 | 2024-01-30T00:01:01 |
+| 4 | 2024-01-31T00:01:01 |
++---+---------------------+
+
+SET time_zone = 'Asia/Shanghai';
+
+Affected Rows: 0
+
+--- add ts2 column, default value is the same as ts1, but with different session timezone ---
+ALTER TABLE test1 ADD COLUMN ts2 TIMESTAMP DEFAULT '2024-01-30 00:01:01' PRIMARY KEY;
+
+Affected Rows: 0
+
+INSERT INTO test1 values (5, 5, DEFAULT, DEFAULT), (6, 6, DEFAULT, '2024-01-31 00:01:01');
+
+Affected Rows: 2
+
+SELECT i, ts1, ts2 FROM test1;
+
++---+---------------------+---------------------+
+| i | ts1                 | ts2                 |
++---+---------------------+---------------------+
+| 1 | 2024-01-30T00:01:01 | 2024-01-29T16:01:01 |
+| 2 | 2024-01-30T00:01:01 | 2024-01-29T16:01:01 |
+| 3 | 2024-01-30T00:01:01 | 2024-01-29T16:01:01 |
+| 4 | 2024-01-31T00:01:01 | 2024-01-29T16:01:01 |
+| 5 | 2024-01-30T00:01:01 | 2024-01-29T16:01:01 |
+| 6 | 2024-01-30T00:01:01 | 2024-01-30T16:01:01 |
++---+---------------------+---------------------+
+
+SET time_zone = 'UTC';
+
+Affected Rows: 0
+
+DROP TABLE test1;
+
+Affected Rows: 0
+

@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod build;
-pub mod version;
+mod build;
+mod database;
+mod timezone;
+mod version;
 
 use std::sync::Arc;
 
 use build::BuildFunction;
+use database::DatabaseFunction;
+use timezone::TimezoneFunction;
 use version::VersionFunction;
 
 use crate::function_registry::FunctionRegistry;
@@ -28,5 +32,7 @@ impl SystemFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(BuildFunction));
         registry.register(Arc::new(VersionFunction));
+        registry.register(Arc::new(DatabaseFunction));
+        registry.register(Arc::new(TimezoneFunction));
     }
 }

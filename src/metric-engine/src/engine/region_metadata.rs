@@ -14,11 +14,7 @@
 
 //! Implementation of retrieving logical region's region metadata.
 
-use std::collections::{HashMap, HashSet};
-
-use api::v1::SemanticType;
-use store_api::metadata::{ColumnMetadata, RegionMetadata};
-use store_api::storage::consts::ReservedColumnId;
+use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;

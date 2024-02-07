@@ -106,7 +106,7 @@ tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
-axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
+axum-test-helper = "0.3"
 catalog = { workspace = true, features = ["testing"] }
 client.workspace = true
 common-base.workspace = true
@@ -120,7 +120,7 @@ serde_json.workspace = true
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tokio-postgres = "0.7"
-tokio-postgres-rustls = { git = "https://github.com/ol-teuto/tokio-postgres-rustls.git", branch = "rustls-update" }
+tokio-postgres-rustls = "0.11"
 tokio-test = "0.4"
 
 [build-dependencies]

@@ -14,25 +14,15 @@
 
 //! Close a metric region
 
-use mito2::engine::MITO_ENGINE_NAME;
-use object_store::util::join_dir;
-use snafu::{OptionExt, ResultExt};
-use store_api::metric_engine_consts::{
-    DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR, PHYSICAL_TABLE_METADATA_KEY,
-};
+use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{
-    AffectedRows, RegionCloseRequest, RegionOpenRequest, RegionRequest,
-};
+use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use super::MetricEngineInner;
-use crate::error::{
-    CloseMitoRegionSnafu, Error, LogicalRegionNotFoundSnafu, OpenMitoRegionSnafu,
-    PhysicalRegionNotFoundSnafu, Result,
-};
+use crate::error::{CloseMitoRegionSnafu, LogicalRegionNotFoundSnafu, Result};
 use crate::metrics::PHYSICAL_REGION_COUNT;
-use crate::{metadata_region, utils};
+use crate::utils;
 
 impl MetricEngineInner {
     pub async fn close_region(

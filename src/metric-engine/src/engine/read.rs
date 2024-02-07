@@ -20,16 +20,16 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info, tracing};
 use datafusion::logical_expr;
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
+use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::region_engine::RegionEngine;
-use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
     InvalidMetadataSnafu, LogicalRegionNotFoundSnafu, MitoReadOperationSnafu, Result,
 };
+use crate::metrics::MITO_OPERATION_ELAPSED;
 use crate::utils;
 
 impl MetricEngineInner {
@@ -57,6 +57,10 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream> {
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["read_physical"])
+            .start_timer();
+
         self.mito
             .handle_query(region_id, request)
             .await
@@ -68,6 +72,10 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream> {
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["read"])
+            .start_timer();
+
         let physical_region_id = self.get_physical_region_id(logical_region_id).await?;
         let data_region_id = utils::to_data_region_id(physical_region_id);
         let request = self
@@ -250,7 +258,6 @@ mod test {
     use store_api::region_request::RegionRequest;
 
     use super::*;
-    use crate::engine::alter;
     use crate::test_util::{
         alter_logical_region_add_tag_columns, create_logical_region_request, TestEnv,
     };
@@ -262,7 +269,6 @@ mod test {
 
         let logical_region_id = env.default_logical_region_id();
         let physical_region_id = env.default_physical_region_id();
-        let data_region_id = utils::to_data_region_id(physical_region_id);
 
         // create another logical region
         let logical_region_id2 = RegionId::new(1112345678, 999);
@@ -282,7 +288,7 @@ mod test {
             .unwrap();
 
         // check explicit projection
-        let mut scan_req = ScanRequest {
+        let scan_req = ScanRequest {
             projection: Some(vec![0, 1, 2, 3, 4, 5, 6]),
             filters: vec![],
             ..Default::default()
@@ -305,7 +311,7 @@ mod test {
         );
 
         // check default projection
-        let mut scan_req = ScanRequest::default();
+        let scan_req = ScanRequest::default();
         let scan_req = env
             .metric()
             .inner

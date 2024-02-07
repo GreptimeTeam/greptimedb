@@ -478,6 +478,15 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to query procedure state"))]
+    QueryProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure not found: {pid}"))]
+    ProcedureNotFound { location: Location, pid: String },
+
     #[snafu(display("Failed to submit procedure"))]
     SubmitProcedure {
         location: Location,
@@ -706,6 +715,7 @@ impl ErrorExt for Error {
             | Error::InvalidArguments { .. }
             | Error::InitExportMetricsTask { .. }
             | Error::InvalidHeartbeatRequest { .. }
+            | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
@@ -731,9 +741,9 @@ impl ErrorExt for Error {
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. }
             | Error::InvalidFullTableName { source, .. } => source.status_code(),
-            Error::SubmitProcedure { source, .. } | Error::WaitProcedure { source, .. } => {
-                source.status_code()
-            }
+            Error::SubmitProcedure { source, .. }
+            | Error::WaitProcedure { source, .. }
+            | Error::QueryProcedure { source, .. } => source.status_code(),
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.status_code()
             }

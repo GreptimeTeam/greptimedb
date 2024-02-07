@@ -247,7 +247,7 @@ pub enum Error {
 
     #[snafu(display("Table mutation error"))]
     TableMutation {
-        source: BoxedError,
+        source: common_query::error::Error,
         location: Location,
     },
 

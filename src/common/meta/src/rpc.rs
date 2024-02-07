@@ -14,6 +14,7 @@
 
 pub mod ddl;
 pub mod lock;
+pub mod procedure;
 pub mod router;
 pub mod store;
 pub mod util;

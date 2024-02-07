@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::Hash;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType};
@@ -28,8 +28,8 @@ use crate::engine::MetricEngineInner;
 use crate::error::{
     ColumnNotFoundSnafu, ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result,
 };
-use crate::metrics::FORBIDDEN_OPERATION_COUNT;
-use crate::utils::{to_data_region_id, to_metadata_region_id};
+use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
+use crate::utils::to_data_region_id;
 
 // A random number
 const TSID_HASH_SEED: u32 = 846793005;
@@ -65,6 +65,10 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
         mut request: RegionPutRequest,
     ) -> Result<AffectedRows> {
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["put"])
+            .start_timer();
+
         let physical_region_id = *self
             .state
             .read()
@@ -80,6 +84,7 @@ impl MetricEngineInner {
             .await?;
 
         // write to data region
+
         // TODO: retrieve table name
         self.modify_rows(logical_region_id.table_id(), &mut request.rows)?;
         self.data_region.write_data(data_region_id, request).await
@@ -97,7 +102,6 @@ impl MetricEngineInner {
         request: &RegionPutRequest,
     ) -> Result<()> {
         // check if the region exists
-        let metadata_region_id = to_metadata_region_id(physical_region_id);
         let data_region_id = to_data_region_id(physical_region_id);
         let state = self.state.read().unwrap();
         if !state.is_logical_region_exist(logical_region_id) {

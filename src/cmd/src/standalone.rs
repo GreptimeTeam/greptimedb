@@ -213,6 +213,10 @@ impl App for Instance {
             .await
             .context(StartWalOptionsAllocatorSnafu)?;
 
+        plugins::start_frontend_plugins(self.frontend.plugins().clone())
+            .await
+            .context(StartFrontendSnafu)?;
+
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
     }
@@ -368,20 +372,18 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
-        let mut fe_opts = opts.frontend.clone();
+        info!("Standalone start command: {:#?}", self);
+        info!("Building standalone instance with {opts:#?}");
+
+        let mut fe_opts = opts.frontend;
         #[allow(clippy::unnecessary_mut_passed)]
         let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
             .await
             .context(StartFrontendSnafu)?;
 
-        let dn_opts = opts.datanode.clone();
+        let dn_opts = opts.datanode;
 
-        info!("Standalone start command: {:#?}", self);
-
-        info!("Building standalone instance with {opts:#?}");
-
-        set_default_timezone(opts.frontend.default_timezone.as_deref())
-            .context(InitTimezoneSnafu)?;
+        set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
@@ -437,11 +439,11 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
-        let servers = Services::new(opts.clone(), Arc::new(frontend.clone()), fe_plugins)
+        let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
             .build()
             .context(StartFrontendSnafu)?;
         frontend
-            .build_servers(opts, servers)
+            .build_servers(fe_opts, servers)
             .context(StartFrontendSnafu)?;
 
         Ok(Instance {
