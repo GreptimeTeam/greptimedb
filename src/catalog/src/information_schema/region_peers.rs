@@ -127,9 +127,6 @@ impl InformationTable for InformationSchemaRegionPeers {
     }
 }
 
-/// Builds the `information_schema.TABLE` table row by row
-///
-/// Columns are based on <https://www.postgresql.org/docs/current/infoschema-columns.html>
 struct InformationSchemaRegionPeersBuilder {
     schema: SchemaRef,
     catalog_name: String,

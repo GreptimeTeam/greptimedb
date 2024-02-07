@@ -187,9 +187,6 @@ impl InformationTable for InformationSchemaPartitions {
     }
 }
 
-/// Builds the `information_schema.TABLE` table row by row
-///
-/// Columns are based on <https://www.postgresql.org/docs/current/infoschema-columns.html>
 struct InformationSchemaPartitionsBuilder {
     schema: SchemaRef,
     catalog_name: String,
