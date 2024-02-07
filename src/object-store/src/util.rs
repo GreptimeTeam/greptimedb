@@ -78,7 +78,49 @@ pub fn normalize_dir(v: &str) -> String {
 /// - Otherwise, it's a file path.
 pub fn join_path(parent: &str, child: &str) -> String {
     let output = format!("{parent}/{child}");
-    opendal::raw::normalize_path(&output)
+    normalize_path(&output)
+}
+
+/// Make sure all operation are constructed by normalized path:
+///
+/// - Path endswith `/` means it's a dir path.
+/// - Otherwise, it's a file path.
+///
+/// # Normalize Rules
+///
+/// - All whitespace will be trimmed: ` abc/def ` => `abc/def`
+/// - Repeated leading / will be trimmed: `///abc` => `/abc`
+/// - Internal // will be replaced by /: `abc///def` => `abc/def`
+/// - Empty path will be `/`: `` => `/`
+pub fn normalize_path(path: &str) -> String {
+    // - all whitespace has been trimmed.
+    let path = path.trim();
+
+    // Fast line for empty path.
+    if path.is_empty() {
+        return "/".to_string();
+    }
+
+    let has_leading = path.starts_with('/');
+    let has_trailing = path.ends_with('/');
+
+    let mut p = path
+        .split('/')
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    // If path is not starting with `/` but it should
+    if !p.starts_with('/') && has_leading {
+        p.insert(0, '/');
+    }
+
+    // If path is not ending with `/` but it should
+    if !p.ends_with('/') && has_trailing {
+        p.push('/');
+    }
+
+    p
 }
 
 /// Attaches instrument layers to the object store.
@@ -127,10 +169,14 @@ mod tests {
         assert_eq!("/", join_path("", "/"));
         assert_eq!("/", join_path("/", "/"));
         assert_eq!("a/", join_path("a", ""));
+        assert_eq!("/a", join_path("/", "a"));
         assert_eq!("a/b/c.txt", join_path("a/b", "c.txt"));
-        assert_eq!("a/b/c.txt", join_path("/a/b", "c.txt"));
-        assert_eq!("a/b/c/", join_path("/a/b", "c/"));
-        assert_eq!("a/b/c/", join_path("/a/b", "/c/"));
-        assert_eq!("a/b/c.txt", join_path("/a/b", "//c.txt"));
+        assert_eq!("/a/b/c.txt", join_path("/a/b", "c.txt"));
+        assert_eq!("/a/b/c/", join_path("/a/b", "c/"));
+        assert_eq!("/a/b/c/", join_path("/a/b", "/c/"));
+        assert_eq!("/a/b/c.txt", join_path("/a/b", "//c.txt"));
+        assert_eq!("abc/def", join_path(" abc", "/def "));
+        assert_eq!("/abc", join_path("//", "/abc"));
+        assert_eq!("abc/def", join_path("abc/", "//def"));
     }
 }
