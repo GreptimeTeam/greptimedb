@@ -649,7 +649,7 @@ DESC TABLE RUNTIME_METRICS;
 | timestamp   | TimestampMillisecond |     | NO   |         | FIELD         |
 +-------------+----------------------+-----+------+---------+---------------+
 
-DESC TABLE REGION_PEERS;
+DESC TABLE GREPTIME_REGION_PEERS;
 
 +--------------+--------+-----+------+---------+---------------+
 | Column       | Type   | Key | Null | Default | Semantic Type |

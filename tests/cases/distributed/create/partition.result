@@ -24,7 +24,7 @@ SELECT table_catalog, table_schema, table_name, partition_name, partition_expres
 
 -- SQLNESS REPLACE (\d{13}) REGION_ID
 -- SQLNESS REPLACE (\d{1}) PEER_ID
-SELECT region_id, peer_id, is_leader, status FROM information_schema.region_peers ORDER BY peer_id;
+SELECT region_id, peer_id, is_leader, status FROM information_schema.greptime_region_peers ORDER BY peer_id;
 
 +---------------+---------+-----------+--------+
 | region_id     | peer_id | is_leader | status |
