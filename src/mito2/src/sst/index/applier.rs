@@ -174,8 +174,7 @@ impl Drop for SstIndexApplier {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
+    use common_base::BitVec;
     use futures::io::Cursor;
     use index::inverted_index::search::index_apply::MockIndexApplier;
     use object_store::services::Memory;
@@ -206,7 +205,7 @@ mod tests {
         mock_index_applier.expect_memory_usage().returning(|| 100);
         mock_index_applier.expect_apply().returning(|_, _| {
             Ok(ApplyOutput {
-                matched_segment_ids: BTreeSet::from_iter([1, 2, 3]),
+                matched_segment_ids: BitVec::EMPTY,
                 total_row_count: 100,
                 segment_row_count: 10,
             })
@@ -223,7 +222,7 @@ mod tests {
         assert_eq!(
             output,
             ApplyOutput {
-                matched_segment_ids: BTreeSet::from_iter([1, 2, 3]),
+                matched_segment_ids: BitVec::EMPTY,
                 total_row_count: 100,
                 segment_row_count: 10,
             }

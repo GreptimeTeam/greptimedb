@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
 use std::mem::size_of;
 
 use async_trait::async_trait;
@@ -51,7 +50,7 @@ impl IndexApplier for PredicatesIndexApplier {
     ) -> Result<ApplyOutput> {
         let metadata = reader.metadata().await?;
         let mut output = ApplyOutput {
-            matched_segment_ids: BTreeSet::default(),
+            matched_segment_ids: BitVec::EMPTY,
             total_row_count: metadata.total_row_count as _,
             segment_row_count: metadata.segment_row_count as _,
         };
@@ -86,7 +85,7 @@ impl IndexApplier for PredicatesIndexApplier {
             bitmap &= bm;
         }
 
-        output.matched_segment_ids = bitmap.iter_ones().collect();
+        output.matched_segment_ids = bitmap;
         Ok(output)
     }
 
@@ -218,7 +217,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             output.matched_segment_ids,
-            BTreeSet::from_iter([0, 2, 4, 6])
+            bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]
         );
 
         // An index reader with a single tag "tag-0" but without value "tag-0_value-0"
@@ -236,7 +235,7 @@ mod tests {
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert!(output.matched_segment_ids.is_empty());
+        assert_eq!(output.matched_segment_ids.count_ones(), 0);
     }
 
     #[tokio::test]
@@ -273,7 +272,10 @@ mod tests {
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert_eq!(output.matched_segment_ids, BTreeSet::from_iter([0, 4, 6]));
+        assert_eq!(
+            output.matched_segment_ids,
+            bitvec![u8, Lsb0; 1, 0, 0, 0, 1, 0, 1, 0]
+        );
     }
 
     #[tokio::test]
@@ -293,7 +295,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             output.matched_segment_ids,
-            BTreeSet::from_iter([0, 1, 2, 3, 4, 5, 6, 7])
+            bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]
         ); // full range to scan
     }
 
@@ -368,7 +370,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             output.matched_segment_ids,
-            BTreeSet::from_iter([0, 1, 2, 3, 4, 5, 6, 7])
+            bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]
         );
     }
 

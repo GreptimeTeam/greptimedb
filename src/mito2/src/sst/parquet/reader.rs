@@ -339,7 +339,7 @@ impl ParquetReaderBuilder {
         let segment_row_count = output.segment_row_count;
         let row_groups = output
             .matched_segment_ids
-            .into_iter()
+            .iter_ones()
             .map(|seg_id| {
                 let begin_row_id = seg_id * segment_row_count;
                 let row_group_id = begin_row_id / row_group_size;
