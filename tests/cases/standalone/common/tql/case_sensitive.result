@@ -26,14 +26,14 @@ insert into "MemTotal" values
 
 Affected Rows: 6
 
-select * from information_schema.tables where table_type = 'BASE TABLE' order by table_id;
+select table_name from information_schema.tables where table_type = 'BASE TABLE' order by table_id;
 
-+---------------+--------------+--------------+------------+----------+--------+
-| table_catalog | table_schema | table_name   | table_type | table_id | engine |
-+---------------+--------------+--------------+------------+----------+--------+
-| greptime      | public       | MemAvailable | BASE TABLE | 1024     | mito   |
-| greptime      | public       | MemTotal     | BASE TABLE | 1025     | mito   |
-+---------------+--------------+--------------+------------+----------+--------+
++--------------+
+| table_name   |
++--------------+
+| MemAvailable |
+| MemTotal     |
++--------------+
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0,10,'5s') sum(MemAvailable / 4) + sum(MemTotal / 4);

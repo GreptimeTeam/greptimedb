@@ -18,7 +18,7 @@ insert into "MemTotal" values
     (5000, 'host1', 100),
     (10000, 'host1', 100);
 
-select * from information_schema.tables where table_type = 'BASE TABLE' order by table_id;
+select table_name from information_schema.tables where table_type = 'BASE TABLE' order by table_id;
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0,10,'5s') sum(MemAvailable / 4) + sum(MemTotal / 4);
