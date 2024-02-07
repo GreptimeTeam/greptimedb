@@ -556,6 +556,13 @@ pub enum Error {
         error: parquet::errors::ParquetError,
         location: Location,
     },
+
+    #[snafu(display("Failed to iter data part"))]
+    ReadDataPart {
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -657,7 +664,7 @@ impl ErrorExt for Error {
             StaleLogEntry { .. } => StatusCode::Unexpected,
             FilterRecordBatch { source, .. } => source.status_code(),
             Upload { .. } => StatusCode::StorageUnavailable,
-            EncodeMemtable { .. } => StatusCode::Internal,
+            ReadDataPart { .. } | EncodeMemtable { .. } => StatusCode::Internal,
         }
     }
 
