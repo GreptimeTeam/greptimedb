@@ -163,6 +163,10 @@ impl CreateLogicalTablesProcedure {
         self.create_regions(region_routes).await
     }
 
+    /// Creates table metadata
+    ///
+    /// Abort(not-retry):
+    /// - Failed to create table metadata.
     pub async fn on_create_metadata(&self) -> Result<Status> {
         let manager = &self.context.table_metadata_manager;
         let physical_table_id = self.creator.data.physical_table_id();
