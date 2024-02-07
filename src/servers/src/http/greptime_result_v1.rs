@@ -32,6 +32,7 @@ pub struct GreptimedbV1Response {
     pub(crate) output: Vec<GreptimeQueryOutput>,
     pub(crate) execution_time_ms: u64,
 
+    // placeholder for header value
     #[serde(skip)]
     #[serde(default)]
     pub(crate) resp_metrics: HashMap<String, Value>,

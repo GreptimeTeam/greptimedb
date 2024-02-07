@@ -13,8 +13,9 @@
 // limitations under the License.
 
 //! prom supply the prometheus HTTP API Server compliance
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
+use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_error::ext::ErrorExt;
@@ -28,8 +29,11 @@ use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::ValueType;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
+use super::handler::collect_plan_metrics;
+use super::header::GREPTIME_DB_HEADER_METRICS;
 use super::prometheus::{PromData, PromSeries, PrometheusResponse};
 use crate::error::{CollectRecordbatchSnafu, InternalSnafu, Result};
 
@@ -44,11 +48,28 @@ pub struct PrometheusJsonResponse {
     pub error_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
+
+    // placeholder for header value
+    #[serde(skip)]
+    #[serde(default)]
+    pub resp_metrics: HashMap<String, Value>,
 }
 
 impl IntoResponse for PrometheusJsonResponse {
     fn into_response(self) -> Response {
-        Json(self).into_response()
+        let metrics = if self.resp_metrics.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&self.resp_metrics).ok()
+        };
+
+        let mut resp = Json(self).into_response();
+
+        if let Some(m) = metrics.and_then(|m| HeaderValue::from_str(&m).ok()) {
+            resp.headers_mut().insert(GREPTIME_DB_HEADER_METRICS, m);
+        }
+
+        resp
     }
 }
 
@@ -64,6 +85,7 @@ impl PrometheusJsonResponse {
             error: Some(reason.into()),
             error_type: Some(error_type.into()),
             warnings: None,
+            resp_metrics: Default::default(),
         }
     }
 
@@ -74,6 +96,7 @@ impl PrometheusJsonResponse {
             error: None,
             error_type: None,
             warnings: None,
+            resp_metrics: Default::default(),
         }
     }
 
@@ -90,15 +113,29 @@ impl PrometheusJsonResponse {
                     metric_name,
                     result_type,
                 )?),
-                Output::Stream(stream, _) => {
+                Output::Stream(stream, physical_plan) => {
                     let record_batches = RecordBatches::try_collect(stream)
                         .await
                         .context(CollectRecordbatchSnafu)?;
-                    Self::success(Self::record_batches_to_data(
+                    let mut resp = Self::success(Self::record_batches_to_data(
                         record_batches,
                         metric_name,
                         result_type,
-                    )?)
+                    )?);
+
+                    if let Some(physical_plan) = physical_plan {
+                        let mut result_map = HashMap::new();
+                        let mut tmp = vec![&mut result_map];
+                        collect_plan_metrics(physical_plan, &mut tmp);
+
+                        let re = result_map
+                            .into_iter()
+                            .map(|(k, v)| (k, Value::from(v)))
+                            .collect();
+                        resp.resp_metrics = re;
+                    }
+
+                    resp
                 }
                 Output::AffectedRows(_) => {
                     Self::error("Unexpected", "expected data result, but got affected rows")
