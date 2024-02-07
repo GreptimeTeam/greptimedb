@@ -55,6 +55,9 @@ const PARTITION_EXPRESSION: &str = "partition_expression";
 /// The region id
 const GREPTIME_PARTITION_ID: &str = "greptime_partition_id";
 
+/// The `PARTITIONS` table provides information about partitioned tables.
+/// See https://dev.mysql.com/doc/refman/8.0/en/information-schema-partitions-table.html
+/// We provide an extral column `greptime_partition_id` for GreptimeDB region id.
 pub(super) struct InformationSchemaPartitions {
     schema: SchemaRef,
     catalog_name: String,

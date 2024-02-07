@@ -12,7 +12,7 @@ PARTITION BY RANGE COLUMNS (a) (
 Affected Rows: 0
 
 -- SQLNESS REPLACE (\d{13}) ID
-SELECT table_catalog, table_schema, table_name, partition_name, partition_expression, greptime_partition_id from information_schema.partitions WHERE table_name = 'my_table';
+SELECT table_catalog, table_schema, table_name, partition_name, partition_expression, greptime_partition_id from information_schema.partitions WHERE table_name = 'my_table' ORDER BY table_catalog, table_schema, table_name, partition_name;
 
 +---------------+--------------+------------+----------------+---------------------------------+-----------------------+
 | table_catalog | table_schema | table_name | partition_name | partition_expression            | greptime_partition_id |
@@ -21,6 +21,18 @@ SELECT table_catalog, table_schema, table_name, partition_name, partition_expres
 | greptime      | public       | my_table   | p1             | (a) VALUES LESS THAN (20)       | ID         |
 | greptime      | public       | my_table   | p2             | (a) VALUES LESS THAN (MAXVALUE) | ID         |
 +---------------+--------------+------------+----------------+---------------------------------+-----------------------+
+
+-- SQLNESS REPLACE (\d{13}) REGION_ID
+-- SQLNESS REPLACE (\d{1}) PEER_ID
+SELECT region_id, peer_id, is_leader, status FROM information_schema.region_peers ORDER BY peer_id;
+
++---------------+---------+-----------+--------+
+| region_id     | peer_id | is_leader | status |
++---------------+---------+-----------+--------+
+| REGION_ID | PEER_ID       | Yes       | Alive  |
+| REGION_ID | PEER_ID       | Yes       | Alive  |
+| REGION_ID | PEER_ID       | Yes       | Alive  |
++---------------+---------+-----------+--------+
 
 DROP TABLE my_table;
 

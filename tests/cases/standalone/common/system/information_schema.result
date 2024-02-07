@@ -555,7 +555,7 @@ select * from key_column_usage;
 +--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 
 -- tables not implemented
-desc table COLUMN_PRIVILEGES;
+DESC TABLE COLUMN_PRIVILEGES;
 
 +----------------+--------+-----+------+---------+---------------+
 | Column         | Type   | Key | Null | Default | Semantic Type |
@@ -569,14 +569,14 @@ desc table COLUMN_PRIVILEGES;
 | is_grantable   | String |     | NO   |         | FIELD         |
 +----------------+--------+-----+------+---------+---------------+
 
-select * from COLUMN_PRIVILEGES;
+SELECT * FROM COLUMN_PRIVILEGES;
 
 +---------+---------------+--------------+------------+-------------+----------------+--------------+
 | grantee | table_catalog | table_schema | table_name | column_name | privilege_type | is_grantable |
 +---------+---------------+--------------+------------+-------------+----------------+--------------+
 +---------+---------------+--------------+------------+-------------+----------------+--------------+
 
-desc table COLUMN_STATISTICS;
+DESC TABLE COLUMN_STATISTICS;
 
 +-------------+--------+-----+------+---------+---------------+
 | Column      | Type   | Key | Null | Default | Semantic Type |
@@ -587,14 +587,14 @@ desc table COLUMN_STATISTICS;
 | histogram   | String |     | NO   |         | FIELD         |
 +-------------+--------+-----+------+---------+---------------+
 
-select * from COLUMN_STATISTICS;
+SELECT * FROM COLUMN_STATISTICS;
 
 +-------------+------------+-------------+-----------+
 | schema_name | table_name | column_name | histogram |
 +-------------+------------+-------------+-----------+
 +-------------+------------+-------------+-----------+
 
-select * from CHARACTER_SETS;
+SELECT * FROM CHARACTER_SETS;
 
 +--------------------+----------------------+---------------+--------+
 | character_set_name | default_collate_name | description   | maxlen |
@@ -602,7 +602,7 @@ select * from CHARACTER_SETS;
 | utf8               | utf8_bin             | UTF-8 Unicode | 4      |
 +--------------------+----------------------+---------------+--------+
 
-select * from COLLATIONS;
+SELECT * FROM COLLATIONS;
 
 +----------------+--------------------+----+------------+-------------+---------+
 | collation_name | character_set_name | id | is_default | is_compiled | sortlen |
@@ -610,7 +610,7 @@ select * from COLLATIONS;
 | utf8_bin       | utf8               | 1  | Yes        | Yes         | 1       |
 +----------------+--------------------+----+------------+-------------+---------+
 
-select * from COLLATION_CHARACTER_SET_APPLICABILITY;
+SELECT * FROM COLLATION_CHARACTER_SET_APPLICABILITY;
 
 +----------------+--------------------+
 | collation_name | character_set_name |
@@ -618,7 +618,7 @@ select * from COLLATION_CHARACTER_SET_APPLICABILITY;
 | utf8_bin       | utf8               |
 +----------------+--------------------+
 
-desc table CHECK_CONSTRAINTS;
+DESC TABLE CHECK_CONSTRAINTS;
 
 +--------------------+--------+-----+------+---------+---------------+
 | Column             | Type   | Key | Null | Default | Semantic Type |
@@ -629,14 +629,14 @@ desc table CHECK_CONSTRAINTS;
 | check_clause       | String |     | NO   |         | FIELD         |
 +--------------------+--------+-----+------+---------+---------------+
 
-select * from CHECK_CONSTRAINTS;
+SELECT * FROM CHECK_CONSTRAINTS;
 
 +--------------------+-------------------+-----------------+--------------+
 | constraint_catalog | constraint_schema | constraint_name | check_clause |
 +--------------------+-------------------+-----------------+--------------+
 +--------------------+-------------------+-----------------+--------------+
 
-desc table RUNTIME_METRICS;
+DESC TABLE RUNTIME_METRICS;
 
 +-------------+----------------------+-----+------+---------+---------------+
 | Column      | Type                 | Key | Null | Default | Semantic Type |
@@ -648,6 +648,19 @@ desc table RUNTIME_METRICS;
 | node_type   | String               |     | NO   |         | FIELD         |
 | timestamp   | TimestampMillisecond |     | NO   |         | FIELD         |
 +-------------+----------------------+-----+------+---------+---------------+
+
+DESC TABLE REGION_PEERS;
+
++--------------+--------+-----+------+---------+---------------+
+| Column       | Type   | Key | Null | Default | Semantic Type |
++--------------+--------+-----+------+---------+---------------+
+| region_id    | UInt64 |     | NO   |         | FIELD         |
+| peer_id      | UInt64 |     | YES  |         | FIELD         |
+| peer_addr    | String |     | YES  |         | FIELD         |
+| is_leader    | String |     | YES  |         | FIELD         |
+| status       | String |     | YES  |         | FIELD         |
+| down_seconds | Int64  |     | YES  |         | FIELD         |
++--------------+--------+-----+------+---------+---------------+
 
 drop table my_db.foo;
 

@@ -17,6 +17,7 @@ mod key_column_usage;
 mod memory_table;
 mod partitions;
 mod predicate;
+mod region_peers;
 mod runtime_metrics;
 mod schemata;
 mod table_names;
@@ -49,6 +50,7 @@ use crate::error::Result;
 use crate::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
 use crate::information_schema::partitions::InformationSchemaPartitions;
+use crate::information_schema::region_peers::InformationSchemaRegionPeers;
 use crate::information_schema::runtime_metrics::InformationSchemaMetrics;
 use crate::information_schema::schemata::InformationSchemaSchemata;
 use crate::information_schema::tables::InformationSchemaTables;
@@ -159,6 +161,10 @@ impl InformationSchemaProvider {
                 BUILD_INFO.to_string(),
                 self.build_table(BUILD_INFO).unwrap(),
             );
+            tables.insert(
+                REGION_PEERS.to_string(),
+                self.build_table(REGION_PEERS).unwrap(),
+            );
         }
 
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
@@ -233,7 +239,10 @@ impl InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
-
+            REGION_PEERS => Some(Arc::new(InformationSchemaRegionPeers::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             _ => None,
         }
     }

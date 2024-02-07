@@ -65,7 +65,7 @@ impl PartitionRuleManager {
         }
     }
 
-    async fn find_region_routes(&self, table_id: TableId) -> Result<Vec<RegionRoute>> {
+    pub async fn find_region_routes(&self, table_id: TableId) -> Result<Vec<RegionRoute>> {
         let (_, route) = self
             .table_route_manager
             .get_physical_table_route(table_id)
