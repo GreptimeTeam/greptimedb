@@ -130,10 +130,12 @@ pub async fn sql(
 pub async fn from_output(
     ty: ResponseFormat,
     outputs: Vec<crate::error::Result<Output>>,
-) -> Result<Vec<GreptimeQueryOutput>, ErrorResponse> {
+) -> Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
     // TODO(sunng87): this api response structure cannot represent error well.
     //  It hides successful execution results from error response
     let mut results = Vec::with_capacity(outputs.len());
+    let mut merge_map = HashMap::new();
+
     for out in outputs {
         match out {
             Ok(Output::AffectedRows(rows)) => {
@@ -155,7 +157,9 @@ pub async fn from_output(
                 };
                 if let Some(physical_plan) = physical_plan {
                     let mut result_map = HashMap::new();
-                    collect_plan_metrics(physical_plan, &mut result_map);
+
+                    let mut tmp = vec![&mut merge_map, &mut result_map];
+                    collect_plan_metrics(physical_plan, &mut tmp);
                     let re = result_map
                         .into_iter()
                         .map(|(k, v)| (k, Value::from(v)))
@@ -180,34 +184,39 @@ pub async fn from_output(
         }
     }
 
-    Ok(results)
+    let merge_map = merge_map
+        .into_iter()
+        .map(|(k, v)| (k, Value::from(v)))
+        .collect();
+
+    Ok((results, merge_map))
 }
 
-fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, result_map: &mut HashMap<String, u64>) {
+fn collect_into_maps(name: &str, value: u64, maps: &mut [&mut HashMap<String, u64>]) {
+    if name.starts_with(GREPTIME_EXEC_PREFIX) && value > 0 {
+        maps.iter_mut().for_each(|map| {
+            map.entry(name.to_string())
+                .and_modify(|v| *v += value)
+                .or_insert(value);
+        });
+    }
+}
+
+pub fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, maps: &mut [&mut HashMap<String, u64>]) {
     if let Some(m) = plan.metrics() {
         m.iter().for_each(|m| match m.value() {
             MetricValue::Count { name, count } => {
-                let value = count.value() as u64;
-                if name.starts_with(GREPTIME_EXEC_PREFIX) && value > 0 {
-                    result_map
-                        .entry(name.to_string())
-                        .and_modify(|v| *v += value)
-                        .or_insert(value);
-                }
+                collect_into_maps(name, count.value() as u64, maps);
             }
             MetricValue::Gauge { name, gauge } => {
-                let value = gauge.value() as u64;
-                if name.starts_with(GREPTIME_EXEC_PREFIX) && value > 0 {
-                    result_map
-                        .entry(name.to_string())
-                        .and_modify(|v| *v += value)
-                        .or_insert(value);
-                }
+                collect_into_maps(name, gauge.value() as u64, maps);
             }
             MetricValue::Time { name, time } => {
                 if name.starts_with(GREPTIME_EXEC_PREFIX) {
                     // override
-                    result_map.insert(name.to_string(), time.value() as u64);
+                    maps.iter_mut().for_each(|map| {
+                        map.insert(name.to_string(), time.value() as u64);
+                    });
                 }
             }
             _ => {}
@@ -215,7 +224,7 @@ fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, result_map: &mut HashMap<St
     }
 
     for c in plan.children() {
-        collect_plan_metrics(c, result_map);
+        collect_plan_metrics(c, maps);
     }
 }
 
