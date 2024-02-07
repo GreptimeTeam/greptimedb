@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod scalars;
-mod system;
-mod table;
+use crate::handlers::{MetaServiceHandlerRef, TableMutationHandlerRef};
 
-pub mod function;
-pub mod function_registry;
-pub mod handlers;
-pub mod helper;
-pub mod state;
+/// Shared state for SQL functions.
+/// The handlers in state may be `None` in cli command-line or test cases.
+#[derive(Clone, Default)]
+pub struct FunctionState {
+    // The table mutation handler
+    pub table_mutation_handler: Option<TableMutationHandlerRef>,
+    // The meta service handler
+    pub meta_service_handler: Option<MetaServiceHandlerRef>,
+}

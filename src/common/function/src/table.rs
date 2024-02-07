@@ -12,12 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod scalars;
-mod system;
-mod table;
+mod migrate_region;
 
-pub mod function;
-pub mod function_registry;
-pub mod handlers;
-pub mod helper;
-pub mod state;
+use std::sync::Arc;
+
+use migrate_region::MigrateRegionFunction;
+
+use crate::function_registry::FunctionRegistry;
+
+/// Table functions
+pub(crate) struct TableFunction;
+
+impl TableFunction {
+    /// Register all table functions to [`FunctionRegistry`].
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(MigrateRegionFunction));
+    }
+}

@@ -21,16 +21,20 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
 
+use crate::state::FunctionState;
+
 /// The function execution context
 #[derive(Clone)]
 pub struct FunctionContext {
     pub query_ctx: QueryContextRef,
+    pub state: Arc<FunctionState>,
 }
 
 impl Default for FunctionContext {
     fn default() -> Self {
         Self {
             query_ctx: QueryContextBuilder::default().build(),
+            state: Arc::new(FunctionState::default()),
         }
     }
 }
