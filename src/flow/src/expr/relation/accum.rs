@@ -313,22 +313,6 @@ impl Accumulator for Float {
                 }
             } else if aggr_fn.is_sum() {
                 self.accum += *(x * OrderedF64::from(diff as f64));
-            } else if aggr_fn.is_max() {
-                // min/max is accumulative only if input is monotonic(no delete)
-                if diff <= 0 {
-                    return Err(InternalSnafu {
-                                    reason: "SimpleNumber Accumulator does not support non-monotonic input for max aggregation".to_string(),
-                                }.build());
-                }
-                self.accum = std::cmp::max(self.accum, x);
-            } else if aggr_fn.is_min() {
-                // min/max is accumulative only if input is monotonic(no delete)
-                if diff <= 0 {
-                    return Err(InternalSnafu {
-                                    reason: "SimpleNumber Accumulator does not support non-monotonic input for max aggregation".to_string(),
-                                }.build());
-                }
-                self.accum = std::cmp::min(self.accum, x);
             } else {
                 return Err(InternalSnafu {
                     reason: format!(
@@ -625,6 +609,30 @@ fn test_accum() {
         vec![Value::Decimal128(Decimal128::new(1, 38, 0)), 1i64.into()]
     );
 
+    // sum f32
+    let mut acc = Accum::new_accum(&AggregateFunc::SumFloat32).unwrap();
+    acc.update(
+        &AggregateFunc::SumFloat32,
+        Value::Float32(OrderedF32::from(1.0)),
+        1,
+    )
+    .unwrap();
+
+    assert_eq!(
+        acc.eval(&AggregateFunc::SumFloat32).unwrap(),
+        Value::Float32(OrderedF32::from(1.0))
+    );
+    assert_eq!(
+        acc.into_state(),
+        vec![
+            Value::Float64(OrderedF64::from(1.0)),
+            0i64.into(),
+            0i64.into(),
+            0i64.into(),
+            1i64.into()
+        ]
+    );
+
     // max i32
     let mut acc = Accum::new_accum(&AggregateFunc::MaxInt32).unwrap();
     acc.update(&AggregateFunc::MaxInt32, Value::Int32(1), 1)
@@ -644,4 +652,49 @@ fn test_accum() {
 
     assert_eq!(acc.eval(&AggregateFunc::MinInt32).unwrap(), Value::Int32(1));
     assert_eq!(acc.into_state(), vec![Value::Int32(1), 2i64.into()]);
+
+    // max f32
+    let mut acc = Accum::new_accum(&AggregateFunc::MaxFloat32).unwrap();
+    acc.update(
+        &AggregateFunc::MaxFloat32,
+        Value::Float32(OrderedF32::from(1.0)),
+        1,
+    )
+    .unwrap();
+    acc.update(
+        &AggregateFunc::MaxFloat32,
+        Value::Float32(OrderedF32::from(2.0)),
+        1,
+    );
+
+    assert_eq!(
+        acc.eval(&AggregateFunc::MaxFloat32).unwrap(),
+        Value::Float32(OrderedF32::from(2.0))
+    );
+    assert_eq!(
+        acc.into_state(),
+        vec![Value::Float32(OrderedF32::from(2.0)), 2i64.into(),]
+    );
+
+    // max DateTime
+    let mut acc = Accum::new_accum(&AggregateFunc::MaxDateTime).unwrap();
+    acc.update(
+        &AggregateFunc::MaxDateTime,
+        Value::DateTime(DateTime::from(0)),
+        1,
+    );
+    acc.update(
+        &AggregateFunc::MaxDateTime,
+        Value::DateTime(DateTime::from(1)),
+        1,
+    );
+
+    assert_eq!(
+        acc.eval(&AggregateFunc::MaxDateTime).unwrap(),
+        Value::DateTime(DateTime::from(1))
+    );
+    assert_eq!(
+        acc.into_state(),
+        vec![Value::DateTime(DateTime::from(1)), 2i64.into(),]
+    );
 }
