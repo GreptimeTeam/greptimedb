@@ -110,12 +110,12 @@ pub fn normalize_path(path: &str) -> String {
         .collect::<Vec<_>>()
         .join("/");
 
-    // If path is not starting with `\` but it should
+    // If path is not starting with `/` but it should
     if !p.starts_with('/') && has_leading {
         p.insert(0, '/');
     }
 
-    // If path is not ending with `\` but it should
+    // If path is not ending with `/` but it should
     if !p.ends_with('/') && has_trailing {
         p.push('/');
     }
@@ -169,10 +169,14 @@ mod tests {
         assert_eq!("/", join_path("", "/"));
         assert_eq!("/", join_path("/", "/"));
         assert_eq!("a/", join_path("a", ""));
+        assert_eq!("/a", join_path("/", "a"));
         assert_eq!("a/b/c.txt", join_path("a/b", "c.txt"));
         assert_eq!("/a/b/c.txt", join_path("/a/b", "c.txt"));
         assert_eq!("/a/b/c/", join_path("/a/b", "c/"));
         assert_eq!("/a/b/c/", join_path("/a/b", "/c/"));
         assert_eq!("/a/b/c.txt", join_path("/a/b", "//c.txt"));
+        assert_eq!("abc/def", join_path(" abc", "/def "));
+        assert_eq!("/abc", join_path("//", "/abc"));
+        assert_eq!("abc/def", join_path("abc/", "//def"));
     }
 }
