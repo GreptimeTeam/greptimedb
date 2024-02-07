@@ -5299,6 +5299,7 @@ dependencies = [
  "futures",
  "humantime-serde",
  "index",
+ "itertools 0.10.5",
  "lazy_static",
  "log-store",
  "memcomparable",

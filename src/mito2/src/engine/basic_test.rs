@@ -551,10 +551,10 @@ async fn test_region_usage() {
 
     let region_stat = region.region_usage().await;
     assert_eq!(region_stat.wal_usage, 0);
-    assert_eq!(region_stat.sst_usage, 3006);
+    assert_eq!(region_stat.sst_usage, 3005);
 
     // region total usage
-    assert_eq!(region_stat.disk_usage(), 4072);
+    assert_eq!(region_stat.disk_usage(), 4071);
 }
 
 #[tokio::test]

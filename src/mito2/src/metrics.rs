@@ -132,6 +132,8 @@ lazy_static! {
     /// Counter of filtered rows by precise filter.
     pub static ref PRECISE_FILTER_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("greptime_mito_precise_filter_rows_total", "mito precise filter rows total", &[TYPE_LABEL]).unwrap();
+    pub static ref READ_ROWS_IN_ROW_GROUP_TOTAL: IntCounterVec =
+        register_int_counter_vec!("greptime_mito_read_rows_in_row_group_total", "mito read rows in row group total", &[TYPE_LABEL]).unwrap();
     // ------- End of query metrics.
 
     // Cache related metrics.
