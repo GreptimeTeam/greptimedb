@@ -259,6 +259,14 @@ impl ScanRegion {
             self.access_layer.object_store().clone(),
             file_cache,
             self.version.metadata.as_ref(),
+            self.version
+                .options
+                .index_options
+                .inverted_index
+                .ignore_column_ids
+                .iter()
+                .copied()
+                .collect(),
         )
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build index applier"))

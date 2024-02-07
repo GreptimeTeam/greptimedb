@@ -130,6 +130,8 @@ impl<'a> SstIndexApplierBuilder<'a> {
 #[cfg(test)]
 mod tests {
 
+    use std::collections::HashSet;
+
     use super::*;
     use crate::error::Error;
     use crate::sst::index::applier::builder::tests::{
@@ -223,8 +225,13 @@ mod tests {
         ];
 
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         for ((left, op, right), _) in &cases {
             builder.collect_comparison_expr(left, op, right).unwrap();
@@ -243,8 +250,13 @@ mod tests {
     #[test]
     fn test_collect_comparison_type_mismatch() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let res = builder.collect_comparison_expr(&tag_column(), &Operator::Lt, &int64_lit(10));
         assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
@@ -254,8 +266,13 @@ mod tests {
     #[test]
     fn test_collect_comparison_field_column() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         builder
             .collect_comparison_expr(&field_column(), &Operator::Lt, &string_lit("abc"))
@@ -266,8 +283,13 @@ mod tests {
     #[test]
     fn test_collect_comparison_nonexistent_column() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let res = builder.collect_comparison_expr(
             &nonexistent_column(),

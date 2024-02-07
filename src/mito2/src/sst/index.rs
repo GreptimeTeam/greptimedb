@@ -27,6 +27,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::read::Batch;
+use crate::region::options::IndexOptions;
 use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
 
@@ -131,6 +132,7 @@ pub(crate) struct IndexerBuilder<'a> {
     pub(crate) row_group_size: usize,
     pub(crate) object_store: ObjectStore,
     pub(crate) intermediate_manager: IntermediateManager,
+    pub(crate) index_options: IndexOptions,
 }
 
 impl<'a> IndexerBuilder<'a> {
@@ -170,7 +172,15 @@ impl<'a> IndexerBuilder<'a> {
             self.mem_threshold_index_create,
             row_group_size,
         )
-        .with_buffer_size(self.write_buffer_size);
+        .with_buffer_size(self.write_buffer_size)
+        .with_ignore_column_ids(
+            self.index_options
+                .inverted_index
+                .ignore_column_ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect(),
+        );
 
         Indexer {
             file_id: self.file_id,
@@ -266,6 +276,7 @@ mod tests {
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 
@@ -285,6 +296,7 @@ mod tests {
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 
@@ -304,6 +316,7 @@ mod tests {
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 
@@ -323,6 +336,7 @@ mod tests {
             row_group_size: 0,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 

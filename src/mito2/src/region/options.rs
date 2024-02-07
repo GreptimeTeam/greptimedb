@@ -18,10 +18,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
-use serde::Deserialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr};
 use snafu::ResultExt;
+use store_api::storage::ColumnId;
 
 use crate::error::{Error, JsonOptionsSnafu, Result};
 
@@ -40,6 +42,8 @@ pub struct RegionOptions {
     pub storage: Option<String>,
     /// Wal options.
     pub wal_options: WalOptions,
+    /// Index options.
+    pub index_options: IndexOptions,
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -64,11 +68,14 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             },
         )?;
 
+        let index_options: IndexOptions = serde_json::from_str(&json).context(JsonOptionsSnafu)?;
+
         Ok(RegionOptions {
             ttl: options.ttl,
             compaction,
             storage: options.storage,
             wal_options,
+            index_options,
         })
     }
 }
@@ -150,6 +157,40 @@ impl Default for RegionOptionsWithoutEnum {
             storage: options.storage,
         }
     }
+}
+
+with_prefix!(prefix_inverted_index "index.inverted_index.");
+
+/// Options for index.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default)]
+pub struct IndexOptions {
+    /// Options for the inverted index.
+    #[serde(flatten, with = "prefix_inverted_index")]
+    pub inverted_index: InvertedIndexOptions,
+}
+
+/// Options for the inverted index.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default)]
+pub struct InvertedIndexOptions {
+    /// The column ids that should be ignored when building the inverted index.
+    /// The column ids are separated by commas. For example, "1,2,3".
+    #[serde(deserialize_with = "deserialize_ignore_column_ids")]
+    pub ignore_column_ids: Vec<ColumnId>,
+}
+
+fn deserialize_ignore_column_ids<'de, D>(deserializer: D) -> Result<Vec<ColumnId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(deserializer)?;
+    let mut column_ids = Vec::new();
+    for item in s.split(',') {
+        let column_id = item.parse().map_err(D::Error::custom)?;
+        column_ids.push(column_id);
+    }
+    Ok(column_ids)
 }
 
 /// Converts the `options` map to a json object.
@@ -257,6 +298,21 @@ mod tests {
         expect == got
     }
 
+    #[test]
+    fn test_with_index() {
+        let map = make_map(&[("index.inverted_index.ignore_column_ids", "1,2,3")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    ignore_column_ids: vec![1, 2, 3],
+                },
+            },
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+    }
+
     // No need to add compatible tests for RegionOptions since the above tests already check for compatibility.
     #[test]
     fn test_with_any_wal_options() {
@@ -281,6 +337,7 @@ mod tests {
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
             ("storage", "S3"),
+            ("index.inverted_index.ignore_column_ids", "1,2,3"),
             (
                 WAL_OPTIONS_KEY,
                 &serde_json::to_string(&wal_options).unwrap(),
@@ -296,6 +353,11 @@ mod tests {
             }),
             storage: Some("s3".to_string()),
             wal_options,
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    ignore_column_ids: vec![1, 2, 3],
+                },
+            },
         };
         assert_eq!(expect, options);
     }
