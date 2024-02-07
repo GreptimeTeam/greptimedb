@@ -344,7 +344,7 @@ impl InformationSchemaPartitionsBuilder {
             Arc::new(DateTimeVector::from(vec![None])),
             rows_num,
         ));
-        let partiton_methods = Arc::new(ConstantVector::new(
+        let partition_methods = Arc::new(ConstantVector::new(
             Arc::new(StringVector::from(vec![Some("RANGE")])),
             rows_num,
         ));
@@ -357,7 +357,7 @@ impl InformationSchemaPartitionsBuilder {
             null_string_vector.clone(),
             Arc::new(self.partition_ordinal_positions.finish()),
             null_i64_vector.clone(),
-            partiton_methods,
+            partition_methods,
             null_string_vector.clone(),
             Arc::new(self.partition_expressions.finish()),
             null_string_vector.clone(),
