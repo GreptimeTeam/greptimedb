@@ -276,6 +276,7 @@ impl RegionRouteBuilder {
 }
 
 /// The Status of the [Region].
+/// TODO(dennis): It's better to add more fine-grained statuses such as `PENDING` etc.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
 pub enum RegionStatus {
     /// The following cases in which the [Region] will be downgraded.
@@ -289,7 +290,7 @@ impl RegionStatus {
     /// Returns the status name.
     pub fn name(&self) -> &str {
         match self {
-            RegionStatus::Downgraded => "Downgraded",
+            RegionStatus::Downgraded => "DOWNGRADED",
         }
     }
 }

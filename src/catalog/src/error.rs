@@ -170,6 +170,12 @@ pub enum Error {
         table: String,
     },
 
+    #[snafu(display("Failed to find region routes: #{table}"))]
+    FindRegionRoutes {
+        source: partition::error::Error,
+        table: String,
+    },
+
     #[snafu(display("Failed to read system catalog table records"))]
     ReadSystemCatalog {
         location: Location,
@@ -262,6 +268,7 @@ impl ErrorExt for Error {
             | Error::SchemaNotFound { .. }
             | Error::CatalogNotFound { .. }
             | Error::FindPartitions { .. }
+            | Error::FindRegionRoutes { .. }
             | Error::InvalidEntryType { .. }
             | Error::ParallelOpenTable { .. } => StatusCode::Unexpected,
 

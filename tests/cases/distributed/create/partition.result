@@ -29,12 +29,12 @@ SELECT region_id, peer_id, is_leader, status FROM information_schema.greptime_re
 +---------------+---------+-----------+--------+
 | region_id     | peer_id | is_leader | status |
 +---------------+---------+-----------+--------+
-| REGION_ID | PEER_ID       | Yes       | Alive  |
-| REGION_ID | PEER_ID       | Yes       | Alive  |
-| REGION_ID | PEER_ID       | Yes       | Alive  |
+| REGION_ID | PEER_ID       | Yes       | ALIVE  |
+| REGION_ID | PEER_ID       | Yes       | ALIVE  |
+| REGION_ID | PEER_ID       | Yes       | ALIVE  |
+| REGION_ID | PEER_ID       | Yes       | ALIVE  |
 +---------------+---------+-----------+--------+
 
 DROP TABLE my_table;
 
 Affected Rows: 0
-

@@ -35,7 +35,7 @@ use table::metadata::TableType;
 
 use super::REGION_PEERS;
 use crate::error::{
-    CreateRecordBatchSnafu, FindPartitionsSnafu, InternalSnafu, Result,
+    CreateRecordBatchSnafu, FindRegionRoutesSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::{InformationTable, Predicates};
@@ -55,8 +55,8 @@ const DOWN_SECONDS: &str = "down_seconds";
 /// - `peer_id`: the region storage datanode peer id
 /// - `peer_addr`: the region storage datanode peer address
 /// - `is_leader`: whether the peer is the leader
-/// - `status`: the region status
-/// - `down_seconds`: if the peer is down, how long does it continue in seconds.
+/// - `status`: the region status, `ALIVE` or `DOWNGRADED`.
+/// - `down_seconds`: the duration of being offline, in seconds.
 ///
 pub(super) struct InformationSchemaRegionPeers {
     schema: SchemaRef,
@@ -199,7 +199,7 @@ impl InformationSchemaRegionPeersBuilder {
                     partition_manager
                         .find_region_routes(table_id)
                         .await
-                        .context(FindPartitionsSnafu {
+                        .context(FindRegionRoutesSnafu {
                             table: &table_info.name,
                         })?
                 } else {
@@ -223,7 +223,7 @@ impl InformationSchemaRegionPeersBuilder {
                 Some(status.name().to_string())
             } else {
                 // Alive by default
-                Some("Alive".to_string())
+                Some("ALIVE".to_string())
             };
 
             let row = [(REGION_ID, &Value::from(region_id))];
