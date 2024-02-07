@@ -19,7 +19,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
-use crate::expr::relation::accum::Accum;
+use crate::expr::relation::accum::{Accum, Accumulator};
 use crate::repr::Diff;
 
 /// Aggregate functions that can be applied to a group of rows.
@@ -143,5 +143,28 @@ impl AggregateFunc {
                 | SumFloat32
                 | SumFloat64
         )
+    }
+
+    /// Eval value, diff with accumulator
+    ///
+    /// Expect self to be accumulable aggregate functio, i.e. sum/count
+    ///
+    /// TODO(discord9): deal with overflow&better accumulator
+    pub fn eval_diff_accumulable<I>(
+        &self,
+        accum: Vec<Value>,
+        value_diffs: I,
+    ) -> Result<(Value, Vec<Value>), EvalError>
+    where
+        I: IntoIterator<Item = (Value, Diff)>,
+    {
+        let mut accum = if accum.is_empty() {
+            Accum::new_accum(self)?
+        } else {
+            Accum::try_into_accum(self, accum)?
+        };
+        accum.update_batch(self, value_diffs)?;
+        let res = accum.eval(self)?;
+        Ok((res, accum.into_state()))
     }
 }
