@@ -325,6 +325,11 @@ impl TableRouteManager {
         }
     }
 
+    /// Returns the [TableRouteValue::Physical] of table.
+    ///
+    /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
+    /// - the physical table(`logical_or_physical_table_id`) does not exists
+    /// - the corresponding physical table of the logical table(`logical_or_physical_table_id`) does not exists.
     pub async fn get_physical_table_route(
         &self,
         logical_or_physical_table_id: TableId,

@@ -70,7 +70,7 @@ impl TableMetadataAllocator {
         }
     }
 
-    async fn allocate_table_id(&self, task: &CreateTableTask) -> Result<TableId> {
+    pub(crate) async fn allocate_table_id(&self, task: &CreateTableTask) -> Result<TableId> {
         let table_id = if let Some(table_id) = &task.create_table.table_id {
             let table_id = table_id.id;
 
