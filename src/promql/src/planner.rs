@@ -292,14 +292,16 @@ impl PromPlanner {
                     (None, None) => {
                         let left_input = self.prom_expr_to_plan(*lhs.clone()).await?;
                         let left_field_columns = self.ctx.field_columns.clone();
-                        let mut left_table_ref: OwnedTableReference =
-                            self.ctx.table_name.clone().unwrap_or_default().into();
+                        let mut left_table_ref = OwnedTableReference::bare(
+                            self.ctx.table_name.clone().unwrap_or_default(),
+                        );
                         let left_context = self.ctx.clone();
 
                         let right_input = self.prom_expr_to_plan(*rhs.clone()).await?;
                         let right_field_columns = self.ctx.field_columns.clone();
-                        let mut right_table_ref: OwnedTableReference =
-                            self.ctx.table_name.clone().unwrap_or_default().into();
+                        let mut right_table_ref = OwnedTableReference::bare(
+                            self.ctx.table_name.clone().unwrap_or_default(),
+                        );
                         let right_context = self.ctx.clone();
 
                         // TODO(ruihang): avoid join if left and right are the same table
@@ -572,6 +574,7 @@ impl PromPlanner {
                     .context(NoMetricMatcherSnafu)?,
             );
         }
+
         self.ctx.table_name = metric_name;
 
         let mut matchers = HashSet::new();
@@ -1883,7 +1886,7 @@ impl PromPlanner {
             .chain(self.ctx.time_index_column.iter())
             .map(|col| {
                 Ok(DfExpr::Column(Column::new(
-                    self.ctx.table_name.clone(),
+                    self.ctx.table_name.clone().map(TableReference::bare),
                     col,
                 )))
             });
