@@ -385,18 +385,18 @@ impl ShardReader {
         }
     }
 
-    fn key_by_pk_index(&self, pk_index: PkIndex) -> &[u8] {
-        let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
-        self.blocks[block_idx as usize].key_by_pk_index(pk_index)
-    }
-
-    fn compute_pk_weights(&self, pk_weights: &mut Vec<u16>) {
+    pub(crate) fn compute_pk_weights(&self, pk_weights: &mut Vec<u16>) {
         pk_weights.clear();
         pk_weights.resize(self.sorted_pk_indices.len(), 0);
 
         for (weight, pk_index) in self.sorted_pk_indices.iter().enumerate() {
             pk_weights[*pk_index as usize] = weight as u16;
         }
+    }
+
+    fn key_by_pk_index(&self, pk_index: PkIndex) -> &[u8] {
+        let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
+        self.blocks[block_idx as usize].key_by_pk_index(pk_index)
     }
 }
 

@@ -58,6 +58,18 @@ pub struct DataBatch {
 }
 
 impl DataBatch {
+    pub(crate) fn pk_index(&self) -> PkIndex {
+        self.pk_index
+    }
+
+    pub(crate) fn record_batch(&self) -> &RecordBatch {
+        &self.rb
+    }
+
+    pub(crate) fn range(&self) -> Range<usize> {
+        self.range.clone()
+    }
+
     pub(crate) fn as_record_batch(&self) -> RecordBatch {
         self.rb.slice(self.range.start, self.range.len())
     }
@@ -83,6 +95,13 @@ impl Iterator for Iter {
 }
 
 impl DataParts {
+    pub(crate) fn new(metadata: RegionMetadataRef, capacity: usize) -> Self {
+        Self {
+            active: DataBuffer::with_capacity(metadata, capacity),
+            frozen: Vec::new(),
+        }
+    }
+
     /// Writes one row into active part.
     pub fn write_row(&mut self, pk_id: PkId, kv: KeyValue) {
         self.active.write_row(pk_id, kv);
@@ -93,6 +112,10 @@ impl DataParts {
     /// The order of yielding primary keys is determined by provided weights.
     pub fn iter(&mut self, _pk_weights: &[u16]) -> Result<Iter> {
         todo!()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        unimplemented!()
     }
 }
 

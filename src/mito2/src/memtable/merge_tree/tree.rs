@@ -14,10 +14,13 @@
 
 //! Implementation of the memtable merge tree.
 
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use common_time::Timestamp;
+use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::record_batch::RecordBatch;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -25,11 +28,14 @@ use table::predicate::Predicate;
 
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::DataBuffer;
-use crate::memtable::merge_tree::index::{IndexConfig, KeyIndex, KeyIndexRef};
+use crate::memtable::merge_tree::data::{self, DataBatch, DataBuffer, DataParts};
+use crate::memtable::merge_tree::index::{
+    IndexConfig, IndexReader, KeyIndex, KeyIndexRef, ShardReader,
+};
 use crate::memtable::merge_tree::mutable::WriteMetrics;
-use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
+use crate::memtable::merge_tree::{MergeTreeConfig, PkId, PkIndex};
 use crate::memtable::{BoxedBatchIterator, KeyValues};
+use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Initial capacity for the data buffer.
@@ -63,11 +69,10 @@ impl MergeTree {
                 max_keys_per_shard: config.index_max_keys_per_shard,
             }))
         });
-        let data_buffer = DataBuffer::with_capacity(metadata.clone(), DATA_INIT_CAP);
         let parts = TreeParts {
             immutable: false,
             index,
-            data_buffer,
+            data: DataParts::new(metadata.clone(), DATA_INIT_CAP),
         };
 
         MergeTree {
@@ -130,17 +135,55 @@ impl MergeTree {
     /// Scans the tree.
     pub(crate) fn scan(
         &self,
-        _projection: Option<&[ColumnId]>,
-        _predicate: Option<Predicate>,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
-        todo!()
+        assert!(predicate.is_none(), "Predicate is unsupported");
+        // Creates the projection set.
+        let projection: HashSet<_> = if let Some(projection) = projection {
+            projection.iter().copied().collect()
+        } else {
+            self.metadata.field_columns().map(|c| c.column_id).collect()
+        };
+
+        let index = {
+            let parts = self.parts.read().unwrap();
+            parts.index.clone()
+        };
+        let index_reader = index
+            .as_ref()
+            .map(|index| index.scan_shard(0))
+            .transpose()?;
+        // Compute pk weights.
+        let mut pk_weights = Vec::new();
+        if let Some(reader) = &index_reader {
+            reader.compute_pk_weights(&mut pk_weights);
+        } else {
+            // Push weight for the only key.
+            // TODO(yingwen): Allow passing empty weights if there is no primary key.
+            pk_weights.push(0);
+        }
+
+        let data_iter = {
+            let mut parts = self.parts.write().unwrap();
+            parts.data.iter(&pk_weights)?
+        };
+
+        let iter = ShardIter {
+            metadata: self.metadata.clone(),
+            projection,
+            index_reader,
+            data_reader: DataReader::new(data_iter)?,
+        };
+
+        Ok(Box::new(iter))
     }
 
     /// Returns true if the tree is empty.
     pub(crate) fn is_empty(&self) -> bool {
         let parts = self.parts.read().unwrap();
         // Gets whether the memtable is empty from the data part.
-        parts.data_buffer.is_empty()
+        parts.data.is_empty()
         // TODO(yingwen): Also consider other parts if we freeze the data buffer.
     }
 
@@ -175,7 +218,7 @@ impl MergeTree {
         let parts = TreeParts {
             immutable: false,
             index,
-            data_buffer: DataBuffer::with_capacity(metadata.clone(), DATA_INIT_CAP),
+            data: DataParts::new(metadata.clone(), DATA_INIT_CAP),
         };
 
         MergeTree {
@@ -214,7 +257,7 @@ impl MergeTree {
     fn write_with_id(&self, pk_id: PkId, kv: KeyValue) {
         let mut parts = self.parts.write().unwrap();
         assert!(!parts.immutable);
-        parts.data_buffer.write_row(pk_id, kv)
+        parts.data.write_row(pk_id, kv)
     }
 
     fn write_primary_key(&self, key: &[u8], metrics: &mut WriteMetrics) -> Result<PkId> {
@@ -235,6 +278,132 @@ struct TreeParts {
     /// Index part of the tree. If the region doesn't have a primary key, this field
     /// is `None`.
     index: Option<KeyIndexRef>,
-    /// Data buffer of the tree.
-    data_buffer: DataBuffer,
+    /// Data part of the tree.
+    data: DataParts,
+}
+
+struct ShardIter {
+    metadata: RegionMetadataRef,
+    projection: HashSet<ColumnId>,
+    index_reader: Option<ShardReader>,
+    data_reader: DataReader,
+}
+
+impl Iterator for ShardIter {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.data_reader.is_valid() {
+            return None;
+        }
+
+        self.next_batch().transpose()
+    }
+}
+
+impl ShardIter {
+    /// Fetches next batch and advances the iter.
+    fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let Some(index_reader) = &mut self.index_reader else {
+            // No primary key to read.
+            // Safety: `next()` ensures the data reader is valid.
+            let batch = self.data_reader.convert_current_record_batch(
+                &self.metadata,
+                &self.projection,
+                &[],
+            )?;
+            // Advances the data reader.
+            self.data_reader.next()?;
+            return Ok(Some(batch));
+        };
+
+        // Iterate the index reader until we see the same pk index of the data batch.
+        while index_reader.is_valid()
+            && index_reader.current_pk_index() != self.data_reader.current_pk_index()
+        {
+            index_reader.next();
+        }
+        assert!(
+            index_reader.is_valid(),
+            "Data contains pk_index {} not in the index",
+            self.data_reader.current_pk_index()
+        );
+
+        let batch = self.data_reader.convert_current_record_batch(
+            &self.metadata,
+            &self.projection,
+            index_reader.current_key(),
+        )?;
+        // Advances the data reader.
+        self.data_reader.next()?;
+        Ok(Some(batch))
+    }
+}
+
+struct DataReader {
+    current: Option<DataBatch>,
+    iter: data::Iter,
+}
+
+impl DataReader {
+    fn new(mut iter: data::Iter) -> Result<Self> {
+        let current = iter.next().transpose()?;
+
+        Ok(Self { current, iter })
+    }
+
+    fn is_valid(&self) -> bool {
+        self.current.is_some()
+    }
+
+    fn current_pk_index(&self) -> PkIndex {
+        self.current.as_ref().unwrap().pk_index()
+    }
+
+    /// Converts current [RecordBatch] to [Batch].
+    fn convert_current_record_batch(
+        &self,
+        metadata: &RegionMetadataRef,
+        projection: &HashSet<ColumnId>,
+        primary_key: &[u8],
+    ) -> Result<Batch> {
+        let data_batch = self.current.as_ref().unwrap();
+        let offset = data_batch.range().start;
+        let length = data_batch.range().len();
+        let record_batch = data_batch.record_batch();
+
+        let mut builder = BatchBuilder::new(primary_key.to_vec());
+        builder
+            .timestamps_array(record_batch.column(1).slice(offset, length))?
+            .sequences_array(record_batch.column(2).slice(offset, length))?
+            .op_types_array(record_batch.column(3).slice(offset, length))?;
+
+        // TODO(yingwen): Pushdown projection to data parts.
+        if record_batch.num_columns() <= 4 {
+            // No fields.
+            return builder.build();
+        }
+
+        // Iterate all field columns.
+        for (array, field) in record_batch
+            .columns()
+            .iter()
+            .zip(record_batch.schema().fields().iter())
+            .skip(4)
+        {
+            // Safety: metadata should contains all fields.
+            let column_id = metadata.column_by_name(field.name()).unwrap().column_id;
+            if !projection.contains(&column_id) {
+                continue;
+            }
+            builder.push_field_array(column_id, array.slice(offset, length))?;
+        }
+
+        builder.build()
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.current = self.iter.next().transpose()?;
+        Ok(())
+    }
 }
