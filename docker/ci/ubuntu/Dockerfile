@@ -19,8 +19,8 @@ RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
 ARG TARGETARCH
 
-ADD $TARGETARCH/$TARGET_BIN /greptime/bin/
+ADD $TARGETARCH/${TARGET_BIN} /greptime/bin/
 
 ENV PATH /greptime/bin/:$PATH
 
-ENTRYPOINT ["$TARGET_BIN"]
+ENTRYPOINT ["${TARGET_BIN}"]
