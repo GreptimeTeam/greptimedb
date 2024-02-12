@@ -4,7 +4,8 @@ FROM ubuntu:22.04
 ARG DOCKER_BUILD_ROOT=.
 # The binary name of GreptimeDB executable.
 # Defaults to "greptime", but sometimes in other projects it might be different.
-ENV TARGET_BIN=greptime
+ARG TARGET_BIN=greptime
+ENV TARGET_BIN=$TARGET_BIN
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ca-certificates \

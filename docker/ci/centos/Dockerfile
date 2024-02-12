@@ -1,7 +1,5 @@
 FROM centos:7
 
-ENV TARGET_BIN=greptime
-
 RUN yum install -y epel-release \
     openssl \
     openssl-devel  \
@@ -11,8 +9,8 @@ RUN yum install -y epel-release \
 
 ARG TARGETARCH
 
-ADD $TARGETARCH/$TARGET_BIN /greptime/bin/
+ADD $TARGETARCH/greptime /greptime/bin/
 
 ENV PATH /greptime/bin/:$PATH
 
-ENTRYPOINT ["$TARGET_BIN"]
+ENTRYPOINT ["greptime"]
