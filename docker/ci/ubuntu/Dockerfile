@@ -23,4 +23,6 @@ ADD $TARGETARCH/$TARGET_BIN /greptime/bin/
 
 ENV PATH /greptime/bin/:$PATH
 
-ENTRYPOINT ["$TARGET_BIN"]
+ENV TARGET_BIN=$TARGET_BIN
+
+ENTRYPOINT ["sh", "-c", "exec $TARGET_BIN \"$@\"", "--"]
