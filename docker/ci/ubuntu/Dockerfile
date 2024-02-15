@@ -17,12 +17,12 @@ COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirement
 
 RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
-ARG TARGETARCH
+#ARG TARGETARCH
 
-ADD $TARGETARCH/$TARGET_BIN /greptime/bin/
+ADD $TARGET_BIN /greptime/bin/
 
 ENV PATH /greptime/bin/:$PATH
 
 ENV TARGET_BIN=$TARGET_BIN
 
-ENTRYPOINT ["$TARGET_BIN"]
+ENTRYPOINT ["sh", "-c", "exec $TARGET_BIN \"$@\"", "--"]
