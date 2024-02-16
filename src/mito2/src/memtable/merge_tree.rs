@@ -65,7 +65,7 @@ impl Default for MergeTreeConfig {
         Self {
             // TODO(yingwen): Use 4096 or find a proper value.
             index_max_keys_per_shard: 8192,
-            freeze_threshold: 40960,
+            freeze_threshold: 409600,
         }
     }
 }
