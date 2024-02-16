@@ -118,6 +118,7 @@ impl WriteCache {
             row_group_size: write_opts.row_group_size,
             object_store: self.file_cache.local_store(),
             intermediate_manager: self.intermediate_manager.clone(),
+            index_options: write_request.index_options,
         }
         .build();
 
@@ -235,6 +236,7 @@ mod tests {
     use super::*;
     use crate::cache::test_util::new_fs_store;
     use crate::cache::CacheManager;
+    use crate::region::options::IndexOptions;
     use crate::sst::file::FileId;
     use crate::sst::location::{index_file_path, sst_file_path};
     use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -279,6 +281,7 @@ mod tests {
             mem_threshold_index_create: None,
             index_write_buffer_size: None,
             cache_manager: Default::default(),
+            index_options: IndexOptions::default(),
         };
 
         let upload_request = SstUploadRequest {
@@ -363,6 +366,7 @@ mod tests {
             mem_threshold_index_create: None,
             index_write_buffer_size: None,
             cache_manager: cache_manager.clone(),
+            index_options: IndexOptions::default(),
         };
         let write_opts = WriteOptions {
             row_group_size: 512,
