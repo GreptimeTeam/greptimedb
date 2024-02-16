@@ -214,19 +214,19 @@ impl Default for WriteMetrics {
 #[derive(Debug, Default)]
 pub(crate) struct ReadMetrics {
     /// Time used to initialize the iter.
-    init_cost: Duration,
+    pub(crate) init_cost: Duration,
     /// Time used to prune rows.
-    prune_cost: Duration,
+    pub(crate) prune_cost: Duration,
     /// Time used to sort and dedup rows.
     sort_dedup_cost: Duration,
     /// Time used to invoke next.
-    next_cost: Duration,
+    pub(crate) next_cost: Duration,
     /// Number of batches returned by the iter.
-    num_batches: usize,
+    pub(crate) num_batches: usize,
     /// Number of rows before prunning.
     num_rows_before_prune: usize,
     /// Number of rows returned.
-    num_rows_returned: usize,
+    pub(crate) num_rows_returned: usize,
     /// Failures during evaluating expressions.
     eval_failure_total: u32,
 }
