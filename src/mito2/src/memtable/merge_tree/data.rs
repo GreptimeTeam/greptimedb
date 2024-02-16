@@ -257,7 +257,7 @@ impl DataParts {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        unimplemented!()
+        self.active.is_empty() && self.frozen.iter().all(|part| part.is_empty())
     }
 }
 
@@ -648,6 +648,14 @@ fn build_rows_to_sort(
 /// Format of immutable data part.
 pub enum DataPart {
     Parquet(Bytes),
+}
+
+impl DataPart {
+    fn is_empty(&self) -> bool {
+        match self {
+            DataPart::Parquet(data) => data.is_empty(),
+        }
+    }
 }
 
 pub struct DataPartIter {
