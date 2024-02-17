@@ -3,24 +3,24 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
-      - 'docs/**'
-      - 'config/**'
-      - '**.md'
-      - '.dockerignore'
-      - 'docker/**'
-      - '.gitignore'
-      - 'grafana/**'
+      - "docs/**"
+      - "config/**"
+      - "**.md"
+      - ".dockerignore"
+      - "docker/**"
+      - ".gitignore"
+      - "grafana/**"
   push:
     branches:
       - main
     paths-ignore:
-      - 'docs/**'
-      - 'config/**'
-      - '**.md'
-      - '.dockerignore'
-      - 'docker/**'
-      - '.gitignore'
-      - 'grafana/**'
+      - "docs/**"
+      - "config/**"
+      - "**.md"
+      - ".dockerignore"
+      - "docker/**"
+      - ".gitignore"
+      - "grafana/**"
   workflow_dispatch:
 
 name: CI
@@ -46,7 +46,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ windows-latest, ubuntu-20.04 ]
+        os: [windows-latest, ubuntu-20.04]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -58,7 +58,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        with: 
+        with:
           # Shares across multiple jobs
           # Shares with `Clippy` job
           shared-key: "check-lint"
@@ -77,7 +77,7 @@ jobs:
           toolchain: stable
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        with: 
+        with:
           # Shares across multiple jobs
           shared-key: "check-toml"
       - name: Install taplo
@@ -91,7 +91,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ubuntu-20.04]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -127,7 +127,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ubuntu-20.04]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -155,7 +155,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ubuntu-20.04]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -171,6 +171,37 @@ jobs:
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
         run: ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
+      - name: Upload sqlness logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: sqlness-logs
+          path: ${{ runner.temp }}/greptime-*.log
+          retention-days: 3
+
+  sqlness-on-windows:
+    name: Sqlness Test
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4.1.0
+      - uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "windows-ci"
+      - name: Run sqlness
+        run: cargo sqlness
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3
@@ -195,7 +226,7 @@ jobs:
           components: rustfmt
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        with: 
+        with:
           # Shares across multiple jobs
           shared-key: "check-rust-fmt"
       - name: Run cargo fmt
@@ -217,7 +248,7 @@ jobs:
           components: clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        with: 
+        with:
           # Shares across multiple jobs
           # Shares with `Check` job
           shared-key: "check-lint"
@@ -253,7 +284,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: "3.10"
       - name: Install PyArrow Package
         run: pip install pyarrow
       - name: Setup etcd server
@@ -283,3 +314,47 @@ jobs:
           flags: rust
           fail_ci_if_error: false
           verbose: true
+
+  test-on-windows:
+    name: CI Test
+    if: github.event.pull_request.draft == false
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.1.0
+      - uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "windows-ci"
+      - name: Install Cargo Nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+      - name: Install PyArrow Package
+        run: pip install pyarrow
+      - name: Install WSL distribution
+        uses: Vampire/setup-wsl@v2
+        with:
+          distribution: Ubuntu-22.04
+      - name: Running tests
+        run: cargo nextest run -F pyo3_backend,dashboard
+        env:
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+          GT_S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+          GT_S3_REGION: ${{ secrets.S3_REGION }}
+          UNITTEST_LOG_DIR: "__unittest_logs"
