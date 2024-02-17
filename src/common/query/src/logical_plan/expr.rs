@@ -44,7 +44,9 @@ pub fn build_filter_from_timestamp(
     ts_col_name: &str,
     time_range: Option<&TimestampRange>,
 ) -> Option<Expr> {
-    let time_range = time_range?;
+    let Some(time_range) = time_range else {
+        return None;
+    };
     let ts_col_expr = DfExpr::Column(Column {
         relation: None,
         name: ts_col_name.to_string(),
