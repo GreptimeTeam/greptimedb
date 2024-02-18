@@ -92,7 +92,7 @@ impl MysqlInstanceShim {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, name = "mysql::do_query")]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         if let Some(output) =
             crate::mysql::federated::check(query, query_ctx.clone(), self.session.clone())
@@ -335,6 +335,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let _ = guard.remove(&stmt_id);
     }
 
+    #[tracing::instrument(skip_all)]
     async fn on_query<'a>(
         &'a mut self,
         query: &'a str,

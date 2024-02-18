@@ -29,7 +29,6 @@ use common_recordbatch::{
     DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream,
 };
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{tracing, warn};
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
 };
@@ -158,7 +157,6 @@ impl MergeScanExec {
         })
     }
 
-    #[tracing::instrument(skip_all)]
     pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         let substrait_plan = self.substrait_plan.to_vec();
         let regions = self.regions.clone();
@@ -168,7 +166,8 @@ impl MergeScanExec {
 
         let dbname = context.task_id().unwrap_or_default();
 
-        let tracing_context = TracingContext::from_current_span().to_w3c();
+        let tracing_context =
+            TracingContext::from_w3c(&serde_json::from_str(context.session_id().as_str()).unwrap());
 
         let stream = Box::pin(stream!({
             METRIC_MERGE_SCAN_REGIONS.observe(regions.len() as f64);
@@ -179,7 +178,7 @@ impl MergeScanExec {
             for region_id in regions {
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
-                        tracing_context: tracing_context.clone(),
+                        tracing_context: tracing_context.to_w3c().clone(),
                         dbname: dbname.clone(),
                     }),
                     region_id: region_id.into(),
