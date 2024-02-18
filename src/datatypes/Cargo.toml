@@ -9,9 +9,9 @@ default = []
 test = []
 
 [dependencies]
+arrow.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
-arrow.workspace = true
 common-base.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
