@@ -63,9 +63,12 @@ impl Status {
     /// - if the output is None.
     pub fn downcast_output_ref<T: 'static>(&self) -> Option<&T> {
         if let Status::Done { output } = self {
-            output.as_ref().unwrap().downcast_ref()
+            output
+                .as_ref()
+                .expect("Try to downcast the output of Status::Done, but the output is None")
+                .downcast_ref()
         } else {
-            unreachable!("")
+            panic!("Expected the Status::Done, but got: {:?}", self)
         }
     }
 
