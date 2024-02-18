@@ -73,6 +73,7 @@ impl Default for MergeTreeConfig {
 /// Memtable based on a merge tree.
 pub struct MergeTreeMemtable {
     id: MemtableId,
+    // FIXME(yingwen): No need to use Arc.
     tree: MergeTreeRef,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
