@@ -44,6 +44,7 @@ const TABLE_SCHEMA: &str = "table_schema";
 const TABLE_NAME: &str = "table_name";
 const COLUMN_NAME: &str = "column_name";
 const ORDINAL_POSITION: &str = "ordinal_position";
+const INIT_CAPACITY: usize = 42;
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
 pub(super) struct InformationSchemaKeyColumnUsage {
@@ -174,15 +175,15 @@ impl InformationSchemaKeyColumnUsageBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            constraint_catalog: StringVectorBuilder::with_capacity(42),
-            constraint_schema: StringVectorBuilder::with_capacity(42),
-            constraint_name: StringVectorBuilder::with_capacity(42),
-            table_catalog: StringVectorBuilder::with_capacity(42),
-            table_schema: StringVectorBuilder::with_capacity(42),
-            table_name: StringVectorBuilder::with_capacity(42),
-            column_name: StringVectorBuilder::with_capacity(42),
-            ordinal_position: UInt32VectorBuilder::with_capacity(42),
-            position_in_unique_constraint: UInt32VectorBuilder::with_capacity(42),
+            constraint_catalog: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            constraint_schema: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            constraint_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_catalog: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_schema: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            ordinal_position: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            position_in_unique_constraint: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 

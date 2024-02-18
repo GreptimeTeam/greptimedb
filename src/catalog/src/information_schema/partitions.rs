@@ -54,6 +54,7 @@ const PARTITION_NAME: &str = "partition_name";
 const PARTITION_EXPRESSION: &str = "partition_expression";
 /// The region id
 const GREPTIME_PARTITION_ID: &str = "greptime_partition_id";
+const INIT_CAPACITY: usize = 42;
 
 /// The `PARTITIONS` table provides information about partitioned tables.
 /// See https://dev.mysql.com/doc/refman/8.0/en/information-schema-partitions-table.html
@@ -212,14 +213,14 @@ impl InformationSchemaPartitionsBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            catalog_names: StringVectorBuilder::with_capacity(42),
-            schema_names: StringVectorBuilder::with_capacity(42),
-            table_names: StringVectorBuilder::with_capacity(42),
-            partition_names: StringVectorBuilder::with_capacity(42),
-            partition_ordinal_positions: Int64VectorBuilder::with_capacity(42),
-            partition_expressions: StringVectorBuilder::with_capacity(42),
-            create_times: DateTimeVectorBuilder::with_capacity(42),
-            partition_ids: UInt64VectorBuilder::with_capacity(42),
+            catalog_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            schema_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            partition_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            partition_ordinal_positions: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
+            partition_expressions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            create_times: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            partition_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 

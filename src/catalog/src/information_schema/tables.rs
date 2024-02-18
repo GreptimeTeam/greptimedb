@@ -45,6 +45,7 @@ const TABLE_NAME: &str = "table_name";
 const TABLE_TYPE: &str = "table_type";
 const TABLE_ID: &str = "table_id";
 const ENGINE: &str = "engine";
+const INIT_CAPACITY: usize = 42;
 
 pub(super) struct InformationSchemaTables {
     schema: SchemaRef,
@@ -141,12 +142,12 @@ impl InformationSchemaTablesBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            catalog_names: StringVectorBuilder::with_capacity(42),
-            schema_names: StringVectorBuilder::with_capacity(42),
-            table_names: StringVectorBuilder::with_capacity(42),
-            table_types: StringVectorBuilder::with_capacity(42),
-            table_ids: UInt32VectorBuilder::with_capacity(42),
-            engines: StringVectorBuilder::with_capacity(42),
+            catalog_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            schema_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            engines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 

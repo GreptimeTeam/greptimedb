@@ -48,6 +48,7 @@ const PEER_ADDR: &str = "peer_addr";
 const IS_LEADER: &str = "is_leader";
 const STATUS: &str = "status";
 const DOWN_SECONDS: &str = "down_seconds";
+const INIT_CAPACITY: usize = 42;
 
 /// The `REGION_PEERS` table provides information about the region distribution and routes. Including fields:
 ///
@@ -150,12 +151,12 @@ impl InformationSchemaRegionPeersBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            region_ids: UInt64VectorBuilder::with_capacity(42),
-            peer_ids: UInt64VectorBuilder::with_capacity(42),
-            peer_addrs: StringVectorBuilder::with_capacity(42),
-            is_leaders: StringVectorBuilder::with_capacity(42),
-            statuses: StringVectorBuilder::with_capacity(42),
-            down_seconds: Int64VectorBuilder::with_capacity(42),
+            region_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            peer_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            peer_addrs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            is_leaders: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            statuses: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            down_seconds: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
