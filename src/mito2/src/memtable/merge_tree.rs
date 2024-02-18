@@ -33,7 +33,7 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::merge_tree::mutable::WriteMetrics;
-use crate::memtable::merge_tree::tree::{MergeTree, MergeTreeRef};
+use crate::memtable::merge_tree::tree::MergeTree;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
@@ -72,8 +72,7 @@ impl Default for MergeTreeConfig {
 /// Memtable based on a merge tree.
 pub struct MergeTreeMemtable {
     id: MemtableId,
-    // FIXME(yingwen): No need to use Arc.
-    tree: MergeTreeRef,
+    tree: MergeTree,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
@@ -190,7 +189,7 @@ impl MergeTreeMemtable {
 
         Self {
             id,
-            tree: Arc::new(tree),
+            tree,
             alloc_tracker,
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),

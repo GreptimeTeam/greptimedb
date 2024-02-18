@@ -51,8 +51,6 @@ pub(crate) struct MergeTree {
     pub(crate) parts: RwLock<TreeParts>,
 }
 
-pub(crate) type MergeTreeRef = Arc<MergeTree>;
-
 impl MergeTree {
     /// Creates a new merge tree.
     pub(crate) fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> MergeTree {
