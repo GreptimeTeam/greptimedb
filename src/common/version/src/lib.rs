@@ -12,35 +12,89 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
+use std::fmt::Display;
+use std::sync::OnceLock;
+
 const UNKNOWN: &str = "unknown";
 
-#[allow(clippy::print_stdout)]
-pub fn setup_git_versions() {
-    println!(
-        "cargo:rustc-env=GIT_COMMIT={}",
-        build_data::get_git_commit()
-            .as_ref()
-            .map(String::as_str)
-            .unwrap_or(UNKNOWN)
-    );
+pub struct BuildInfo {
+    pub branch: Cow<'static, str>,
+    pub commit: Cow<'static, str>,
+    pub commit_short: Cow<'static, str>,
+    pub dirty: Cow<'static, str>,
+    pub timestamp: Cow<'static, str>,
+
+    /// Rustc Version
+    pub rustc: Cow<'static, str>,
+    /// GreptimeDB Version
+    pub version: Cow<'static, str>,
+}
+
+impl Display for BuildInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            [
+                format!("branch: {}", self.branch),
+                format!("commit: {}", self.commit),
+                format!("commit_short: {}", self.commit_short),
+                format!("dirty: {}", self.dirty),
+                format!("version: {}", self.version),
+            ]
+            .join("\n")
+        )
+    }
+}
+
+static BUILD: OnceLock<BuildInfo> = OnceLock::new();
+
+pub fn build_info() -> &'static BuildInfo {
+    BUILD.get_or_init(|| {
+        let branch = build_data::get_git_branch()
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(UNKNOWN));
+        let commit = build_data::get_git_commit()
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(UNKNOWN));
+        let commit_short = build_data::get_git_commit_short()
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(UNKNOWN));
+        let dirty = build_data::get_git_dirty()
+            .map(|b| Cow::Owned(b.to_string()))
+            .unwrap_or(Cow::Borrowed(UNKNOWN));
+        let timestamp = build_data::get_source_time()
+            .map(|ts| Cow::Owned(build_data::format_timestamp(ts)))
+            .unwrap_or(Cow::Borrowed(UNKNOWN));
+        let rustc = build_data::get_rustc_version()
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(UNKNOWN));
+        let version = Cow::Borrowed(env!("CARGO_PKG_VERSION"));
+
+        BuildInfo {
+            branch,
+            commit,
+            commit_short,
+            dirty,
+            timestamp,
+            rustc,
+            version,
+        }
+    })
+}
+
+#[allow(clippy::print-stdout)]
+pub fn setup_build_info() {
+    let build_info = build_info();
+    println!("cargo:rustc-env=GIT_COMMIT={}", build_info.commit);
     println!(
         "cargo:rustc-env=GIT_COMMIT_SHORT={}",
-        build_data::get_git_commit_short()
-            .as_ref()
-            .map(String::as_str)
-            .unwrap_or(UNKNOWN)
+        build_info.commit_short
     );
-    println!(
-        "cargo:rustc-env=GIT_BRANCH={}",
-        build_data::get_git_branch()
-            .as_ref()
-            .map(String::as_str)
-            .unwrap_or(UNKNOWN)
-    );
-    println!(
-        "cargo:rustc-env=GIT_DIRTY={}",
-        build_data::get_git_dirty()
-            .map(|b| if b { "true" } else { "false" })
-            .unwrap_or(UNKNOWN)
-    );
+    println!("cargo:rustc-env=GIT_BRANCH={}", build_info.branch);
+    println!("cargo:rustc-env=GIT_DIRTY={}", build_info.dirty);
+    println!("cargo:rustc-env=GIT_DIRTY={}", build_info.dirty);
+    println!("cargo:rustc-env=RUSTC_VERSION={}", build_info.rustc);
+    println!("cargo:rustc-env=SOURCE_TIMESTAMP={}", build_info.timestamp);
 }

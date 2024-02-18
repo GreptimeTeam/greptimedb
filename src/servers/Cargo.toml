@@ -123,5 +123,4 @@ tokio-postgres-rustls = "0.11"
 tokio-test = "0.4"
 
 [build-dependencies]
-build-data = "0.1.4"
 common-version.workspace = true

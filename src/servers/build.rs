@@ -13,10 +13,7 @@
 // limitations under the License.
 
 fn main() {
-    build_data::set_RUSTC_VERSION();
-    build_data::set_SOURCE_TIMESTAMP();
-    common_version::setup_git_versions();
-
+    common_version::setup_build_info();
     #[cfg(feature = "dashboard")]
     fetch_dashboard_assets();
 }
