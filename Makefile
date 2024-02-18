@@ -65,7 +65,7 @@ endif
 build: ## Build debug version greptime.
 	cargo ${CARGO_EXTENSION} build ${CARGO_BUILD_OPTS}
 
-.POHNY: build-by-dev-builder
+.PHONY: build-by-dev-builder
 build-by-dev-builder: ## Build greptime by dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
@@ -144,11 +144,12 @@ multi-platform-buildx: ## Create buildx multi-platform builder.
 	docker buildx inspect ${BUILDX_BUILDER_NAME} || docker buildx create --name ${BUILDX_BUILDER_NAME} --driver docker-container --bootstrap --use
 
 ##@ Test
+.PHONY: test
 test: nextest ## Run unit and integration tests.
 	cargo nextest run ${NEXTEST_OPTS}
 
-.PHONY: nextest ## Install nextest tools.
-nextest:
+.PHONY: nextest
+nextest: ## Install nextest tools.
 	cargo --list | grep nextest || cargo install cargo-nextest --locked
 
 .PHONY: sqlness-test

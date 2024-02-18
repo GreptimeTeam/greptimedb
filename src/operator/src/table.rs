@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use query::error as query_error;
-use query::error::Result as QueryResult;
-use query::table_mutation::{AffectedRows, TableMutationHandler};
+use common_function::handlers::{AffectedRows, TableMutationHandler};
+use common_query::error as query_error;
+use common_query::error::Result as QueryResult;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sqlparser::ast::ObjectName;
@@ -92,5 +94,16 @@ impl TableMutationHandler for TableMutationOperator {
             .await
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)
+    }
+
+    async fn migrate_region(
+        &self,
+        _region_id: u64,
+        _from_peer: u64,
+        _to_peer: u64,
+        _replay_timeout: Duration,
+    ) -> QueryResult<String> {
+        // FIXME(dennis): implemented in the following PR.
+        todo!();
     }
 }

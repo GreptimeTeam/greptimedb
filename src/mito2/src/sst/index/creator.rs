@@ -15,7 +15,7 @@
 mod statistics;
 mod temp_provider;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu,
+    BiSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu,
     PushIndexValueSnafu, Result,
 };
 use crate::metrics::{
@@ -40,7 +40,7 @@ use crate::metrics::{
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
-use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
+use crate::sst::index::codec::{ColumnId, IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::creator::statistics::Statistics;
 use crate::sst::index::creator::temp_provider::TempFileProvider;
 use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
@@ -72,6 +72,9 @@ pub struct SstIndexCreator {
     stats: Statistics,
     /// Whether the index creation is aborted.
     aborted: bool,
+
+    /// Ignore column IDs for index creation.
+    ignore_column_ids: HashSet<ColumnId>,
 }
 
 impl SstIndexCreator {
@@ -84,7 +87,7 @@ impl SstIndexCreator {
         index_store: ObjectStore,
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
-        row_group_size: NonZeroUsize,
+        segment_row_count: NonZeroUsize,
     ) -> Self {
         // `memory_usage_threshold` is the total memory usage threshold of the index creation,
         // so we need to divide it by the number of columns
@@ -96,7 +99,7 @@ impl SstIndexCreator {
             intermediate_manager,
         ));
         let sorter = ExternalSorter::factory(temp_file_provider.clone() as _, memory_threshold);
-        let index_creator = Box::new(SortIndexCreator::new(sorter, row_group_size));
+        let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
         Self {
@@ -110,12 +113,20 @@ impl SstIndexCreator {
 
             stats: Statistics::default(),
             aborted: false,
+
+            ignore_column_ids: HashSet::default(),
         }
     }
 
     /// Sets the write buffer size of the store.
     pub fn with_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
         self.store = self.store.with_write_buffer_size(write_buffer_size);
+        self
+    }
+
+    /// Sets the ignore column IDs for index creation.
+    pub fn with_ignore_column_ids(mut self, ignore_column_ids: HashSet<ColumnId>) -> Self {
+        self.ignore_column_ids = ignore_column_ids;
         self
     }
 
@@ -189,6 +200,10 @@ impl SstIndexCreator {
         guard.inc_row_count(n);
 
         for (column_id, field, value) in self.codec.decode(batch.primary_key())? {
+            if self.ignore_column_ids.contains(column_id) {
+                continue;
+            }
+
             if let Some(value) = value.as_ref() {
                 self.value_buf.clear();
                 IndexValueCodec::encode_value(value.as_value_ref(), field, &mut self.value_buf)?;
@@ -249,8 +264,21 @@ impl SstIndexCreator {
             self.index_creator.finish(&mut index_writer),
             puffin_writer.add_blob(blob)
         );
-        index_finish.context(IndexFinishSnafu)?;
-        puffin_add_blob.context(PuffinAddBlobSnafu)?;
+
+        match (
+            puffin_add_blob.context(PuffinAddBlobSnafu),
+            index_finish.context(IndexFinishSnafu),
+        ) {
+            (Err(e1), Err(e2)) => BiSnafu {
+                first: Box::new(e1),
+                second: Box::new(e2),
+            }
+            .fail()?,
+
+            (Ok(_), e @ Err(_)) => e?,
+            (e @ Err(_), Ok(_)) => e?,
+            _ => {}
+        }
 
         let byte_count = puffin_writer.finish().await.context(PuffinFinishSnafu)?;
         guard.inc_byte_count(byte_count);

@@ -99,6 +99,11 @@ impl Session {
     }
 
     #[inline]
+    pub fn get_catalog(&self) -> String {
+        self.catalog.load().as_ref().clone()
+    }
+
+    #[inline]
     pub fn set_schema(&self, schema: String) {
         self.schema.store(Arc::new(schema));
     }

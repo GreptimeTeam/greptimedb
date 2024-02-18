@@ -14,13 +14,12 @@
 
 pub mod builder;
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures::{AsyncRead, AsyncSeek};
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
-    IndexApplier, IndexNotFoundStrategy, SearchContext,
+    ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
 use object_store::ObjectStore;
 use puffin::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
@@ -84,7 +83,7 @@ impl SstIndexApplier {
     }
 
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
-    pub async fn apply(&self, file_id: FileId) -> Result<BTreeSet<usize>> {
+    pub async fn apply(&self, file_id: FileId) -> Result<ApplyOutput> {
         let _timer = INDEX_APPLY_ELAPSED.start_timer();
 
         let context = SearchContext {
@@ -175,6 +174,7 @@ impl Drop for SstIndexApplier {
 
 #[cfg(test)]
 mod tests {
+    use common_base::BitVec;
     use futures::io::Cursor;
     use index::inverted_index::search::index_apply::MockIndexApplier;
     use object_store::services::Memory;
@@ -203,9 +203,13 @@ mod tests {
 
         let mut mock_index_applier = MockIndexApplier::new();
         mock_index_applier.expect_memory_usage().returning(|| 100);
-        mock_index_applier
-            .expect_apply()
-            .returning(|_, _| Ok(BTreeSet::from_iter([1, 2, 3])));
+        mock_index_applier.expect_apply().returning(|_, _| {
+            Ok(ApplyOutput {
+                matched_segment_ids: BitVec::EMPTY,
+                total_row_count: 100,
+                segment_row_count: 10,
+            })
+        });
 
         let sst_index_applier = SstIndexApplier::new(
             region_dir.clone(),
@@ -214,8 +218,15 @@ mod tests {
             None,
             Box::new(mock_index_applier),
         );
-        let ids = sst_index_applier.apply(file_id).await.unwrap();
-        assert_eq!(ids, BTreeSet::from_iter([1, 2, 3]));
+        let output = sst_index_applier.apply(file_id).await.unwrap();
+        assert_eq!(
+            output,
+            ApplyOutput {
+                matched_segment_ids: BitVec::EMPTY,
+                total_row_count: 100,
+                segment_row_count: 10,
+            }
+        );
     }
 
     #[tokio::test]

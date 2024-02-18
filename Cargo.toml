@@ -96,7 +96,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "519b1d0757404c8ff1eeb2a68d29f5ade54a1752" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "96f1f0404f421ee560a4310c73c5071e49168168" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -115,7 +115,7 @@ paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 prost = "0.12"
-raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "22dfb426cd994602b57725ef080287d3e53db479" }
+raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
 regex = "1.8"
 regex-automata = { version = "0.2", features = ["transducer"] }
@@ -164,7 +164,6 @@ common-grpc-expr = { path = "src/common/grpc-expr" }
 common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
-common-pprof = { path = "src/common/pprof" }
 common-procedure = { path = "src/common/procedure" }
 common-procedure-test = { path = "src/common/procedure-test" }
 common-query = { path = "src/common/query" }

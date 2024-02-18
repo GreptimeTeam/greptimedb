@@ -5,8 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-arrow-schema.workspace = true
 arrow.workspace = true
+arrow-schema.workspace = true
 async-compression = { version = "0.3", features = [
     "bzip2",
     "gzip",
@@ -34,8 +34,8 @@ regex = "1.7"
 serde.workspace = true
 snafu.workspace = true
 strum.workspace = true
-tokio-util.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 url = "2.3"
 
 [dev-dependencies]

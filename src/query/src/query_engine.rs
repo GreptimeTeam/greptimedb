@@ -24,6 +24,7 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
 use common_function::function_registry::FUNCTION_REGISTRY;
+use common_function::handlers::TableMutationHandlerRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
@@ -39,7 +40,6 @@ use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
-use crate::table_mutation::TableMutationHandlerRef;
 
 /// Describe statement result
 #[derive(Debug)]

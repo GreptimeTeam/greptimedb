@@ -25,6 +25,7 @@ use crate::scalars::math::MathFunction;
 use crate::scalars::numpy::NumpyFunction;
 use crate::scalars::timestamp::TimestampFunction;
 use crate::system::SystemFunction;
+use crate::table::TableFunction;
 
 #[derive(Default)]
 pub struct FunctionRegistry {
@@ -74,13 +75,19 @@ impl FunctionRegistry {
 pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     let function_registry = FunctionRegistry::default();
 
+    // Utility functions
     MathFunction::register(&function_registry);
     NumpyFunction::register(&function_registry);
     TimestampFunction::register(&function_registry);
     DateFunction::register(&function_registry);
 
+    // Aggregate functions
     AggregateFunctions::register(&function_registry);
+
+    // System and administration functions
     SystemFunction::register(&function_registry);
+    TableFunction::register(&function_registry);
+
     Arc::new(function_registry)
 });
 

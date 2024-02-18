@@ -23,8 +23,8 @@ common-datasource.workspace = true
 common-error.workspace = true
 common-function.workspace = true
 common-greptimedb-telemetry.workspace = true
-common-grpc-expr.workspace = true
 common-grpc.workspace = true
+common-grpc-expr.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-procedure.workspace = true
@@ -35,9 +35,9 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
 dashmap.workspace = true
+datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datafusion.workspace = true
 datatypes.workspace = true
 file-engine.workspace = true
 futures = "0.3"
@@ -65,8 +65,8 @@ sql.workspace = true
 store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }

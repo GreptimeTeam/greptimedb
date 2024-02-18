@@ -622,6 +622,10 @@ desc table RUNTIME_METRICS;
 | timestamp   | TimestampMillisecond |     | NO   |         | FIELD         |
 +-------------+----------------------+-----+------+---------+---------------+
 
+drop table my_db.foo;
+
+Affected Rows: 0
+
 use public;
 
 Affected Rows: 0
