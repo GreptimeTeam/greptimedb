@@ -56,6 +56,7 @@ pub mod table_region;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
+mod txn_helper;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
@@ -277,7 +278,7 @@ impl<T: Serialize + DeserializeOwned + TableMetaValue> DeserializedValueWithByte
     }
 
     /// Returns original `bytes`
-    pub fn into_bytes(&self) -> Vec<u8> {
+    pub fn get_raw_bytes(&self) -> Vec<u8> {
         self.bytes.to_vec()
     }
 

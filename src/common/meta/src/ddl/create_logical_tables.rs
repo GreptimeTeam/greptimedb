@@ -159,7 +159,10 @@ impl CreateLogicalTablesProcedure {
         let num_tables = tables_data.len();
 
         if num_tables > 0 {
-            manager.create_logic_tables_metadata(tables_data).await?;
+            const BATCH_SIZE: usize = 20;
+            for chunk in tables_data.chunks(BATCH_SIZE) {
+                manager.create_logic_tables_metadata(chunk.to_vec()).await?;
+            }
         }
 
         let table_ids = self.creator.data.real_table_ids();
