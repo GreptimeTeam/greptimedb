@@ -34,7 +34,7 @@ use table::table_reference::TableReference;
 
 use super::utils::handle_retry_error;
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::add_peer_context_if_need;
+use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_info::TableInfoValue;
@@ -223,7 +223,7 @@ impl DropTableProcedure {
                 drop_region_tasks.push(async move {
                     if let Err(err) = requester.handle(request).await {
                         if err.status_code() != StatusCode::RegionNotFound {
-                            return Err(add_peer_context_if_need(datanode)(err));
+                            return Err(add_peer_context_if_needed(datanode)(err));
                         }
                     }
                     Ok(())

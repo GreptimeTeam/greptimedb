@@ -40,7 +40,7 @@ use table::requests::AlterKind;
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::add_peer_context_if_need;
+use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
 use crate::error::{self, ConvertAlterTableRequestSnafu, Error, InvalidProtoMsgSnafu, Result};
 use crate::key::table_info::TableInfoValue;
@@ -226,7 +226,7 @@ impl AlterTableProcedure {
                             // The engine will throw this code when the schema version not match.
                             // As this procedure has locked the table, the only reason for this error
                             // is procedure is succeeded before and is retrying.
-                            return Err(add_peer_context_if_need(datanode)(err));
+                            return Err(add_peer_context_if_needed(datanode)(err));
                         }
                     }
                     Ok(())

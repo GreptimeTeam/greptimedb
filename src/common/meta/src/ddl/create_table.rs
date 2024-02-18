@@ -33,7 +33,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
-use crate::ddl::utils::{add_peer_context_if_need, handle_retry_error, region_storage_path};
+use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error, region_storage_path};
 use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
 use crate::error::{self, Result, TableRouteNotFoundSnafu};
 use crate::key::table_name::TableNameKey;
@@ -267,7 +267,7 @@ impl CreateTableProcedure {
                     requester
                         .handle(request)
                         .await
-                        .map_err(add_peer_context_if_need(datanode))
+                        .map_err(add_peer_context_if_needed(datanode))
                 });
             }
         }

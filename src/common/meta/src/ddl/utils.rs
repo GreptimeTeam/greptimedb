@@ -28,7 +28,7 @@ use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 
 /// Adds [Peer] context if the error is unretryable.
-pub fn add_peer_context_if_need(datanode: Peer) -> impl FnOnce(Error) -> Error {
+pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {
     move |err| {
         if !err.is_retry_later() {
             return Error::OperateDatanode {

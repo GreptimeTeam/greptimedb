@@ -31,7 +31,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use super::utils::handle_retry_error;
-use crate::ddl::utils::add_peer_context_if_need;
+use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
 use crate::error::{Result, TableNotFoundSnafu};
 use crate::key::table_info::TableInfoValue;
@@ -170,7 +170,7 @@ impl TruncateTableProcedure {
 
                 truncate_region_tasks.push(async move {
                     if let Err(err) = requester.handle(request).await {
-                        return Err(add_peer_context_if_need(datanode)(err));
+                        return Err(add_peer_context_if_needed(datanode)(err));
                     }
                     Ok(())
                 });
