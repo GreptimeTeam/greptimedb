@@ -19,7 +19,7 @@ jobs:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
         sync-labels: 1
     - name: create an issue in doc repo
-      uses: dacbd/create-issue-action@main
+      uses: dacbd/create-issue-action@v1.2.1
       if: ${{ github.event.action == 'opened' && contains(github.event.pull_request.body, '- [ ]  This PR does not require documentation updates.') }}
       with:
         owner: GreptimeTeam

@@ -101,7 +101,7 @@ jobs:
       version: ${{ steps.create-version.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -155,12 +155,12 @@ jobs:
     runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Checkout greptimedb
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.commit }}
@@ -184,12 +184,12 @@ jobs:
     runs-on: ${{ needs.allocate-runners.outputs.linux-arm64-runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Checkout greptimedb
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.commit }}
@@ -216,7 +216,7 @@ jobs:
     outputs:
       build-result: ${{ steps.set-build-result.outputs.build-result }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -247,7 +247,7 @@ jobs:
     runs-on: ubuntu-20.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -281,7 +281,7 @@ jobs:
     ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -306,7 +306,7 @@ jobs:
     ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 

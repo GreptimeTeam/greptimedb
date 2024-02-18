@@ -37,7 +37,7 @@ jobs:
     name: Spell Check with Typos
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: crate-ci/typos@v1.13.10
 
   check:
@@ -49,8 +49,8 @@ jobs:
         os: [ windows-latest, ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -94,8 +94,8 @@ jobs:
         os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -130,7 +130,7 @@ jobs:
         os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -159,7 +159,7 @@ jobs:
         os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -187,8 +187,8 @@ jobs:
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
@@ -209,8 +209,8 @@ jobs:
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
@@ -231,8 +231,8 @@ jobs:
     runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: KyleMayes/install-llvm-action@v1
@@ -253,7 +253,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       - name: Install PyArrow Package
