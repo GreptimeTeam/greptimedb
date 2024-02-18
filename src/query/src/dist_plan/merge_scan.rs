@@ -176,7 +176,7 @@ impl MergeScanExec {
             for region_id in regions {
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
-                        tracing_context: tracing_context.to_w3c().clone(),
+                        tracing_context: tracing_context.to_w3c(),
                         dbname: dbname.clone(),
                     }),
                     region_id: region_id.into(),
