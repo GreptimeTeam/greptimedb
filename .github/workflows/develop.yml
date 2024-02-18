@@ -140,6 +140,14 @@ jobs:
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
         run: RUST_BACKTRACE=1 ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
+      # FIXME: Logs cannot found be on failure (or even success). Need to figure out the cause.
+      - name: Upload sqlness logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: sqlness-logs
+          path: ${{ runner.temp }}/greptime-*.log
+          retention-days: 3
 
   sqlness-kafka-wal:
     name: Sqlness Test with Kafka Wal
@@ -164,6 +172,14 @@ jobs:
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
         run: RUST_BACKTRACE=1 ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
+      # FIXME: Logs cannot be found on failure (or even success). Need to figure out the cause.
+      - name: Upload sqlness logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: sqlness-logs
+          path: ${{ runner.temp }}/greptime-*.log
+          retention-days: 3
 
   fmt:
     name: Rustfmt
