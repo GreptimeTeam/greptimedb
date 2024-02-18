@@ -6,7 +6,7 @@
 -- SQLNESS REPLACE [\s\-]+
 SELECT build();
 
-++|build()|++|branch:BRANCH|commit:COMMIT|commit_short:COMMIT_SHORT||dirty:DIRTY|version:VERSION++
+++|build()|++|branch:BRANCH|commit:COMMIT|commit_short:COMMIT_SHORT|dirty:DIRTY|version:VERSION++
 
 -- SQLNESS REPLACE greptimedb-[\d\.]+ greptimedb-VERSION
 SELECT version();
