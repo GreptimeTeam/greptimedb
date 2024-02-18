@@ -84,7 +84,7 @@ pub fn build_info() -> &'static BuildInfo {
     })
 }
 
-#[allow(clippy::print-stdout)]
+#[allow(clippy::print_stdout)]
 pub fn setup_build_info() {
     let build_info = build_info();
     println!("cargo:rustc-env=GIT_COMMIT={}", build_info.commit);
