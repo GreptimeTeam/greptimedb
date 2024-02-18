@@ -240,6 +240,11 @@ jobs:
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
           artifacts-dir: ${{ matrix.artifacts-dir-prefix }}-${{ needs.allocate-runners.outputs.version }}
 
+      - name: Set build macos result
+        id: set-build-macos-result
+        run: |
+          echo "build-macos-result=success" >> $GITHUB_OUTPUT    
+
   build-windows-artifacts:
     name: Build Windows artifacts
     strategy:
@@ -276,6 +281,11 @@ jobs:
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
           artifacts-dir: ${{ matrix.artifacts-dir-prefix }}-${{ needs.allocate-runners.outputs.version }}
 
+      - name: Set build windows result
+        id: set-build-windows-result
+        run: |
+          echo "build-windows-result=success" >> $GITHUB_OUTPUT    
+
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
     if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
@@ -298,6 +308,11 @@ jobs:
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
+
+      - name: Set build image result
+        id: set-image-build-result
+        run: |
+          echo "build-image-result=success" >> $GITHUB_OUTPUT    
 
   release-cn-artifacts:
     name: Release artifacts to CN region
@@ -413,3 +428,27 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+
+  notification:
+    if: ${{ always() }} # Not requiring successful dependent jobs, always run.
+    name: Send notification to Greptime team
+    needs: [
+      release-images-to-dockerhub
+    ]
+    runs-on: ubuntu-20.04
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
+    steps:
+      - name: Notifiy release successful result
+        uses: slackapi/slack-github-action@v1.23.0
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result == 'success' && needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
+        with:
+          payload: |
+            {"text": "GreptimeDB's release version ${{ needs.allocate-runners.outputs.version }} has completed successfully."}
+
+      - name: Notifiy release failed result
+        uses: slackapi/slack-github-action@v1.23.0
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result != 'success' || needs.build-windows-artifacts.outputs.build-windows-result != 'success' || needs.build-macos-artifacts.outputs.build-macos-result != 'success' }}
+        with:
+          payload: |
+            {"text": "GreptimeDB's release version ${{ needs.allocate-runners.outputs.version }} has failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/release.yml'."}
