@@ -18,8 +18,8 @@ common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
 common-greptimedb-telemetry.workspace = true
-common-grpc-expr.workspace = true
 common-grpc.workspace = true
+common-grpc-expr.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-procedure.workspace = true
@@ -51,8 +51,8 @@ snafu.workspace = true
 store-api.workspace = true
 strum.workspace = true
 table.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
 tower = "0.4"

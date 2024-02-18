@@ -42,7 +42,6 @@ jobs:
 
   check:
     name: Check
-    if: github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -67,7 +66,6 @@ jobs:
 
   toml:
     name: Toml Check
-    if: github.event.pull_request.draft == false
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
@@ -81,13 +79,12 @@ jobs:
           # Shares across multiple jobs
           shared-key: "check-toml"
       - name: Install taplo
-        run: cargo +stable install taplo-cli --version ^0.8 --locked
+        run: cargo +stable install taplo-cli --version ^0.9 --locked
       - name: Run taplo
         run: taplo format --check
 
   build:
     name: Build GreptimeDB binaries
-    if: github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -122,7 +119,6 @@ jobs:
 
   sqlness:
     name: Sqlness Test
-    if: github.event.pull_request.draft == false
     needs: build
     runs-on: ${{ matrix.os }}
     strategy:
@@ -139,7 +135,8 @@ jobs:
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
-        run: ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
+      # FIXME: Logs cannot found be on failure (or even success). Need to figure out the cause.
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3
@@ -150,7 +147,6 @@ jobs:
 
   sqlness-kafka-wal:
     name: Sqlness Test with Kafka Wal
-    if: github.event.pull_request.draft == false
     needs: build
     runs-on: ${{ matrix.os }}
     strategy:
@@ -170,7 +166,8 @@ jobs:
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
-        run: ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
+      # FIXME: Logs cannot be found on failure (or even success). Need to figure out the cause.
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3
@@ -181,7 +178,6 @@ jobs:
 
   fmt:
     name: Rustfmt
-    if: github.event.pull_request.draft == false
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
@@ -203,7 +199,6 @@ jobs:
 
   clippy:
     name: Clippy
-    if: github.event.pull_request.draft == false
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:

@@ -45,8 +45,8 @@ datafusion-common = { workspace = true, optional = true }
 datafusion-expr = { workspace = true, optional = true }
 datafusion-physical-expr = { workspace = true, optional = true }
 datatypes.workspace = true
-futures-util.workspace = true
 futures.workspace = true
+futures-util.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
 paste = { workspace = true, optional = true }

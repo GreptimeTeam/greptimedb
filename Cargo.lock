@@ -1243,7 +1243,6 @@ dependencies = [
  "arrow-schema",
  "async-stream",
  "async-trait",
- "build-data",
  "catalog",
  "chrono",
  "common-catalog",
@@ -1257,6 +1256,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-version",
  "dashmap",
  "datafusion",
  "datatypes",
@@ -1782,7 +1782,6 @@ dependencies = [
  "api",
  "arc-swap",
  "async-trait",
- "build-data",
  "chrono-tz 0.6.3",
  "common-error",
  "common-macro",
@@ -1790,6 +1789,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "common-version",
  "datafusion",
  "datatypes",
  "libc",
@@ -4699,9 +4699,9 @@ checksum = "302d7ab3130588088d277783b1e2d2e10c9e9e4a16dd9050e6ec93fb3e7048f4"
 
 [[package]]
 name = "libgit2-sys"
-version = "0.16.1+1.7.1"
+version = "0.16.2+1.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2a2bb3680b094add03bb3732ec520ece34da31a8cd2d633d1389d0f0fb60d0c"
+checksum = "ee4126d8b4ee5c9d9ea891dd875cfdc1e9d0950437179104b183d7d8a74d24e8"
 dependencies = [
  "cc",
  "libc",
@@ -8883,7 +8883,6 @@ dependencies = [
  "axum-macros",
  "axum-test-helper 0.3.0",
  "base64 0.21.5",
- "build-data",
  "bytes",
  "catalog",
  "chrono",
@@ -8902,6 +8901,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-version",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

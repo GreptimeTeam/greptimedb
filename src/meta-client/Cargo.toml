@@ -20,8 +20,8 @@ serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 table.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 
 [dev-dependencies]
