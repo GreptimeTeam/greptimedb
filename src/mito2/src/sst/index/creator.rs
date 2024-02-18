@@ -15,7 +15,7 @@
 mod statistics;
 mod temp_provider;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ use crate::metrics::{
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
-use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
+use crate::sst::index::codec::{ColumnId, IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::creator::statistics::Statistics;
 use crate::sst::index::creator::temp_provider::TempFileProvider;
 use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
@@ -72,6 +72,9 @@ pub struct SstIndexCreator {
     stats: Statistics,
     /// Whether the index creation is aborted.
     aborted: bool,
+
+    /// Ignore column IDs for index creation.
+    ignore_column_ids: HashSet<ColumnId>,
 }
 
 impl SstIndexCreator {
@@ -110,12 +113,20 @@ impl SstIndexCreator {
 
             stats: Statistics::default(),
             aborted: false,
+
+            ignore_column_ids: HashSet::default(),
         }
     }
 
     /// Sets the write buffer size of the store.
     pub fn with_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
         self.store = self.store.with_write_buffer_size(write_buffer_size);
+        self
+    }
+
+    /// Sets the ignore column IDs for index creation.
+    pub fn with_ignore_column_ids(mut self, ignore_column_ids: HashSet<ColumnId>) -> Self {
+        self.ignore_column_ids = ignore_column_ids;
         self
     }
 
@@ -189,6 +200,10 @@ impl SstIndexCreator {
         guard.inc_row_count(n);
 
         for (column_id, field, value) in self.codec.decode(batch.primary_key())? {
+            if self.ignore_column_ids.contains(column_id) {
+                continue;
+            }
+
             if let Some(value) = value.as_ref() {
                 self.value_buf.clear();
                 IndexValueCodec::encode_value(value.as_value_ref(), field, &mut self.value_buf)?;

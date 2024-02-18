@@ -132,8 +132,13 @@ mod tests {
     #[test]
     fn test_collect_eq_basic() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         builder
             .collect_eq(&tag_column(), &string_lit("foo"))
@@ -161,8 +166,13 @@ mod tests {
     #[test]
     fn test_collect_eq_field_column() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         builder
             .collect_eq(&field_column(), &string_lit("abc"))
@@ -173,8 +183,13 @@ mod tests {
     #[test]
     fn test_collect_eq_nonexistent_column() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let res = builder.collect_eq(&nonexistent_column(), &string_lit("abc"));
         assert!(matches!(res, Err(Error::ColumnNotFound { .. })));
@@ -184,8 +199,13 @@ mod tests {
     #[test]
     fn test_collect_eq_type_mismatch() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let res = builder.collect_eq(&tag_column(), &int64_lit(1));
         assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
@@ -195,8 +215,13 @@ mod tests {
     #[test]
     fn test_collect_or_eq_list_basic() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
             left: Box::new(tag_column()),
@@ -245,8 +270,13 @@ mod tests {
     #[test]
     fn test_collect_or_eq_list_invalid_op() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
             left: Box::new(tag_column()),
@@ -274,8 +304,13 @@ mod tests {
     #[test]
     fn test_collect_or_eq_list_multiple_columns() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
             left: Box::new(tag_column()),
