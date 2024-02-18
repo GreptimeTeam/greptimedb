@@ -20,7 +20,6 @@ use std::time::Instant;
 
 use api::v1::OpType;
 use common_time::Timestamp;
-use datatypes::arrow::record_batch::RecordBatch;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;

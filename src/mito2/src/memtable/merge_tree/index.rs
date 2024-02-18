@@ -14,15 +14,12 @@
 
 //! Primary key index of the merge tree.
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use datatypes::arrow::array::{Array, ArrayBuilder, BinaryArray, BinaryBuilder};
-use datatypes::arrow::compute;
-use snafu::ResultExt;
 
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::Result;
 use crate::memtable::merge_tree::mutable::WriteMetrics;
 use crate::memtable::merge_tree::{PkId, PkIndex, ShardId};
 

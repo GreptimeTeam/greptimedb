@@ -25,7 +25,7 @@ use datatypes::arrow;
 use datatypes::arrow::array::{Array, RecordBatch, UInt16Array, UInt32Array};
 use datatypes::arrow::datatypes::{Field, Schema, SchemaRef};
 use datatypes::data_type::DataType;
-use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, Vector, VectorRef};
+use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
 use datatypes::vectors::{
@@ -351,7 +351,7 @@ impl DataBuffer {
     pub fn iter(&mut self, pk_weights: &[u16]) -> Result<DataBufferIter> {
         let batch =
             data_buffer_to_record_batches(self.data_part_schema.clone(), self, pk_weights, true)?;
-        Ok(DataBufferIter::new(batch))
+        DataBufferIter::new(batch)
     }
 
     /// Returns num of rows in data buffer.
@@ -373,14 +373,14 @@ pub(crate) struct DataBufferIter {
 }
 
 impl DataBufferIter {
-    pub(crate) fn new(batch: RecordBatch) -> Self {
+    pub(crate) fn new(batch: RecordBatch) -> Result<Self> {
         let mut iter = Self {
             batch,
             offset: 0,
             current_data_batch: None,
         };
-        iter.next(); // fill data batch for comparison and merge.
-        iter
+        iter.next()?; // fill data batch for comparison and merge.
+        Ok(iter)
     }
 
     pub(crate) fn is_valid(&self) -> bool {
@@ -685,7 +685,7 @@ impl DataPartIter {
         if let Some(batch_size) = batch_size {
             builder = builder.with_batch_size(batch_size);
         }
-        let mut reader = builder.build().context(error::ReadDataPartSnafu)?;
+        let reader = builder.build().context(error::ReadDataPartSnafu)?;
         let mut iter = Self {
             inner: reader,
             current_pk_index: None,
@@ -913,13 +913,13 @@ mod tests {
 
         assert_eq!(4, buffer.num_rows());
 
-        let mut encoder = DataPartEncoder::new(&meta, &[0, 1, 2], None);
+        let encoder = DataPartEncoder::new(&meta, &[0, 1, 2], None);
         let encoded = encoder.write(&mut buffer).unwrap();
         let s = String::from_utf8_lossy(encoded.as_bytes());
         assert!(s.starts_with("PAR1"));
         assert!(s.ends_with("PAR1"));
 
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(encoded).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(encoded).unwrap();
         let mut reader = builder.build().unwrap();
         let batch = reader.next().unwrap().unwrap();
         assert_eq!(3, batch.num_rows());
@@ -987,7 +987,7 @@ mod tests {
             3,
         );
 
-        let mut encoder = DataPartEncoder::new(&meta, weights, Some(4));
+        let encoder = DataPartEncoder::new(&meta, weights, Some(4));
         let encoded = encoder.write(&mut buffer).unwrap();
 
         let mut iter = DataPartIter::new(encoded, Some(4)).unwrap();
@@ -1106,7 +1106,7 @@ mod tests {
             active: buffer,
             frozen: vec![part_0, part_1],
         };
-        let mut iter = parts.iter(pk_weights.to_vec()).unwrap();
+        let iter = parts.iter(pk_weights.to_vec()).unwrap();
         let mut res = Vec::with_capacity(expected_values.len());
         for b in iter {
             let batch = b.unwrap().as_record_batch();

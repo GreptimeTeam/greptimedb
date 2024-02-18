@@ -26,7 +26,6 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use common_base::readable_size::ReadableSize;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;

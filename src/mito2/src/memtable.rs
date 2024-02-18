@@ -15,7 +15,7 @@
 //! Memtables are write buffers for regions.
 
 pub mod key_values;
-#[allow(unused)]
+#[allow(dead_code)]
 pub mod merge_tree;
 pub mod time_series;
 pub(crate) mod version;
