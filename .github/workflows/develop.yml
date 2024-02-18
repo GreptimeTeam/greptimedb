@@ -139,14 +139,7 @@ jobs:
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
-        run: ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
-      - name: Upload sqlness logs
-        if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: sqlness-logs
-          path: ${{ runner.temp }}/greptime-*.log
-          retention-days: 3
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
 
   sqlness-kafka-wal:
     name: Sqlness Test with Kafka Wal
@@ -170,14 +163,7 @@ jobs:
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
-        run: ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
-      - name: Upload sqlness logs
-        if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: sqlness-logs
-          path: ${{ runner.temp }}/greptime-*.log
-          retention-days: 3
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
 
   fmt:
     name: Rustfmt
