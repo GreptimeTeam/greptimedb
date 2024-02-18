@@ -19,7 +19,6 @@ use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use common_time::Timestamp;
-use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
@@ -28,14 +27,14 @@ use table::predicate::Predicate;
 
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{self, DataBatch, DataBuffer, DataParts};
+use crate::memtable::merge_tree::data::{self, DataBatch, DataParts};
 use crate::memtable::merge_tree::index::{
-    IndexConfig, IndexReader, KeyIndex, KeyIndexRef, ShardReader,
+    compute_pk_weights, IndexConfig, IndexReader, KeyIndex, KeyIndexRef, ShardReader,
 };
 use crate::memtable::merge_tree::mutable::WriteMetrics;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId, PkIndex};
 use crate::memtable::{BoxedBatchIterator, KeyValues};
-use crate::read::{Batch, BatchBuilder, BatchColumn};
+use crate::read::{Batch, BatchBuilder};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Initial capacity for the data buffer.
@@ -49,7 +48,7 @@ pub(crate) struct MergeTree {
     pub(crate) metadata: RegionMetadataRef,
     /// Primary key codec.
     row_codec: Arc<McmpRowCodec>,
-    parts: RwLock<TreeParts>,
+    pub(crate) parts: RwLock<TreeParts>,
 }
 
 pub(crate) type MergeTreeRef = Arc<MergeTree>;
@@ -69,10 +68,12 @@ impl MergeTree {
                 max_keys_per_shard: config.index_max_keys_per_shard,
             }))
         });
+        let data =
+            DataParts::with_capacity(metadata.clone(), DATA_INIT_CAP, config.freeze_threshold);
         let parts = TreeParts {
             immutable: false,
             index,
-            data: DataParts::new(metadata.clone(), DATA_INIT_CAP),
+            data,
         };
 
         MergeTree {
@@ -113,7 +114,7 @@ impl MergeTree {
                     shard_id: 0,
                     pk_index: 0,
                 };
-                self.write_with_id(pk_id, kv);
+                self.write_with_id(pk_id, kv)?;
                 continue;
             }
 
@@ -157,7 +158,7 @@ impl MergeTree {
         // Compute pk weights.
         let mut pk_weights = Vec::new();
         if let Some(reader) = &index_reader {
-            reader.compute_pk_weights(&mut pk_weights);
+            compute_pk_weights(reader.sorted_pk_index(), &mut pk_weights);
         } else {
             // Push weight for the only key.
             // TODO(yingwen): Allow passing empty weights if there is no primary key.
@@ -166,7 +167,7 @@ impl MergeTree {
 
         let data_iter = {
             let mut parts = self.parts.write().unwrap();
-            parts.data.iter(&pk_weights)?
+            parts.data.iter(pk_weights)?
         };
 
         let iter = ShardIter {
@@ -218,7 +219,11 @@ impl MergeTree {
         let parts = TreeParts {
             immutable: false,
             index,
-            data: DataParts::new(metadata.clone(), DATA_INIT_CAP),
+            data: DataParts::new(
+                metadata.clone(),
+                DATA_INIT_CAP,
+                self.config.freeze_threshold,
+            ),
         };
 
         MergeTree {
@@ -249,15 +254,26 @@ impl MergeTree {
         // Write the pk to the index.
         let pk_id = self.write_primary_key(primary_key, metrics)?;
         // Writes data.
-        self.write_with_id(pk_id, kv);
-
-        Ok(())
+        self.write_with_id(pk_id, kv)
     }
 
-    fn write_with_id(&self, pk_id: PkId, kv: KeyValue) {
+    fn write_with_id(&self, pk_id: PkId, kv: KeyValue) -> Result<()> {
         let mut parts = self.parts.write().unwrap();
         assert!(!parts.immutable);
-        parts.data.write_row(pk_id, kv)
+        if parts.data.write_row(pk_id, kv) {
+            // should trigger freeze
+            let weights = if let Some(index) = parts.index.as_ref() {
+                let pk_indices = index.sorted_pk_indices();
+                let mut weights = Vec::with_capacity(pk_indices.len());
+                compute_pk_weights(&pk_indices, &mut weights);
+                weights
+            } else {
+                vec![0]
+            };
+            parts.data.freeze(&weights)
+        } else {
+            Ok(())
+        }
     }
 
     fn write_primary_key(&self, key: &[u8], metrics: &mut WriteMetrics) -> Result<PkId> {
@@ -272,14 +288,14 @@ impl MergeTree {
     }
 }
 
-struct TreeParts {
+pub(crate) struct TreeParts {
     /// Whether the tree is immutable.
     immutable: bool,
     /// Index part of the tree. If the region doesn't have a primary key, this field
     /// is `None`.
     index: Option<KeyIndexRef>,
     /// Data part of the tree.
-    data: DataParts,
+    pub(crate) data: DataParts,
 }
 
 struct ShardIter {
@@ -391,7 +407,7 @@ impl DataReader {
             .zip(record_batch.schema().fields().iter())
             .skip(4)
         {
-            // Safety: metadata should contains all fields.
+            // Safety: metadata should contain all fields.
             let column_id = metadata.column_by_name(field.name()).unwrap().column_id;
             if !projection.contains(&column_id) {
                 continue;

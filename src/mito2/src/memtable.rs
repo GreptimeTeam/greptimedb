@@ -60,7 +60,7 @@ impl MemtableStats {
     }
 }
 
-pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send + Sync>;
+pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
 
 /// In memory write buffer.
 pub trait Memtable: Send + Sync + fmt::Debug {

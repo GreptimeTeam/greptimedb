@@ -54,6 +54,11 @@ impl KeyIndex {
         }
     }
 
+    pub(crate) fn sorted_pk_indices(&self) -> Vec<u16> {
+        let shard = self.shard.read().unwrap();
+        shard.sorted_pk_indices()
+    }
+
     pub(crate) fn write_primary_key(&self, key: &[u8], metrics: &mut WriteMetrics) -> Result<PkId> {
         let mut shard = self.shard.write().unwrap();
         let pk_id = shard.try_add_primary_key(&self.config, key, metrics)?;
@@ -385,18 +390,22 @@ impl ShardReader {
         }
     }
 
-    pub(crate) fn compute_pk_weights(&self, pk_weights: &mut Vec<u16>) {
-        pk_weights.clear();
-        pk_weights.resize(self.sorted_pk_indices.len(), 0);
-
-        for (weight, pk_index) in self.sorted_pk_indices.iter().enumerate() {
-            pk_weights[*pk_index as usize] = weight as u16;
-        }
-    }
-
     fn key_by_pk_index(&self, pk_index: PkIndex) -> &[u8] {
         let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
         self.blocks[block_idx as usize].key_by_pk_index(pk_index)
+    }
+
+    pub(crate) fn sorted_pk_index(&self) -> &[PkIndex] {
+        &self.sorted_pk_indices
+    }
+}
+
+pub(crate) fn compute_pk_weights(sorted_pk_indices: &[PkIndex], pk_weights: &mut Vec<u16>) {
+    pk_weights.clear();
+    pk_weights.resize(sorted_pk_indices.len(), 0);
+
+    for (weight, pk_index) in sorted_pk_indices.iter().enumerate() {
+        pk_weights[*pk_index as usize] = weight as u16;
     }
 }
 

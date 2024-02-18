@@ -56,6 +56,8 @@ pub(crate) struct PkId {
 pub struct MergeTreeConfig {
     /// Max keys in an index shard.
     index_max_keys_per_shard: usize,
+    /// Freeze threshold of data parts.
+    freeze_threshold: usize,
 }
 
 impl Default for MergeTreeConfig {
@@ -63,6 +65,7 @@ impl Default for MergeTreeConfig {
         Self {
             // TODO(yingwen): Use 4096 or find a proper value.
             index_max_keys_per_shard: 8192,
+            freeze_threshold: 4096,
         }
     }
 }
