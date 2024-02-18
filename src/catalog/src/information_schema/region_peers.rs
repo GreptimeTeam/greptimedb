@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::pin::pin;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -28,7 +29,7 @@ use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{Int64VectorBuilder, StringVectorBuilder, UInt64VectorBuilder};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
@@ -176,29 +177,38 @@ impl InformationSchemaRegionPeersBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
+            let table_id_stream = catalog_manager
+                .tables(&catalog_name, &schema_name)
+                .await
+                .try_filter_map(|t| async move {
+                    let table_info = t.table_info();
+                    if table_info.table_type == TableType::Temporary {
+                        Ok(None)
+                    } else {
+                        Ok(Some(table_info.ident.table_id))
+                    }
+                });
 
-            while let Some(table) = stream.try_next().await? {
-                let table_info = table.table_info();
+            const BATCH_SIZE: usize = 128;
 
-                if table_info.table_type == TableType::Temporary {
-                    continue;
-                }
+            // Split table ids into chunks
+            let mut table_id_chunks = pin!(table_id_stream.ready_chunks(BATCH_SIZE));
 
-                let table_id = table_info.ident.table_id;
-                let routes = if let Some(partition_manager) = &partition_manager {
+            while let Some(table_ids) = table_id_chunks.next().await {
+                let table_ids = table_ids.into_iter().collect::<Result<Vec<_>>>()?;
+
+                let table_routes = if let Some(partition_manager) = &partition_manager {
                     partition_manager
-                        .find_region_routes(table_id)
+                        .find_region_routes_batch(&table_ids)
                         .await
-                        .context(FindRegionRoutesSnafu {
-                            table: &table_info.name,
-                        })?
+                        .context(FindRegionRoutesSnafu)?
                 } else {
-                    // Standalone doesn't has route values.
-                    vec![]
+                    table_ids.into_iter().map(|id| (id, vec![])).collect()
                 };
 
-                self.add_region_peers(&predicates, &routes);
+                for routes in table_routes.values() {
+                    self.add_region_peers(&predicates, routes);
+                }
             }
         }
 
@@ -211,7 +221,7 @@ impl InformationSchemaRegionPeersBuilder {
             let peer_id = route.leader_peer.clone().map(|p| p.id);
             let peer_addr = route.leader_peer.clone().map(|p| p.addr);
             let status = if let Some(status) = route.leader_status {
-                Some(status.name().to_string())
+                Some(status.as_ref().to_string())
             } else {
                 // Alive by default
                 Some("ALIVE".to_string())

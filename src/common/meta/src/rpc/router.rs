@@ -24,6 +24,7 @@ use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
+use strum::AsRefStr;
 
 use crate::error::{self, Result};
 use crate::key::RegionDistribution;
@@ -277,22 +278,14 @@ impl RegionRouteBuilder {
 
 /// The Status of the [Region].
 /// TODO(dennis): It's better to add more fine-grained statuses such as `PENDING` etc.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, AsRefStr)]
+#[strum(serialize_all = "UPPERCASE")]
 pub enum RegionStatus {
     /// The following cases in which the [Region] will be downgraded.
     ///
     /// - The [Region] is unavailable(e.g., Crashed, Network disconnected).
     /// - The [Region] was planned to migrate to another [Peer].
     Downgraded,
-}
-
-impl RegionStatus {
-    /// Returns the status name.
-    pub fn name(&self) -> &str {
-        match self {
-            RegionStatus::Downgraded => "DOWNGRADED",
-        }
-    }
 }
 
 impl RegionRoute {

@@ -170,11 +170,8 @@ pub enum Error {
         table: String,
     },
 
-    #[snafu(display("Failed to find region routes: #{table}"))]
-    FindRegionRoutes {
-        source: partition::error::Error,
-        table: String,
-    },
+    #[snafu(display("Failed to find region routes"))]
+    FindRegionRoutes { source: partition::error::Error },
 
     #[snafu(display("Failed to read system catalog table records"))]
     ReadSystemCatalog {

@@ -74,6 +74,29 @@ impl PartitionRuleManager {
         Ok(route.region_routes)
     }
 
+    pub async fn find_region_routes_batch(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, Vec<RegionRoute>>> {
+        let table_routes = self
+            .table_route_manager
+            .batch_get(table_ids)
+            .await
+            .context(error::TableRouteManagerSnafu)?;
+
+        let mut table_region_routes = HashMap::with_capacity(table_routes.len());
+
+        for (table_id, table_route) in table_routes {
+            let region_routes = table_route
+                .region_routes()
+                .context(error::TableRouteManagerSnafu)?
+                .clone();
+            table_region_routes.insert(table_id, region_routes);
+        }
+
+        Ok(table_region_routes)
+    }
+
     pub async fn find_table_partitions(&self, table_id: TableId) -> Result<Vec<PartitionInfo>> {
         let region_routes = self.find_region_routes(table_id).await?;
         ensure!(
