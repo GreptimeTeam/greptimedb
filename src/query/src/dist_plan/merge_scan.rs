@@ -165,9 +165,7 @@ impl MergeScanExec {
         let schema = Self::arrow_schema_to_schema(self.schema())?;
 
         let dbname = context.task_id().unwrap_or_default();
-
-        let tracing_context =
-            TracingContext::from_w3c(&serde_json::from_str(context.session_id().as_str()).unwrap());
+        let tracing_context = TracingContext::from_json(context.session_id().as_str());
 
         let stream = Box::pin(stream!({
             METRIC_MERGE_SCAN_REGIONS.observe(regions.len() as f64);

@@ -44,7 +44,8 @@ impl QueryEngineContext {
         let state = &self.state;
         let tracing_context = TracingContext::from_current_span();
 
-        let session_id = serde_json::to_string(&tracing_context.to_w3c()).unwrap();
+        // pass tracing context in session_id
+        let session_id = tracing_context.to_json();
 
         Arc::new(TaskContext::new(
             Some(dbname),

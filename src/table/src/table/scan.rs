@@ -101,8 +101,7 @@ impl PhysicalPlan for StreamScanAdapter {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> QueryResult<SendableRecordBatchStream> {
-        let tracing_context =
-            TracingContext::from_w3c(&serde_json::from_str(context.session_id().as_str()).unwrap());
+        let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let span = tracing_context.attach(common_telemetry::tracing::info_span!("stream_adapter"));
 
         let mut stream = self.stream.lock().unwrap();
