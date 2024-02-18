@@ -14,9 +14,8 @@
 
 fn main() {
     build_data::set_RUSTC_VERSION();
-    build_data::set_GIT_BRANCH();
-    build_data::set_GIT_COMMIT();
     build_data::set_SOURCE_TIMESTAMP();
+    common_version::setup_git_versions();
 
     #[cfg(feature = "dashboard")]
     fetch_dashboard_assets();

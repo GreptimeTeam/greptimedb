@@ -8901,6 +8901,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-version",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

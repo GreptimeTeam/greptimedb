@@ -19,12 +19,12 @@ greptime-proto.workspace = true
 mockall.workspace = true
 pin-project.workspace = true
 prost.workspace = true
-regex-automata.workspace = true
 regex.workspace = true
+regex-automata.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
 tempfile.workspace = true
-tokio-util.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
