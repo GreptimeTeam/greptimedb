@@ -210,16 +210,14 @@ impl Iterator for Iter {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(mut top) = self.heap.pop() {
-            if top.source.is_valid() {
-                let top_batch = top.source.current_batch();
-                if let Err(e) = top.source.next() {
-                    return Some(Err(e));
-                }
-                if top.source.is_valid() {
-                    self.heap.push(top);
-                }
-                return Some(Ok(top_batch));
+            let top_batch = top.source.current_batch();
+            if let Err(e) = top.source.next() {
+                return Some(Err(e));
             }
+            if top.source.is_valid() {
+                self.heap.push(top);
+            }
+            return Some(Ok(top_batch));
         }
         None
     }
