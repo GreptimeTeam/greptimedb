@@ -24,6 +24,7 @@ use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
+use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::IndexerBuilder;
@@ -139,9 +140,11 @@ impl AccessLayer {
                 file_id,
                 file_path: index_file_path,
                 metadata: &request.metadata,
+                segment_row_count: write_opts.index_segment_row_count,
                 row_group_size: write_opts.row_group_size,
                 object_store: self.object_store.clone(),
                 intermediate_manager: self.intermediate_manager.clone(),
+                index_options: request.index_options,
             }
             .build();
             let mut writer = ParquetWriter::new(
@@ -186,6 +189,8 @@ pub(crate) struct SstWriteRequest {
     pub(crate) mem_threshold_index_create: Option<usize>,
     /// The size of write buffer for index.
     pub(crate) index_write_buffer_size: Option<usize>,
+    /// The options of the index for the region.
+    pub(crate) index_options: IndexOptions,
 }
 
 /// Creates a fs object store with atomic write dir.

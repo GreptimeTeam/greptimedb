@@ -298,6 +298,14 @@ impl InvertedIndexConfig {
             self.intermediate_path = join_dir(data_home, "index_intermediate");
         }
 
+        if self.write_buffer_size < MULTIPART_UPLOAD_MINIMUM_SIZE {
+            self.write_buffer_size = MULTIPART_UPLOAD_MINIMUM_SIZE;
+            warn!(
+                "Sanitize index write buffer size to {}",
+                self.write_buffer_size
+            );
+        }
+
         Ok(())
     }
 }

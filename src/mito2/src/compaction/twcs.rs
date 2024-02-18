@@ -37,6 +37,7 @@ use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::read::{BoxedBatchReader, Source};
+use crate::region::options::IndexOptions;
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
@@ -186,6 +187,7 @@ impl Picker for TwcsPicker {
             start_time,
             cache_manager,
             storage: current_version.options.storage.clone(),
+            index_options: current_version.options.index_options.clone(),
         };
         Some(Box::new(task))
     }
@@ -251,6 +253,8 @@ pub(crate) struct TwcsCompactionTask {
     pub(crate) cache_manager: CacheManagerRef,
     /// Target storage of the region.
     pub(crate) storage: Option<String>,
+    /// Index options of the region.
+    pub(crate) index_options: IndexOptions,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -327,6 +331,7 @@ impl TwcsCompactionTask {
             let file_id = output.output_file_id;
             let cache_manager = self.cache_manager.clone();
             let storage = self.storage.clone();
+            let index_options = self.index_options.clone();
             futs.push(async move {
                 let reader =
                     build_sst_reader(metadata.clone(), sst_layer.clone(), &output.inputs).await?;
@@ -341,6 +346,7 @@ impl TwcsCompactionTask {
                             create_inverted_index,
                             mem_threshold_index_create,
                             index_write_buffer_size,
+                            index_options,
                         },
                         &write_opts,
                     )

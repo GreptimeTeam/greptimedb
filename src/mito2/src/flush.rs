@@ -33,6 +33,7 @@ use crate::error::{
 };
 use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL};
 use crate::read::Source;
+use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
@@ -201,6 +202,9 @@ pub(crate) struct RegionFlushTask {
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
     pub(crate) cache_manager: CacheManagerRef,
+
+    /// Index options for the region.
+    pub(crate) index_options: IndexOptions,
 }
 
 impl RegionFlushTask {
@@ -336,6 +340,7 @@ impl RegionFlushTask {
                 create_inverted_index,
                 mem_threshold_index_create,
                 index_write_buffer_size,
+                index_options: self.index_options.clone(),
             };
             let Some(sst_info) = self
                 .access_layer
@@ -765,6 +770,7 @@ mod tests {
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
             cache_manager: Arc::new(CacheManager::default()),
+            index_options: IndexOptions::default(),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler

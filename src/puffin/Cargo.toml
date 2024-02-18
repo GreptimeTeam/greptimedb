@@ -17,5 +17,5 @@ serde_json.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
-tokio-util.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true

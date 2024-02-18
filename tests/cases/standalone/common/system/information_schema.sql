@@ -117,4 +117,6 @@ select * from CHECK_CONSTRAINTS;
 
 desc table RUNTIME_METRICS;
 
+drop table my_db.foo;
+
 use public;

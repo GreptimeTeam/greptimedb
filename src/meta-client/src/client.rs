@@ -13,10 +13,10 @@
 // limitations under the License.
 
 mod ask_leader;
-mod ddl;
 mod heartbeat;
 mod load_balance;
 mod lock;
+mod procedure;
 
 mod store;
 
@@ -33,9 +33,9 @@ use common_meta::rpc::store::{
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_telemetry::info;
-use ddl::Client as DdlClient;
 use heartbeat::Client as HeartbeatClient;
 use lock::Client as LockClient;
+use procedure::Client as ProcedureClient;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
 
@@ -157,7 +157,7 @@ impl MetaClientBuilder {
         }
         if self.enable_ddl {
             let mgr = self.ddl_channel_manager.unwrap_or(mgr);
-            client.ddl = Some(DdlClient::new(
+            client.ddl = Some(ProcedureClient::new(
                 self.id,
                 self.role,
                 mgr,
@@ -176,7 +176,7 @@ pub struct MetaClient {
     heartbeat: Option<HeartbeatClient>,
     store: Option<StoreClient>,
     lock: Option<LockClient>,
-    ddl: Option<DdlClient>,
+    ddl: Option<ProcedureClient>,
 }
 
 #[async_trait::async_trait]
@@ -328,6 +328,7 @@ impl MetaClient {
         Ok(())
     }
 
+    /// Submit a DDL task
     pub async fn submit_ddl_task(
         &self,
         req: SubmitDdlTaskRequest,
@@ -364,7 +365,7 @@ impl MetaClient {
     }
 
     #[inline]
-    pub fn ddl_client(&self) -> Result<DdlClient> {
+    pub fn ddl_client(&self) -> Result<ProcedureClient> {
         self.ddl
             .clone()
             .context(error::NotStartedSnafu { name: "ddl_client" })

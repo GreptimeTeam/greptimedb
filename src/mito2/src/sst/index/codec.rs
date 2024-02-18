@@ -37,7 +37,7 @@ impl IndexValueCodec {
     }
 }
 
-type ColumnId = String;
+pub(crate) type ColumnId = String;
 
 /// Decodes primary key values into their corresponding column ids, data types and values.
 pub struct IndexValuesCodec {

@@ -550,6 +550,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("BiError, first: {first}, second: {second}"))]
+    BiError {
+        first: Box<Error>,
+        second: Box<Error>,
+        location: Location,
+    },
+
     #[snafu(display("Failed to encode memtable to Parquet bytes"))]
     EncodeMemtable {
         #[snafu(source)]
@@ -561,7 +568,6 @@ pub enum Error {
     ReadDataPart {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
-        location: Location,
     },
 }
 
@@ -664,6 +670,7 @@ impl ErrorExt for Error {
             StaleLogEntry { .. } => StatusCode::Unexpected,
             FilterRecordBatch { source, .. } => source.status_code(),
             Upload { .. } => StatusCode::StorageUnavailable,
+            BiError { .. } => StatusCode::Internal,
             ReadDataPart { .. } | EncodeMemtable { .. } => StatusCode::Internal,
         }
     }

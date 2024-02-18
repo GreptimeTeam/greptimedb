@@ -1243,7 +1243,6 @@ dependencies = [
  "arrow-schema",
  "async-stream",
  "async-trait",
- "build-data",
  "catalog",
  "chrono",
  "common-catalog",
@@ -1257,6 +1256,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-version",
  "dashmap",
  "datafusion",
  "datatypes",
@@ -1779,13 +1779,17 @@ dependencies = [
 name = "common-function"
 version = "0.6.0"
 dependencies = [
+ "api",
  "arc-swap",
- "build-data",
+ "async-trait",
  "chrono-tz 0.6.3",
  "common-error",
  "common-macro",
  "common-query",
+ "common-runtime",
+ "common-telemetry",
  "common-time",
+ "common-version",
  "datafusion",
  "datatypes",
  "libc",
@@ -1798,6 +1802,7 @@ dependencies = [
  "session",
  "snafu",
  "statrs",
+ "table",
 ]
 
 [[package]]
@@ -1922,6 +1927,7 @@ dependencies = [
  "etcd-client",
  "futures",
  "futures-util",
+ "hex",
  "humantime-serde",
  "hyper",
  "lazy_static",
@@ -3782,7 +3788,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=519b1d0757404c8ff1eeb2a68d29f5ade54a1752#519b1d0757404c8ff1eeb2a68d29f5ade54a1752"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=96f1f0404f421ee560a4310c73c5071e49168168#96f1f0404f421ee560a4310c73c5071e49168168"
 dependencies = [
  "prost 0.12.3",
  "serde",
@@ -5293,6 +5299,7 @@ dependencies = [
  "futures",
  "humantime-serde",
  "index",
+ "itertools 0.10.5",
  "lazy_static",
  "log-store",
  "memcomparable",
@@ -6038,6 +6045,7 @@ dependencies = [
  "common-catalog",
  "common-datasource",
  "common-error",
+ "common-function",
  "common-grpc-expr",
  "common-macro",
  "common-meta",
@@ -7332,8 +7340,9 @@ dependencies = [
 
 [[package]]
 name = "raft-engine"
-version = "0.4.0"
-source = "git+https://github.com/tikv/raft-engine.git?rev=22dfb426cd994602b57725ef080287d3e53db479#22dfb426cd994602b57725ef080287d3e53db479"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bc58d7f3a865d3224bad461e5fbe386b799b2b7eabea43e1da6f11ac725d83f"
 dependencies = [
  "byteorder",
  "crc32fast",
@@ -7355,7 +7364,6 @@ dependencies = [
  "prometheus-static-metric",
  "protobuf",
  "rayon",
- "rhai",
  "scopeguard",
  "serde",
  "serde_repr",
@@ -7692,33 +7700,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05aaa8004b64fd573fc9d002f4e632d51ad4f026c2b5ba95fcb6c2f32c2c47d8"
 dependencies = [
  "bytemuck",
-]
-
-[[package]]
-name = "rhai"
-version = "1.16.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3625f343d89990133d013e39c46e350915178cf94f1bec9f49b0cbef98a3e3c"
-dependencies = [
- "ahash 0.8.6",
- "bitflags 2.4.1",
- "instant",
- "num-traits",
- "once_cell",
- "rhai_codegen",
- "smallvec",
- "smartstring",
-]
-
-[[package]]
-name = "rhai_codegen"
-version = "1.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "853977598f084a492323fe2f7896b4100a86284ee8473612de60021ea341310f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.43",
 ]
 
 [[package]]
@@ -8902,7 +8883,6 @@ dependencies = [
  "axum-macros",
  "axum-test-helper 0.3.0",
  "base64 0.21.5",
- "build-data",
  "bytes",
  "catalog",
  "chrono",
@@ -8921,6 +8901,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-version",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -9160,17 +9141,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4dccd0940a2dcdf68d092b8cbab7dc0ad8fa938bf95787e1b916b0e3d0e8e970"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "smartstring"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
-dependencies = [
- "autocfg",
- "static_assertions",
- "version_check",
 ]
 
 [[package]]
