@@ -17,8 +17,6 @@ use std::ops::Deref;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
-use common_telemetry::tracing::Span;
-use common_telemetry::tracing_context::FutureExt;
 use common_telemetry::{debug, error};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
@@ -136,13 +134,10 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     ) -> Result<()> {
         match create_mysql_column_def(&query_result.schema) {
             Ok(column_def) => {
-                let tracing_span = Span::current();
                 // The RowWriter's lifetime is bound to `column_def` thus we can't use finish_one()
                 // to return a new QueryResultWriter.
                 let mut row_writer = writer.start(&column_def).await?;
-                while let Some(record_batch) =
-                    query_result.stream.next().trace(tracing_span.clone()).await
-                {
+                while let Some(record_batch) = query_result.stream.next().await {
                     match record_batch {
                         Ok(record_batch) => {
                             Self::write_recordbatch(
