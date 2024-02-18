@@ -309,10 +309,10 @@ jobs:
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
 
-      - name: Set image build result
+      - name: Set build image result
         id: set-image-build-result
         run: |
-          echo "image-build-result=success" >> $GITHUB_OUTPUT    
+          echo "build-image-result=success" >> $GITHUB_OUTPUT    
 
   release-cn-artifacts:
     name: Release artifacts to CN region
@@ -441,14 +441,14 @@ jobs:
     steps:
       - name: Notifiy release successful result
         uses: slackapi/slack-github-action@v1.23.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.image-build-result == 'success' && needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result == 'success' && needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
         with:
           payload: |
             {"text": "GreptimeDB's release version ${{ needs.allocate-runners.outputs.version }} has completed successfully."}
 
       - name: Notifiy release failed result
         uses: slackapi/slack-github-action@v1.23.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.image-build-result != 'success' || needs.build-windows-artifacts.outputs.build-windows-result != 'success' || needs.build-macos-artifacts.outputs.build-macos-result != 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result != 'success' || needs.build-windows-artifacts.outputs.build-windows-result != 'success' || needs.build-macos-artifacts.outputs.build-macos-result != 'success' }}
         with:
           payload: |
             {"text": "GreptimeDB's release version ${{ needs.allocate-runners.outputs.version }} has failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/release.yml'."}
