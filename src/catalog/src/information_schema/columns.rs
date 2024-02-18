@@ -177,13 +177,6 @@ impl InformationSchemaColumnsBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            if !catalog_manager
-                .schema_exists(&catalog_name, &schema_name)
-                .await?
-            {
-                continue;
-            }
-
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
 
             while let Some(table) = stream.try_next().await? {

@@ -162,13 +162,6 @@ impl InformationSchemaSchemataBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            if !catalog_manager
-                .schema_exists(&catalog_name, &schema_name)
-                .await?
-            {
-                continue;
-            }
-
             self.add_schema(&predicates, &catalog_name, &schema_name);
         }
 
