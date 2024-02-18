@@ -35,6 +35,7 @@ use crate::ddl::DdlContext;
 use crate::error::{Result, TableAlreadyExistsSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::kv_backend::txn;
 use crate::lock_key::{TableLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
@@ -159,7 +160,9 @@ impl CreateLogicalTablesProcedure {
         let num_tables = tables_data.len();
 
         if num_tables > 0 {
-            const BATCH_SIZE: usize = 20;
+            // The batch size is txn::MAX_TXN_SIZE / 3 because the size of the `tables_data`
+            // is 3 times the size of the `tables_data`.
+            const BATCH_SIZE: usize = txn::MAX_TXN_SIZE / 3;
             for chunk in tables_data.chunks(BATCH_SIZE) {
                 manager.create_logic_tables_metadata(chunk.to_vec()).await?;
             }

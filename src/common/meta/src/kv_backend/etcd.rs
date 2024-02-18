@@ -21,7 +21,7 @@ use etcd_client::{
 };
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::KvBackendRef;
+use super::{txn, KvBackendRef};
 use crate::error::{self, Error, Result};
 use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
 use crate::kv_backend::{KvBackend, TxnService};
@@ -37,7 +37,7 @@ use crate::rpc::KeyValue;
 // The etcd default configuration's `--max-txn-ops` is 128.
 //
 // For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
-const MAX_TXN_SIZE: usize = 128;
+const MAX_TXN_SIZE: usize = txn::MAX_TXN_SIZE;
 
 fn convert_key_value(kv: etcd_client::KeyValue) -> KeyValue {
     let (key, value) = kv.into_key_value();
