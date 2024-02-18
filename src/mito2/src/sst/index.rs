@@ -130,7 +130,6 @@ pub(crate) struct IndexerBuilder<'a> {
     pub(crate) file_path: String,
     pub(crate) metadata: &'a RegionMetadataRef,
     pub(crate) row_group_size: usize,
-    pub(crate) segment_row_count: usize,
     pub(crate) object_store: ObjectStore,
     pub(crate) intermediate_manager: IntermediateManager,
     pub(crate) index_options: IndexOptions,
@@ -156,7 +155,9 @@ impl<'a> IndexerBuilder<'a> {
             return Indexer::default();
         }
 
-        let Some(mut segment_row_count) = NonZeroUsize::new(self.segment_row_count) else {
+        let Some(mut segment_row_count) =
+            NonZeroUsize::new(self.index_options.inverted_index.segment_row_count)
+        else {
             warn!(
                 "Segment row count is 0, skip creating index, region_id: {}, file_id: {}",
                 self.metadata.region_id, self.file_id,
@@ -287,7 +288,6 @@ mod tests {
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
-            segment_row_count: 16,
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
@@ -308,7 +308,6 @@ mod tests {
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
-            segment_row_count: 16,
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
@@ -329,7 +328,6 @@ mod tests {
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
-            segment_row_count: 16,
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
@@ -350,7 +348,6 @@ mod tests {
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
-            segment_row_count: 0,
             row_group_size: 0,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),

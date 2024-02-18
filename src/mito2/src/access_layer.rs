@@ -140,7 +140,6 @@ impl AccessLayer {
                 file_id,
                 file_path: index_file_path,
                 metadata: &request.metadata,
-                segment_row_count: write_opts.index_segment_row_count,
                 row_group_size: write_opts.row_group_size,
                 object_store: self.object_store.clone(),
                 intermediate_manager: self.intermediate_manager.clone(),
