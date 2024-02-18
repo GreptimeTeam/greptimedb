@@ -89,4 +89,17 @@ impl TracingContext {
         let context = Propagator::new().extract(fields);
         Self(context)
     }
+
+    /// Convert the tracing context to a JSON string in W3C trace context format.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(&self.to_w3c()).unwrap()
+    }
+
+    /// Create a new tracing context from a JSON string in W3C trace context format.
+    ///
+    /// Illegal json string will produce an empty tracing context and no error will be reported.
+    pub fn from_json(json: &str) -> Self {
+        let fields: W3cTrace = serde_json::from_str(json).unwrap_or_default();
+        Self::from_w3c(&fields)
+    }
 }

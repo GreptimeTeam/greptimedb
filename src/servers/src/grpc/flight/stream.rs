@@ -18,7 +18,7 @@ use std::task::{Context, Poll};
 use arrow_flight::FlightData;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::tracing::info_span;
+use common_telemetry::tracing::{info_span, Instrument};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::warn;
 use futures::channel::mpsc;
@@ -66,7 +66,7 @@ impl FlightRecordBatchStream {
             return;
         }
 
-        while let Some(batch_or_err) = recordbatches.next().await {
+        while let Some(batch_or_err) = recordbatches.next().in_current_span().await {
             match batch_or_err {
                 Ok(recordbatch) => {
                     if let Err(e) = tx.send(Ok(FlightMessage::Recordbatch(recordbatch))).await {
