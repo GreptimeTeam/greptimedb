@@ -13,3 +13,26 @@
 // limitations under the License.
 
 //! Internal metrics of the memtable.
+
+/// Metrics of writing the merge tree.
+pub struct WriteMetrics {
+    /// Size allocated by keys.
+    pub key_bytes: usize,
+    /// Size allocated by values.
+    pub value_bytes: usize,
+    /// Minimum timestamp.
+    pub min_ts: i64,
+    /// Maximum timestamp
+    pub max_ts: i64,
+}
+
+impl Default for WriteMetrics {
+    fn default() -> Self {
+        Self {
+            key_bytes: 0,
+            value_bytes: 0,
+            min_ts: i64::MAX,
+            max_ts: i64::MIN,
+        }
+    }
+}
