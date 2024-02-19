@@ -37,8 +37,8 @@ use crate::worker::WorkerId;
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display(
-        "Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
-        region_id, expected_last_entry_id, replayed_last_entry_id
+    "Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
+    region_id, expected_last_entry_id, replayed_last_entry_id
     ))]
     UnexpectedReplay {
         location: Location,
@@ -559,6 +559,13 @@ pub enum Error {
 
     #[snafu(display("Encode null value"))]
     IndexEncodeNull { location: Location },
+
+    #[snafu(display("Failed to encode memtable to Parquet bytes"))]
+    EncodeMemtable {
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -662,6 +669,7 @@ impl ErrorExt for Error {
             FilterRecordBatch { source, .. } => source.status_code(),
             Upload { .. } => StatusCode::StorageUnavailable,
             BiError { .. } => StatusCode::Internal,
+            EncodeMemtable { .. } => StatusCode::Internal,
         }
     }
 

@@ -17,8 +17,13 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use api::helper::ColumnDataTypeWrapper;
+use api::v1::value::ValueData;
+use api::v1::{Row, Rows, SemanticType};
+use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
+use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::Result;
@@ -82,4 +87,114 @@ impl MemtableBuilder for EmptyMemtableBuilder {
             self.next_id.fetch_add(1, Ordering::Relaxed),
         ))
     }
+}
+
+/// Creates a region metadata to test memtable with default pk.
+///
+/// The schema is `k0, k1, ts, v0, v1` and pk is `k0, k1`.
+pub(crate) fn metadata_for_test() -> RegionMetadataRef {
+    metadata_with_primary_key(vec![0, 1])
+}
+
+/// Creates a region metadata to test memtable and specific primary key.
+///
+/// The schema is `k0, k1, ts, v0, v1`.
+pub(crate) fn metadata_with_primary_key(primary_key: Vec<ColumnId>) -> RegionMetadataRef {
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
+            semantic_type: semantic_type_of_column(0, &primary_key),
+            column_id: 0,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("k1", ConcreteDataType::int64_datatype(), false),
+            semantic_type: semantic_type_of_column(1, &primary_key),
+            column_id: 1,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 2,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("v0", ConcreteDataType::int64_datatype(), true),
+            semantic_type: semantic_type_of_column(3, &primary_key),
+            column_id: 3,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("v1", ConcreteDataType::float64_datatype(), true),
+            semantic_type: semantic_type_of_column(4, &primary_key),
+            column_id: 4,
+        })
+        .primary_key(primary_key);
+    let region_metadata = builder.build().unwrap();
+    Arc::new(region_metadata)
+}
+
+fn semantic_type_of_column(column_id: ColumnId, primary_key: &[ColumnId]) -> SemanticType {
+    if primary_key.contains(&column_id) {
+        SemanticType::Tag
+    } else {
+        SemanticType::Field
+    }
+}
+
+/// Builds key values with timestamps (ms) and sequences for test.
+pub(crate) fn build_key_values_with_ts_seq_values(
+    schema: &RegionMetadataRef,
+    k0: String,
+    k1: i64,
+    timestamps: impl Iterator<Item = i64>,
+    values: impl Iterator<Item = Option<f64>>,
+    sequence: SequenceNumber,
+) -> KeyValues {
+    let column_schema = schema
+        .column_metadatas
+        .iter()
+        .map(|c| api::v1::ColumnSchema {
+            column_name: c.column_schema.name.clone(),
+            datatype: ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
+                .unwrap()
+                .datatype() as i32,
+            semantic_type: c.semantic_type as i32,
+            ..Default::default()
+        })
+        .collect();
+
+    let rows = timestamps
+        .zip(values)
+        .map(|(ts, v)| Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(k0.clone())),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::I64Value(k1)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(ts)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::I64Value(ts)),
+                },
+                api::v1::Value {
+                    value_data: v.map(ValueData::F64Value),
+                },
+            ],
+        })
+        .collect();
+    let mutation = api::v1::Mutation {
+        op_type: 1,
+        sequence,
+        rows: Some(Rows {
+            schema: column_schema,
+            rows,
+        }),
+    };
+    KeyValues::new(schema.as_ref(), mutation).unwrap()
 }
