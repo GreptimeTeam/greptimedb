@@ -433,22 +433,24 @@ jobs:
     if: ${{ always() }} # Not requiring successful dependent jobs, always run.
     name: Send notification to Greptime team
     needs: [
-      release-images-to-dockerhub
+      release-images-to-dockerhub,
+      build-macos-artifacts,
+      build-windows-artifacts,
     ]
     runs-on: ubuntu-20.04
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:
       - name: Notifiy release successful result
-        uses: slackapi/slack-github-action@v1.23.0
+        uses: slackapi/slack-github-action@v1.25.0
         if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result == 'success' && needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB's release version ${{ needs.allocate-runners.outputs.version }} has completed successfully."}
+            {"text": "GreptimeDB's release version has completed successfully."}
 
       - name: Notifiy release failed result
-        uses: slackapi/slack-github-action@v1.23.0
+        uses: slackapi/slack-github-action@v1.25.0
         if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result != 'success' || needs.build-windows-artifacts.outputs.build-windows-result != 'success' || needs.build-macos-artifacts.outputs.build-macos-result != 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB's release version ${{ needs.allocate-runners.outputs.version }} has failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/release.yml'."}
+            {"text": "GreptimeDB's release version has failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/release.yml'."}
