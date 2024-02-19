@@ -80,17 +80,14 @@ impl PartitionRuleManager {
     ) -> Result<HashMap<TableId, Vec<RegionRoute>>> {
         let table_routes = self
             .table_route_manager
-            .batch_get(table_ids)
+            .batch_get_physical_table_routes(table_ids)
             .await
             .context(error::TableRouteManagerSnafu)?;
 
         let mut table_region_routes = HashMap::with_capacity(table_routes.len());
 
         for (table_id, table_route) in table_routes {
-            let region_routes = table_route
-                .region_routes()
-                .context(error::TableRouteManagerSnafu)?
-                .clone();
+            let region_routes = table_route.region_routes;
             table_region_routes.insert(table_id, region_routes);
         }
 
