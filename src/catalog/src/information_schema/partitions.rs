@@ -265,7 +265,7 @@ impl InformationSchemaPartitionsBuilder {
 
                 let mut table_partitions = if let Some(partition_manager) = &partition_manager {
                     partition_manager
-                        .find_table_partitions_batch(&table_ids)
+                        .batch_find_table_partitions(&table_ids)
                         .await
                         .context(FindPartitionsSnafu)?
                 } else {
