@@ -16,6 +16,7 @@
 
 use std::any::Any;
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::path::Path;
 use std::sync::RwLock;
 
 use common_error::ext::BoxedError;
@@ -41,37 +42,34 @@ pub struct RaftEngineBackend {
     engine: RwLock<Engine>,
 }
 
+fn ensure_dir(dir: &str) -> error::Result<()> {
+    fn wrap_io_error<T>(res: std::io::Result<T>, path: &str) -> error::Result<T> {
+        let path = path.to_string();
+        res.context(IoSnafu { path })
+    }
+
+    let path = Path::new(dir);
+    if !path.exists() {
+        // create the directory to ensure the permission
+        wrap_io_error(std::fs::create_dir_all(path), dir)
+    } else if !wrap_io_error(std::fs::metadata(path), dir)?.is_dir() {
+        wrap_io_error(Err(std::io::ErrorKind::NotADirectory.into()), dir)
+    } else {
+        Ok(())
+    }
+}
+
 impl RaftEngineBackend {
     pub fn try_open_with_cfg(config: Config) -> error::Result<Self> {
-        Self::check_config(&config)?;
+        ensure_dir(&config.dir)?;
+        if let Some(spill_dir) = &config.spill_dir {
+            ensure_dir(spill_dir)?;
+        }
 
         let engine = Engine::open(config).context(RaftEngineSnafu)?;
         Ok(Self {
             engine: RwLock::new(engine),
         })
-    }
-
-    fn check_config(config: &Config) -> error::Result<()> {
-        fn check_dir(dir: &str) -> error::Result<()> {
-            let metadata = std::fs::metadata(dir).context(IoSnafu {
-                path: dir.to_string(),
-            })?;
-
-            if !metadata.is_dir() {
-                return Err(std::io::ErrorKind::NotADirectory.into()).context(IoSnafu {
-                    path: dir.to_string(),
-                });
-            }
-
-            Ok(())
-        }
-
-        check_dir(&config.dir)?;
-        if let Some(spill_dir) = &config.spill_dir {
-            check_dir(spill_dir)?;
-        }
-
-        Ok(())
     }
 }
 
