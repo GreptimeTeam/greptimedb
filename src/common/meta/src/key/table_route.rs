@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
@@ -386,6 +386,59 @@ impl TableRouteManager {
                 ))
             }
         }
+    }
+
+    pub async fn batch_get_physical_table_routes(
+        &self,
+        logical_or_physical_table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+        let table_routes = self.batch_get(logical_or_physical_table_ids).await?;
+
+        let mut physical_table_routes = HashMap::with_capacity(table_routes.len());
+        let mut logical_table_ids = HashMap::with_capacity(table_routes.len());
+
+        for (table_id, table_route) in table_routes {
+            match table_route {
+                TableRouteValue::Physical(x) => {
+                    physical_table_routes.insert(table_id, x);
+                }
+                TableRouteValue::Logical(x) => {
+                    logical_table_ids.insert(table_id, x.physical_table_id());
+                }
+            }
+        }
+
+        if logical_table_ids.is_empty() {
+            return Ok(physical_table_routes);
+        }
+
+        let physical_table_ids = logical_table_ids
+            .values()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let table_routes = self.batch_get(&physical_table_ids).await?;
+
+        for (logical_table_id, physical_table_id) in logical_table_ids {
+            let table_route =
+                table_routes
+                    .get(&physical_table_id)
+                    .context(TableRouteNotFoundSnafu {
+                        table_id: physical_table_id,
+                    })?;
+            match table_route {
+                TableRouteValue::Physical(x) => {
+                    physical_table_routes.insert(logical_table_id, x.clone());
+                }
+                TableRouteValue::Logical(x) => {
+                    // Never get here, because we use a physical table id cannot obtain a logical table.
+                    unreachable!("Metadata corruption: logical table {} {:?} cannot be resolved to a physical table.", logical_table_id, x)
+                }
+            }
+        }
+
+        Ok(physical_table_routes)
     }
 
     /// It may return a subset of the `table_ids`.
