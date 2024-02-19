@@ -21,7 +21,7 @@ use etcd_client::{
 };
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::{txn, KvBackendRef};
+use super::KvBackendRef;
 use crate::error::{self, Error, Result};
 use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
 use crate::kv_backend::{KvBackend, TxnService};
@@ -37,7 +37,7 @@ use crate::rpc::KeyValue;
 // The etcd default configuration's `--max-txn-ops` is 128.
 //
 // For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
-const MAX_TXN_SIZE: usize = txn::MAX_TXN_SIZE;
+const MAX_TXN_SIZE: usize = 128;
 
 fn convert_key_value(kv: etcd_client::KeyValue) -> KeyValue {
     let (key, value) = kv.into_key_value();
@@ -66,7 +66,8 @@ impl EtcdStore {
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
-        if txn_ops.len() < MAX_TXN_SIZE {
+        let max_txn_size = self.max_txn_size();
+        if txn_ops.len() < max_txn_size {
             // fast path
             let _timer = METRIC_META_TXN_REQUEST
                 .with_label_values(&["etcd", "txn"])
@@ -82,7 +83,7 @@ impl EtcdStore {
         }
 
         let txns = txn_ops
-            .chunks(MAX_TXN_SIZE)
+            .chunks(max_txn_size)
             .map(|part| async move {
                 let _timer = METRIC_META_TXN_REQUEST
                     .with_label_values(&["etcd", "txn"])
@@ -318,6 +319,10 @@ impl TxnService for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
         txn_res.try_into()
+    }
+
+    fn max_txn_size(&self) -> usize {
+        MAX_TXN_SIZE
     }
 }
 

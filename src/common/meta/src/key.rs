@@ -458,8 +458,14 @@ impl TableMetadataManager {
         Ok(())
     }
 
+    pub fn max_logical_tables_per_batch(&self) -> usize {
+        // The batch size is max_txn_size / 3 because the size of the `tables_data`
+        // is 3 times the size of the `tables_data`.
+        self.kv_backend.max_txn_size() / 3
+    }
+
     /// Creates metadata for multiple logical tables and return an error if different metadata exists.
-    pub async fn create_logic_tables_metadata(
+    pub async fn create_logical_tables_metadata(
         &self,
         tables_data: Vec<(RawTableInfo, TableRouteValue)>,
     ) -> Result<()> {
@@ -1002,13 +1008,13 @@ mod tests {
         let tables_data = vec![(table_info.clone(), table_route_value.clone())];
         // creates metadata.
         table_metadata_manager
-            .create_logic_tables_metadata(tables_data.clone())
+            .create_logical_tables_metadata(tables_data.clone())
             .await
             .unwrap();
 
         // if metadata was already created, it should be ok.
         assert!(table_metadata_manager
-            .create_logic_tables_metadata(tables_data)
+            .create_logical_tables_metadata(tables_data)
             .await
             .is_ok());
 
@@ -1018,7 +1024,7 @@ mod tests {
         let modified_tables_data = vec![(table_info.clone(), modified_table_route_value)];
         // if remote metadata was exists, it should return an error.
         assert!(table_metadata_manager
-            .create_logic_tables_metadata(modified_tables_data)
+            .create_logical_tables_metadata(modified_tables_data)
             .await
             .is_err());
 

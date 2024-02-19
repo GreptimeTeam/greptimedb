@@ -18,15 +18,17 @@ use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
 
 mod etcd;
 
-// Maximum number of operations permitted in a transaction.
-pub const MAX_TXN_SIZE: usize = 128;
-
 #[async_trait::async_trait]
 pub trait TxnService: Sync + Send {
     type Error: ErrorExt;
 
     async fn txn(&self, _txn: Txn) -> Result<TxnResponse, Self::Error> {
         unimplemented!("txn is not implemented")
+    }
+
+    /// Maximum number of operations permitted in a transaction.
+    fn max_txn_size(&self) -> usize {
+        usize::MAX
     }
 }
 

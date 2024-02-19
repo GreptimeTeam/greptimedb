@@ -23,6 +23,7 @@ use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use futures_util::future::join_all;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
@@ -35,7 +36,6 @@ use crate::ddl::DdlContext;
 use crate::error::{Result, TableAlreadyExistsSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
-use crate::kv_backend::txn;
 use crate::lock_key::{TableLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
@@ -160,11 +160,19 @@ impl CreateLogicalTablesProcedure {
         let num_tables = tables_data.len();
 
         if num_tables > 0 {
-            // The batch size is txn::MAX_TXN_SIZE / 3 because the size of the `tables_data`
-            // is 3 times the size of the `tables_data`.
-            const BATCH_SIZE: usize = txn::MAX_TXN_SIZE / 3;
-            for chunk in tables_data.chunks(BATCH_SIZE) {
-                manager.create_logic_tables_metadata(chunk.to_vec()).await?;
+            let chunk_size = manager.max_logical_tables_per_batch();
+            if num_tables > chunk_size {
+                let chunks = tables_data
+                    .into_iter()
+                    .chunks(chunk_size)
+                    .into_iter()
+                    .map(|chunk| chunk.collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                for chunk in chunks {
+                    manager.create_logical_tables_metadata(chunk).await?;
+                }
+            } else {
+                manager.create_logical_tables_metadata(tables_data).await?;
             }
         }
 

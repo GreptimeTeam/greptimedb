@@ -1924,6 +1924,7 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "hyper",
+ "itertools 0.10.5",
  "lazy_static",
  "prometheus",
  "prost 0.12.3",
