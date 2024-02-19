@@ -164,11 +164,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to find table partitions: #{table}"))]
-    FindPartitions {
-        source: partition::error::Error,
-        table: String,
-    },
+    #[snafu(display("Failed to find table partitions"))]
+    FindPartitions { source: partition::error::Error },
 
     #[snafu(display("Failed to find region routes"))]
     FindRegionRoutes { source: partition::error::Error },

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::pin::pin;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -31,7 +32,7 @@ use datatypes::vectors::{
     ConstantVector, DateTimeVector, DateTimeVectorBuilder, Int64Vector, Int64VectorBuilder,
     MutableVector, StringVector, StringVectorBuilder, UInt64VectorBuilder,
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use partition::manager::PartitionInfo;
 use partition::partition::PartitionDef;
 use snafu::{OptionExt, ResultExt};
@@ -240,40 +241,64 @@ impl InformationSchemaPartitionsBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
+            let table_info_stream = catalog_manager
+                .tables(&catalog_name, &schema_name)
+                .await
+                .try_filter_map(|t| async move {
+                    let table_info = t.table_info();
+                    if table_info.table_type == TableType::Temporary {
+                        Ok(None)
+                    } else {
+                        Ok(Some(table_info))
+                    }
+                });
 
-            while let Some(table) = stream.try_next().await? {
-                let table_info = table.table_info();
+            const BATCH_SIZE: usize = 128;
 
-                if table_info.table_type == TableType::Temporary {
-                    continue;
-                }
+            // Split table infos into chunks
+            let mut table_info_chunks = pin!(table_info_stream.ready_chunks(BATCH_SIZE));
 
-                let table_id = table_info.ident.table_id;
-                let partitions = if let Some(partition_manager) = &partition_manager {
+            while let Some(table_infos) = table_info_chunks.next().await {
+                let table_infos = table_infos.into_iter().collect::<Result<Vec<_>>>()?;
+                let table_ids: Vec<TableId> =
+                    table_infos.iter().map(|info| info.ident.table_id).collect();
+
+                let mut table_partitions = if let Some(partition_manager) = &partition_manager {
                     partition_manager
-                        .find_table_partitions(table_id)
+                        .find_table_partitions_batch(&table_ids)
                         .await
-                        .context(FindPartitionsSnafu {
-                            table: &table_info.name,
-                        })?
+                        .context(FindPartitionsSnafu)?
                 } else {
                     // Current node must be a standalone instance, contains only one partition by default.
                     // TODO(dennis): change it when we support multi-regions for standalone.
-                    vec![PartitionInfo {
-                        id: RegionId::new(table_id, 0),
-                        partition: PartitionDef::new(vec![], vec![]),
-                    }]
+                    table_ids
+                        .into_iter()
+                        .map(|table_id| {
+                            (
+                                table_id,
+                                vec![PartitionInfo {
+                                    id: RegionId::new(table_id, 0),
+                                    partition: PartitionDef::new(vec![], vec![]),
+                                }],
+                            )
+                        })
+                        .collect()
                 };
 
-                self.add_partitions(
-                    &predicates,
-                    &table_info,
-                    &catalog_name,
-                    &schema_name,
-                    &table_info.name,
-                    &partitions,
-                );
+                for table_info in table_infos {
+                    let partitions = table_partitions
+                        .remove(&table_info.ident.table_id)
+                        .unwrap_or(vec![]);
+
+                    self.add_partitions(
+                        &predicates,
+                        &table_info,
+                        &catalog_name,
+                        &schema_name,
+                        &table_info.name,
+                        &partitions,
+                    );
+                }
             }
         }
 

@@ -101,40 +101,25 @@ impl PartitionRuleManager {
             error::FindTableRoutesSnafu { table_id }
         );
 
-        let mut partitions = Vec::with_capacity(region_routes.len());
-        for r in region_routes {
-            let partition = r
-                .region
-                .partition
-                .clone()
-                .context(error::FindRegionRoutesSnafu {
-                    region_id: r.region.id,
-                    table_id,
-                })?;
-            let partition_def = PartitionDef::try_from(partition)?;
+        create_partitions_from_region_routes(table_id, region_routes)
+    }
 
-            partitions.push(PartitionInfo {
-                id: r.region.id,
-                partition: partition_def,
-            });
-        }
-        partitions.sort_by(|a, b| {
-            a.partition
-                .partition_bounds()
-                .cmp(b.partition.partition_bounds())
-        });
+    pub async fn find_table_partitions_batch(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, Vec<PartitionInfo>>> {
+        let batch_region_routes = self.find_region_routes_batch(table_ids).await?;
 
-        ensure!(
-            partitions
-                .windows(2)
-                .all(|w| w[0].partition.partition_columns() == w[1].partition.partition_columns()),
-            error::InvalidTableRouteDataSnafu {
+        let mut results = HashMap::with_capacity(table_ids.len());
+
+        for (table_id, region_routes) in batch_region_routes {
+            results.insert(
                 table_id,
-                err_msg: "partition columns of all regions are not the same"
-            }
-        );
+                create_partitions_from_region_routes(table_id, region_routes)?,
+            );
+        }
 
-        Ok(partitions)
+        Ok(results)
     }
 
     /// Get partition rule of given table.
@@ -232,6 +217,46 @@ impl PartitionRuleManager {
         let partition_rule = self.find_table_partition_rule(table_id).await?;
         RowSplitter::new(partition_rule).split(rows)
     }
+}
+
+fn create_partitions_from_region_routes(
+    table_id: TableId,
+    region_routes: Vec<RegionRoute>,
+) -> Result<Vec<PartitionInfo>> {
+    let mut partitions = Vec::with_capacity(region_routes.len());
+    for r in region_routes {
+        let partition = r
+            .region
+            .partition
+            .clone()
+            .context(error::FindRegionRoutesSnafu {
+                region_id: r.region.id,
+                table_id,
+            })?;
+        let partition_def = PartitionDef::try_from(partition)?;
+
+        partitions.push(PartitionInfo {
+            id: r.region.id,
+            partition: partition_def,
+        });
+    }
+    partitions.sort_by(|a, b| {
+        a.partition
+            .partition_bounds()
+            .cmp(b.partition.partition_bounds())
+    });
+
+    ensure!(
+        partitions
+            .windows(2)
+            .all(|w| w[0].partition.partition_columns() == w[1].partition.partition_columns()),
+        error::InvalidTableRouteDataSnafu {
+            table_id,
+            err_msg: "partition columns of all regions are not the same"
+        }
+    );
+
+    Ok(partitions)
 }
 
 fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<HashSet<RegionNumber>> {
