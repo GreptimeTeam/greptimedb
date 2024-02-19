@@ -114,7 +114,6 @@ impl WriteCache {
             file_id,
             file_path: self.file_cache.cache_file_path(puffin_key),
             metadata: &write_request.metadata,
-            segment_row_count: write_opts.index_segment_row_count,
             row_group_size: write_opts.row_group_size,
             object_store: self.file_cache.local_store(),
             intermediate_manager: self.intermediate_manager.clone(),

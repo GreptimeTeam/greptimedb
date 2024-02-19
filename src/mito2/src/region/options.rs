@@ -27,6 +27,8 @@ use store_api::storage::ColumnId;
 
 use crate::error::{Error, JsonOptionsSnafu, Result};
 
+const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
+
 /// Options that affect the entire region.
 ///
 /// Users need to specify the options while creating/opening a region.
@@ -171,13 +173,27 @@ pub struct IndexOptions {
 }
 
 /// Options for the inverted index.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct InvertedIndexOptions {
     /// The column ids that should be ignored when building the inverted index.
     /// The column ids are separated by commas. For example, "1,2,3".
     #[serde(deserialize_with = "deserialize_ignore_column_ids")]
     pub ignore_column_ids: Vec<ColumnId>,
+
+    /// The number of rows in a segment.
+    #[serde_as(as = "DisplayFromStr")]
+    pub segment_row_count: usize,
+}
+
+impl Default for InvertedIndexOptions {
+    fn default() -> Self {
+        Self {
+            ignore_column_ids: Vec::new(),
+            segment_row_count: DEFAULT_INDEX_SEGMENT_ROW_COUNT,
+        }
+    }
 }
 
 fn deserialize_ignore_column_ids<'de, D>(deserializer: D) -> Result<Vec<ColumnId>, D::Error>
@@ -300,12 +316,16 @@ mod tests {
 
     #[test]
     fn test_with_index() {
-        let map = make_map(&[("index.inverted_index.ignore_column_ids", "1,2,3")]);
+        let map = make_map(&[
+            ("index.inverted_index.ignore_column_ids", "1,2,3"),
+            ("index.inverted_index.segment_row_count", "512"),
+        ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
                     ignore_column_ids: vec![1, 2, 3],
+                    segment_row_count: 512,
                 },
             },
             ..Default::default()
@@ -356,6 +376,7 @@ mod tests {
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
                     ignore_column_ids: vec![1, 2, 3],
+                    segment_row_count: 1024,
                 },
             },
         };
