@@ -6324,6 +6324,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
+ "itertools 0.10.5",
  "lazy_static",
  "meta-client",
  "moka",

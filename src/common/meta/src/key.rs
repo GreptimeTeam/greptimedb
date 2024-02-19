@@ -844,6 +844,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use common_time::util::current_time_millis;
     use futures::TryStreamExt;
     use table::metadata::{RawTableInfo, TableInfo};
 
@@ -910,6 +911,7 @@ mod tests {
             leader_peer: Some(Peer::new(datanode, "a2")),
             follower_peers: vec![],
             leader_status: None,
+            leader_down_since: None,
         }
     }
 
@@ -1263,6 +1265,7 @@ mod tests {
                 leader_peer: Some(Peer::new(datanode, "a2")),
                 leader_status: Some(RegionStatus::Downgraded),
                 follower_peers: vec![],
+                leader_down_since: Some(current_time_millis()),
             },
             RegionRoute {
                 region: Region {
@@ -1274,6 +1277,7 @@ mod tests {
                 leader_peer: Some(Peer::new(datanode, "a1")),
                 leader_status: None,
                 follower_peers: vec![],
+                leader_down_since: None,
             },
         ];
         let table_info: RawTableInfo =
@@ -1314,10 +1318,18 @@ mod tests {
             updated_route_value.region_routes().unwrap()[0].leader_status,
             Some(RegionStatus::Downgraded)
         );
+
+        assert!(updated_route_value.region_routes().unwrap()[0]
+            .leader_down_since
+            .is_some());
+
         assert_eq!(
             updated_route_value.region_routes().unwrap()[1].leader_status,
             Some(RegionStatus::Downgraded)
         );
+        assert!(updated_route_value.region_routes().unwrap()[1]
+            .leader_down_since
+            .is_some());
     }
 
     async fn assert_datanode_table(

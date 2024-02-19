@@ -58,6 +58,7 @@ const COLUMN_DEFAULT: &str = "column_default";
 const IS_NULLABLE: &str = "is_nullable";
 const COLUMN_TYPE: &str = "column_type";
 const COLUMN_COMMENT: &str = "column_comment";
+const INIT_CAPACITY: usize = 42;
 
 impl InformationSchemaColumns {
     pub(super) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
@@ -154,16 +155,16 @@ impl InformationSchemaColumnsBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            catalog_names: StringVectorBuilder::with_capacity(42),
-            schema_names: StringVectorBuilder::with_capacity(42),
-            table_names: StringVectorBuilder::with_capacity(42),
-            column_names: StringVectorBuilder::with_capacity(42),
-            data_types: StringVectorBuilder::with_capacity(42),
-            semantic_types: StringVectorBuilder::with_capacity(42),
-            column_defaults: StringVectorBuilder::with_capacity(42),
-            is_nullables: StringVectorBuilder::with_capacity(42),
-            column_types: StringVectorBuilder::with_capacity(42),
-            column_comments: StringVectorBuilder::with_capacity(42),
+            catalog_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            schema_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            data_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            semantic_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_defaults: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            is_nullables: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_comments: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -177,13 +178,6 @@ impl InformationSchemaColumnsBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            if !catalog_manager
-                .schema_exists(&catalog_name, &schema_name)
-                .await?
-            {
-                continue;
-            }
-
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
 
             while let Some(table) = stream.try_next().await? {

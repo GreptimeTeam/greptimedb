@@ -23,10 +23,10 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
+use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
+use datatypes::vectors::{ConstantVector, StringVector, StringVectorBuilder, UInt32VectorBuilder};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
@@ -44,6 +44,7 @@ const TABLE_SCHEMA: &str = "table_schema";
 const TABLE_NAME: &str = "table_name";
 const COLUMN_NAME: &str = "column_name";
 const ORDINAL_POSITION: &str = "ordinal_position";
+const INIT_CAPACITY: usize = 42;
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
 pub(super) struct InformationSchemaKeyColumnUsage {
@@ -162,9 +163,6 @@ struct InformationSchemaKeyColumnUsageBuilder {
     column_name: StringVectorBuilder,
     ordinal_position: UInt32VectorBuilder,
     position_in_unique_constraint: UInt32VectorBuilder,
-    referenced_table_schema: StringVectorBuilder,
-    referenced_table_name: StringVectorBuilder,
-    referenced_column_name: StringVectorBuilder,
 }
 
 impl InformationSchemaKeyColumnUsageBuilder {
@@ -177,18 +175,15 @@ impl InformationSchemaKeyColumnUsageBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            constraint_catalog: StringVectorBuilder::with_capacity(42),
-            constraint_schema: StringVectorBuilder::with_capacity(42),
-            constraint_name: StringVectorBuilder::with_capacity(42),
-            table_catalog: StringVectorBuilder::with_capacity(42),
-            table_schema: StringVectorBuilder::with_capacity(42),
-            table_name: StringVectorBuilder::with_capacity(42),
-            column_name: StringVectorBuilder::with_capacity(42),
-            ordinal_position: UInt32VectorBuilder::with_capacity(42),
-            position_in_unique_constraint: UInt32VectorBuilder::with_capacity(42),
-            referenced_table_schema: StringVectorBuilder::with_capacity(42),
-            referenced_table_name: StringVectorBuilder::with_capacity(42),
-            referenced_column_name: StringVectorBuilder::with_capacity(42),
+            constraint_catalog: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            constraint_schema: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            constraint_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_catalog: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_schema: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            ordinal_position: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            position_in_unique_constraint: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -301,12 +296,15 @@ impl InformationSchemaKeyColumnUsageBuilder {
         self.column_name.push(Some(column_name));
         self.ordinal_position.push(Some(ordinal_position));
         self.position_in_unique_constraint.push(None);
-        self.referenced_table_schema.push(None);
-        self.referenced_table_name.push(None);
-        self.referenced_column_name.push(None);
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
+        let rows_num = self.table_catalog.len();
+
+        let null_string_vector = Arc::new(ConstantVector::new(
+            Arc::new(StringVector::from(vec![None as Option<&str>])),
+            rows_num,
+        ));
         let columns: Vec<VectorRef> = vec![
             Arc::new(self.constraint_catalog.finish()),
             Arc::new(self.constraint_schema.finish()),
@@ -317,9 +315,9 @@ impl InformationSchemaKeyColumnUsageBuilder {
             Arc::new(self.column_name.finish()),
             Arc::new(self.ordinal_position.finish()),
             Arc::new(self.position_in_unique_constraint.finish()),
-            Arc::new(self.referenced_table_schema.finish()),
-            Arc::new(self.referenced_table_name.finish()),
-            Arc::new(self.referenced_column_name.finish()),
+            null_string_vector.clone(),
+            null_string_vector.clone(),
+            null_string_vector,
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
