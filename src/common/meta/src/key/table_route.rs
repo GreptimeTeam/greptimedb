@@ -22,7 +22,8 @@ use table::metadata::TableId;
 
 use super::{DeserializedValueWithBytes, TableMetaValue};
 use crate::error::{
-    Result, SerdeJsonSnafu, TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
+    MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
+    UnexpectedLogicalRouteTableSnafu,
 };
 use crate::key::{to_removed_key, RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
@@ -433,7 +434,13 @@ impl TableRouteManager {
                 }
                 TableRouteValue::Logical(x) => {
                     // Never get here, because we use a physical table id cannot obtain a logical table.
-                    unreachable!("Metadata corruption: logical table {} {:?} cannot be resolved to a physical table.", logical_table_id, x)
+                    MetadataCorruptionSnafu {
+                        err_msg: format!(
+                            "logical table {} {:?} cannot be resolved to a physical table.",
+                            logical_table_id, x
+                        ),
+                    }
+                    .fail()?;
                 }
             }
         }
