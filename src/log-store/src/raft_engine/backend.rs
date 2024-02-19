@@ -32,7 +32,7 @@ use common_meta::util::get_next_prefix_key;
 use raft_engine::{Config, Engine, LogBatch};
 use snafu::ResultExt;
 
-use crate::error::{self, RaftEngineSnafu};
+use crate::error::{self, IoSnafu, RaftEngineSnafu};
 
 pub(crate) const SYSTEM_NAMESPACE: u64 = 0;
 
@@ -43,10 +43,35 @@ pub struct RaftEngineBackend {
 
 impl RaftEngineBackend {
     pub fn try_open_with_cfg(config: Config) -> error::Result<Self> {
+        Self::check_config(&config)?;
+
         let engine = Engine::open(config).context(RaftEngineSnafu)?;
         Ok(Self {
             engine: RwLock::new(engine),
         })
+    }
+
+    fn check_config(config: &Config) -> error::Result<()> {
+        fn check_dir(dir: &str) -> error::Result<()> {
+            let metadata = std::fs::metadata(dir).context(IoSnafu {
+                path: dir.to_string(),
+            })?;
+
+            if !metadata.is_dir() {
+                return Err(std::io::ErrorKind::NotADirectory.into()).context(IoSnafu {
+                    path: dir.to_string(),
+                });
+            }
+
+            Ok(())
+        }
+
+        check_dir(&config.dir)?;
+        if let Some(spill_dir) = &config.spill_dir {
+            check_dir(spill_dir)?;
+        }
+
+        Ok(())
     }
 }
 
