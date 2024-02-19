@@ -374,6 +374,9 @@ pub enum Error {
 
     #[snafu(display("The tasks of create tables cannot be empty"))]
     EmptyCreateTableTasks { location: Location },
+
+    #[snafu(display("Metadata corruption: {}", err_msg))]
+    MetadataCorruption { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -417,7 +420,8 @@ impl ErrorExt for Error {
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. }
             | UnexpectedLogicalRouteTable { .. }
-            | ProcedureOutput { .. } => StatusCode::Unexpected,
+            | ProcedureOutput { .. }
+            | MetadataCorruption { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
