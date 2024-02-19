@@ -31,7 +31,7 @@ use common_meta::rpc::store::{
 use common_meta::rpc::KeyValue;
 use common_meta::util::get_next_prefix_key;
 use raft_engine::{Config, Engine, LogBatch};
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 
 use crate::error::{self, IoSnafu, RaftEngineSnafu};
 
@@ -43,20 +43,25 @@ pub struct RaftEngineBackend {
 }
 
 fn ensure_dir(dir: &str) -> error::Result<()> {
-    fn wrap_io_error<T>(res: std::io::Result<T>, path: &str) -> error::Result<T> {
-        let path = path.to_string();
-        res.context(IoSnafu { path })
-    }
+    let io_context = |err| {
+        IoSnafu {
+            path: dir.to_string(),
+        }
+        .into_error(err)
+    };
 
     let path = Path::new(dir);
     if !path.exists() {
         // create the directory to ensure the permission
-        wrap_io_error(std::fs::create_dir_all(path), dir)
-    } else if !wrap_io_error(std::fs::metadata(path), dir)?.is_dir() {
-        wrap_io_error(Err(std::io::ErrorKind::NotADirectory.into()), dir)
-    } else {
-        Ok(())
+        return std::fs::create_dir_all(path).map_err(io_context);
     }
+
+    let metadata = std::fs::metadata(path).map_err(io_context)?;
+    if !metadata.is_dir() {
+        return Err(io_context(std::io::ErrorKind::NotADirectory.into()));
+    }
+
+    Ok(())
 }
 
 impl RaftEngineBackend {
