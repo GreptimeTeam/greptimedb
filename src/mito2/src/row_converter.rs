@@ -50,7 +50,7 @@ pub trait RowCodec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SortField {
-    data_type: ConcreteDataType,
+    pub(crate) data_type: ConcreteDataType,
 }
 
 impl SortField {
