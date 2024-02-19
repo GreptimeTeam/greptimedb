@@ -13,3 +13,15 @@
 // limitations under the License.
 
 //! Builder of a shard.
+
+use crate::memtable::merge_tree::data::DataBuffer;
+use crate::memtable::merge_tree::dict::KeyDictBuilder;
+
+/// Builder to write keys and data to a shard that the key dictionary
+/// is still active.
+pub struct ShardBuilder {
+    /// Builder for the key dictionary.
+    dict_builder: KeyDictBuilder,
+    /// Buffer to store data.
+    data_buffer: DataBuffer,
+}

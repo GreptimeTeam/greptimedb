@@ -13,3 +13,9 @@
 // limitations under the License.
 
 //! Data part of a shard.
+
+/// Buffer to store columns not in the primary key.
+pub struct DataBuffer {}
+
+/// Data parts under a shard.
+pub struct DataParts {}

@@ -14,7 +14,8 @@
 
 //! Implementation of the merge tree.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -22,6 +23,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
+use crate::memtable::merge_tree::partition::{PartitionKey, PartitionRef};
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::row_converter::{McmpRowCodec, SortField};
@@ -34,6 +36,8 @@ pub struct MergeTree {
     pub(crate) metadata: RegionMetadataRef,
     /// Primary key codec.
     row_codec: Arc<McmpRowCodec>,
+    /// Partitions in the tree.
+    partitions: RwLock<BTreeMap<PartitionKey, PartitionRef>>,
 }
 
 impl MergeTree {
@@ -50,6 +54,7 @@ impl MergeTree {
             config: config.clone(),
             metadata,
             row_codec: Arc::new(row_codec),
+            partitions: Default::default(),
         }
     }
 

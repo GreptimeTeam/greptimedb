@@ -13,3 +13,16 @@
 // limitations under the License.
 
 //! Shard in a partition.
+
+use crate::memtable::merge_tree::data::DataParts;
+use crate::memtable::merge_tree::dict::KeyDictRef;
+use crate::memtable::merge_tree::ShardId;
+
+/// Shard stores data related to the same key dictionary.
+pub struct Shard {
+    shard_id: ShardId,
+    /// Key dictionary of the shard. `None` if the schema of the tree doesn't have a primary key.
+    key_dict: Option<KeyDictRef>,
+    /// Data in the shard.
+    data_parts: DataParts,
+}

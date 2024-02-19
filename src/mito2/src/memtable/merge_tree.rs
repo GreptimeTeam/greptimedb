@@ -39,7 +39,7 @@ use crate::memtable::{
     MemtableRef, MemtableStats,
 };
 
-/// Id of a shard, unique inside a tree.
+/// Id of a shard, only unique inside a partition.
 type ShardId = u32;
 /// Index of a primary key in a shard.
 type PkIndex = u16;

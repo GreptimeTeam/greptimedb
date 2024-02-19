@@ -13,3 +13,16 @@
 // limitations under the License.
 
 //! Key dictionary of a shard.
+
+use std::sync::Arc;
+
+/// Builder to build a key dictionary.
+pub struct KeyDictBuilder {}
+
+/// Buffer to store unsorted primary keys.
+pub struct KeyBuffer {}
+
+/// A key dictionary.
+pub struct KeyDict {}
+
+pub type KeyDictRef = Arc<KeyDict>;
