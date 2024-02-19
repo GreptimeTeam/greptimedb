@@ -12,28 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datatypes::data_type::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
 use memcomparable::Serializer;
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 
-use crate::error::Result;
+use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Encodes index values according to their data types for sorting and storage use.
 pub struct IndexValueCodec;
 
 impl IndexValueCodec {
-    /// Serializes a `ValueRef` using the data type defined in `SortField` and writes
+    /// Serializes a non-null `ValueRef` using the data type defined in `SortField` and writes
     /// the result into a buffer.
+    ///
+    /// For `String` data types, we don't serialize it via memcomparable, but directly write the
+    /// bytes into the buffer, since we have to keep the original string for searching with regex.
     ///
     /// # Arguments
     /// * `value` - The value to be encoded.
     /// * `field` - Contains data type to guide serialization.
     /// * `buffer` - Destination buffer for the serialized value.
-    pub fn encode_value(value: ValueRef, field: &SortField, buffer: &mut Vec<u8>) -> Result<()> {
-        buffer.reserve(field.estimated_size());
-        let mut serializer = Serializer::new(buffer);
-        field.serialize(&mut serializer, &value)
+    pub fn encode_nonnull_value(
+        value: ValueRef,
+        field: &SortField,
+        buffer: &mut Vec<u8>,
+    ) -> Result<()> {
+        ensure!(!value.is_null(), IndexEncodeNullSnafu);
+
+        if matches!(field.data_type, ConcreteDataType::String(_)) {
+            let value = value
+                .as_string()
+                .context(FieldTypeMismatchSnafu)?
+                .context(IndexEncodeNullSnafu)?;
+            buffer.extend_from_slice(value.as_bytes());
+            Ok(())
+        } else {
+            buffer.reserve(field.estimated_size());
+            let mut serializer = Serializer::new(buffer);
+            field.serialize(&mut serializer, &value)
+        }
     }
 }
 
@@ -106,7 +126,7 @@ mod tests {
         let field = SortField::new(ConcreteDataType::string_datatype());
 
         let mut buffer = Vec::new();
-        IndexValueCodec::encode_value(value, &field, &mut buffer).unwrap();
+        IndexValueCodec::encode_nonnull_value(value, &field, &mut buffer).unwrap();
         assert!(!buffer.is_empty());
     }
 
@@ -116,8 +136,18 @@ mod tests {
         let field = SortField::new(ConcreteDataType::int64_datatype());
 
         let mut buffer = Vec::new();
-        let res = IndexValueCodec::encode_value(value, &field, &mut buffer);
+        let res = IndexValueCodec::encode_nonnull_value(value, &field, &mut buffer);
         assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_encode_null_value() {
+        let value = ValueRef::Null;
+        let field = SortField::new(ConcreteDataType::string_datatype());
+
+        let mut buffer = Vec::new();
+        let res = IndexValueCodec::encode_nonnull_value(value, &field, &mut buffer);
+        assert!(matches!(res, Err(Error::IndexEncodeNull { .. })));
     }
 
     #[test]

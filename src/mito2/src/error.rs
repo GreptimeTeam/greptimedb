@@ -556,6 +556,9 @@ pub enum Error {
         second: Box<Error>,
         location: Location,
     },
+
+    #[snafu(display("Encode null value"))]
+    IndexEncodeNull { location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -595,7 +598,8 @@ impl ErrorExt for Error {
             | InvalidParquet { .. }
             | OperateAbortedIndex { .. }
             | PuffinBlobTypeNotFound { .. }
-            | UnexpectedReplay { .. } => StatusCode::Unexpected,
+            | UnexpectedReplay { .. }
+            | IndexEncodeNull { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }

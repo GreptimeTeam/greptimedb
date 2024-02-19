@@ -190,7 +190,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let value = Value::try_from(lit.clone()).context(ConvertValueSnafu)?;
         let mut bytes = vec![];
         let field = SortField::new(data_type);
-        IndexValueCodec::encode_value(value.as_value_ref(), &field, &mut bytes)?;
+        IndexValueCodec::encode_nonnull_value(value.as_value_ref(), &field, &mut bytes)?;
         Ok(bytes)
     }
 }
@@ -285,7 +285,7 @@ mod tests {
 
     pub(crate) fn encoded_string(s: impl Into<String>) -> Vec<u8> {
         let mut bytes = vec![];
-        IndexValueCodec::encode_value(
+        IndexValueCodec::encode_nonnull_value(
             Value::from(s.into()).as_value_ref(),
             &SortField::new(ConcreteDataType::string_datatype()),
             &mut bytes,
@@ -296,7 +296,7 @@ mod tests {
 
     pub(crate) fn encoded_int64(s: impl Into<i64>) -> Vec<u8> {
         let mut bytes = vec![];
-        IndexValueCodec::encode_value(
+        IndexValueCodec::encode_nonnull_value(
             Value::from(s.into()).as_value_ref(),
             &SortField::new(ConcreteDataType::int64_datatype()),
             &mut bytes,
