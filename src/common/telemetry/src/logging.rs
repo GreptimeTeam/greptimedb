@@ -149,7 +149,7 @@ pub fn init_global_logging(
     // JSON log layer.
     let rolling_appender = RollingFileAppender::new(Rotation::HOURLY, dir, app_name);
     let (rolling_writer, rolling_writer_guard) = tracing_appender::non_blocking(rolling_appender);
-    let file_logging_layer = Layer::new().with_writer(rolling_writer).with_ansi(false);
+    let file_logging_layer = Layer::new().with_writer(rolling_writer);
     guards.push(rolling_writer_guard);
 
     // error JSON log layer.
