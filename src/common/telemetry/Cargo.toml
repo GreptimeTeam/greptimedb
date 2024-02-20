@@ -9,6 +9,7 @@ tokio-console = ["console-subscriber", "tokio/tracing"]
 deadlock_detection = ["parking_lot/deadlock_detection"]
 
 [dependencies]
+atty = "0.2"
 backtrace = "0.3"
 common-error.workspace = true
 console-subscriber = { version = "0.1", optional = true }
