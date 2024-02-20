@@ -72,7 +72,11 @@ impl UnaryFunc {
                     }
                     .fail()?
                 }?;
-                Ok(Value::from(!bool))
+                if matches!(self, Self::IsTrue) {
+                    Ok(Value::from(bool))
+                } else {
+                    Ok(Value::from(!bool))
+                }
             }
             Self::StepTimestamp => {
                 if let Value::DateTime(datetime) = arg {
@@ -165,6 +169,7 @@ impl BinaryFunc {
             Self::Lte => Ok(Value::from(left <= right)),
             Self::Gt => Ok(Value::from(left > right)),
             Self::Gte => Ok(Value::from(left >= right)),
+
             Self::AddInt16 => Ok(add::<i16>(left, right)?),
             Self::AddInt32 => Ok(add::<i32>(left, right)?),
             Self::AddInt64 => Ok(add::<i64>(left, right)?),
