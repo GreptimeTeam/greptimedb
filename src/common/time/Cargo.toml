@@ -6,8 +6,8 @@ license.workspace = true
 
 [dependencies]
 arrow.workspace = true
-chrono-tz = "0.8"
 chrono.workspace = true
+chrono-tz = "0.8"
 common-error.workspace = true
 common-macro.workspace = true
 once_cell.workspace = true

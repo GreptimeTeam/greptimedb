@@ -27,6 +27,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::read::Batch;
+use crate::region::options::IndexOptions;
 use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
 
@@ -131,6 +132,7 @@ pub(crate) struct IndexerBuilder<'a> {
     pub(crate) row_group_size: usize,
     pub(crate) object_store: ObjectStore,
     pub(crate) intermediate_manager: IntermediateManager,
+    pub(crate) index_options: IndexOptions,
 }
 
 impl<'a> IndexerBuilder<'a> {
@@ -153,6 +155,16 @@ impl<'a> IndexerBuilder<'a> {
             return Indexer::default();
         }
 
+        let Some(mut segment_row_count) =
+            NonZeroUsize::new(self.index_options.inverted_index.segment_row_count)
+        else {
+            warn!(
+                "Segment row count is 0, skip creating index, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
+            return Indexer::default();
+        };
+
         let Some(row_group_size) = NonZeroUsize::new(self.row_group_size) else {
             warn!(
                 "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
@@ -161,6 +173,11 @@ impl<'a> IndexerBuilder<'a> {
             return Indexer::default();
         };
 
+        // if segment row count not aligned with row group size, adjust it to be aligned.
+        if row_group_size.get() % segment_row_count.get() != 0 {
+            segment_row_count = row_group_size;
+        }
+
         let creator = SstIndexCreator::new(
             self.file_path,
             self.file_id,
@@ -168,9 +185,17 @@ impl<'a> IndexerBuilder<'a> {
             self.object_store,
             self.intermediate_manager,
             self.mem_threshold_index_create,
-            row_group_size,
+            segment_row_count,
         )
-        .with_buffer_size(self.write_buffer_size);
+        .with_buffer_size(self.write_buffer_size)
+        .with_ignore_column_ids(
+            self.index_options
+                .inverted_index
+                .ignore_column_ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect(),
+        );
 
         Indexer {
             file_id: self.file_id,
@@ -266,6 +291,7 @@ mod tests {
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 
@@ -285,6 +311,7 @@ mod tests {
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 
@@ -304,6 +331,7 @@ mod tests {
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 
@@ -323,6 +351,7 @@ mod tests {
             row_group_size: 0,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 

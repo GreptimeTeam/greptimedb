@@ -28,10 +28,11 @@ common-wal.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true
-futures-util.workspace = true
 futures.workspace = true
+futures-util.workspace = true
 hex = { version = "0.4" }
 humantime-serde.workspace = true
+itertools.workspace = true
 lazy_static.workspace = true
 prometheus.workspace = true
 prost.workspace = true

@@ -34,13 +34,14 @@ common-test-util = { workspace = true, optional = true }
 common-time.workspace = true
 common-wal.workspace = true
 dashmap.workspace = true
+datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datafusion.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
 index.workspace = true
+itertools.workspace = true
 lazy_static = "1.4"
 log-store = { workspace = true, optional = true }
 memcomparable = "0.2"
@@ -61,9 +62,9 @@ snafu.workspace = true
 store-api.workspace = true
 strum.workspace = true
 table.workspace = true
+tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
-tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

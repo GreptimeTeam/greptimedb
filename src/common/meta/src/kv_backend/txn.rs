@@ -25,6 +25,11 @@ pub trait TxnService: Sync + Send {
     async fn txn(&self, _txn: Txn) -> Result<TxnResponse, Self::Error> {
         unimplemented!("txn is not implemented")
     }
+
+    /// Maximum number of operations permitted in a transaction.
+    fn max_txn_size(&self) -> usize {
+        usize::MAX
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

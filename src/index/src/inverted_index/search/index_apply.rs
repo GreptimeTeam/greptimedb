@@ -14,13 +14,25 @@
 
 mod predicates_apply;
 
-use std::collections::BTreeSet;
-
 use async_trait::async_trait;
+use common_base::BitVec;
 pub use predicates_apply::PredicatesIndexApplier;
 
 use crate::inverted_index::error::Result;
 use crate::inverted_index::format::reader::InvertedIndexReader;
+
+/// The output of an apply operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplyOutput {
+    /// Bitmap of indices that match the predicates.
+    pub matched_segment_ids: BitVec,
+
+    /// The total number of rows in the index.
+    pub total_row_count: usize,
+
+    /// The number of rows in each segment.
+    pub segment_row_count: usize,
+}
 
 /// A trait for processing and transforming indices obtained from an inverted index.
 ///
@@ -35,7 +47,7 @@ pub trait IndexApplier: Send + Sync {
         &self,
         context: SearchContext,
         reader: &mut (dyn InvertedIndexReader + 'a),
-    ) -> Result<BTreeSet<usize>>;
+    ) -> Result<ApplyOutput>;
 
     /// Returns the memory usage of the applier.
     fn memory_usage(&self) -> usize;

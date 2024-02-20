@@ -50,6 +50,7 @@ pub(crate) fn new_region_route(region_id: u64, peers: &[Peer], leader_node: u64)
         leader_peer,
         follower_peers: vec![],
         leader_status: None,
+        leader_down_since: None,
     }
 }
 
@@ -132,6 +133,7 @@ pub(crate) async fn prepare_table_region_and_info_value(
         }),
         follower_peers: vec![],
         leader_status: None,
+        leader_down_since: None,
     };
 
     // Region distribution:

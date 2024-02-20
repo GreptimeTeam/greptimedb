@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
 use common_meta::rpc::router::Partition as MetaPartition;
 use datafusion_expr::Operator;
 use datatypes::prelude::Value;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
@@ -54,6 +55,29 @@ pub enum PartitionBound {
 pub struct PartitionDef {
     partition_columns: Vec<String>,
     partition_bounds: Vec<PartitionBound>,
+}
+
+impl Display for PartitionBound {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Value(v) => write!(f, "{}", v),
+            Self::MaxValue => write!(f, "MAXVALUE"),
+        }
+    }
+}
+
+impl Display for PartitionDef {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "({}) VALUES LESS THAN ({})",
+            self.partition_columns.iter().join(", "),
+            self.partition_bounds
+                .iter()
+                .map(|b| format!("{b}"))
+                .join(", ")
+        )
+    }
 }
 
 impl PartitionDef {
@@ -162,6 +186,8 @@ mod tests {
                 PartitionBound::Value(1_i32.into()),
             ],
         };
+        assert_eq!("(a, b) VALUES LESS THAN (MAXVALUE, 1)", def.to_string());
+
         let partition: MetaPartition = def.try_into().unwrap();
         assert_eq!(
             r#"{"column_list":["a","b"],"value_list":["\"MaxValue\"","{\"Value\":{\"Int32\":1}}"]}"#,

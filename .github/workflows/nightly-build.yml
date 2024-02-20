@@ -85,7 +85,7 @@ jobs:
       version: ${{ steps.create-version.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -137,7 +137,7 @@ jobs:
     ]
     runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -156,7 +156,7 @@ jobs:
     ]
     runs-on: ${{ needs.allocate-runners.outputs.linux-arm64-runner }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -179,7 +179,7 @@ jobs:
     outputs:
       nightly-build-result: ${{ steps.set-nightly-build-result.outputs.nightly-build-result }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -211,7 +211,7 @@ jobs:
     # The ACR have daily sync with DockerHub, so don't worry about the image not being updated.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -245,7 +245,7 @@ jobs:
     ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -270,7 +270,7 @@ jobs:
     ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 

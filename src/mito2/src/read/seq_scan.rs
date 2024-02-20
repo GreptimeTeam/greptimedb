@@ -21,7 +21,7 @@ use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, tracing};
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
 use table::predicate::Predicate;
@@ -286,6 +286,7 @@ impl SeqScan {
     }
 
     /// Fetch a batch from the reader and convert it into a record batch.
+    #[tracing::instrument(skip_all, level = "trace")]
     async fn fetch_record_batch(
         reader: &mut dyn BatchReader,
         mapper: &ProjectionMapper,

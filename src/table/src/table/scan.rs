@@ -24,6 +24,8 @@ use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_telemetry::tracing::Span;
+use common_telemetry::tracing_context::TracingContext;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion_physical_expr::PhysicalSortExpr;
@@ -98,14 +100,18 @@ impl PhysicalPlan for StreamScanAdapter {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> QueryResult<SendableRecordBatchStream> {
+        let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let span = tracing_context.attach(common_telemetry::tracing::info_span!("stream_adapter"));
+
         let mut stream = self.stream.lock().unwrap();
         let stream = stream.take().context(query_error::ExecuteRepeatedlySnafu)?;
         let mem_usage_metrics = MemoryUsageMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {
             stream,
             metric: mem_usage_metrics,
+            span,
         }))
     }
 
@@ -117,6 +123,7 @@ impl PhysicalPlan for StreamScanAdapter {
 pub struct StreamWithMetricWrapper {
     stream: SendableRecordBatchStream,
     metric: MemoryUsageMetrics,
+    span: Span,
 }
 
 impl Stream for StreamWithMetricWrapper {
@@ -124,6 +131,7 @@ impl Stream for StreamWithMetricWrapper {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        let _enter = this.span.enter();
         let poll = this.stream.poll_next_unpin(cx);
         if let Poll::Ready(Some(Ok(record_batch))) = &poll {
             let batch_mem_size = record_batch

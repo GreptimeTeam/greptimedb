@@ -123,6 +123,7 @@ impl RegionServer {
             })
     }
 
+    #[tracing::instrument(skip_all, fields(request_type = request.request_type()))]
     pub async fn handle_request(
         &self,
         region_id: RegionId,
@@ -226,6 +227,7 @@ impl RegionServerHandler for RegionServer {
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)?;
         let tracing_context = TracingContext::from_current_span();
+
         let results = if is_parallel {
             let join_tasks = requests.into_iter().map(|(region_id, req)| {
                 let self_to_move = self.clone();
@@ -488,17 +490,11 @@ impl RegionServerInner {
             CurrentEngine::EarlyReturn(rows) => return Ok(rows),
         };
 
-        let engine_type = engine.name();
-
         // Sets corresponding region status to registering/deregistering before the operation.
         self.set_region_status_not_ready(region_id, &engine, &region_change);
 
         match engine
             .handle_request(region_id, request)
-            .trace(info_span!(
-                "RegionEngine::handle_region_request",
-                engine_type
-            ))
             .await
             .with_context(|_| HandleRegionRequestSnafu { region_id })
         {

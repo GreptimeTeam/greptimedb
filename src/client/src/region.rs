@@ -28,6 +28,7 @@ use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
+use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
 use snafu::{location, Location, OptionExt, ResultExt};
 use tokio_stream::StreamExt;
@@ -125,7 +126,12 @@ impl RegionRequester {
         let metrics = Arc::new(ArcSwapOption::from(None));
         let metrics_ref = metrics.clone();
 
+        let tracing_context = TracingContext::from_current_span();
+
         let stream = Box::pin(stream!({
+            let _span = tracing_context.attach(common_telemetry::tracing::info_span!(
+                "poll_flight_data_stream"
+            ));
             while let Some(flight_message) = flight_message_stream.next().await {
                 let flight_message = flight_message
                     .map_err(BoxedError::new)

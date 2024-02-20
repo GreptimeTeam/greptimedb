@@ -296,6 +296,7 @@ mod test {
                 leader_peer: Some(peer.clone()),
                 follower_peers: vec![follower_peer.clone()],
                 leader_status: Some(RegionStatus::Downgraded),
+                leader_down_since: Some(1),
             },
             RegionRoute {
                 region: Region::new_test(another_region_id),

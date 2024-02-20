@@ -23,6 +23,7 @@ use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use futures_util::future::join_all;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
@@ -159,7 +160,20 @@ impl CreateLogicalTablesProcedure {
         let num_tables = tables_data.len();
 
         if num_tables > 0 {
-            manager.create_logic_tables_metadata(tables_data).await?;
+            let chunk_size = manager.max_logical_tables_per_batch();
+            if num_tables > chunk_size {
+                let chunks = tables_data
+                    .into_iter()
+                    .chunks(chunk_size)
+                    .into_iter()
+                    .map(|chunk| chunk.collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                for chunk in chunks {
+                    manager.create_logical_tables_metadata(chunk).await?;
+                }
+            } else {
+                manager.create_logical_tables_metadata(tables_data).await?;
+            }
         }
 
         let table_ids = self.creator.data.real_table_ids();

@@ -12,8 +12,8 @@ api.workspace = true
 arrow-flight.workspace = true
 async-trait = "0.1"
 auth.workspace = true
-axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 axum.workspace = true
+axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 catalog.workspace = true
 chrono.workspace = true
 client = { workspace = true, features = ["testing"] }
@@ -71,8 +71,8 @@ tower = "0.4"
 uuid.workspace = true
 
 [dev-dependencies]
-datafusion-expr.workspace = true
 datafusion.workspace = true
+datafusion-expr.workspace = true
 itertools.workspace = true
 opentelemetry-proto.workspace = true
 partition.workspace = true

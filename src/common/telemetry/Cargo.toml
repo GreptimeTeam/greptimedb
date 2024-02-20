@@ -24,6 +24,7 @@ opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 parking_lot = { version = "0.12" }
 prometheus.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing = "0.1"
 tracing-appender = "0.2"

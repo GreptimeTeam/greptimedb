@@ -20,6 +20,7 @@ pub(crate) mod metadata;
 mod page_reader;
 pub mod reader;
 pub mod row_group;
+mod row_selection;
 mod stats;
 pub mod writer;
 

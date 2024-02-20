@@ -34,6 +34,7 @@ show tables;
 | key_column_usage                      |
 | optimizer_trace                       |
 | parameters                            |
+| partitions                            |
 | profiling                             |
 | referential_constraints               |
 | routines                              |
