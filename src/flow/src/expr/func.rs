@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use crate::expr::error::{
-    CastValueSnafu, DivisionByZeroSnafu, EvalError, TryFromValueSnafu, TypeMismatchSnafu,
+    CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, TryFromValueSnafu,
+    TypeMismatchSnafu,
 };
 use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
 use crate::repr::Row;
@@ -213,6 +214,26 @@ impl BinaryFunc {
             Self::ModUInt32 => Ok(rem::<u32>(left, right)?),
             Self::ModUInt64 => Ok(rem::<u64>(left, right)?),
         }
+    }
+
+    /// Reverse the comparison operator, i.e. `a < b` becomes `b > a`,
+    /// equal and not equal are unchanged.
+    pub fn reverse_compare(&self) -> Result<Self, EvalError> {
+        let ret = match &self {
+            BinaryFunc::Eq => BinaryFunc::Eq,
+            BinaryFunc::NotEq => BinaryFunc::NotEq,
+            BinaryFunc::Lt => BinaryFunc::Gt,
+            BinaryFunc::Lte => BinaryFunc::Gte,
+            BinaryFunc::Gt => BinaryFunc::Lt,
+            BinaryFunc::Gte => BinaryFunc::Lte,
+            _ => {
+                return InternalSnafu {
+                    reason: format!("Expect a comparison operator, found {:?}", self),
+                }
+                .fail();
+            }
+        };
+        Ok(ret)
     }
 }
 

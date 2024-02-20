@@ -18,7 +18,9 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 
-use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
+use crate::expr::error::{
+    EvalError, InvalidArgumentSnafu, OptimizeSnafu, UnsupportedTemporalFilterSnafu,
+};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 
 /// A scalar expression, which can be evaluated to a value.
@@ -194,16 +196,12 @@ impl ScalarExpr {
             ScalarExpr::Column(_)
             | ScalarExpr::Literal(_, _)
             | ScalarExpr::CallUnmaterializable(_) => (),
-            ScalarExpr::CallUnary { func: _, expr } => f(expr),
-            ScalarExpr::CallBinary {
-                func: as_any,
-                expr1,
-                expr2,
-            } => {
+            ScalarExpr::CallUnary { expr, .. } => f(expr),
+            ScalarExpr::CallBinary { expr1, expr2, .. } => {
                 f(expr1);
                 f(expr2);
             }
-            ScalarExpr::CallVariadic { func: _, exprs } => {
+            ScalarExpr::CallVariadic { exprs, .. } => {
                 for expr in exprs {
                     f(expr);
                 }
@@ -232,12 +230,12 @@ impl ScalarExpr {
             ScalarExpr::Column(_)
             | ScalarExpr::Literal(_, _)
             | ScalarExpr::CallUnmaterializable(_) => (),
-            ScalarExpr::CallUnary { func, expr } => f(expr),
-            ScalarExpr::CallBinary { func, expr1, expr2 } => {
+            ScalarExpr::CallUnary { expr, .. } => f(expr),
+            ScalarExpr::CallBinary { expr1, expr2, .. } => {
                 f(expr1);
                 f(expr2);
             }
-            ScalarExpr::CallVariadic { func, exprs } => {
+            ScalarExpr::CallVariadic { exprs, .. } => {
                 for expr in exprs {
                     f(expr);
                 }
@@ -269,12 +267,12 @@ impl ScalarExpr {
     ///
     /// false for lower bound, true for upper bound
     /// TODO(discord9): allow simple transform like `now() + a < b` to `now() < b - a`
-    pub fn extract_bound(&self) -> Result<(Option<Self>, Option<Self>), String> {
+    pub fn extract_bound(&self) -> Result<(Option<Self>, Option<Self>), EvalError> {
         let unsupported_err = |msg: &str| {
-            Err(format!(
-                    "Unsupported temporal predicate: {msg}. NOTE: Use `now()` in direct comparison: {:?}",
-                    self
-                ))
+            UnsupportedTemporalFilterSnafu {
+                reason: msg.to_string(),
+            }
+            .fail()
         };
         if let Self::CallBinary {
             mut func,
@@ -282,37 +280,34 @@ impl ScalarExpr {
             mut expr2,
         } = self.clone()
         {
-            if !(expr1.contains_temporal() ^ expr2.contains_temporal()) {
+            let expr_1_contains_now = expr1.contains_temporal();
+            let expr_2_contains_now = expr2.contains_temporal();
+            if !(expr_1_contains_now ^ expr_2_contains_now) {
                 return unsupported_err("one side of the comparison must be `now()`");
             }
-            if !expr1.contains_temporal()
+            if !expr_1_contains_now
                 && *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
             {
                 std::mem::swap(&mut expr1, &mut expr2);
-                func = match func {
-                    BinaryFunc::Eq => BinaryFunc::Eq,
-                    BinaryFunc::NotEq => BinaryFunc::NotEq,
-                    BinaryFunc::Lt => BinaryFunc::Gt,
-                    BinaryFunc::Lte => BinaryFunc::Gte,
-                    BinaryFunc::Gt => BinaryFunc::Lt,
-                    BinaryFunc::Gte => BinaryFunc::Lte,
-                    _ => {
-                        return unsupported_err("The top level operator must be comparison");
-                    }
-                };
+                func = BinaryFunc::reverse_compare(&func)?;
             }
             // TODO: support simple transform like `now() + a < b` to `now() < b - a`
-            if expr2.contains_temporal()
+            if expr_2_contains_now
                 || *expr1 != ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
             {
                 return unsupported_err("None of the sides of the comparison is `now()`");
             }
             let step = |expr: ScalarExpr| expr.call_unary(UnaryFunc::StepTimestamp);
             match func {
+                // now == expr2 -> now <= expr2 && now < expr2 + 1
                 BinaryFunc::Eq => Ok((Some(*expr2.clone()), Some(step(*expr2)))),
+                // now < expr2 -> now < expr2
                 BinaryFunc::Lt => Ok((None, Some(*expr2))),
+                // now <= expr2 -> now < expr2 + 1
                 BinaryFunc::Lte => Ok((None, Some(step(*expr2)))),
+                // now > expr2 -> now >= expr2 + 1
                 BinaryFunc::Gt => Ok((Some(step(*expr2)), None)),
+                // now >= expr2 -> now >= expr2
                 BinaryFunc::Gte => Ok((Some(*expr2), None)),
                 _ => unreachable!("Already checked"),
             }
@@ -327,7 +322,7 @@ mod test {
     use super::*;
     #[test]
     fn test_extract_bound() {
-        let test_list = [
+        let test_list: [(ScalarExpr, Result<_, EvalError>); 5] = [
             // col(0) == now
             (
                 ScalarExpr::CallBinary {
@@ -392,8 +387,14 @@ mod test {
                 Ok((Some(ScalarExpr::Column(0)), None)),
             ),
         ];
-        for (expr, expected) in test_list.iter() {
-            assert_eq!(expr.extract_bound(), *expected);
+        for (expr, expected) in test_list.into_iter() {
+            let actual = expr.extract_bound();
+            // EvalError is not Eq, so we need to compare the error message
+            match (actual, expected) {
+                (Ok(l), Ok(r)) => assert_eq!(l, r),
+                (Err(l), Err(r)) => assert!(matches!(l, r)),
+                (l, r) => panic!("expected: {:?}, actual: {:?}", r, l),
+            }
         }
     }
 }
