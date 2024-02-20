@@ -17,6 +17,7 @@ mod close;
 mod create;
 mod drop;
 mod open;
+mod options;
 mod put;
 mod read;
 mod region_metadata;

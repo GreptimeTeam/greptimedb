@@ -5210,6 +5210,7 @@ dependencies = [
  "common-time",
  "datafusion",
  "datatypes",
+ "itertools 0.10.5",
  "lazy_static",
  "mito2",
  "mur3",

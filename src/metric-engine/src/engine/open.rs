@@ -26,6 +26,7 @@ use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use super::MetricEngineInner;
+use crate::engine::options::set_index_options_for_data_region;
 use crate::error::{OpenMitoRegionSnafu, Result};
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils;
@@ -77,9 +78,12 @@ impl MetricEngineInner {
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
         };
+
+        let mut data_region_options = request.options;
+        set_index_options_for_data_region(&mut data_region_options);
         let open_data_region_request = RegionOpenRequest {
             region_dir: data_region_dir,
-            options: request.options.clone(),
+            options: data_region_options,
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
         };

@@ -36,6 +36,7 @@ use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 
+use crate::engine::options::set_index_options_for_data_region;
 use crate::engine::MetricEngineInner;
 use crate::error::{
     ConflictRegionOptionSnafu, CreateMitoRegionSnafu, InternalColumnOccupiedSnafu,
@@ -375,6 +376,9 @@ impl MetricEngineInner {
         data_region_request.column_metadatas.push(tsid_col);
         data_region_request.primary_key =
             vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
+
+        // set index options
+        set_index_options_for_data_region(&mut data_region_request.options);
 
         data_region_request
     }
