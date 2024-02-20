@@ -100,6 +100,15 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to query procedure"))]
+    QueryProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure not found: #{pid}"))]
+    ProcedureNotFound { location: Location, pid: String },
+
     #[snafu(display("Failed to parse procedure id: {key}"))]
     ParseProcedureId {
         location: Location,
@@ -431,14 +440,17 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Unsupported { .. } => StatusCode::Internal,
 
-            PrimaryKeyNotFound { .. } | EmptyKey { .. } | InvalidEngineType { .. } => {
-                StatusCode::InvalidArguments
-            }
+            ProcedureNotFound { .. }
+            | PrimaryKeyNotFound { .. }
+            | EmptyKey { .. }
+            | InvalidEngineType { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
-            SubmitProcedure { source, .. } | WaitProcedure { source, .. } => source.status_code(),
+            SubmitProcedure { source, .. }
+            | QueryProcedure { source, .. }
+            | WaitProcedure { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),

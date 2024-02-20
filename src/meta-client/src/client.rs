@@ -197,14 +197,24 @@ impl ProcedureExecutor for MetaClient {
 
     async fn migrate_region(
         &self,
-        ctx: &ExecutorContext,
-        reqeust: MigrageRegionRequest,
+        _ctx: &ExecutorContext,
+        request: MigrageRegionRequest,
     ) -> MetaResult<MigrateRegionResponse> {
-        todo!();
+        self.migrate_region(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
     }
 
-    async fn query_procedure_state(&self, pid: &str) -> MetaResult<ProcedureStateResponse> {
-        todo!();
+    async fn query_procedure_state(
+        &self,
+        _ctx: &ExecutorContext,
+        pid: &str,
+    ) -> MetaResult<ProcedureStateResponse> {
+        self.query_procedure_state(pid)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
     }
 }
 
@@ -341,6 +351,26 @@ impl MetaClient {
     pub async fn unlock(&self, req: UnlockRequest) -> Result<()> {
         let _ = self.lock_client()?.unlock(req.into()).await?;
         Ok(())
+    }
+
+    /// Query the procedure state by its id.
+    pub async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
+        self.procedure_client()?.query_procedure_state(pid).await
+    }
+
+    /// Submit a region migration task.
+    pub async fn migrate_region(
+        &self,
+        request: MigrageRegionRequest,
+    ) -> Result<MigrateRegionResponse> {
+        self.procedure_client()?
+            .migrate_region(
+                request.region_id,
+                request.from_peer,
+                request.to_peer,
+                request.replay_timeout,
+            )
+            .await
     }
 
     /// Submit a DDL task

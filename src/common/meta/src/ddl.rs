@@ -47,21 +47,29 @@ pub struct ExecutorContext {
     pub tracing_context: Option<W3cTrace>,
 }
 
+/// The procedure executor that accepts ddl, region migration task etc.
 #[async_trait::async_trait]
 pub trait ProcedureExecutor: Send + Sync {
+    /// Submit a ddl task
     async fn submit_ddl_task(
         &self,
         ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse>;
 
+    /// Submit a region migration task
     async fn migrate_region(
         &self,
         ctx: &ExecutorContext,
         request: MigrageRegionRequest,
     ) -> Result<MigrateRegionResponse>;
 
-    async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse>;
+    /// Query the procedure state by its id
+    async fn query_procedure_state(
+        &self,
+        ctx: &ExecutorContext,
+        pid: &str,
+    ) -> Result<ProcedureStateResponse>;
 }
 
 pub type ProcedureExecutorRef = Arc<dyn ProcedureExecutor>;

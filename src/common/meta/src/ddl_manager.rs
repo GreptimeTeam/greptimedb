@@ -34,7 +34,7 @@ use crate::ddl::{
 };
 use crate::error::{
     self, EmptyCreateTableTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
-    SubmitProcedureSnafu, TableNotFoundSnafu, WaitProcedureSnafu,
+    SubmitProcedureSnafu, TableNotFoundSnafu, UnsupportedSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -49,6 +49,7 @@ use crate::rpc::ddl::{
     AlterTableTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
     TruncateTableTask,
 };
+use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrageRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 use crate::rpc::router::RegionRoute;
 use crate::table_name::TableName;
@@ -531,6 +532,7 @@ async fn handle_create_logical_table_tasks(
     })
 }
 
+/// TODO(dennis): let [`DdlManager`] implement [`ProcedureExecutor`] looks weird, find some way to refactor it.
 #[async_trait::async_trait]
 impl ProcedureExecutor for DdlManager {
     async fn submit_ddl_task(
@@ -573,14 +575,33 @@ impl ProcedureExecutor for DdlManager {
 
     async fn migrate_region(
         &self,
-        ctx: &ExecutorContext,
-        request: MigrageRegionRequest,
+        _ctx: &ExecutorContext,
+        _request: MigrageRegionRequest,
     ) -> Result<MigrateRegionResponse> {
-        todo!();
+        UnsupportedSnafu {
+            operation: "migrate_region",
+        }
+        .fail()
     }
 
-    async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
-        todo!();
+    async fn query_procedure_state(
+        &self,
+        _ctx: &ExecutorContext,
+        pid: &str,
+    ) -> Result<ProcedureStateResponse> {
+        let pid = ProcedureId::parse_str(pid)
+            .with_context(|_| error::ParseProcedureIdSnafu { key: pid })?;
+
+        let state = self
+            .procedure_manager
+            .procedure_state(pid)
+            .await
+            .context(error::QueryProcedureSnafu)?
+            .context(error::ProcedureNotFoundSnafu {
+                pid: pid.to_string(),
+            })?;
+
+        Ok(procedure::procedure_state_to_pb_response(&state))
     }
 }
 

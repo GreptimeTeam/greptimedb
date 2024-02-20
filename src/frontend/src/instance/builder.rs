@@ -35,6 +35,7 @@ use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::{Instance, StatementExecutorRef};
 use crate::script::ScriptExecutor;
 
+/// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
     kv_backend: KvBackendRef,
     cache_invalidator: Option<CacheInvalidatorRef>,
