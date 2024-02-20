@@ -169,7 +169,6 @@ impl Server for GrpcServer {
         };
 
         let builder = tonic::transport::Server::builder()
-            .tls_config()
             .add_routes(routes)
             .add_service(self.create_healthcheck_service())
             .add_service(self.create_reflection_service());
