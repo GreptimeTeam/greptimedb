@@ -1802,6 +1802,7 @@ dependencies = [
  "paste",
  "ron",
  "serde",
+ "serde_json",
  "session",
  "snafu",
  "statrs",

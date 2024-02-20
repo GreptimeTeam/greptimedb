@@ -172,5 +172,60 @@ impl fmt::Display for MigrateRegionFunction {
 
 #[cfg(test)]
 mod tests {
-    // FIXME(dennis): test in the following PR.
+    use std::sync::Arc;
+
+    use common_query::prelude::TypeSignature;
+    use datatypes::vectors::{StringVector, UInt64Vector};
+
+    use super::*;
+
+    #[test]
+    fn test_migrate_region_misc() {
+        let f = MigrateRegionFunction;
+        assert_eq!("migrate_region", f.name());
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            f.return_type(&[]).unwrap()
+        );
+        assert!(matches!(f.signature(),
+                         Signature {
+                             type_signature: TypeSignature::OneOf(sigs),
+                             volatility: Volatility::Immutable
+                         } if sigs.len() == 2));
+    }
+
+    #[test]
+    fn test_missing_procedure_service() {
+        let f = MigrateRegionFunction;
+
+        let args = vec![1, 1, 1];
+
+        let args = args
+            .into_iter()
+            .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
+            .collect::<Vec<_>>();
+
+        let result = f.eval(FunctionContext::default(), &args).unwrap_err();
+        assert_eq!(
+            "Missing ProcedureServiceHandler, not expected",
+            result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_migrate_region() {
+        let f = MigrateRegionFunction;
+
+        let args = vec![1, 1, 1];
+
+        let args = args
+            .into_iter()
+            .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
+            .collect::<Vec<_>>();
+
+        let result = f.eval(FunctionContext::mock(), &args).unwrap();
+
+        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
+        assert_eq!(expect, result);
+    }
 }

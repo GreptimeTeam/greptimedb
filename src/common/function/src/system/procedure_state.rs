@@ -26,6 +26,7 @@ use common_query::prelude::{Signature, Volatility};
 use common_telemetry::error;
 use datatypes::prelude::*;
 use datatypes::vectors::{ConstantVector, Helper, StringVector, VectorRef};
+use serde::Serialize;
 use snafu::{ensure, Location, OptionExt};
 
 use crate::function::{Function, FunctionContext};
@@ -41,6 +42,13 @@ impl fmt::Display for ProcedureStateFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "PROCEDURE_STATE")
     }
+}
+
+#[derive(Serialize)]
+struct ProcedureStateJson {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 impl Function for ProcedureStateFunction {
@@ -105,7 +113,12 @@ impl Function for ProcedureStateFunction {
                                     .map(|v| v.as_str_name())
                                     .unwrap_or("Unknown");
 
-                                Ok(Some(format!("status: {status}, error: {error}")))
+                                let state = ProcedureStateJson {
+                                    status: status.to_string(),
+                                    error: if error.is_empty() { None } else { Some(error) },
+                                };
+
+                                Ok(Some(serde_json::to_string(&state).unwrap_or_default()))
                             } else {
                                 Ok(None)
                             }
@@ -134,5 +147,68 @@ impl Function for ProcedureStateFunction {
             }
             .fail(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_query::prelude::TypeSignature;
+    use datatypes::vectors::StringVector;
+
+    use super::*;
+
+    #[test]
+    fn test_procedure_state_misc() {
+        let f = ProcedureStateFunction;
+        assert_eq!("procedure_state", f.name());
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            f.return_type(&[]).unwrap()
+        );
+        assert!(matches!(f.signature(),
+                         Signature {
+                             type_signature: TypeSignature::Uniform(1, valid_types),
+                             volatility: Volatility::Immutable
+                         } if valid_types == vec![ConcreteDataType::string_datatype()]
+        ));
+    }
+
+    #[test]
+    fn test_missing_procedure_service() {
+        let f = ProcedureStateFunction;
+
+        let args = vec!["pid"];
+
+        let args = args
+            .into_iter()
+            .map(|arg| Arc::new(StringVector::from_slice(&[arg])) as _)
+            .collect::<Vec<_>>();
+
+        let result = f.eval(FunctionContext::default(), &args).unwrap_err();
+        assert_eq!(
+            "Missing ProcedureServiceHandler, not expected",
+            result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_procedure_state() {
+        let f = ProcedureStateFunction;
+
+        let args = vec!["pid"];
+
+        let args = args
+            .into_iter()
+            .map(|arg| Arc::new(StringVector::from_slice(&[arg])) as _)
+            .collect::<Vec<_>>();
+
+        let result = f.eval(FunctionContext::mock(), &args).unwrap();
+
+        let expect: VectorRef = Arc::new(StringVector::from(vec![
+            "{\"status\":\"Done\",\"error\":\"OK\"}",
+        ]));
+        assert_eq!(expect, result);
     }
 }
