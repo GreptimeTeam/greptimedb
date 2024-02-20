@@ -132,11 +132,16 @@ pub fn init_global_logging(
     // Enable log compatible layer to convert log record to tracing span.
     LogTracer::init().expect("log tracer must be valid");
 
+    // stdout log layer.
     let stdout_logging_layer = if opts.append_stdout {
         let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
         guards.push(stdout_guard);
 
-        Some(Layer::new().with_writer(stdout_writer))
+        Some(
+            Layer::new()
+                .with_writer(stdout_writer)
+                .with_ansi(atty::is(atty::Stream::Stdout)),
+        )
     } else {
         None
     };
@@ -144,7 +149,7 @@ pub fn init_global_logging(
     // JSON log layer.
     let rolling_appender = RollingFileAppender::new(Rotation::HOURLY, dir, app_name);
     let (rolling_writer, rolling_writer_guard) = tracing_appender::non_blocking(rolling_appender);
-    let file_logging_layer = Layer::new().with_writer(rolling_writer);
+    let file_logging_layer = Layer::new().with_writer(rolling_writer).with_ansi(false);
     guards.push(rolling_writer_guard);
 
     // error JSON log layer.
