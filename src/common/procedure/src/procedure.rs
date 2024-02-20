@@ -57,6 +57,7 @@ impl Status {
         Status::Done { output: None }
     }
 
+    #[cfg(any(test, feature = "testing"))]
     /// Downcasts [Status::Done]'s output to &T
     ///  #Panic:
     /// - if [Status] is not the [Status::Done].
