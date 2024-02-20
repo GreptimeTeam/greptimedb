@@ -90,16 +90,11 @@ pub struct DataBuffer {
     op_type_builder: UInt8VectorBuilder,
     /// Builders for field columns.
     field_builders: Vec<Option<Box<dyn MutableVector>>>,
-    /// Threshold for freezing data buffer.
-    freeze_threshold: usize,
 }
 
 impl DataBuffer {
-    pub fn with_capacity(
-        metadata: RegionMetadataRef,
-        init_capacity: usize,
-        freeze_threshold: usize,
-    ) -> Self {
+    /// Creates a `DataBuffer` instance with given schema and capacity.
+    pub fn with_capacity(metadata: RegionMetadataRef, init_capacity: usize) -> Self {
         let ts_builder = metadata
             .time_index_column()
             .column_schema
@@ -126,7 +121,6 @@ impl DataBuffer {
             sequence_builder,
             op_type_builder,
             field_builders,
-            freeze_threshold,
         }
     }
 
@@ -330,9 +324,11 @@ fn search_next_pk_range(array: &UInt16Array, start: usize) -> Option<(PkIndex, R
         return None;
     }
 
-    let next_pk = array.value(start);
+    let values = array.values();
+    let next_pk = values[start];
+
     for idx in start..num_rows {
-        if array.value(idx) != next_pk {
+        if values[idx] != next_pk {
             return Some((next_pk, start..idx));
         }
     }
@@ -513,7 +509,7 @@ mod tests {
 
     fn check_test_data_buffer_to_record_batches(keep_data: bool) {
         let meta = metadata_for_test();
-        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10, usize::MAX);
+        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
 
         write_rows_to_buffer(&mut buffer, &meta, 0, vec![1, 2], vec![Some(0.1), None], 1);
         write_rows_to_buffer(&mut buffer, &meta, 1, vec![1, 2], vec![Some(1.1), None], 2);
@@ -604,7 +600,7 @@ mod tests {
     #[test]
     fn test_encode_data_buffer() {
         let meta = metadata_for_test();
-        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10, usize::MAX);
+        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
 
         // write rows with null values.
         write_rows_to_buffer(
@@ -667,7 +663,7 @@ mod tests {
     #[test]
     fn test_iter_data_buffer() {
         let meta = metadata_for_test();
-        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10, usize::MAX);
+        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
 
         write_rows_to_buffer(
             &mut buffer,
@@ -694,7 +690,7 @@ mod tests {
     #[test]
     fn test_iter_empty_data_buffer() {
         let meta = metadata_for_test();
-        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10, usize::MAX);
+        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
         let mut iter = buffer.iter(&[0, 1, 3, 2]).unwrap();
         check_buffer_values_equal(&mut iter, &[]);
     }
