@@ -15,9 +15,9 @@
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use common_api::http_headers::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_telemetry::logging::{debug, error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -88,9 +88,9 @@ impl IntoResponse for ErrorResponse {
             HeaderValue::from_str(&msg).expect("malformed error msg"),
         );
         resp.headers_mut()
-            .insert(GREPTIME_DB_HEADER_FORMAT, HeaderValue::from_static(ty));
+            .insert(&GREPTIME_DB_HEADER_FORMAT, HeaderValue::from_static(ty));
         resp.headers_mut().insert(
-            GREPTIME_DB_HEADER_EXECUTION_TIME,
+            &GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),
         );
         resp

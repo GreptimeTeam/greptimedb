@@ -8,6 +8,7 @@ license.workspace = true
 api.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
+common-api.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true

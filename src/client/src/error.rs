@@ -14,9 +14,9 @@
 
 use std::any::Any;
 
+use common_api::http_headers::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 use tonic::{Code, Status};
