@@ -65,7 +65,7 @@ impl KeyDictBuilder {
     /// Adds the key to the builder and returns its index if the builder is not full.
     ///
     /// Returns `None` if the builder is full.
-    pub fn try_add_key(
+    pub fn try_insert_key(
         &mut self,
         key: &[u8],
         metrics: &mut WriteMetrics,
@@ -136,10 +136,99 @@ impl KeyDictBuilder {
             key_positions,
         })
     }
+
+    /// Scans the builder.
+    pub fn scan(&self) -> DictBuilderReader {
+        let sorted_pk_indices = self.pk_to_index.values().copied().collect();
+        let block = self.key_buffer.finish_cloned();
+        let mut blocks = Vec::with_capacity(self.dict_blocks.len() + 1);
+        blocks.extend_from_slice(&self.dict_blocks);
+        blocks.push(block);
+
+        DictBuilderReader::new(blocks, sorted_pk_indices)
+    }
+}
+
+/// Reader to scan the [KeyDictBuilder].
+#[derive(Default)]
+pub struct DictBuilderReader {
+    blocks: Vec<DictBlock>,
+    sorted_pk_indices: Vec<PkIndex>,
+    /// Current offset in the `sorted_pk_indices`.
+    offset: usize,
+}
+
+impl DictBuilderReader {
+    fn new(blocks: Vec<DictBlock>, sorted_pk_indices: Vec<PkIndex>) -> Self {
+        Self {
+            blocks,
+            sorted_pk_indices,
+            offset: 0,
+        }
+    }
+
+    /// Returns true if the item in the reader is valid.
+    pub fn is_valid(&self) -> bool {
+        self.offset < self.sorted_pk_indices.len()
+    }
+
+    /// Returns current key.
+    pub fn current_key(&self) -> &[u8] {
+        let pk_index = self.current_pk_index();
+        self.key_by_pk_index(pk_index)
+    }
+
+    /// Returns current [PkIndex] of the key.
+    pub fn current_pk_index(&self) -> PkIndex {
+        assert!(self.is_valid());
+        self.sorted_pk_indices[self.offset]
+    }
+
+    /// Advances the reader.
+    pub fn next(&mut self) {
+        assert!(self.is_valid());
+        self.offset += 1;
+    }
+
+    /// Returns pk indices sorted by keys.
+    pub(crate) fn sorted_pk_index(&self) -> &[PkIndex] {
+        &self.sorted_pk_indices
+    }
+
+    fn key_by_pk_index(&self, pk_index: PkIndex) -> &[u8] {
+        let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
+        self.blocks[block_idx as usize].key_by_pk_index(pk_index)
+    }
+}
+
+/// A key dictionary.
+#[derive(Default)]
+pub struct KeyDict {
+    // TODO(yingwen): We can use key_positions to do a binary search.
+    /// Key map to find a key in the dict.
+    pk_to_index: PkIndexMap,
+    /// Unsorted key blocks.
+    dict_blocks: Vec<DictBlock>,
+    /// Maps pk index to position of the key in [Self::dict_blocks].
+    key_positions: Vec<PkIndex>,
+}
+
+pub type KeyDictRef = Arc<KeyDict>;
+
+impl KeyDict {
+    /// Gets the primary key by its index.
+    ///
+    /// # Panics
+    /// Panics if the index is invalid.
+    pub fn key_by_pk_index(&self, index: PkIndex) -> &[u8] {
+        let position = self.key_positions[index as usize];
+        let block_index = position / MAX_KEYS_PER_BLOCK;
+        self.dict_blocks[block_index as usize].key_by_pk_index(position)
+    }
 }
 
 /// Buffer to store unsorted primary keys.
-pub struct KeyBuffer {
+struct KeyBuffer {
     // We use arrow's binary builder as out default binary builder
     // is LargeBinaryBuilder
     // TODO(yingwen): Change the type binary vector to Binary instead of LargeBinary.
@@ -222,31 +311,6 @@ impl KeyBuffer {
     }
 }
 
-/// A key dictionary.
-#[derive(Default)]
-pub struct KeyDict {
-    /// Key map to find a key in the dict.
-    pk_to_index: PkIndexMap,
-    /// Unsorted key blocks.
-    dict_blocks: Vec<DictBlock>,
-    /// Maps pk index to position of the key in [Self::dict_blocks].
-    key_positions: Vec<PkIndex>,
-}
-
-impl KeyDict {
-    /// Gets the primary key by its index.
-    ///
-    /// # Panics
-    /// Panics if the index is invalid.
-    pub fn key_by_pk_index(&self, index: PkIndex) -> &[u8] {
-        let position = self.key_positions[index as usize];
-        let block_index = position / MAX_KEYS_PER_BLOCK;
-        self.dict_blocks[block_index as usize].key_by_pk_index(position)
-    }
-}
-
-pub type KeyDictRef = Arc<KeyDict>;
-
 /// A block in the key dictionary.
 ///
 /// The block is cheap to clone. Keys in the block are unsorted.
@@ -272,5 +336,78 @@ impl DictBlock {
 
     fn buffer_memory_size(&self) -> usize {
         self.keys.get_buffer_memory_size()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::Rng;
+
+    use super::*;
+
+    fn prepare_input_keys(num_keys: usize) -> Vec<Vec<u8>> {
+        let prefix = ["a", "b", "c", "d", "e", "f"];
+        let mut rng = rand::thread_rng();
+        let mut keys = Vec::with_capacity(num_keys);
+        for i in 0..num_keys {
+            let prefix_idx = rng.gen_range(0..prefix.len());
+            // We don't need to decode the priamry key in index's test so we format the string
+            // into the key.
+            let key = format!("{}{}", prefix[prefix_idx], i);
+            keys.push(key.into_bytes());
+        }
+
+        keys
+    }
+
+    #[test]
+    fn test_write_scan_builder() {
+        let num_keys = MAX_KEYS_PER_BLOCK * 2 + MAX_KEYS_PER_BLOCK / 2;
+        let keys = prepare_input_keys(num_keys.into());
+
+        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 3).into());
+        let mut last_pk_index = None;
+        let mut metrics = WriteMetrics::default();
+        for key in &keys {
+            let pk_index = builder.try_insert_key(key, &mut metrics).unwrap().unwrap();
+            last_pk_index = Some(pk_index);
+        }
+        assert_eq!(num_keys - 1, last_pk_index.unwrap());
+        let key_bytes: usize = keys.iter().map(|key| key.len() * 2).sum();
+        assert_eq!(key_bytes, metrics.key_bytes);
+
+        let mut expect: Vec<_> = keys
+            .into_iter()
+            .enumerate()
+            .map(|(i, key)| (key, i as PkIndex))
+            .collect();
+        expect.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        let mut result = Vec::with_capacity(expect.len());
+        let mut reader = builder.scan();
+        while reader.is_valid() {
+            result.push((reader.current_key().to_vec(), reader.current_pk_index()));
+            reader.next();
+        }
+        assert_eq!(expect, result);
+    }
+
+    #[test]
+    fn test_builder_memory_size() {
+        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 3).into());
+        let mut metrics = WriteMetrics::default();
+        // 513 keys
+        let num_keys = MAX_KEYS_PER_BLOCK * 2 + 1;
+        // Writes 2 blocks
+        for i in 0..num_keys {
+            // Each key is 5 bytes.
+            let key = format!("{i:05}");
+            builder
+                .try_insert_key(key.as_bytes(), &mut metrics)
+                .unwrap();
+        }
+        // num_keys * 5 * 2
+        assert_eq!(5130, metrics.key_bytes);
+        assert_eq!(8850, builder.memory_size());
     }
 }
