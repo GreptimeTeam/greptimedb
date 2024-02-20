@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_query::Output;
 use reqwest::header::HeaderValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use super::header::GREPTIME_DB_HEADER_METRICS;
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::{handler, GreptimeQueryOutput, HttpResponse, ResponseFormat};
 
@@ -27,14 +31,20 @@ pub struct GreptimedbV1Response {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(crate) output: Vec<GreptimeQueryOutput>,
     pub(crate) execution_time_ms: u64,
+
+    // placeholder for header value
+    #[serde(skip)]
+    #[serde(default)]
+    pub(crate) resp_metrics: HashMap<String, Value>,
 }
 
 impl GreptimedbV1Response {
     pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
         match handler::from_output(ResponseFormat::GreptimedbV1, outputs).await {
-            Ok(output) => HttpResponse::GreptimedbV1(Self {
+            Ok((output, resp_metrics)) => HttpResponse::GreptimedbV1(Self {
                 output,
                 execution_time_ms: 0,
+                resp_metrics,
             }),
             Err(err) => HttpResponse::Error(err),
         }
@@ -57,7 +67,14 @@ impl GreptimedbV1Response {
 impl IntoResponse for GreptimedbV1Response {
     fn into_response(self) -> Response {
         let execution_time = self.execution_time_ms;
+        let metrics = if self.resp_metrics.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&self.resp_metrics).ok()
+        };
+
         let mut resp = Json(self).into_response();
+
         resp.headers_mut().insert(
             GREPTIME_DB_HEADER_FORMAT,
             HeaderValue::from_static("greptimedb_v1"),
@@ -66,6 +83,10 @@ impl IntoResponse for GreptimedbV1Response {
             GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),
         );
+        if let Some(m) = metrics.and_then(|m| HeaderValue::from_str(&m).ok()) {
+            resp.headers_mut().insert(GREPTIME_DB_HEADER_METRICS, m);
+        }
+
         resp
     }
 }

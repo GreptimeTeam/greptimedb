@@ -16,6 +16,7 @@ use headers::{Header, HeaderName, HeaderValue};
 
 pub const GREPTIME_DB_HEADER_FORMAT: &str = "x-greptime-format";
 pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
+pub const GREPTIME_DB_HEADER_METRICS: &str = "x-greptime-metrics";
 
 /// Header key of `db-name`. Example format of the header value is `greptime-public`.
 pub static GREPTIME_DB_HEADER_NAME: HeaderName = HeaderName::from_static("x-greptime-db-name");

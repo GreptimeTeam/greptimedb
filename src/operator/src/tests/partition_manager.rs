@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use catalog::kvbackend::MetaKvBackend;
@@ -29,10 +28,6 @@ use datafusion_expr::{lit, Operator};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use meta_client::client::MetaClient;
-use meter_core::collect::Collect;
-use meter_core::data::{ReadRecord, WriteRecord};
-use meter_core::global::global_registry;
-use meter_core::write_calc::WriteCalculator;
 use partition::columns::RangeColumnsPartitionRule;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use partition::partition::{PartitionBound, PartitionDef};
@@ -40,8 +35,6 @@ use partition::range::RangePartitionRule;
 use partition::PartitionRuleRef;
 use store_api::storage::RegionNumber;
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
-use table::meter_insert_request;
-use table::requests::InsertRequest;
 
 pub fn new_test_table_info(
     table_id: u32,
@@ -420,48 +413,4 @@ async fn test_find_regions() {
         regions.unwrap_err(),
         partition::error::Error::FindRegions { .. }
     ));
-}
-
-#[derive(Default)]
-struct MockCollector {
-    pub write_sum: AtomicU32,
-}
-
-impl Collect for MockCollector {
-    fn on_write(&self, record: WriteRecord) {
-        let _ = self
-            .write_sum
-            .fetch_add(record.byte_count, Ordering::Relaxed);
-    }
-
-    fn on_read(&self, _record: ReadRecord) {
-        todo!()
-    }
-}
-
-struct MockCalculator;
-
-impl WriteCalculator<InsertRequest> for MockCalculator {
-    fn calc_byte(&self, _value: &InsertRequest) -> u32 {
-        1024 * 10
-    }
-}
-
-#[test]
-#[ignore]
-fn test_meter_insert_request() {
-    let collector = Arc::new(MockCollector::default());
-    global_registry().set_collector(collector.clone());
-    global_registry().register_calculator(Arc::new(MockCalculator));
-
-    let req = InsertRequest {
-        catalog_name: "greptime".to_string(),
-        schema_name: "public".to_string(),
-        table_name: "numbers".to_string(),
-        columns_values: Default::default(),
-    };
-    meter_insert_request!(req);
-
-    let re = collector.write_sum.load(Ordering::Relaxed);
-    assert_eq!(re, 1024 * 10);
 }

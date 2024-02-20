@@ -68,7 +68,7 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
 
     let query_output = execute_sql(&instance, "select ts from test.demo order by ts limit 1").await;
     match query_output {
-        Output::Stream(s) => {
+        Output::Stream(s, _) => {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
@@ -299,7 +299,7 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
 async fn assert_query_result(instance: &Arc<Instance>, sql: &str, ts: i64, host: &str) {
     let query_output = execute_sql(instance, sql).await;
     match query_output {
-        Output::Stream(s) => {
+        Output::Stream(s, _) => {
             let batches = util::collect(s).await.unwrap();
             // let columns = batches[0].df_recordbatch.columns();
             assert_eq!(2, batches[0].num_columns());
@@ -421,7 +421,7 @@ async fn test_execute_query(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "select sum(number) from numbers limit 20").await;
     match output {
-        Output::Stream(recordbatch) => {
+        Output::Stream(recordbatch, _) => {
             let numbers = util::collect(recordbatch).await.unwrap();
             assert_eq!(1, numbers[0].num_columns());
             assert_eq!(numbers[0].column(0).len(), 1);

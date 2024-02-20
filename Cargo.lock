@@ -1557,6 +1557,8 @@ dependencies = [
  "prometheus",
  "prost 0.12.3",
  "rand",
+ "serde",
+ "serde_json",
  "session",
  "snafu",
  "substrait 0.17.1",
@@ -1948,6 +1950,10 @@ dependencies = [
  "tonic 0.10.2",
  "uuid",
 ]
+
+[[package]]
+name = "common-plugins"
+version = "0.6.0"
 
 [[package]]
 name = "common-procedure"
@@ -4700,9 +4706,9 @@ checksum = "302d7ab3130588088d277783b1e2d2e10c9e9e4a16dd9050e6ec93fb3e7048f4"
 
 [[package]]
 name = "libgit2-sys"
-version = "0.16.2+1.7.2"
+version = "0.16.1+1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee4126d8b4ee5c9d9ea891dd875cfdc1e9d0950437179104b183d7d8a74d24e8"
+checksum = "f2a2bb3680b094add03bb3732ec520ece34da31a8cd2d633d1389d0f0fb60d0c"
 dependencies = [
  "cc",
  "libc",
@@ -5178,7 +5184,7 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=abbd357c1e193cd270ea65ee7652334a150b628f#abbd357c1e193cd270ea65ee7652334a150b628f"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80b72716dcde47ec4161478416a5c6c21343364d#80b72716dcde47ec4161478416a5c6c21343364d"
 dependencies = [
  "anymap",
  "once_cell",
@@ -5188,7 +5194,7 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=abbd357c1e193cd270ea65ee7652334a150b628f#abbd357c1e193cd270ea65ee7652334a150b628f"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=80b72716dcde47ec4161478416a5c6c21343364d#80b72716dcde47ec4161478416a5c6c21343364d"
 dependencies = [
  "meter-core",
 ]
@@ -7242,6 +7248,7 @@ dependencies = [
  "common-function",
  "common-macro",
  "common-meta",
+ "common-plugins",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
@@ -8898,6 +8905,7 @@ dependencies = [
  "common-macro",
  "common-mem-prof",
  "common-meta",
+ "common-plugins",
  "common-query",
  "common-recordbatch",
  "common-runtime",

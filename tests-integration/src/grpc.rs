@@ -147,7 +147,7 @@ mod test {
             )),
         });
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -384,7 +384,7 @@ CREATE TABLE {table_name} (
             ))),
         });
         let output = query(instance, request.clone()).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -477,7 +477,7 @@ CREATE TABLE {table_name} (
         assert!(matches!(output, Output::AffectedRows(6)));
 
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -651,7 +651,7 @@ CREATE TABLE {table_name} (
             )),
         });
         let output = query(instance, request.clone()).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -693,7 +693,7 @@ CREATE TABLE {table_name} (
         assert!(matches!(output, Output::AffectedRows(2)));
 
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -791,7 +791,7 @@ CREATE TABLE {table_name} (
             })),
         });
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();

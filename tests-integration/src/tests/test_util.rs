@@ -330,7 +330,7 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str
     };
 
     let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        Output::Stream(stream, _) => util::collect_batches(stream).await.unwrap(),
         Output::RecordBatches(recordbatches) => recordbatches,
         _ => unreachable!(),
     };

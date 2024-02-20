@@ -95,7 +95,10 @@ impl DatafusionQueryEngine {
             optimized_physical_plan
         };
 
-        Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
+        Ok(Output::Stream(
+            self.execute_stream(&ctx, &physical_plan)?,
+            Some(physical_plan),
+        ))
     }
 
     #[tracing::instrument(skip_all)]
@@ -121,7 +124,7 @@ impl DatafusionQueryEngine {
             .await?;
         let mut stream = match output {
             Output::RecordBatches(batches) => batches.as_stream(),
-            Output::Stream(stream) => stream,
+            Output::Stream(stream, _) => stream,
             _ => unreachable!(),
         };
 
@@ -601,7 +604,7 @@ mod tests {
         let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
 
         match output {
-            Output::Stream(recordbatch) => {
+            Output::Stream(recordbatch, _) => {
                 let numbers = util::collect(recordbatch).await.unwrap();
                 assert_eq!(1, numbers.len());
                 assert_eq!(numbers[0].num_columns(), 1);

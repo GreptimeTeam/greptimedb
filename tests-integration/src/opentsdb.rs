@@ -84,7 +84,7 @@ mod tests {
             .remove(0)
             .unwrap();
         match output {
-            Output::Stream(stream) => {
+            Output::Stream(stream, _) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print().unwrap();
                 let expected = vec![

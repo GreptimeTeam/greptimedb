@@ -93,7 +93,7 @@ def hello() -> vector[str]:
         common_query::Output::RecordBatches(_) => {
             unreachable!()
         }
-        common_query::Output::Stream(s) => {
+        common_query::Output::Stream(s, _) => {
             let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
             let expected = "\
 +---------+

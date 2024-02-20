@@ -37,7 +37,7 @@ impl CsvResponse {
     pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
         match handler::from_output(ResponseFormat::Csv, outputs).await {
             Err(err) => HttpResponse::Error(err),
-            Ok(output) => {
+            Ok((output, _)) => {
                 if output.len() > 1 {
                     HttpResponse::Error(ErrorResponse::from_error_message(
                         ResponseFormat::Csv,

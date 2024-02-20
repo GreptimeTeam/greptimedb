@@ -321,18 +321,6 @@ impl TruncateTableRequest {
     }
 }
 
-#[macro_export]
-macro_rules! meter_insert_request {
-    ($req: expr) => {
-        meter_macros::write_meter!(
-            $req.catalog_name.to_string(),
-            $req.schema_name.to_string(),
-            $req.table_name.to_string(),
-            $req
-        );
-    };
-}
-
 pub fn valid_table_option(key: &str) -> bool {
     matches!(
         key,

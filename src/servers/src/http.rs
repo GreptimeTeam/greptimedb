@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
@@ -82,6 +83,7 @@ pub mod otlp;
 pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
+mod prometheus_resp;
 pub mod script;
 
 pub mod arrow_result;
@@ -182,6 +184,11 @@ impl From<SchemaRef> for OutputSchema {
 pub struct HttpRecordsOutput {
     schema: OutputSchema,
     rows: Vec<Vec<Value>>,
+
+    // plan level execution metrics
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default)]
+    metrics: HashMap<String, Value>,
 }
 
 impl HttpRecordsOutput {
@@ -211,6 +218,7 @@ impl HttpRecordsOutput {
             Ok(HttpRecordsOutput {
                 schema: OutputSchema::from(schema),
                 rows: vec![],
+                metrics: Default::default(),
             })
         } else {
             let mut rows =
@@ -231,6 +239,7 @@ impl HttpRecordsOutput {
             Ok(HttpRecordsOutput {
                 schema: OutputSchema::from(schema),
                 rows,
+                metrics: Default::default(),
             })
         }
     }

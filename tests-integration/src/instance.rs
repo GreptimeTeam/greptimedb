@@ -173,7 +173,7 @@ mod tests {
 
         let sql = "SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host"; // use nanoseconds as where condition
         let output = query(instance, sql).await;
-        let Output::Stream(s) = output else {
+        let Output::Stream(s, _) = output else {
             unreachable!()
         };
         let batches = common_recordbatch::util::collect_batches(s).await.unwrap();

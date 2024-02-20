@@ -43,7 +43,7 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
         .plan(stmt, query_ctx.clone())
         .await
         .unwrap();
-    let Output::Stream(stream) = engine.execute(plan, query_ctx).await.unwrap() else {
+    let Output::Stream(stream, _) = engine.execute(plan, query_ctx).await.unwrap() else {
         unreachable!()
     };
     util::collect(stream).await.unwrap()
