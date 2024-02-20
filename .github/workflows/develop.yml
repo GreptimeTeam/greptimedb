@@ -266,7 +266,6 @@ jobs:
 
   compat:
     name: Compatibility Test
-    if: github.event.pull_request.draft == false
     needs: build
     runs-on: ubuntu-20.04
     timeout-minutes: 60
