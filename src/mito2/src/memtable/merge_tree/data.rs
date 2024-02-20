@@ -40,9 +40,9 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use crate::error;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::{PkId, PkIndex, ShardId};
+use crate::memtable::merge_tree::{PkId, PkIndex};
 
-const PK_INDEX_COLUMN_NAME: &str = "pk_index";
+const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
 
 /// Data part batches returns by `DataParts::read`.
 #[derive(Debug, Clone)]
@@ -50,7 +50,7 @@ pub struct DataBatch {
     /// Primary key index of this batch.
     pk_index: PkIndex,
     /// Record batch of data.
-    rb: RecordBatch,
+    rb: Arc<RecordBatch>,
     /// Range of current primary key inside record batch
     range: Range<usize>,
 }
@@ -68,14 +68,13 @@ impl DataBatch {
         self.range.clone()
     }
 
-    pub(crate) fn as_record_batch(&self) -> RecordBatch {
+    pub(crate) fn slice_record_batch(&self) -> RecordBatch {
         self.rb.slice(self.range.start, self.range.len())
     }
 }
 
 /// Buffer for the value part (pk_index, ts, sequence, op_type, field columns) in a shard.
 pub struct DataBuffer {
-    shard_id: ShardId,
     metadata: RegionMetadataRef,
     /// Schema for data part (primary keys are replaced with pk_index)
     data_part_schema: SchemaRef,
@@ -119,7 +118,6 @@ impl DataBuffer {
 
         let data_part_schema = memtable_schema_to_encoded_schema(&metadata);
         Self {
-            shard_id: 0,
             metadata,
             data_part_schema,
             field_types,
@@ -261,7 +259,7 @@ fn data_buffer_to_record_batches(
 
 #[derive(Debug)]
 pub(crate) struct DataBufferIter {
-    batch: RecordBatch,
+    batch: Arc<RecordBatch>,
     offset: usize,
     current_data_batch: Option<DataBatch>,
 }
@@ -269,7 +267,7 @@ pub(crate) struct DataBufferIter {
 impl DataBufferIter {
     pub(crate) fn new(batch: RecordBatch) -> Result<Self> {
         let mut iter = Self {
-            batch,
+            batch: Arc::new(batch),
             offset: 0,
             current_data_batch: None,
         };
@@ -639,7 +637,7 @@ mod tests {
     fn check_buffer_values_equal(iter: &mut DataBufferIter, expected_values: &[Vec<f64>]) {
         let mut output = Vec::with_capacity(expected_values.len());
         while iter.is_valid() {
-            let batch = iter.current_data_batch().as_record_batch();
+            let batch = iter.current_data_batch().slice_record_batch();
             let values = batch
                 .column_by_name("v1")
                 .unwrap()
