@@ -26,7 +26,7 @@ use crate::error::{ParseProcedureIdSnafu, Result};
 
 /// A request to migrate region.
 #[derive(Clone)]
-pub struct MigrageRegionRequest {
+pub struct MigrateRegionRequest {
     pub region_id: u64,
     pub from_peer: u64,
     pub to_peer: u64,

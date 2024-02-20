@@ -28,7 +28,7 @@ use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
 use common_meta::rpc::procedure::{
-    MigrageRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -198,7 +198,7 @@ impl ProcedureExecutor for MetaClient {
     async fn migrate_region(
         &self,
         _ctx: &ExecutorContext,
-        request: MigrageRegionRequest,
+        request: MigrateRegionRequest,
     ) -> MetaResult<MigrateRegionResponse> {
         self.migrate_region(request)
             .await
@@ -361,7 +361,7 @@ impl MetaClient {
     /// Submit a region migration task.
     pub async fn migrate_region(
         &self,
-        request: MigrageRegionRequest,
+        request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse> {
         self.procedure_client()?
             .migrate_region(

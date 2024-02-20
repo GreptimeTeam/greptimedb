@@ -50,7 +50,7 @@ use crate::rpc::ddl::{
     TruncateTableTask,
 };
 use crate::rpc::procedure;
-use crate::rpc::procedure::{MigrageRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
+use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 use crate::rpc::router::RegionRoute;
 use crate::table_name::TableName;
 use crate::ClusterId;
@@ -576,7 +576,7 @@ impl ProcedureExecutor for DdlManager {
     async fn migrate_region(
         &self,
         _ctx: &ExecutorContext,
-        _request: MigrageRegionRequest,
+        _request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse> {
         UnsupportedSnafu {
             operation: "migrate_region",

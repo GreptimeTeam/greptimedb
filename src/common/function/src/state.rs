@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::handlers::{MetaServiceHandlerRef, TableMutationHandlerRef};
+use crate::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
 
 /// Shared state for SQL functions.
 /// The handlers in state may be `None` in cli command-line or test cases.
@@ -20,6 +20,6 @@ use crate::handlers::{MetaServiceHandlerRef, TableMutationHandlerRef};
 pub struct FunctionState {
     // The table mutation handler
     pub table_mutation_handler: Option<TableMutationHandlerRef>,
-    // The meta service handler
-    pub meta_service_handler: Option<MetaServiceHandlerRef>,
+    // The procedure service handler
+    pub procedure_service_handler: Option<ProcedureServiceHandlerRef>,
 }

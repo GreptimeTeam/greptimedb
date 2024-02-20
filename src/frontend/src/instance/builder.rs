@@ -24,6 +24,7 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
+use operator::procedure::ProcedureServiceOperator;
 use operator::statement::StatementExecutor;
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
@@ -113,10 +114,15 @@ impl FrontendBuilder {
             deleter.clone(),
         ));
 
+        let procedure_service_handler = Arc::new(ProcedureServiceOperator::new(
+            self.procedure_executor.clone(),
+        ));
+
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
             Some(region_query_handler.clone()),
             Some(table_mutation_handler),
+            Some(procedure_service_handler),
             true,
             plugins.clone(),
         )

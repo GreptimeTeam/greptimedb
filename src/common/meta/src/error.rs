@@ -106,7 +106,7 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Procedure not found: #{pid}"))]
+    #[snafu(display("Procedure not found: {pid}"))]
     ProcedureNotFound { location: Location, pid: String },
 
     #[snafu(display("Failed to parse procedure id: {key}"))]

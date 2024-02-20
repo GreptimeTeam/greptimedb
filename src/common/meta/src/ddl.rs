@@ -26,7 +26,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
-use crate::rpc::procedure::{MigrageRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
+use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 
 pub mod alter_table;
 pub mod create_logical_tables;
@@ -61,7 +61,7 @@ pub trait ProcedureExecutor: Send + Sync {
     async fn migrate_region(
         &self,
         ctx: &ExecutorContext,
-        request: MigrageRegionRequest,
+        request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse>;
 
     /// Query the procedure state by its id
