@@ -134,22 +134,14 @@ impl From<Status> for Error {
 
 impl Error {
     pub fn should_retry(&self) -> bool {
+        // TODO(weny): figure out each case of these codes.
         matches!(
             self,
             Self::RegionServer {
                 code: Code::Cancelled,
                 ..
             } | Self::RegionServer {
-                code: Code::Unknown,
-                ..
-            } | Self::RegionServer {
                 code: Code::DeadlineExceeded,
-                ..
-            } | Self::RegionServer {
-                code: Code::ResourceExhausted,
-                ..
-            } | Self::RegionServer {
-                code: Code::Aborted,
                 ..
             } | Self::RegionServer {
                 code: Code::Unavailable,

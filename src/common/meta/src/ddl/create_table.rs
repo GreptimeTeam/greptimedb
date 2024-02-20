@@ -177,10 +177,7 @@ impl CreateTableProcedure {
     /// Retry:
     /// - If the underlying servers returns one of the following [Code](tonic::status::Code):
     ///   - [Code::Cancelled](tonic::status::Code::Cancelled)
-    ///   - [Code::Unknown](tonic::status::Code::Unknown)
     ///   - [Code::DeadlineExceeded](tonic::status::Code::DeadlineExceeded)
-    ///   - [Code::ResourceExhausted](tonic::status::Code::ResourceExhausted)
-    ///   - [Code::Aborted](tonic::status::Code::Aborted)
     ///   - [Code::Unavailable](tonic::status::Code::Unavailable)
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
         // Safety: the table route must be allocated.
