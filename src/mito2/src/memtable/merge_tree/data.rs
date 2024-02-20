@@ -78,8 +78,6 @@ pub struct DataBuffer {
     metadata: RegionMetadataRef,
     /// Schema for data part (primary keys are replaced with pk_index)
     data_part_schema: SchemaRef,
-    /// Data types for field columns.
-    field_types: Vec<ConcreteDataType>,
     /// Builder for primary key index.
     pk_index_builder: UInt16VectorBuilder,
     /// Builder for timestamp column.
@@ -89,7 +87,7 @@ pub struct DataBuffer {
     /// Builder for op_type column.
     op_type_builder: UInt8VectorBuilder,
     /// Builders for field columns.
-    field_builders: Vec<Option<Box<dyn MutableVector>>>,
+    field_builders: Vec<LazyMutableVectorBuilder>,
 }
 
 impl DataBuffer {
@@ -105,17 +103,15 @@ impl DataBuffer {
         let sequence_builder = UInt64VectorBuilder::with_capacity(init_capacity);
         let op_type_builder = UInt8VectorBuilder::with_capacity(init_capacity);
 
-        let field_types = metadata
+        let field_builders = metadata
             .field_columns()
-            .map(|c| c.column_schema.data_type.clone())
+            .map(|c| LazyMutableVectorBuilder::new(c.column_schema.data_type.clone()))
             .collect::<Vec<_>>();
-        let field_builders = (0..field_types.len()).map(|_| None).collect();
 
         let data_part_schema = memtable_schema_to_encoded_schema(&metadata);
         Self {
             metadata,
             data_part_schema,
-            field_types,
             pk_index_builder: pk_id_builder,
             ts_builder,
             sequence_builder,
@@ -125,7 +121,7 @@ impl DataBuffer {
     }
 
     /// Writes a row to data buffer.
-    pub fn write_row(&mut self, pk_id: PkId, kv: KeyValue) -> bool {
+    pub fn write_row(&mut self, pk_id: PkId, kv: KeyValue) {
         self.ts_builder.push_value_ref(kv.timestamp());
         self.pk_index_builder.push(Some(pk_id.pk_index));
         self.sequence_builder.push(Some(kv.sequence()));
@@ -135,16 +131,9 @@ impl DataBuffer {
 
         for (idx, field) in kv.fields().enumerate() {
             self.field_builders[idx]
-                .get_or_insert_with(|| {
-                    let mut builder =
-                        self.field_types[idx].create_mutable_vector(self.ts_builder.len());
-                    builder.push_nulls(self.ts_builder.len() - 1);
-                    builder
-                })
+                .get_or_create_builder(self.ts_builder.len())
                 .push_value_ref(field);
         }
-
-        self.ts_builder.len() >= self.freeze_threshold
     }
 
     /// Freezes `DataBuffer` to bytes. Use `pk_weights` to convert pk_id to pk sort order.
@@ -156,8 +145,14 @@ impl DataBuffer {
 
     /// Reads batches from data buffer without resetting builder's buffers.
     pub fn iter(&mut self, pk_weights: &[u16]) -> Result<DataBufferIter> {
-        let batch =
-            data_buffer_to_record_batches(self.data_part_schema.clone(), self, pk_weights, true)?;
+        // todo(hl): control whether to dedup while invoking `iter`.
+        let batch = data_buffer_to_record_batches(
+            self.data_part_schema.clone(),
+            self,
+            pk_weights,
+            true,
+            true,
+        )?;
         DataBufferIter::new(batch)
     }
 
@@ -172,12 +167,35 @@ impl DataBuffer {
     }
 }
 
+enum LazyMutableVectorBuilder {
+    Type(ConcreteDataType),
+    Builder(Box<dyn MutableVector>),
+}
+
+impl LazyMutableVectorBuilder {
+    fn new(ty: ConcreteDataType) -> Self {
+        Self::Type(ty)
+    }
+
+    fn get_or_create_builder(&mut self, init_capacity: usize) -> &mut Box<dyn MutableVector> {
+        match self {
+            LazyMutableVectorBuilder::Type(ty) => {
+                let builder = ty.create_mutable_vector(init_capacity);
+                *self = LazyMutableVectorBuilder::Builder(builder);
+                self.get_or_create_builder(init_capacity)
+            }
+            LazyMutableVectorBuilder::Builder(builder) => builder,
+        }
+    }
+}
+
 /// Converts `DataBuffer` to record batches, with rows sorted according to pk_weights.
 fn data_buffer_to_record_batches(
     schema: SchemaRef,
     buffer: &mut DataBuffer,
     pk_weights: &[u16],
     keep_data: bool,
+    dedup: bool,
 ) -> Result<RecordBatch> {
     let num_rows = buffer.ts_builder.len();
 
@@ -201,7 +219,9 @@ fn data_buffer_to_record_batches(
 
     // sort and dedup
     rows.sort_unstable_by(|l, r| l.1.cmp(&r.1));
-    rows.dedup_by(|l, r| l.1.timestamp == r.1.timestamp);
+    if dedup {
+        rows.dedup_by(|l, r| l.1.timestamp == r.1.timestamp);
+    }
     let indices_to_take = UInt32Array::from_iter_values(rows.into_iter().map(|v| v.0 as u32));
 
     let mut columns = Vec::with_capacity(4 + buffer.field_builders.len());
@@ -226,22 +246,21 @@ fn data_buffer_to_record_batches(
             .context(error::ComputeArrowSnafu)?,
     );
 
-    for (idx, c) in buffer.field_builders.iter_mut().enumerate() {
-        let array = match c {
-            None => {
-                let mut single_null = buffer.field_types[idx].create_mutable_vector(num_rows);
+    for b in buffer.field_builders.iter_mut() {
+        let array = match b {
+            LazyMutableVectorBuilder::Type(ty) => {
+                let mut single_null = ty.create_mutable_vector(num_rows);
                 single_null.push_nulls(num_rows);
                 single_null.to_vector().to_arrow_array()
             }
-            Some(v) => {
+            LazyMutableVectorBuilder::Builder(builder) => {
                 if keep_data {
-                    v.to_vector_cloned().to_arrow_array()
+                    builder.to_vector_cloned().to_arrow_array()
                 } else {
-                    v.to_vector().to_arrow_array()
+                    builder.to_vector().to_arrow_array()
                 }
             }
         };
-
         columns.push(
             arrow::compute::take(&array, &indices_to_take, None)
                 .context(error::ComputeArrowSnafu)?,
@@ -473,8 +492,13 @@ impl<'a> DataPartEncoder<'a> {
         let mut bytes = Vec::with_capacity(1024);
         let mut writer = ArrowWriter::try_new(&mut bytes, self.schema.clone(), self.writer_props())
             .context(error::EncodeMemtableSnafu)?;
-        let rb =
-            data_buffer_to_record_batches(self.schema.clone(), source, self.pk_weights, false)?;
+        let rb = data_buffer_to_record_batches(
+            self.schema.clone(),
+            source,
+            self.pk_weights,
+            false,
+            true,
+        )?;
         writer.write(&rb).context(error::EncodeMemtableSnafu)?;
         let _file_meta = writer.close().context(error::EncodeMemtableSnafu)?;
         Ok(Bytes::from(bytes))
@@ -507,6 +531,26 @@ mod tests {
     use super::*;
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
+    #[test]
+    fn test_lazy_mutable_vector_builder() {
+        let mut builder = LazyMutableVectorBuilder::new(ConcreteDataType::boolean_datatype());
+        match builder {
+            LazyMutableVectorBuilder::Type(ref t) => {
+                assert_eq!(&ConcreteDataType::boolean_datatype(), t);
+            }
+            LazyMutableVectorBuilder::Builder(_) => {
+                unreachable!()
+            }
+        }
+        builder.get_or_create_builder(1);
+        match builder {
+            LazyMutableVectorBuilder::Type(_) => {
+                unreachable!()
+            }
+            LazyMutableVectorBuilder::Builder(_) => {}
+        }
+    }
+
     fn check_test_data_buffer_to_record_batches(keep_data: bool) {
         let meta = metadata_for_test();
         let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
@@ -516,7 +560,8 @@ mod tests {
         write_rows_to_buffer(&mut buffer, &meta, 0, vec![2], vec![Some(1.1)], 3);
         assert_eq!(5, buffer.num_rows());
         let schema = memtable_schema_to_encoded_schema(&meta);
-        let batch = data_buffer_to_record_batches(schema, &mut buffer, &[3, 1], keep_data).unwrap();
+        let batch =
+            data_buffer_to_record_batches(schema, &mut buffer, &[3, 1], keep_data, true).unwrap();
 
         assert_eq!(
             vec![1, 2, 1, 2],
@@ -567,6 +612,46 @@ mod tests {
     fn test_data_buffer_to_record_batches() {
         check_test_data_buffer_to_record_batches(true);
         check_test_data_buffer_to_record_batches(false);
+    }
+
+    #[test]
+    fn test_data_buffer_to_record_batches_without_dedup() {
+        let meta = metadata_for_test();
+        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
+
+        write_rows_to_buffer(&mut buffer, &meta, 0, vec![1, 2], vec![Some(0.1), None], 1);
+        write_rows_to_buffer(&mut buffer, &meta, 1, vec![1, 2], vec![Some(1.1), None], 2);
+        write_rows_to_buffer(&mut buffer, &meta, 0, vec![2], vec![Some(1.1)], 3);
+        assert_eq!(5, buffer.num_rows());
+        let schema = memtable_schema_to_encoded_schema(&meta);
+        let batch =
+            data_buffer_to_record_batches(schema, &mut buffer, &[3, 1], true, false).unwrap();
+
+        assert_eq!(
+            vec![1, 1, 0, 0, 0],
+            batch
+                .column_by_name(PK_INDEX_COLUMN_NAME)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .unwrap()
+                .iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            vec![1, 2, 1, 2, 2],
+            batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<_>>()
+        );
     }
 
     fn write_rows_to_buffer(
