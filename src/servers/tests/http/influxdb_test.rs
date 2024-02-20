@@ -169,7 +169,7 @@ async fn test_influxdb_write() {
         .await;
     assert_eq!(result.status(), 401);
     assert_eq!(
-        result.headers().get(GREPTIME_DB_HEADER_FORMAT).unwrap(),
+        result.headers().get(&GREPTIME_DB_HEADER_FORMAT).unwrap(),
         "influxdb_v1",
     );
     assert_eq!(
@@ -185,7 +185,7 @@ async fn test_influxdb_write() {
         .await;
     assert_eq!(result.status(), 401);
     assert_eq!(
-        result.headers().get(GREPTIME_DB_HEADER_FORMAT).unwrap(),
+        result.headers().get(&GREPTIME_DB_HEADER_FORMAT).unwrap(),
         "influxdb_v1",
     );
     assert_eq!(
