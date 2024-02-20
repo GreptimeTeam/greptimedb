@@ -72,12 +72,14 @@ impl Function for ProcedureStateFunction {
         );
 
         let pids = columns[0].clone();
+        let expect_len = pids.len();
+        let is_const = pids.is_const();
 
         match pids.data_type() {
             ConcreteDataType::String(_) => {
                 // TODO(dennis): datafusion UDF doesn't support async function currently
                 std::thread::spawn(move || {
-                    let pids: &StringVector = if pids.is_const() {
+                    let pids: &StringVector = if is_const {
                         let pids: &ConstantVector = unsafe { Helper::static_cast(&pids) };
                         unsafe { Helper::static_cast(pids.inner()) }
                     } else {
@@ -110,7 +112,13 @@ impl Function for ProcedureStateFunction {
                         })
                         .collect::<Result<Vec<_>>>()?;
 
-                    Ok(Arc::new(StringVector::from(states)) as _)
+                    let results: VectorRef = Arc::new(StringVector::from(states));
+
+                    if is_const {
+                        Ok(Arc::new(ConstantVector::new(results, expect_len)) as _)
+                    } else {
+                        Ok(results)
+                    }
                 })
                 .join()
                 .map_err(|e| {
