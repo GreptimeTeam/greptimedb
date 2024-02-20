@@ -29,7 +29,7 @@ use rustls_pki_types::{CertificateDer, ServerName};
 use servers::error::Result;
 use servers::postgres::PostgresServer;
 use servers::server::Server;
-use servers::tls::TlsOption;
+use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::test_util::MemTable;
 use table::TableRef;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
@@ -60,9 +60,15 @@ fn create_postgres_server(
         None
     };
 
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
     Ok(Box::new(PostgresServer::new(
         instance,
-        tls,
+        tls.should_force_tls(),
+        tls_server_config,
         io_runtime,
         user_provider,
     )))

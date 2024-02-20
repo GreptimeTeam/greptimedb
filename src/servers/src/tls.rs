@@ -14,6 +14,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, Error, ErrorKind};
+use std::sync::{Arc, RwLock};
 
 use rustls::ServerConfig;
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
@@ -109,6 +110,32 @@ impl TlsOption {
 
     pub fn should_force_tls(&self) -> bool {
         !matches!(self.mode, TlsMode::Disable | TlsMode::Prefer)
+    }
+}
+
+pub struct ReloadableTlsServerConfig {
+    tls_option: TlsOption,
+    config: RwLock<Option<Arc<ServerConfig>>>,
+}
+
+impl ReloadableTlsServerConfig {
+    pub fn try_new(tls_option: TlsOption) -> Result<ReloadableTlsServerConfig, Error> {
+        let server_config = tls_option.setup()?;
+        Ok(Self {
+            tls_option,
+            config: RwLock::new(server_config.map(Arc::new)),
+        })
+    }
+
+    /// Reread server certificates and keys from file system.
+    pub fn reload(&self) -> Result<(), Error> {
+        let server_config = self.tls_option.setup()?;
+        *self.config.write().unwrap() = server_config.map(Arc::new);
+        Ok(())
+    }
+
+    pub fn get_server_config(&self) -> Option<Arc<ServerConfig>> {
+        self.config.read().unwrap().clone()
     }
 }
 

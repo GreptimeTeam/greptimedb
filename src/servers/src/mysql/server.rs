@@ -33,6 +33,7 @@ use crate::error::{Error, Result};
 use crate::mysql::handler::MysqlInstanceShim;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
+use crate::tls::ReloadableTlsServerConfig;
 
 // Default size of ResultSet write buffer: 100KB
 const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
@@ -68,7 +69,7 @@ impl MysqlSpawnRef {
 pub struct MysqlSpawnConfig {
     // tls config
     force_tls: bool,
-    tls: Option<Arc<ServerConfig>>,
+    tls: Arc<ReloadableTlsServerConfig>,
     // other shim config
     reject_no_database: bool,
 }
@@ -76,7 +77,7 @@ pub struct MysqlSpawnConfig {
 impl MysqlSpawnConfig {
     pub fn new(
         force_tls: bool,
-        tls: Option<Arc<ServerConfig>>,
+        tls: Arc<ReloadableTlsServerConfig>,
         reject_no_database: bool,
     ) -> MysqlSpawnConfig {
         MysqlSpawnConfig {
@@ -87,7 +88,7 @@ impl MysqlSpawnConfig {
     }
 
     fn tls(&self) -> Option<Arc<ServerConfig>> {
-        self.tls.clone()
+        self.tls.get_server_config()
     }
 }
 

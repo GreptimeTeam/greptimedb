@@ -30,6 +30,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::server::{Server, ServerHandlers};
+use servers::tls::ReloadableTlsServerConfig;
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu};
@@ -195,6 +196,12 @@ where
             let opts = &opts.mysql;
             let mysql_addr = parse_addr(&opts.addr)?;
 
+            let tls_server_config = Arc::new(
+                ReloadableTlsServerConfig::try_new(opts.tls.clone())
+                    .context(InternalIoSnafu)
+                    .context(StartServerSnafu)?,
+            );
+
             let mysql_io_runtime = Arc::new(
                 RuntimeBuilder::default()
                     .worker_threads(opts.runtime_size)
@@ -210,11 +217,7 @@ where
                 )),
                 Arc::new(MysqlSpawnConfig::new(
                     opts.tls.should_force_tls(),
-                    opts.tls
-                        .setup()
-                        .context(InternalIoSnafu)
-                        .context(StartServerSnafu)?
-                        .map(Arc::new),
+                    tls_server_config,
                     opts.reject_no_database.unwrap_or(false),
                 )),
             );
@@ -226,6 +229,12 @@ where
             let opts = &opts.postgres;
             let pg_addr = parse_addr(&opts.addr)?;
 
+            let tls_server_config = Arc::new(
+                ReloadableTlsServerConfig::try_new(opts.tls.clone())
+                    .context(InternalIoSnafu)
+                    .context(StartServerSnafu)?,
+            );
+
             let pg_io_runtime = Arc::new(
                 RuntimeBuilder::default()
                     .worker_threads(opts.runtime_size)
@@ -236,7 +245,8 @@ where
 
             let pg_server = Box::new(PostgresServer::new(
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),
-                opts.tls.clone(),
+                opts.tls.should_force_tls(),
+                tls_server_config,
                 pg_io_runtime,
                 user_provider.clone(),
             )) as Box<dyn Server>;

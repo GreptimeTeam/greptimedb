@@ -30,7 +30,7 @@ use rand::Rng;
 use servers::error::Result;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::server::Server;
-use servers::tls::TlsOption;
+use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::test_util::MemTable;
 use table::TableRef;
 
@@ -59,12 +59,17 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
         provider.set_authorization_info(auth_info);
     }
 
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(opts.tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
     Ok(MysqlServer::create_server(
         io_runtime,
         Arc::new(MysqlSpawnRef::new(query_handler, Some(Arc::new(provider)))),
         Arc::new(MysqlSpawnConfig::new(
             opts.tls.should_force_tls(),
-            opts.tls.setup()?.map(Arc::new),
+            tls_server_config,
             opts.reject_no_database,
         )),
     ))
