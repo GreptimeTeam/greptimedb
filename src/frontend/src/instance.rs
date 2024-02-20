@@ -147,7 +147,7 @@ impl Instance {
             .enable_router()
             .enable_store()
             .enable_heartbeat()
-            .enable_ddl()
+            .enable_procedure()
             .channel_manager(channel_manager)
             .ddl_channel_manager(ddl_channel_manager)
             .build();

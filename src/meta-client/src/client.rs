@@ -23,10 +23,13 @@ mod store;
 use api::v1::meta::Role;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::ddl::{DdlTaskExecutor, ExecutorContext};
+use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
+use common_meta::rpc::procedure::{
+    MigrageRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
@@ -56,7 +59,7 @@ pub struct MetaClientBuilder {
     enable_router: bool,
     enable_store: bool,
     enable_lock: bool,
-    enable_ddl: bool,
+    enable_procedure: bool,
     channel_manager: Option<ChannelManager>,
     ddl_channel_manager: Option<ChannelManager>,
     heartbeat_channel_manager: Option<ChannelManager>,
@@ -99,9 +102,9 @@ impl MetaClientBuilder {
         }
     }
 
-    pub fn enable_ddl(self) -> Self {
+    pub fn enable_procedure(self) -> Self {
         Self {
-            enable_ddl: true,
+            enable_procedure: true,
             ..self
         }
     }
@@ -155,9 +158,9 @@ impl MetaClientBuilder {
         if self.enable_lock {
             client.lock = Some(LockClient::new(self.id, self.role, mgr.clone()));
         }
-        if self.enable_ddl {
+        if self.enable_procedure {
             let mgr = self.ddl_channel_manager.unwrap_or(mgr);
-            client.ddl = Some(ProcedureClient::new(
+            client.procedure = Some(ProcedureClient::new(
                 self.id,
                 self.role,
                 mgr,
@@ -176,11 +179,11 @@ pub struct MetaClient {
     heartbeat: Option<HeartbeatClient>,
     store: Option<StoreClient>,
     lock: Option<LockClient>,
-    ddl: Option<ProcedureClient>,
+    procedure: Option<ProcedureClient>,
 }
 
 #[async_trait::async_trait]
-impl DdlTaskExecutor for MetaClient {
+impl ProcedureExecutor for MetaClient {
     async fn submit_ddl_task(
         &self,
         _ctx: &ExecutorContext,
@@ -190,6 +193,18 @@ impl DdlTaskExecutor for MetaClient {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
+    }
+
+    async fn migrate_region(
+        &self,
+        ctx: &ExecutorContext,
+        reqeust: MigrageRegionRequest,
+    ) -> MetaResult<MigrateRegionResponse> {
+        todo!();
+    }
+
+    async fn query_procedure_state(&self, pid: &str) -> MetaResult<ProcedureStateResponse> {
+        todo!();
     }
 }
 
@@ -228,7 +243,7 @@ impl MetaClient {
             client.start(urls.clone()).await?;
             info!("Lock client started");
         }
-        if let Some(client) = &mut self.ddl {
+        if let Some(client) = &mut self.procedure {
             client.start(urls).await?;
             info!("DDL client started");
         }
@@ -334,7 +349,7 @@ impl MetaClient {
         req: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
         let res = self
-            .ddl_client()?
+            .procedure_client()?
             .submit_ddl_task(req.try_into().context(error::ConvertMetaRequestSnafu)?)
             .await?
             .try_into()
@@ -365,8 +380,8 @@ impl MetaClient {
     }
 
     #[inline]
-    pub fn ddl_client(&self) -> Result<ProcedureClient> {
-        self.ddl
+    pub fn procedure_client(&self) -> Result<ProcedureClient> {
+        self.procedure
             .clone()
             .context(error::NotStartedSnafu { name: "ddl_client" })
     }

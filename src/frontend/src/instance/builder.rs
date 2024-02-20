@@ -19,7 +19,7 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::Plugins;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::datanode_manager::DatanodeManagerRef;
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use operator::delete::Deleter;
@@ -40,7 +40,7 @@ pub struct FrontendBuilder {
     cache_invalidator: Option<CacheInvalidatorRef>,
     datanode_manager: DatanodeManagerRef,
     plugins: Option<Plugins>,
-    ddl_task_executor: DdlTaskExecutorRef,
+    procedure_executor: ProcedureExecutorRef,
     heartbeat_task: Option<HeartbeatTask>,
 }
 
@@ -48,14 +48,14 @@ impl FrontendBuilder {
     pub fn new(
         kv_backend: KvBackendRef,
         datanode_manager: DatanodeManagerRef,
-        ddl_task_executor: DdlTaskExecutorRef,
+        procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {
             kv_backend,
             cache_invalidator: None,
             datanode_manager,
             plugins: None,
-            ddl_task_executor,
+            procedure_executor,
             heartbeat_task: None,
         }
     }
@@ -127,7 +127,7 @@ impl FrontendBuilder {
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
             query_engine.clone(),
-            self.ddl_task_executor,
+            self.procedure_executor,
             kv_backend.clone(),
             catalog_manager.clone(),
             inserter.clone(),

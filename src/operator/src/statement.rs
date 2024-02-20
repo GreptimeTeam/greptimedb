@@ -26,7 +26,7 @@ use std::sync::Arc;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
@@ -61,7 +61,7 @@ use crate::table::table_idents_to_full_name;
 pub struct StatementExecutor {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
-    ddl_executor: DdlTaskExecutorRef,
+    procedure_executor: ProcedureExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
@@ -72,7 +72,7 @@ impl StatementExecutor {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
-        ddl_task_executor: DdlTaskExecutorRef,
+        procedure_executor: ProcedureExecutorRef,
         kv_backend: KvBackendRef,
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
@@ -80,7 +80,7 @@ impl StatementExecutor {
         Self {
             catalog_manager,
             query_engine,
-            ddl_executor: ddl_task_executor,
+            procedure_executor,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
             cache_invalidator,

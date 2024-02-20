@@ -28,7 +28,10 @@ use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::ddl::truncate_table::TruncateTableProcedure;
-use crate::ddl::{utils, DdlContext, DdlTaskExecutor, ExecutorContext};
+use crate::ddl::{
+    utils, DdlContext, ExecutorContext, ProcedureExecutor, TableMetadata,
+    TableMetadataAllocatorContext,
+};
 use crate::error::{
     self, EmptyCreateTableTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
     SubmitProcedureSnafu, TableNotFoundSnafu, WaitProcedureSnafu,
@@ -46,6 +49,7 @@ use crate::rpc::ddl::{
     AlterTableTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
     TruncateTableTask,
 };
+use crate::rpc::procedure::{MigrageRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 use crate::rpc::router::RegionRoute;
 use crate::table_name::TableName;
 use crate::ClusterId;
@@ -528,7 +532,7 @@ async fn handle_create_logical_table_tasks(
 }
 
 #[async_trait::async_trait]
-impl DdlTaskExecutor for DdlManager {
+impl ProcedureExecutor for DdlManager {
     async fn submit_ddl_task(
         &self,
         ctx: &ExecutorContext,
@@ -565,6 +569,18 @@ impl DdlTaskExecutor for DdlManager {
         }
         .trace(span)
         .await
+    }
+
+    async fn migrate_region(
+        &self,
+        ctx: &ExecutorContext,
+        request: MigrageRegionRequest,
+    ) -> Result<MigrateRegionResponse> {
+        todo!();
+    }
+
+    async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
+        todo!();
     }
 }
 
