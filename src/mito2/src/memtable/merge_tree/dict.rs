@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use datatypes::arrow::array::{Array, ArrayBuilder, BinaryArray, BinaryBuilder};
 
-use crate::error::Result;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::PkIndex;
 
@@ -52,7 +51,7 @@ impl KeyDictBuilder {
             num_keys: 0,
             pk_to_index: BTreeMap::new(),
             key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
-            dict_blocks: Vec::new(),
+            dict_blocks: Vec::with_capacity(capacity / MAX_KEYS_PER_BLOCK as usize + 1),
             key_bytes_in_index: 0,
         }
     }
@@ -65,20 +64,16 @@ impl KeyDictBuilder {
     /// Adds the key to the builder and returns its index if the builder is not full.
     ///
     /// Returns `None` if the builder is full.
-    pub fn try_insert_key(
-        &mut self,
-        key: &[u8],
-        metrics: &mut WriteMetrics,
-    ) -> Result<Option<PkIndex>> {
+    pub fn try_insert_key(&mut self, key: &[u8], metrics: &mut WriteMetrics) -> Option<PkIndex> {
         if let Some(pk_index) = self.pk_to_index.get(key).copied() {
             // Already in the builder.
-            return Ok(Some(pk_index));
+            return Some(pk_index);
         }
 
         // A new key.
         if self.num_keys >= self.capacity {
             // The builder is full.
-            return Ok(None);
+            return None;
         }
 
         if self.key_buffer.len() >= MAX_KEYS_PER_BLOCK.into() {
@@ -96,7 +91,7 @@ impl KeyDictBuilder {
         metrics.key_bytes += key.len() * 2;
         self.key_bytes_in_index += key.len();
 
-        Ok(Some(pk_index))
+        Some(pk_index)
     }
 
     /// Memory size of the builder.
@@ -351,7 +346,7 @@ mod tests {
         let mut keys = Vec::with_capacity(num_keys);
         for i in 0..num_keys {
             let prefix_idx = rng.gen_range(0..prefix.len());
-            // We don't need to decode the priamry key in index's test so we format the string
+            // We don't need to decode the primary key in index's test so we format the string
             // into the key.
             let key = format!("{}{}", prefix[prefix_idx], i);
             keys.push(key.into_bytes());
@@ -369,7 +364,7 @@ mod tests {
         let mut last_pk_index = None;
         let mut metrics = WriteMetrics::default();
         for key in &keys {
-            let pk_index = builder.try_insert_key(key, &mut metrics).unwrap().unwrap();
+            let pk_index = builder.try_insert_key(key, &mut metrics).unwrap();
             last_pk_index = Some(pk_index);
         }
         assert_eq!(num_keys - 1, last_pk_index.unwrap());
