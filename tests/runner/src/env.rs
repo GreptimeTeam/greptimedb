@@ -362,9 +362,7 @@ impl Env {
             kafka_wal_broker_endpoints: String,
         }
 
-        let data_home = self
-            .data_home
-            .join(format!("greptimedb-{subcommand}-{}", db_ctx.time));
+        let data_home = self.data_home.join(format!("greptimedb-{subcommand}"));
         std::fs::create_dir_all(data_home.as_path()).unwrap();
 
         let wal_dir = data_home.join("wal").display().to_string();
@@ -489,21 +487,26 @@ impl GreptimeDB {
     fn stop(&mut self) {
         if let Some(server_processes) = self.server_processes.clone() {
             let mut server_processes = server_processes.lock().unwrap();
-            for server_process in server_processes.iter_mut() {
-                Env::stop_server(server_process);
+            for mut server_process in server_processes.drain(..) {
+                Env::stop_server(&mut server_process);
+                println!(
+                    "Standalone or Datanode (pid = {}) is stopped",
+                    server_process.id()
+                );
             }
         }
         if let Some(mut metasrv) = self.metasrv_process.take() {
             Env::stop_server(&mut metasrv);
+            println!("Metasrv (pid = {}) is stopped", metasrv.id());
         }
-        if let Some(mut datanode) = self.frontend_process.take() {
-            Env::stop_server(&mut datanode);
+        if let Some(mut frontend) = self.frontend_process.take() {
+            Env::stop_server(&mut frontend);
+            println!("Frontend (pid = {}) is stopped", frontend.id());
         }
         if matches!(self.ctx.wal, WalConfig::Kafka { needs_kafka_cluster, .. } if needs_kafka_cluster)
         {
             util::teardown_wal();
         }
-        println!("Stopped DB.");
     }
 }
 
