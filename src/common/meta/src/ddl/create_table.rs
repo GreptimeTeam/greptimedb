@@ -87,12 +87,12 @@ impl CreateTableProcedure {
         self.table_info().ident.table_id
     }
 
-    fn region_wal_options(&self) -> &Option<HashMap<RegionNumber, String>> {
-        &self.creator.data.region_wal_options
+    fn region_wal_options(&self) -> Option<&HashMap<RegionNumber, String>> {
+        self.creator.data.region_wal_options.as_ref()
     }
 
-    fn table_route(&self) -> &Option<TableRouteValue> {
-        &self.creator.data.table_route
+    fn table_route(&self) -> Option<&TableRouteValue> {
+        self.creator.data.table_route.as_ref()
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -214,7 +214,7 @@ impl CreateTableProcedure {
         request_builder: CreateRequestBuilder,
     ) -> Result<Status> {
         // Safety: the table_route must be allocated.
-        if self.table_route().as_ref().unwrap().is_physical() {
+        if self.table_route().unwrap().is_physical() {
             // Registers opening regions
             let guards = self
                 .creator
@@ -226,7 +226,7 @@ impl CreateTableProcedure {
 
         let create_table_data = &self.creator.data;
         // Safety: the region_wal_options must be allocated
-        let region_wal_options = self.region_wal_options().as_ref().unwrap();
+        let region_wal_options = self.region_wal_options().unwrap();
         let create_table_expr = &create_table_data.task.create_table;
         let catalog = &create_table_expr.catalog_name;
         let schema = &create_table_expr.schema_name;
@@ -291,9 +291,9 @@ impl CreateTableProcedure {
 
         let raw_table_info = self.table_info().clone();
         // Safety: the region_wal_options must be allocated.
-        let region_wal_options = self.region_wal_options().clone().unwrap();
+        let region_wal_options = self.region_wal_options().unwrap().clone();
         // Safety: the table_route must be allocated.
-        let table_route = self.table_route().clone().unwrap();
+        let table_route = self.table_route().unwrap().clone();
         manager
             .create_table_metadata(raw_table_info, table_route, region_wal_options)
             .await?;
