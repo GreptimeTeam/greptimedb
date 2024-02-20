@@ -124,6 +124,7 @@ impl ScalarExpr {
         });
     }
 
+    /// Returns the set of columns that are referenced by `self`.
     pub fn support(&self) -> BTreeSet<usize> {
         let mut support = BTreeSet::new();
         self.visit_post_nolimit(&mut |e| {
