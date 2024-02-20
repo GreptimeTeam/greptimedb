@@ -58,7 +58,7 @@ members = [
     "src/index",
     "tests-fuzz",
     "tests-integration",
-    "tests/runner", "src/common/api",
+    "tests/runner",
 ]
 resolver = "2"
 
