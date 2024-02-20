@@ -220,7 +220,7 @@ fn data_buffer_to_record_batches(
     // sort and dedup
     rows.sort_unstable_by(|l, r| l.1.cmp(&r.1));
     if dedup {
-        rows.dedup_by(|l, r| l.1.timestamp == r.1.timestamp);
+        rows.dedup_by(|l, r| l.1.pk_weight == r.1.pk_weight && l.1.timestamp == r.1.timestamp);
     }
     let indices_to_take = UInt32Array::from_iter_values(rows.into_iter().map(|v| v.0 as u32));
 
@@ -524,7 +524,7 @@ pub struct DataParts {}
 #[cfg(test)]
 mod tests {
     use datafusion::arrow::array::Float64Array;
-    use datatypes::arrow::array::{TimestampMillisecondArray, UInt16Array};
+    use datatypes::arrow::array::{TimestampMillisecondArray, UInt16Array, UInt64Array};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::data_type::AsBytes;
 
@@ -612,6 +612,60 @@ mod tests {
     fn test_data_buffer_to_record_batches() {
         check_test_data_buffer_to_record_batches(true);
         check_test_data_buffer_to_record_batches(false);
+    }
+
+    #[test]
+    fn test_data_buffer_to_record_batches_with_dedup() {
+        let meta = metadata_for_test();
+        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
+
+        write_rows_to_buffer(&mut buffer, &meta, 0, vec![1, 2], vec![Some(0.1), None], 1);
+        write_rows_to_buffer(&mut buffer, &meta, 1, vec![2], vec![Some(1.1)], 2);
+        write_rows_to_buffer(&mut buffer, &meta, 0, vec![2], vec![Some(1.1)], 3);
+        assert_eq!(4, buffer.num_rows());
+        let schema = memtable_schema_to_encoded_schema(&meta);
+        let batch =
+            data_buffer_to_record_batches(schema, &mut buffer, &[0, 1], true, true).unwrap();
+
+        assert_eq!(3, batch.num_rows());
+        assert_eq!(
+            vec![0, 0, 1],
+            batch
+                .column_by_name(PK_INDEX_COLUMN_NAME)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .unwrap()
+                .iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            vec![1, 2, 2],
+            batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            vec![1, 3, 2],
+            batch
+                .column_by_name(SEQUENCE_COLUMN_NAME)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
