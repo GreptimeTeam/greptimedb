@@ -46,22 +46,22 @@ const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
 
 /// Data part batches returns by `DataParts::read`.
 #[derive(Debug, Clone)]
-pub struct DataBatch {
+pub struct DataBatch<'a> {
     /// Primary key index of this batch.
     pk_index: PkIndex,
     /// Record batch of data.
-    rb: Arc<RecordBatch>,
+    rb: &'a RecordBatch,
     /// Range of current primary key inside record batch
     range: Range<usize>,
 }
 
-impl DataBatch {
+impl<'a> DataBatch<'a> {
     pub(crate) fn pk_index(&self) -> PkIndex {
         self.pk_index
     }
 
     pub(crate) fn record_batch(&self) -> &RecordBatch {
-        &self.rb
+        self.rb
     }
 
     pub(crate) fn range(&self) -> Range<usize> {
@@ -272,54 +272,56 @@ fn data_buffer_to_record_batches(
 
 #[derive(Debug)]
 pub(crate) struct DataBufferIter {
-    batch: Arc<RecordBatch>,
+    batch: RecordBatch,
     offset: usize,
-    current_data_batch: Option<DataBatch>,
+    current_batch: Option<(PkIndex, Range<usize>)>,
 }
 
 impl DataBufferIter {
     pub(crate) fn new(batch: RecordBatch) -> Result<Self> {
         let mut iter = Self {
-            batch: Arc::new(batch),
+            batch,
             offset: 0,
-            current_data_batch: None,
+            current_batch: None,
         };
         iter.next()?; // fill data batch for comparison and merge.
         Ok(iter)
     }
 
     pub(crate) fn is_valid(&self) -> bool {
-        self.current_data_batch.is_some()
+        self.current_batch.is_some()
     }
 
     /// # Panics
     /// If Current iterator is not exhausted.
     pub(crate) fn current_data_batch(&self) -> DataBatch {
-        self.current_data_batch.as_ref().unwrap().clone()
+        let (pk_index, range) = self.current_batch.as_ref().unwrap();
+        DataBatch {
+            pk_index: *pk_index,
+            rb: &self.batch,
+            range: range.clone(),
+        }
     }
 
     /// # Panics
-    /// If Current iterator is not exhausted.
+    /// If Current iterator is exhausted.
     pub(crate) fn current_pk_index(&self) -> PkIndex {
-        self.current_data_batch.as_ref().unwrap().pk_index
+        let (pk_index, _) = self.current_batch.as_ref().unwrap();
+        *pk_index
     }
 
     /// Advances iterator to next data batch.
     pub(crate) fn next(&mut self) -> Result<()> {
         if self.offset >= self.batch.num_rows() {
-            self.current_data_batch = None;
+            self.current_batch = None;
             return Ok(());
         }
         let pk_index_array = pk_index_array(&self.batch);
         if let Some((next_pk, range)) = search_next_pk_range(pk_index_array, self.offset) {
             self.offset = range.end;
-            self.current_data_batch = Some(DataBatch {
-                pk_index: next_pk,
-                rb: self.batch.clone(),
-                range,
-            })
+            self.current_batch = Some((next_pk, range))
         } else {
-            self.current_data_batch = None;
+            self.current_batch = None;
         }
         Ok(())
     }
