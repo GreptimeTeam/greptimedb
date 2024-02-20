@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_api::http_headers::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 use tonic::Status;

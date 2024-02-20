@@ -13,7 +13,6 @@ arc-swap = "1.6"
 arrow-flight.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
-common-api.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true

@@ -18,4 +18,6 @@ pub mod ext;
 pub mod format;
 pub mod mock;
 pub mod status_code;
+
+pub use common_api::http_headers::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 pub use snafu;

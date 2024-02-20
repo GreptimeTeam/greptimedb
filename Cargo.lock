@@ -1533,7 +1533,6 @@ dependencies = [
  "arrow-flight",
  "async-stream",
  "async-trait",
- "common-api",
  "common-base",
  "common-catalog",
  "common-error",
@@ -1778,6 +1777,7 @@ dependencies = [
 name = "common-error"
 version = "0.6.0"
 dependencies = [
+ "common-api",
  "snafu",
  "strum 0.25.0",
 ]
@@ -5102,7 +5102,6 @@ dependencies = [
  "api",
  "async-trait",
  "chrono",
- "common-api",
  "common-error",
  "common-grpc",
  "common-macro",

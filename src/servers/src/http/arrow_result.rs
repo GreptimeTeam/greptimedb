@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 use arrow_ipc::writer::FileWriter;
-use axum::http::{header, HeaderName, HeaderValue};
+use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::Output;
