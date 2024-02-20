@@ -212,7 +212,7 @@ async fn test_on_prepare_logical_table_exists_err() {
     task.set_table_id(1025);
     ddl_context
         .table_metadata_manager
-        .create_logic_tables_metadata(vec![(
+        .create_logical_tables_metadata(vec![(
             task.table_info.clone(),
             TableRouteValue::logical(1024, vec![RegionId::new(1025, 1)]),
         )])
@@ -258,7 +258,7 @@ async fn test_on_prepare_with_create_if_table_exists() {
     task.set_table_id(8192);
     ddl_context
         .table_metadata_manager
-        .create_logic_tables_metadata(vec![(
+        .create_logical_tables_metadata(vec![(
             task.table_info.clone(),
             TableRouteValue::logical(1024, vec![RegionId::new(8192, 1)]),
         )])
@@ -306,7 +306,7 @@ async fn test_on_prepare_part_logical_tables_exist() {
     task.set_table_id(8192);
     ddl_context
         .table_metadata_manager
-        .create_logic_tables_metadata(vec![(
+        .create_logical_tables_metadata(vec![(
             task.table_info.clone(),
             TableRouteValue::logical(1024, vec![RegionId::new(8192, 1)]),
         )])
@@ -427,7 +427,7 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
     task.set_table_id(8192);
     ddl_context
         .table_metadata_manager
-        .create_logic_tables_metadata(vec![(
+        .create_logical_tables_metadata(vec![(
             task.table_info.clone(),
             TableRouteValue::logical(1024, vec![RegionId::new(8192, 1)]),
         )])
@@ -506,7 +506,7 @@ async fn test_on_create_metadata_err() {
     task.table_info.ident.table_id = 1025;
     ddl_context
         .table_metadata_manager
-        .create_logic_tables_metadata(vec![(
+        .create_logical_tables_metadata(vec![(
             task.table_info,
             TableRouteValue::logical(512, vec![RegionId::new(1026, 1)]),
         )])
