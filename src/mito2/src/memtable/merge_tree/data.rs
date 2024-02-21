@@ -35,7 +35,6 @@ use datatypes::vectors::{
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use parquet::format::FileMetaData;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
@@ -522,10 +521,9 @@ impl<'a> DataPartEncoder<'a> {
             true,
         )?;
         writer.write(&rb).context(error::EncodeMemtableSnafu)?;
-        let metadata = writer.close().context(error::EncodeMemtableSnafu)?;
+        let _metadata = writer.close().context(error::EncodeMemtableSnafu)?;
         Ok(DataPart::Parquet(ParquetPart {
             data: Bytes::from(bytes),
-            metadata,
         }))
     }
 }
@@ -654,7 +652,6 @@ impl DataPartReader {
 /// Parquet-encoded `DataPart`.
 pub struct ParquetPart {
     data: Bytes,
-    metadata: FileMetaData,
 }
 
 #[cfg(test)]
