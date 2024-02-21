@@ -1,6 +1,6 @@
 ---
 Feature Name:  Multi-dimension Partition Rule
-Tracking Issue: TBD
+Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/3351
 Date: 2024-02-21
 Author: "Ruihang Xia <waynestxia@gmail.com>"
 ---
