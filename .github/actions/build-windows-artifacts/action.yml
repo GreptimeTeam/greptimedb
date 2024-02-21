@@ -65,7 +65,7 @@ runs:
       uses: actions/upload-artifact@v3
       with:
         name: sqlness-logs
-        path: ${{ runner.temp }}/greptime-*.log
+        path: /tmp/greptime-*.log
         retention-days: 3
 
     - name: Build greptime binary
