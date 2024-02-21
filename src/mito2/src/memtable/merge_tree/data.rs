@@ -547,8 +547,7 @@ impl DataPart {
         }
     }
 
-    /// Reads frozen data parts and yields record batches.
-    /// Returned record batches are ga
+    /// Reads frozen data part and yields [DataBatch]es.
     pub fn read(&self, _pk_weights: &[u16]) -> Result<DataPartReader> {
         match self {
             DataPart::Parquet(data_bytes) => DataPartReader::new(data_bytes.data.clone(), None),
