@@ -148,8 +148,8 @@ impl DataBuffer {
     }
 
     /// Reads batches from data buffer without resetting builder's buffers.
-    pub fn iter(&mut self, pk_weights: &[u16]) -> Result<DataBufferIter> {
-        // todo(hl): control whether to dedup while invoking `iter`.
+    pub fn read(&mut self, pk_weights: &[u16]) -> Result<DataBufferReader> {
+        // todo(hl): control whether to dedup while invoking `read`.
         let batch = data_buffer_to_record_batches(
             self.data_part_schema.clone(),
             self,
@@ -158,7 +158,7 @@ impl DataBuffer {
             true,
             true,
         )?;
-        DataBufferIter::new(batch)
+        DataBufferReader::new(batch)
     }
 
     /// Returns num of rows in data buffer.
@@ -290,21 +290,21 @@ fn data_buffer_to_record_batches(
 }
 
 #[derive(Debug)]
-pub(crate) struct DataBufferIter {
+pub(crate) struct DataBufferReader {
     batch: RecordBatch,
     offset: usize,
     current_batch: Option<(PkIndex, Range<usize>)>,
 }
 
-impl DataBufferIter {
+impl DataBufferReader {
     pub(crate) fn new(batch: RecordBatch) -> Result<Self> {
-        let mut iter = Self {
+        let mut reader = Self {
             batch,
             offset: 0,
             current_batch: None,
         };
-        iter.next()?; // fill data batch for comparison and merge.
-        Ok(iter)
+        reader.next()?; // fill data batch for comparison and merge.
+        Ok(reader)
     }
 
     pub(crate) fn is_valid(&self) -> bool {
@@ -312,7 +312,7 @@ impl DataBufferIter {
     }
 
     /// # Panics
-    /// If Current iterator is not exhausted.
+    /// If Current reader is exhausted.
     pub(crate) fn current_data_batch(&self) -> DataBatch {
         let (pk_index, range) = self.current_batch.as_ref().unwrap();
         DataBatch {
@@ -323,13 +323,13 @@ impl DataBufferIter {
     }
 
     /// # Panics
-    /// If Current iterator is exhausted.
+    /// If Current reader is exhausted.
     pub(crate) fn current_pk_index(&self) -> PkIndex {
         let (pk_index, _) = self.current_batch.as_ref().unwrap();
         *pk_index
     }
 
-    /// Advances iterator to next data batch.
+    /// Advances reader to next data batch.
     pub(crate) fn next(&mut self) -> Result<()> {
         if self.offset >= self.batch.num_rows() {
             self.current_batch = None;
@@ -547,50 +547,50 @@ impl DataPart {
         }
     }
 
-    /// Iterates frozen data parts and yields record batches.
+    /// Reads frozen data parts and yields record batches.
     /// Returned record batches are ga
-    pub fn iter(&self, _pk_weights: &[u16]) -> Result<DataPartIter> {
+    pub fn read(&self, _pk_weights: &[u16]) -> Result<DataPartReader> {
         match self {
-            DataPart::Parquet(data_bytes) => DataPartIter::new(data_bytes.data.clone(), None),
+            DataPart::Parquet(data_bytes) => DataPartReader::new(data_bytes.data.clone(), None),
         }
     }
 }
 
-pub struct DataPartIter {
+pub struct DataPartReader {
     inner: ParquetRecordBatchReader,
     current_range: Range<usize>,
     current_pk_index: Option<PkIndex>,
     current_batch: Option<RecordBatch>,
 }
 
-impl Debug for DataPartIter {
+impl Debug for DataPartReader {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DataPartIter")
+        f.debug_struct("DataPartReader")
             .field("current_range", &self.current_range)
             .field("current_pk_index", &self.current_pk_index)
             .finish()
     }
 }
 
-impl DataPartIter {
+impl DataPartReader {
     pub fn new(data: Bytes, batch_size: Option<usize>) -> Result<Self> {
         let mut builder =
             ParquetRecordBatchReaderBuilder::try_new(data).context(error::ReadDataPartSnafu)?;
         if let Some(batch_size) = batch_size {
             builder = builder.with_batch_size(batch_size);
         }
-        let reader = builder.build().context(error::ReadDataPartSnafu)?;
-        let mut iter = Self {
-            inner: reader,
+        let parquet_reader = builder.build().context(error::ReadDataPartSnafu)?;
+        let mut reader = Self {
+            inner: parquet_reader,
             current_pk_index: None,
             current_range: 0..0,
             current_batch: None,
         };
-        iter.next()?;
-        Ok(iter)
+        reader.next()?;
+        Ok(reader)
     }
 
-    /// Returns false if current iter is exhausted.
+    /// Returns false if current reader is exhausted.
     pub(crate) fn is_valid(&self) -> bool {
         self.current_pk_index.is_some()
     }
@@ -598,14 +598,14 @@ impl DataPartIter {
     /// Returns current pk index.
     ///
     /// # Panics
-    /// If iterator is exhausted.
+    /// If reader is exhausted.
     pub(crate) fn current_pk_index(&self) -> PkIndex {
-        self.current_pk_index.expect("DataPartIter is exhausted")
+        self.current_pk_index.expect("DataPartReader is exhausted")
     }
 
-    /// Returns current data batch of iterator.
+    /// Returns current data batch of reader.
     /// # Panics
-    /// If iterator is exhausted.
+    /// If reader is exhausted.
     pub(crate) fn current_data_batch(&self) -> DataBatch {
         let rb = self.current_batch.as_ref().unwrap();
         let pk_index = self.current_pk_index.unwrap();
@@ -907,10 +907,10 @@ mod tests {
         assert_eq!(3, batch.num_rows());
     }
 
-    fn check_buffer_values_equal(iter: &mut DataBufferIter, expected_values: &[Vec<f64>]) {
+    fn check_buffer_values_equal(reader: &mut DataBufferReader, expected_values: &[Vec<f64>]) {
         let mut output = Vec::with_capacity(expected_values.len());
-        while iter.is_valid() {
-            let batch = iter.current_data_batch().slice_record_batch();
+        while reader.is_valid() {
+            let batch = reader.current_data_batch().slice_record_batch();
             let values = batch
                 .column_by_name("v1")
                 .unwrap()
@@ -921,7 +921,7 @@ mod tests {
                 .map(|v| v.unwrap())
                 .collect::<Vec<_>>();
             output.push(values);
-            iter.next().unwrap();
+            reader.next().unwrap();
         }
         assert_eq!(expected_values, output);
     }
@@ -960,7 +960,7 @@ mod tests {
             2,
         );
 
-        let mut iter = buffer.iter(&[0, 1, 3, 2]).unwrap();
+        let mut iter = buffer.read(&[0, 1, 3, 2]).unwrap();
         check_buffer_values_equal(&mut iter, &[vec![1.1, 2.1, 3.1], vec![1.0, 2.0, 3.0]]);
     }
 
@@ -968,11 +968,11 @@ mod tests {
     fn test_iter_empty_data_buffer() {
         let meta = metadata_for_test();
         let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
-        let mut iter = buffer.iter(&[0, 1, 3, 2]).unwrap();
+        let mut iter = buffer.read(&[0, 1, 3, 2]).unwrap();
         check_buffer_values_equal(&mut iter, &[]);
     }
 
-    fn check_part_values_equal(iter: &mut DataPartIter, expected_values: &[Vec<f64>]) {
+    fn check_part_values_equal(iter: &mut DataPartReader, expected_values: &[Vec<f64>]) {
         let mut output = Vec::with_capacity(expected_values.len());
         while iter.is_valid() {
             let batch = iter.current_data_batch().slice_record_batch();
@@ -1025,7 +1025,7 @@ mod tests {
         let encoder = DataPartEncoder::new(&meta, weights, Some(4));
         let encoded = encoder.write(&mut buffer).unwrap();
 
-        let mut iter = encoded.iter(weights).unwrap();
+        let mut iter = encoded.read(weights).unwrap();
         check_part_values_equal(&mut iter, expected_values);
     }
 
