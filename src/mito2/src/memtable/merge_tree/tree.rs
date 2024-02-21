@@ -14,11 +14,15 @@
 
 //! Implementation of the merge tree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
+use datafusion_common::ScalarValue;
+use datatypes::arrow;
+use datatypes::data_type::ConcreteDataType;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -27,9 +31,13 @@ use table::predicate::Predicate;
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::partition::{Partition, PartitionKey, PartitionRef};
+use crate::memtable::merge_tree::partition::{
+    Partition, PartitionKey, PartitionReader, PartitionRef,
+};
 use crate::memtable::merge_tree::MergeTreeConfig;
+use crate::memtable::time_series::primary_key_schema;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
+use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// The merge tree.
@@ -116,10 +124,45 @@ impl MergeTree {
     /// Scans the tree.
     pub fn scan(
         &self,
-        _projection: Option<&[ColumnId]>,
-        _predicate: Option<Predicate>,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
-        todo!()
+        // Creates the projection set.
+        let projection: HashSet<_> = if let Some(projection) = projection {
+            projection.iter().copied().collect()
+        } else {
+            self.metadata.field_columns().map(|c| c.column_id).collect()
+        };
+
+        let filters = predicate
+            .map(|p| {
+                p.exprs()
+                    .iter()
+                    .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let partitions = self.prune_partitions(&filters);
+        let pk_schema = primary_key_schema(&self.metadata);
+        let pk_datatypes = self
+            .metadata
+            .primary_key_columns()
+            .map(|pk| pk.column_schema.data_type.clone())
+            .collect();
+
+        let iter = TreeIter {
+            metadata: self.metadata.clone(),
+            pk_schema,
+            pk_datatypes,
+            projection,
+            filters,
+            row_codec: self.row_codec.clone(),
+            partitions,
+            current_reader: None,
+        };
+
+        Ok(Box::new(iter))
     }
 
     /// Returns true if the tree is empty.
@@ -206,5 +249,49 @@ impl MergeTree {
             .entry(partition_key)
             .or_insert_with(|| Arc::new(Partition::new(self.metadata.clone(), &self.config)))
             .clone()
+    }
+
+    fn prune_partitions(&self, filters: &[SimpleFilterEvaluator]) -> VecDeque<PartitionRef> {
+        let partitions = self.partitions.read().unwrap();
+        if self.is_partitioned {
+            // Prune partition keys.
+            for filter in filters {
+                // Only the first filter takes effect.
+                if Partition::is_partition_column(filter.column_name()) {
+                    let mut pruned = VecDeque::new();
+                    for (key, partition) in partitions.iter() {
+                        if filter
+                            .evaluate_scalar(&ScalarValue::UInt32(Some(*key as u32)))
+                            .unwrap_or(true)
+                        {
+                            pruned.push_back(partition.clone());
+                        }
+                    }
+
+                    return pruned;
+                }
+            }
+        }
+
+        partitions.values().cloned().collect()
+    }
+}
+
+struct TreeIter {
+    metadata: RegionMetadataRef,
+    pk_schema: arrow::datatypes::SchemaRef,
+    pk_datatypes: Vec<ConcreteDataType>,
+    projection: HashSet<ColumnId>,
+    filters: Vec<SimpleFilterEvaluator>,
+    row_codec: Arc<McmpRowCodec>,
+    partitions: VecDeque<PartitionRef>,
+    current_reader: Option<PartitionReader>,
+}
+
+impl Iterator for TreeIter {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unimplemented!()
     }
 }

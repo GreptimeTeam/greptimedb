@@ -141,6 +141,11 @@ impl Partition {
             .map(|meta| meta.column_schema.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
             .unwrap_or(false)
     }
+
+    /// Returns true if this is a partition column.
+    pub(crate) fn is_partition_column(name: &str) -> bool {
+        name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+    }
 }
 
 /// Reader to scan rows in a partition.

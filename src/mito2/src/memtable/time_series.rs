@@ -320,7 +320,9 @@ impl SeriesSet {
 
 /// Creates an arrow [SchemaRef](arrow::datatypes::SchemaRef) that only contains primary keys
 /// of given region schema
-fn primary_key_schema(region_metadata: &RegionMetadataRef) -> arrow::datatypes::SchemaRef {
+pub(crate) fn primary_key_schema(
+    region_metadata: &RegionMetadataRef,
+) -> arrow::datatypes::SchemaRef {
     let fields = region_metadata
         .primary_key_columns()
         .map(|pk| {
