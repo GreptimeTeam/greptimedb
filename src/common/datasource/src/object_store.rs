@@ -56,6 +56,7 @@ pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
 pub fn build_backend(url: &str, connection: &HashMap<String, String>) -> Result<ObjectStore> {
     let (schema, host, path) = parse_url(url)?;
     let (root, _) = find_dir_and_filename(&path);
+    println!("schema {schema}, host {host:?} path {path} root {root}");
 
     match schema.to_uppercase().as_str() {
         S3_SCHEMA => {
