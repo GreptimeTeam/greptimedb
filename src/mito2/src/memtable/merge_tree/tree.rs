@@ -112,7 +112,7 @@ impl MergeTree {
             self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
 
             // Write rows with primary keys.
-            self.write_with_key(&pk_buffer, kv, metrics)?;
+            self.write_with_key(pk_buffer, kv, metrics)?;
         }
 
         metrics.value_bytes +=
@@ -261,7 +261,7 @@ impl MergeTree {
                     let mut pruned = VecDeque::new();
                     for (key, partition) in partitions.iter() {
                         if filter
-                            .evaluate_scalar(&ScalarValue::UInt32(Some(*key as u32)))
+                            .evaluate_scalar(&ScalarValue::UInt32(Some(*key)))
                             .unwrap_or(true)
                         {
                             pruned.push_back(partition.clone());
