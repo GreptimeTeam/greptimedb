@@ -240,7 +240,7 @@ impl MergeTree {
         let partition_key = Partition::get_partition_key(&key_value, self.is_partitioned);
         let partition = self.get_or_create_partition(partition_key);
 
-        partition.write_on_key(key_value, metrics)
+        partition.write_no_key(key_value, metrics)
     }
 
     fn get_or_create_partition(&self, partition_key: PartitionKey) -> PartitionRef {

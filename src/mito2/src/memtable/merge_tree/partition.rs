@@ -74,7 +74,7 @@ impl Partition {
     }
 
     /// Writes to the partition without a primary key.
-    pub fn write_on_key(&self, key_value: KeyValue, metrics: &mut WriteMetrics) -> Result<()> {
+    pub fn write_no_key(&self, key_value: KeyValue, metrics: &mut WriteMetrics) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
         // If no primary key, always write to the first shard.
         if inner.shards.is_empty() {
