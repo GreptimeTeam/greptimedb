@@ -3406,6 +3406,7 @@ dependencies = [
  "datatypes",
  "hydroflow",
  "itertools 0.10.5",
+ "num-traits",
  "serde",
  "servers",
  "session",
