@@ -238,11 +238,13 @@ fn data_buffer_to_record_batches(
             rows.into_iter().map(|(_, key)| key.pk_weight),
         )) as Arc<_>
     } else {
-        arrow::compute::take(&pk_index_v.to_arrow_array(), &indices_to_take, None)
-            .context(error::ComputeArrowSnafu)?
+        pk_index_v.to_arrow_array()
     };
 
-    columns.push(pk_array);
+    columns.push(
+        arrow::compute::take(&pk_array, &indices_to_take, None)
+            .context(error::ComputeArrowSnafu)?,
+    );
 
     columns.push(
         arrow::compute::take(&ts_v.to_arrow_array(), &indices_to_take, None)
