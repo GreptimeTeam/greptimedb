@@ -21,17 +21,11 @@ Considering the future requirements like region repartitioning or autonomous reb
 
 First, we define a simple expression that can be used to define the partition rule. The simple expression is a binary expression expression on the partition key columns that can be evaluated to a boolean value. The binary operator is limited to comparison operators only, like `=`, `!=`, `>`, `>=`, `<`, `<=`. And the operands are limited either literal value or partition column.
 
-Example of valid simple expressions are:
-
-```latex, math
-col_A \eq 10 \\
-col_A \gt 10 \& col_B \gt 20 \\
-col_A \ne 10 \\
-```
+Example of valid simple expressions are $`col_A = 10`$, $`col_A \gt 10 \& col_B \gt 20`$ or $`col_A \ne 10`$.
 
 Those expressions can be used as predicates to divide the key space into different regions. The following example have two partition columns `Col A` and `Col B`, and four partitioned regions.
 
-```latex, math
+```math
 \left\{\begin{aligned}
  
 &col_A \le 10 &Region_1 \\
