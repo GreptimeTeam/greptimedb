@@ -59,16 +59,17 @@ impl Partition {
             return inner.write_to_shard(pk_id, key_value);
         }
 
-        // Write to the shard builder.
-        inner
-            .shard_builder
-            .write_with_key(primary_key, key_value, metrics)?;
         if inner.shard_builder.should_freeze() {
             let shard_id = inner.active_shard_id;
             let shard = inner.shard_builder.finish(shard_id)?;
             inner.active_shard_id += 1;
             inner.shards.push(shard);
         }
+
+        // Write to the shard builder.
+        inner
+            .shard_builder
+            .write_with_key(primary_key, key_value, metrics)?;
 
         Ok(())
     }
