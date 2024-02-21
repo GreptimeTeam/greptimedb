@@ -15,6 +15,7 @@
 //! Data part of a shard.
 
 use std::cmp::{Ordering, Reverse};
+use std::fmt::{Debug, Formatter};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -31,8 +32,10 @@ use datatypes::vectors::{
     TimestampSecondVector, UInt16Vector, UInt16VectorBuilder, UInt64Vector, UInt64VectorBuilder,
     UInt8VectorBuilder,
 };
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
+use parquet::format::FileMetaData;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
@@ -140,8 +143,8 @@ impl DataBuffer {
     /// `freeze` clears the buffers of builders.
     pub fn freeze(&mut self, pk_weights: &[u16]) -> Result<DataPart> {
         let encoder = DataPartEncoder::new(&self.metadata, pk_weights, None);
-        let encoded = encoder.write(self)?;
-        Ok(DataPart::Parquet(encoded))
+        let parts = encoder.write(self)?;
+        Ok(parts)
     }
 
     /// Reads batches from data buffer without resetting builder's buffers.
@@ -506,7 +509,7 @@ impl<'a> DataPartEncoder<'a> {
                 .build()
         })
     }
-    pub fn write(&self, source: &mut DataBuffer) -> Result<Bytes> {
+    pub fn write(&self, source: &mut DataBuffer) -> Result<DataPart> {
         let mut bytes = Vec::with_capacity(1024);
         let mut writer = ArrowWriter::try_new(&mut bytes, self.schema.clone(), self.writer_props())
             .context(error::EncodeMemtableSnafu)?;
@@ -519,26 +522,138 @@ impl<'a> DataPartEncoder<'a> {
             true,
         )?;
         writer.write(&rb).context(error::EncodeMemtableSnafu)?;
-        let _file_meta = writer.close().context(error::EncodeMemtableSnafu)?;
-        Ok(Bytes::from(bytes))
+        let metadata = writer.close().context(error::EncodeMemtableSnafu)?;
+        Ok(DataPart::Parquet(ParquetPart {
+            data: Bytes::from(bytes),
+            metadata,
+        }))
     }
+}
+
+/// Data parts under a shard.
+pub struct DataParts {
+    parts: Vec<DataPart>,
 }
 
 /// Format of immutable data part.
 pub enum DataPart {
-    Parquet(Bytes),
+    Parquet(ParquetPart),
 }
 
 impl DataPart {
     fn is_empty(&self) -> bool {
         match self {
-            DataPart::Parquet(data) => data.is_empty(),
+            DataPart::Parquet(p) => p.data.is_empty(),
+        }
+    }
+
+    /// Iterates frozen data parts and yields record batches.
+    /// Returned record batches are ga
+    pub fn iter(&self, _pk_weights: &[u16]) -> Result<DataPartIter> {
+        match self {
+            DataPart::Parquet(data_bytes) => DataPartIter::new(data_bytes.data.clone(), None),
         }
     }
 }
 
-/// Data parts under a shard.
-pub struct DataParts {}
+pub struct DataPartIter {
+    inner: ParquetRecordBatchReader,
+    current_range: Range<usize>,
+    current_pk_index: Option<PkIndex>,
+    current_batch: Option<RecordBatch>,
+}
+
+impl Debug for DataPartIter {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataPartIter")
+            .field("current_range", &self.current_range)
+            .field("current_pk_index", &self.current_pk_index)
+            .finish()
+    }
+}
+
+impl DataPartIter {
+    pub fn new(data: Bytes, batch_size: Option<usize>) -> Result<Self> {
+        let mut builder =
+            ParquetRecordBatchReaderBuilder::try_new(data).context(error::ReadDataPartSnafu)?;
+        if let Some(batch_size) = batch_size {
+            builder = builder.with_batch_size(batch_size);
+        }
+        let reader = builder.build().context(error::ReadDataPartSnafu)?;
+        let mut iter = Self {
+            inner: reader,
+            current_pk_index: None,
+            current_range: 0..0,
+            current_batch: None,
+        };
+        iter.next()?;
+        Ok(iter)
+    }
+
+    /// Returns false if current iter is exhausted.
+    pub(crate) fn is_valid(&self) -> bool {
+        self.current_pk_index.is_some()
+    }
+
+    /// Returns current pk index.
+    ///
+    /// # Panics
+    /// If iterator is exhausted.
+    pub(crate) fn current_pk_index(&self) -> PkIndex {
+        self.current_pk_index.expect("DataPartIter is exhausted")
+    }
+
+    /// Returns current data batch of iterator.
+    /// # Panics
+    /// If iterator is exhausted.
+    pub(crate) fn current_data_batch(&self) -> DataBatch {
+        let rb = self.current_batch.as_ref().unwrap();
+        let pk_index = self.current_pk_index.unwrap();
+        let range = self.current_range.clone();
+        DataBatch {
+            pk_index,
+            rb,
+            range,
+        }
+    }
+
+    pub(crate) fn next(&mut self) -> Result<()> {
+        if let Some((next_pk, range)) = self.search_next_pk_range() {
+            // first try to search next pk in current record batch.
+            self.current_pk_index = Some(next_pk);
+            self.current_range = range;
+        } else {
+            // current record batch reaches eof, fetch next record batch from parquet reader.
+            if let Some(rb) = self.inner.next() {
+                let rb = rb.context(error::ComputeArrowSnafu)?;
+                self.current_range = 0..0;
+                self.current_batch = Some(rb);
+                return self.next();
+            } else {
+                // parquet is also exhausted
+                self.current_pk_index = None;
+                self.current_batch = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Searches next primary key along with it's offset range inside record batch.
+    fn search_next_pk_range(&self) -> Option<(PkIndex, Range<usize>)> {
+        self.current_batch.as_ref().and_then(|b| {
+            // safety: PK_INDEX_COLUMN_NAME must present in record batch yielded by data part.
+            let pk_array = pk_index_array(b);
+            search_next_pk_range(pk_array, self.current_range.end)
+        })
+    }
+}
+
+/// Parquet-encoded `DataPart`.
+pub struct ParquetPart {
+    data: Bytes,
+    metadata: FileMetaData,
+}
 
 #[cfg(test)]
 mod tests {
@@ -778,7 +893,10 @@ mod tests {
         assert_eq!(4, buffer.num_rows());
 
         let encoder = DataPartEncoder::new(&meta, &[0, 1, 2], None);
-        let encoded = encoder.write(&mut buffer).unwrap();
+        let encoded = match encoder.write(&mut buffer).unwrap() {
+            DataPart::Parquet(data) => data.data,
+        };
+
         let s = String::from_utf8_lossy(encoded.as_bytes());
         assert!(s.starts_with("PAR1"));
         assert!(s.ends_with("PAR1"));
@@ -852,5 +970,75 @@ mod tests {
         let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
         let mut iter = buffer.iter(&[0, 1, 3, 2]).unwrap();
         check_buffer_values_equal(&mut iter, &[]);
+    }
+
+    fn check_part_values_equal(iter: &mut DataPartIter, expected_values: &[Vec<f64>]) {
+        let mut output = Vec::with_capacity(expected_values.len());
+        while iter.is_valid() {
+            let batch = iter.current_data_batch().slice_record_batch();
+            let values = batch
+                .column_by_name("v1")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<_>>();
+            output.push(values);
+            iter.next().unwrap();
+        }
+        assert_eq!(expected_values, output);
+    }
+
+    fn check_iter_data_part(weights: &[u16], expected_values: &[Vec<f64>]) {
+        let meta = metadata_for_test();
+        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10);
+
+        write_rows_to_buffer(
+            &mut buffer,
+            &meta,
+            2,
+            vec![0, 1, 2],
+            vec![Some(1.0), Some(2.0), Some(3.0)],
+            2,
+        );
+
+        write_rows_to_buffer(
+            &mut buffer,
+            &meta,
+            3,
+            vec![1, 2, 3],
+            vec![Some(1.1), Some(2.1), Some(3.1)],
+            3,
+        );
+
+        write_rows_to_buffer(
+            &mut buffer,
+            &meta,
+            2,
+            vec![2, 3],
+            vec![Some(2.2), Some(2.3)],
+            4,
+        );
+
+        let encoder = DataPartEncoder::new(&meta, weights, Some(4));
+        let encoded = encoder.write(&mut buffer).unwrap();
+
+        let mut iter = encoded.iter(weights).unwrap();
+        check_part_values_equal(&mut iter, expected_values);
+    }
+
+    #[test]
+    fn test_iter_data_part() {
+        check_iter_data_part(
+            &[0, 1, 2, 3],
+            &[vec![1.0, 2.0, 3.0, 2.3], vec![1.1, 2.1, 3.1]],
+        );
+
+        check_iter_data_part(
+            &[3, 2, 1, 0],
+            &[vec![1.1, 2.1, 3.1], vec![1.0, 2.0, 3.0, 2.3]],
+        );
     }
 }
