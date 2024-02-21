@@ -136,11 +136,12 @@ impl DataBuffer {
         }
     }
 
-    /// Freezes `DataBuffer` to bytes. Use `pk_weights` to convert pk_id to pk sort order.
+    /// Freezes `DataBuffer` to bytes. Use `pk_weights` to sort rows and replace pk_index to pk_weights.
     /// `freeze` clears the buffers of builders.
-    pub fn freeze(&mut self, _pk_weights: &[u16]) -> Result<DataPart> {
-        // we need distinguish between `freeze` in `ShardWriter` And `Shard`.
-        todo!()
+    pub fn freeze(&mut self, pk_weights: &[u16]) -> Result<DataPart> {
+        let encoder = DataPartEncoder::new(&self.metadata, pk_weights, None);
+        let encoded = encoder.write(self)?;
+        Ok(DataPart::Parquet(encoded))
     }
 
     /// Reads batches from data buffer without resetting builder's buffers.
@@ -222,14 +223,16 @@ fn data_buffer_to_record_batches(
     if dedup {
         rows.dedup_by(|l, r| l.1.pk_weight == r.1.pk_weight && l.1.timestamp == r.1.timestamp);
     }
-    let indices_to_take = UInt32Array::from_iter_values(rows.into_iter().map(|v| v.0 as u32));
+    let indices_to_take = UInt32Array::from_iter_values(rows.iter().map(|(idx, _)| *idx as u32));
 
     let mut columns = Vec::with_capacity(4 + buffer.field_builders.len());
 
-    columns.push(
-        arrow::compute::take(&pk_index_v.as_arrow(), &indices_to_take, None)
-            .context(error::ComputeArrowSnafu)?,
-    );
+    // replace pk index values with pk weights.
+    let weights_of_pks = Arc::new(UInt16Array::from_iter_values(
+        rows.into_iter().map(|(_, key)| key.pk_weight),
+    )) as Arc<_>;
+
+    columns.push(weights_of_pks);
 
     columns.push(
         arrow::compute::take(&ts_v.to_arrow_array(), &indices_to_take, None)
@@ -579,7 +582,7 @@ mod tests {
         );
 
         assert_eq!(
-            vec![1, 1, 0, 0],
+            vec![1, 1, 3, 3],
             batch
                 .column_by_name(PK_INDEX_COLUMN_NAME)
                 .unwrap()
@@ -684,7 +687,7 @@ mod tests {
             data_buffer_to_record_batches(schema, &mut buffer, &[3, 1], true, false).unwrap();
 
         assert_eq!(
-            vec![1, 1, 0, 0, 0],
+            vec![1, 1, 3, 3, 3],
             batch
                 .column_by_name(PK_INDEX_COLUMN_NAME)
                 .unwrap()
