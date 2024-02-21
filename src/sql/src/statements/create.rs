@@ -16,6 +16,7 @@ use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
 use itertools::Itertools;
+use sqlparser::ast::Expr;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
@@ -128,7 +129,7 @@ impl CreateTable {
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct Partitions {
     pub column_list: Vec<Ident>,
-    pub entries: Vec<PartitionEntry>,
+    pub exprs: Vec<Expr>,
 }
 
 impl Partitions {
@@ -162,9 +163,9 @@ impl Display for Partitions {
         if !self.column_list.is_empty() {
             write!(
                 f,
-                "PARTITION BY RANGE COLUMNS ({}) (\n{}\n)",
+                "PARTITION ON COLUMNS ({}) (\n{}\n)",
                 format_list_comma!(self.column_list),
-                format_list_indent!(self.entries),
+                format_list_indent!(self.exprs),
             )
         } else {
             write!(f, "")
