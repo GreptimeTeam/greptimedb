@@ -14,13 +14,17 @@
 
 //! Builder of a shard.
 
+use std::sync::Arc;
+
+use store_api::metadata::RegionMetadataRef;
+
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::DataBuffer;
+use crate::memtable::merge_tree::data::{DataBuffer, DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::dict::KeyDictBuilder;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::shard::Shard;
-use crate::memtable::merge_tree::ShardId;
+use crate::memtable::merge_tree::{MergeTreeConfig, ShardId};
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
@@ -29,36 +33,67 @@ pub struct ShardBuilder {
     dict_builder: KeyDictBuilder,
     /// Buffer to store data.
     data_buffer: DataBuffer,
-    /// Max keys in an index shard.
-    index_max_keys_per_shard: usize,
     /// Number of rows to freeze a data part.
     data_freeze_threshold: usize,
 }
 
 impl ShardBuilder {
+    /// Returns a new builder.
+    pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> ShardBuilder {
+        ShardBuilder {
+            dict_builder: KeyDictBuilder::new(config.index_max_keys_per_shard),
+            data_buffer: DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
+            data_freeze_threshold: config.data_freeze_threshold,
+        }
+    }
+
     /// Write a key value with its encoded primary key.
-    pub fn write_with_key(
-        &mut self,
-        _key: &[u8],
-        _key_value: KeyValue,
-        _metrics: &mut WriteMetrics,
-    ) -> Result<()> {
-        unimplemented!()
+    pub fn write_with_key(&mut self, key: &[u8], key_value: KeyValue, metrics: &mut WriteMetrics) {
+        // Safety: we check whether the builder need to freeze before.
+        let pk_index = self.dict_builder.insert_key(key, metrics);
+        self.data_buffer.write_row(pk_index, key_value);
     }
 
     /// Returns true if the builder is empty.
     pub fn is_empty(&self) -> bool {
-        unimplemented!()
+        self.data_buffer.is_empty()
     }
 
     /// Returns true if the builder need to freeze.
     pub fn should_freeze(&self) -> bool {
-        unimplemented!()
+        self.dict_builder.is_full() || self.data_buffer.num_rows() == self.data_freeze_threshold
     }
 
     /// Builds a new shard and resets the builder.
-    pub fn finish(&mut self, _shard_id: ShardId) -> Result<Shard> {
-        unimplemented!()
+    pub fn finish(
+        &mut self,
+        shard_id: ShardId,
+        metadata: RegionMetadataRef,
+    ) -> Result<Option<Shard>> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+
+        let key_dict = self.dict_builder.finish();
+        let data_part = match &key_dict {
+            Some(dict) => {
+                let pk_weights = dict.pk_weights_to_sort_data();
+                self.data_buffer.freeze(&pk_weights)?
+            }
+            None => {
+                let pk_weights = [0];
+                self.data_buffer.freeze(&pk_weights)?
+            }
+        };
+
+        // build data parts.
+        let data_parts = DataParts {
+            active: DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
+            frozen: vec![data_part],
+        };
+        let key_dict = key_dict.map(Arc::new);
+
+        Ok(Some(Shard::new(shard_id, key_dict, data_parts)))
     }
 
     /// Scans the shard builder

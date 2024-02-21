@@ -19,16 +19,14 @@ use std::collections::HashSet;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use store_api::storage::ColumnId;
 
-use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::DataParts;
 use crate::memtable::merge_tree::dict::KeyDictRef;
-use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::{PkId, ShardId};
 
 /// Shard stores data related to the same key dictionary.
 pub struct Shard {
-    shard_id: ShardId,
+    pub(crate) shard_id: ShardId,
     /// Key dictionary of the shard. `None` if the schema of the tree doesn't have a primary key.
     key_dict: Option<KeyDictRef>,
     /// Data in the shard.
@@ -36,24 +34,31 @@ pub struct Shard {
 }
 
 impl Shard {
-    /// Returns a shard without dictionary.
-    pub fn new_no_dict(_shard_id: ShardId) -> Shard {
-        unimplemented!()
+    /// Returns a new shard.
+    pub fn new(shard_id: ShardId, key_dict: Option<KeyDictRef>, data_parts: DataParts) -> Shard {
+        Shard {
+            shard_id,
+            key_dict,
+            data_parts,
+        }
     }
 
     /// Returns the pk id of the key if it exists.
-    pub fn find_key(&self, _key: &[u8]) -> Option<PkId> {
-        unimplemented!()
+    pub fn find_key(&self, key: &[u8]) -> Option<PkId> {
+        let key_dict = self.key_dict.as_ref()?;
+        let pk_index = key_dict.get_pk_index(key)?;
+
+        Some(PkId {
+            shard_id: self.shard_id,
+            pk_index,
+        })
     }
 
     /// Writes a key value into the shard.
-    pub fn write_key_value(
-        &mut self,
-        _pk_id: PkId,
-        _key_value: KeyValue,
-        _metrics: &mut WriteMetrics,
-    ) -> Result<()> {
-        unimplemented!()
+    pub fn write_key_value(&mut self, pk_id: PkId, key_value: KeyValue) {
+        debug_assert_eq!(self.shard_id, pk_id.shard_id);
+
+        self.data_parts.active.write_row(pk_id.pk_index, key_value);
     }
 
     /// Scans the shard.

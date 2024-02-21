@@ -61,19 +61,21 @@ impl KeyDictBuilder {
         self.pk_to_index.get(key).copied()
     }
 
+    /// Returns true if the builder is full.
+    pub fn is_full(&self) -> bool {
+        self.num_keys >= self.capacity
+    }
+
     /// Adds the key to the builder and returns its index if the builder is not full.
     ///
-    /// Returns `None` if the builder is full.
-    pub fn try_insert_key(&mut self, key: &[u8], metrics: &mut WriteMetrics) -> Option<PkIndex> {
+    /// # Panics
+    /// Panics if the builder is full.
+    pub fn insert_key(&mut self, key: &[u8], metrics: &mut WriteMetrics) -> PkIndex {
+        assert!(!self.is_full());
+
         if let Some(pk_index) = self.pk_to_index.get(key).copied() {
             // Already in the builder.
-            return Some(pk_index);
-        }
-
-        // A new key.
-        if self.num_keys >= self.capacity {
-            // The builder is full.
-            return None;
+            return pk_index;
         }
 
         if self.key_buffer.len() >= MAX_KEYS_PER_BLOCK.into() {
@@ -91,7 +93,7 @@ impl KeyDictBuilder {
         metrics.key_bytes += key.len() * 2;
         self.key_bytes_in_index += key.len();
 
-        Some(pk_index)
+        pk_index
     }
 
     /// Memory size of the builder.
@@ -219,6 +221,20 @@ impl KeyDict {
         let position = self.key_positions[index as usize];
         let block_index = position / MAX_KEYS_PER_BLOCK;
         self.dict_blocks[block_index as usize].key_by_pk_index(position)
+    }
+
+    /// Gets the pk index by the key.
+    pub fn get_pk_index(&self, key: &[u8]) -> Option<PkIndex> {
+        self.pk_to_index.get(key).copied()
+    }
+
+    /// Sets the pk weights to sort a data part and replaces pk indices.
+    pub(crate) fn pk_weights_to_sort_data(&self) -> Vec<u16> {
+        let mut pk_weights = vec![0; self.key_positions.len()];
+        for (weight, pk_index) in self.key_positions.iter().enumerate() {
+            pk_weights[*pk_index as usize] = weight as u16;
+        }
+        pk_weights
     }
 }
 
@@ -364,7 +380,7 @@ mod tests {
         let mut last_pk_index = None;
         let mut metrics = WriteMetrics::default();
         for key in &keys {
-            let pk_index = builder.try_insert_key(key, &mut metrics).unwrap();
+            let pk_index = builder.insert_key(key, &mut metrics);
             last_pk_index = Some(pk_index);
         }
         assert_eq!(num_keys - 1, last_pk_index.unwrap());
@@ -397,9 +413,7 @@ mod tests {
         for i in 0..num_keys {
             // Each key is 5 bytes.
             let key = format!("{i:05}");
-            builder
-                .try_insert_key(key.as_bytes(), &mut metrics)
-                .unwrap();
+            builder.insert_key(key.as_bytes(), &mut metrics);
         }
         // num_keys * 5 * 2
         assert_eq!(5130, metrics.key_bytes);

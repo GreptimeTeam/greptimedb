@@ -42,9 +42,12 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use crate::error;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::{PkId, PkIndex};
+use crate::memtable::merge_tree::PkIndex;
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
+
+/// Initial capacity for the data buffer.
+pub(crate) const DATA_INIT_CAP: usize = 8;
 
 /// Data part batches returns by `DataParts::read`.
 #[derive(Debug, Clone)]
@@ -123,9 +126,9 @@ impl DataBuffer {
     }
 
     /// Writes a row to data buffer.
-    pub fn write_row(&mut self, pk_id: PkId, kv: KeyValue) {
+    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
         self.ts_builder.push_value_ref(kv.timestamp());
-        self.pk_index_builder.push(Some(pk_id.pk_index));
+        self.pk_index_builder.push(Some(pk_index));
         self.sequence_builder.push(Some(kv.sequence()));
         self.op_type_builder.push(Some(kv.op_type() as u8));
 
@@ -860,13 +863,7 @@ mod tests {
         );
 
         for kv in kvs.iter() {
-            buffer.write_row(
-                PkId {
-                    shard_id: 0,
-                    pk_index,
-                },
-                kv,
-            );
+            buffer.write_row(pk_index, kv);
         }
     }
 
