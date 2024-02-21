@@ -127,7 +127,7 @@ impl ScalarExpr {
     }
 
     /// Returns the set of columns that are referenced by `self`.
-    pub fn support(&self) -> BTreeSet<usize> {
+    pub fn get_all_ref_columns(&self) -> BTreeSet<usize> {
         let mut support = BTreeSet::new();
         self.visit_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(i) = e {
@@ -280,13 +280,6 @@ impl ScalarExpr {
             mut expr2,
         } = self.clone()
         {
-            let expr_1_contains_now = expr1.contains_temporal();
-            let expr_2_contains_now = expr2.contains_temporal();
-
-            if !(expr_1_contains_now ^ expr_2_contains_now) {
-                return unsupported_err("one side of the comparison must be `now()`");
-            }
-
             // TODO: support simple transform like `now() + a < b` to `now() < b - a`
 
             let expr1_is_now =
