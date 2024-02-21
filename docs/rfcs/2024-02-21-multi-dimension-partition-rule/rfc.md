@@ -92,7 +92,7 @@ The data file itself can be "projected" to the key space as a polyhedron, it is 
 
 ![sst-project](sst-project.png)
 
-An additional limition is that considering how the index works and how we organize the primary keys at present, the partition columns are limited to be a subset of primary keys for better performance.
+An additional limitation is that considering how the index works and how we organize the primary keys at present, the partition columns are limited to be a subset of primary keys for better performance.
 
 # Drawbacks
 
