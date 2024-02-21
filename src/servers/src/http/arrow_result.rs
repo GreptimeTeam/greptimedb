@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 use arrow_ipc::writer::FileWriter;
-use axum::http::{header, HeaderName, HeaderValue};
+use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -122,15 +122,15 @@ impl IntoResponse for ArrowResponse {
         (
             [
                 (
-                    header::CONTENT_TYPE,
+                    &header::CONTENT_TYPE,
                     HeaderValue::from_static("application/arrow"),
                 ),
                 (
-                    HeaderName::from_static(GREPTIME_DB_HEADER_FORMAT),
+                    &GREPTIME_DB_HEADER_FORMAT,
                     HeaderValue::from_static("ARROW"),
                 ),
                 (
-                    HeaderName::from_static(GREPTIME_DB_HEADER_EXECUTION_TIME),
+                    &GREPTIME_DB_HEADER_EXECUTION_TIME,
                     HeaderValue::from(execution_time),
                 ),
             ],

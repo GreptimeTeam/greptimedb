@@ -14,16 +14,45 @@
 
 use headers::{Header, HeaderName, HeaderValue};
 
-pub const GREPTIME_DB_HEADER_FORMAT: &str = "x-greptime-format";
-pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
-pub const GREPTIME_DB_HEADER_METRICS: &str = "x-greptime-metrics";
+pub mod constants {
+    // New HTTP headers would better distinguish use cases among:
+    // * GreptimeDB
+    // * GreptimeCloud
+    // * ...
+    //
+    // And thus trying to use:
+    // * x-greptime-db-xxx
+    // * x-greptime-cloud-xxx
+    //
+    // ... accordingly
+    //
+    // Most of the headers are for GreptimeDB and thus using `x-greptime-db-` as prefix.
+    // Only use `x-greptime-cloud` when it's intentionally used by GreptimeCloud.
+
+    // LEGACY HEADERS - KEEP IT UNMODIFIED
+    pub const GREPTIME_DB_HEADER_FORMAT: &str = "x-greptime-format";
+    pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
+    pub const GREPTIME_DB_HEADER_METRICS: &str = "x-greptime-metrics";
+    pub const GREPTIME_DB_HEADER_NAME: &str = "x-greptime-db-name";
+    pub const GREPTIME_TIMEZONE_HEADER_NAME: &str = "x-greptime-timezone";
+    pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = common_error::GREPTIME_DB_HEADER_ERROR_CODE;
+    pub const GREPTIME_DB_HEADER_ERROR_MSG: &str = common_error::GREPTIME_DB_HEADER_ERROR_MSG;
+}
+
+pub static GREPTIME_DB_HEADER_FORMAT: HeaderName =
+    HeaderName::from_static(constants::GREPTIME_DB_HEADER_FORMAT);
+pub static GREPTIME_DB_HEADER_EXECUTION_TIME: HeaderName =
+    HeaderName::from_static(constants::GREPTIME_DB_HEADER_EXECUTION_TIME);
+pub static GREPTIME_DB_HEADER_METRICS: HeaderName =
+    HeaderName::from_static(constants::GREPTIME_DB_HEADER_METRICS);
 
 /// Header key of `db-name`. Example format of the header value is `greptime-public`.
-pub static GREPTIME_DB_HEADER_NAME: HeaderName = HeaderName::from_static("x-greptime-db-name");
-/// Header key of query specific timezone.
-/// Example format of the header value is `Asia/Shanghai` or `+08:00`.
+pub static GREPTIME_DB_HEADER_NAME: HeaderName =
+    HeaderName::from_static(constants::GREPTIME_DB_HEADER_NAME);
+
+/// Header key of query specific timezone. Example format of the header value is `Asia/Shanghai` or `+08:00`.
 pub static GREPTIME_TIMEZONE_HEADER_NAME: HeaderName =
-    HeaderName::from_static("x-greptime-timezone");
+    HeaderName::from_static(constants::GREPTIME_TIMEZONE_HEADER_NAME);
 
 pub struct GreptimeDbName(Option<String>);
 

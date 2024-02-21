@@ -66,7 +66,7 @@ impl IntoResponse for PrometheusJsonResponse {
         let mut resp = Json(self).into_response();
 
         if let Some(m) = metrics.and_then(|m| HeaderValue::from_str(&m).ok()) {
-            resp.headers_mut().insert(GREPTIME_DB_HEADER_METRICS, m);
+            resp.headers_mut().insert(&GREPTIME_DB_HEADER_METRICS, m);
         }
 
         resp
