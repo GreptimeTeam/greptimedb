@@ -532,7 +532,10 @@ impl<'a> DataPartEncoder<'a> {
 
 /// Data parts under a shard.
 pub struct DataParts {
-    parts: Vec<DataPart>,
+    /// The active writing buffer.
+    pub(crate) active: DataBuffer,
+    /// immutable (encoded) parts.
+    pub(crate) frozen: Vec<DataPart>,
 }
 
 /// Format of immutable data part.
@@ -548,7 +551,7 @@ impl DataPart {
     }
 
     /// Reads frozen data part and yields [DataBatch]es.
-    pub fn read(&self, _pk_weights: &[u16]) -> Result<DataPartReader> {
+    pub fn read(&self) -> Result<DataPartReader> {
         match self {
             DataPart::Parquet(data_bytes) => DataPartReader::new(data_bytes.data.clone(), None),
         }
@@ -1024,7 +1027,7 @@ mod tests {
         let encoder = DataPartEncoder::new(&meta, weights, Some(4));
         let encoded = encoder.write(&mut buffer).unwrap();
 
-        let mut iter = encoded.read(weights).unwrap();
+        let mut iter = encoded.read().unwrap();
         check_part_values_equal(&mut iter, expected_values);
     }
 
