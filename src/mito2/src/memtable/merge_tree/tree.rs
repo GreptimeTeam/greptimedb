@@ -27,7 +27,7 @@ use table::predicate::Predicate;
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::partition::{PartitionKey, PartitionRef};
+use crate::memtable::merge_tree::partition::{Partition, PartitionKey, PartitionRef};
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -42,6 +42,8 @@ pub struct MergeTree {
     row_codec: Arc<McmpRowCodec>,
     /// Partitions in the tree.
     partitions: RwLock<BTreeMap<PartitionKey, PartitionRef>>,
+    /// Whether the tree has multiple partitions.
+    is_partitioned: bool,
 }
 
 impl MergeTree {
@@ -53,12 +55,14 @@ impl MergeTree {
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))
                 .collect(),
         );
+        let is_partitioned = Partition::has_multi_partitions(&metadata);
 
         MergeTree {
             config: config.clone(),
             metadata,
             row_codec: Arc::new(row_codec),
             partitions: Default::default(),
+            is_partitioned,
         }
     }
 
@@ -143,14 +147,24 @@ impl MergeTree {
 
     fn write_with_key(
         &self,
-        _primary_key: &[u8],
-        _key_value: KeyValue,
-        _metrics: &mut WriteMetrics,
+        primary_key: &[u8],
+        key_value: KeyValue,
+        metrics: &mut WriteMetrics,
     ) -> Result<()> {
-        unimplemented!()
+        let partition_key = Partition::get_partition_key(&key_value, self.is_partitioned);
+        let partition = self.get_or_create_partition(partition_key);
+
+        partition.write_with_key(primary_key, key_value, metrics)
     }
 
-    fn write_no_key(&self, _key_value: KeyValue, _metrics: &mut WriteMetrics) -> Result<()> {
+    fn write_no_key(&self, key_value: KeyValue, metrics: &mut WriteMetrics) -> Result<()> {
+        let partition_key = Partition::get_partition_key(&key_value, self.is_partitioned);
+        let partition = self.get_or_create_partition(partition_key);
+
+        partition.write_on_key(key_value, metrics)
+    }
+
+    fn get_or_create_partition(&self, partition_key: PartitionKey) -> PartitionRef {
         unimplemented!()
     }
 }

@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock};
 
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
 
 use crate::error::Result;
@@ -112,6 +113,28 @@ impl Partition {
     /// Returns shared memory size of the partition.
     pub fn shared_memory_size(&self) -> usize {
         unimplemented!()
+    }
+
+    /// Get partition key from the key value.
+    pub(crate) fn get_partition_key(key_value: &KeyValue, is_partitioned: bool) -> PartitionKey {
+        if !is_partitioned {
+            return PartitionKey::default();
+        }
+
+        let Some(value) = key_value.primary_keys().next() else {
+            return PartitionKey::default();
+        };
+
+        value.as_u32().unwrap().unwrap()
+    }
+
+    /// Returns true if the region can be partitioned.
+    pub(crate) fn has_multi_partitions(metadata: &RegionMetadataRef) -> bool {
+        metadata
+            .primary_key_columns()
+            .next()
+            .map(|meta| meta.column_schema.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+            .unwrap_or(false)
     }
 }
 
