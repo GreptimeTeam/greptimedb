@@ -787,23 +787,6 @@ dependencies = [
 
 [[package]]
 name = "axum-test-helper"
-version = "0.1.1"
-source = "git+https://github.com/sunng87/axum-test-helper.git?branch=patch-1#5aa7843ce2250144ea1b7f589f274c00cf1af4ab"
-dependencies = [
- "axum",
- "bytes",
- "http",
- "http-body",
- "hyper",
- "reqwest",
- "serde",
- "tokio",
- "tower",
- "tower-service",
-]
-
-[[package]]
-name = "axum-test-helper"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "298f62fa902c2515c169ab0bfb56c593229f33faa01131215d58e3d4898e3aa9"
@@ -8894,7 +8877,7 @@ dependencies = [
  "auth",
  "axum",
  "axum-macros",
- "axum-test-helper 0.3.0",
+ "axum-test-helper",
  "base64 0.21.5",
  "bytes",
  "catalog",
@@ -9967,7 +9950,7 @@ dependencies = [
  "async-trait",
  "auth",
  "axum",
- "axum-test-helper 0.1.1",
+ "axum-test-helper",
  "catalog",
  "chrono",
  "client",

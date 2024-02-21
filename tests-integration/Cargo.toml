@@ -13,7 +13,7 @@ arrow-flight.workspace = true
 async-trait = "0.1"
 auth.workspace = true
 axum.workspace = true
-axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
+axum-test-helper = "0.3.0"
 catalog.workspace = true
 chrono.workspace = true
 client = { workspace = true, features = ["testing"] }
