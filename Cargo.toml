@@ -6,7 +6,6 @@ members = [
     "src/catalog",
     "src/client",
     "src/cmd",
-    "src/common/api",
     "src/common/base",
     "src/common/catalog",
     "src/common/config",
@@ -153,7 +152,6 @@ auth = { path = "src/auth" }
 catalog = { path = "src/catalog" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd" }
-common-api = { path = "src/common/api" }
 common-base = { path = "src/common/base" }
 common-catalog = { path = "src/common/catalog" }
 common-config = { path = "src/common/config" }

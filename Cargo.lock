@@ -1687,10 +1687,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 
 [[package]]
-name = "common-api"
-version = "0.6.0"
-
-[[package]]
 name = "common-base"
 version = "0.6.0"
 dependencies = [
@@ -1777,7 +1773,6 @@ dependencies = [
 name = "common-error"
 version = "0.6.0"
 dependencies = [
- "common-api",
  "snafu",
  "strum 0.25.0",
 ]
@@ -8903,7 +8898,6 @@ dependencies = [
  "catalog",
  "chrono",
  "client",
- "common-api",
  "common-base",
  "common-catalog",
  "common-error",

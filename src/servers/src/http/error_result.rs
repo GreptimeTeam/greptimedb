@@ -15,13 +15,13 @@
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use common_api::http_headers::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_telemetry::logging::{debug, error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::http::header::constants::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::ResponseFormat;
 

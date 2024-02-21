@@ -403,11 +403,11 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Column: {}, {} incompatible, expected: {}, actual: {}",
-        column_name,
-        datatype,
-        expected,
-        actual
+    "Column: {}, {} incompatible, expected: {}, actual: {}",
+    column_name,
+    datatype,
+    expected,
+    actual
     ))]
     IncompatibleSchema {
         column_name: String,
@@ -438,7 +438,7 @@ pub enum Error {
     MissingQueryContext { location: Location },
 
     #[snafu(display(
-        "Invalid parameter, physical_table is not expected when metric engine is disabled"
+    "Invalid parameter, physical_table is not expected when metric engine is disabled"
     ))]
     UnexpectedPhysicalTable { location: Location },
 }
@@ -596,9 +596,11 @@ macro_rules! define_into_tonic_status {
     ($Error: ty) => {
         impl From<$Error> for tonic::Status {
             fn from(err: $Error) -> Self {
-                use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
                 use tonic::codegen::http::{HeaderMap, HeaderValue};
                 use tonic::metadata::MetadataMap;
+                use $crate::http::header::constants::{
+                    GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG,
+                };
 
                 let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
 

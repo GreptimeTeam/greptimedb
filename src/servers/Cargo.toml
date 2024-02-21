@@ -25,7 +25,6 @@ base64.workspace = true
 bytes.workspace = true
 catalog.workspace = true
 chrono.workspace = true
-common-api.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true

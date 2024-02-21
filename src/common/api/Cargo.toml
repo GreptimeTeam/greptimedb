@@ -1,8 +1,0 @@
-[package]
-name = "common-api"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-publish = false
-
-[dependencies]
