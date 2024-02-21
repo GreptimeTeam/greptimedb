@@ -294,7 +294,7 @@ impl ScalarExpr {
             let expr2_is_now =
                 *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now);
 
-            if expr1_is_now ^ expr2_is_now {
+            if !(expr1_is_now ^ expr2_is_now) {
                 return unsupported_err("None of the sides of the comparison is `now()`");
             }
 
