@@ -42,8 +42,18 @@ pub struct Partition {
 
 impl Partition {
     /// Creates a new partition.
-    pub fn new(_metadata: RegionMetadataRef, _config: &MergeTreeConfig) -> Self {
-        unimplemented!()
+    pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+        let shard_builder = ShardBuilder::new(metadata.clone(), config);
+
+        Partition {
+            inner: RwLock::new(Inner {
+                metadata,
+                shard_builder,
+                active_shard_id: 0,
+                shards: Vec::new(),
+                num_rows: 0,
+            }),
+        }
     }
 
     /// Writes to the partition with a primary key.
@@ -74,6 +84,7 @@ impl Partition {
         inner
             .shard_builder
             .write_with_key(primary_key, key_value, metrics);
+        inner.num_rows += 1;
 
         Ok(())
     }
@@ -83,6 +94,7 @@ impl Partition {
         let mut inner = self.inner.write().unwrap();
         // If no primary key, always write to the first shard.
         if inner.shards.is_empty() {
+            // Create the shard if it doesn't exist.
             let shard_id = inner.active_shard_id;
             let data_parts = DataParts {
                 active: DataBuffer::with_capacity(inner.metadata.clone(), DATA_INIT_CAP),
@@ -98,6 +110,7 @@ impl Partition {
             pk_index: 0,
         };
         inner.shards[0].write_key_value(pk_id, key_value);
+        inner.num_rows += 1;
     }
 
     /// Scans data in the partition.
@@ -111,22 +124,55 @@ impl Partition {
 
     /// Freezes the partition.
     pub fn freeze(&self) -> Result<()> {
-        unimplemented!()
+        let mut inner = self.inner.write().unwrap();
+        // TODO(yingwen): wrap a method to bump shard id and create shard?
+        let shard_id = inner.active_shard_id;
+        let metadata = inner.metadata.clone();
+        let Some(shard) = inner.shard_builder.finish(shard_id, metadata)? else {
+            return Ok(());
+        };
+        inner.active_shard_id += 1;
+
+        inner.shards.push(shard);
+        Ok(())
     }
 
     /// Forks the partition.
-    pub fn fork(&self, _metadata: &RegionMetadataRef) -> Partition {
-        unimplemented!()
+    pub fn fork(&self, metadata: &RegionMetadataRef, config: &MergeTreeConfig) -> Partition {
+        let inner = self.inner.read().unwrap();
+        // TODO(yingwen): TTL or evict shards.
+        let shard_builder = ShardBuilder::new(metadata.clone(), config);
+        let shards = inner
+            .shards
+            .iter()
+            .map(|shard| shard.fork(metadata.clone()))
+            .collect();
+
+        Partition {
+            inner: RwLock::new(Inner {
+                metadata: metadata.clone(),
+                shard_builder,
+                active_shard_id: inner.active_shard_id,
+                shards,
+                num_rows: 0,
+            }),
+        }
     }
 
     /// Returns true if the partition has data.
     pub fn has_data(&self) -> bool {
-        unimplemented!()
+        let inner = self.inner.read().unwrap();
+        inner.num_rows > 0
     }
 
     /// Returns shared memory size of the partition.
     pub fn shared_memory_size(&self) -> usize {
-        unimplemented!()
+        let inner = self.inner.read().unwrap();
+        inner
+            .shards
+            .iter()
+            .map(|shard| shard.shared_memory_size())
+            .sum()
     }
 
     /// Get partition key from the key value.
@@ -174,6 +220,7 @@ struct Inner {
     active_shard_id: ShardId,
     /// Shards with frozon dictionary.
     shards: Vec<Shard>,
+    num_rows: usize,
 }
 
 impl Inner {
@@ -191,6 +238,7 @@ impl Inner {
         for shard in &mut self.shards {
             if shard.shard_id == pk_id.shard_id {
                 shard.write_key_value(pk_id, key_value);
+                self.num_rows += 1;
                 return;
             }
         }

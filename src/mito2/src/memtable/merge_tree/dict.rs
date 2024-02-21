@@ -131,6 +131,7 @@ impl KeyDictBuilder {
             pk_to_index,
             dict_blocks: std::mem::take(&mut self.dict_blocks),
             key_positions,
+            key_bytes_in_index: self.key_bytes_in_index,
         })
     }
 
@@ -208,6 +209,7 @@ pub struct KeyDict {
     dict_blocks: Vec<DictBlock>,
     /// Maps pk index to position of the key in [Self::dict_blocks].
     key_positions: Vec<PkIndex>,
+    key_bytes_in_index: usize,
 }
 
 pub type KeyDictRef = Arc<KeyDict>;
@@ -235,6 +237,11 @@ impl KeyDict {
             pk_weights[*pk_index as usize] = weight as u16;
         }
         pk_weights
+    }
+
+    /// Returns the shared memory size.
+    pub(crate) fn shared_memory_size(&self) -> usize {
+        self.key_bytes_in_index
     }
 }
 

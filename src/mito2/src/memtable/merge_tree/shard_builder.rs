@@ -96,7 +96,7 @@ impl ShardBuilder {
         Ok(Some(Shard::new(shard_id, key_dict, data_parts)))
     }
 
-    /// Scans the shard builder
+    /// Scans the shard builder.
     pub fn scan(&mut self, _shard_id: ShardId) -> Result<ShardBuilderReader> {
         unimplemented!()
     }

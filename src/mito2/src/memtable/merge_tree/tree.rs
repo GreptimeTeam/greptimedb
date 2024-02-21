@@ -202,7 +202,7 @@ impl MergeTree {
             }
 
             // Only fork partitions that have data.
-            let forked_part = part.fork(&metadata);
+            let forked_part = part.fork(&metadata, &self.config);
             forked.insert(*part_key, Arc::new(forked_part));
         }
 

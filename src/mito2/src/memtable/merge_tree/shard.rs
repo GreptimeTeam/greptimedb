@@ -17,10 +17,11 @@
 use std::collections::HashSet;
 
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::DataParts;
+use crate::memtable::merge_tree::data::{DataBuffer, DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::dict::KeyDictRef;
 use crate::memtable::merge_tree::{PkId, ShardId};
 
@@ -68,6 +69,26 @@ impl Shard {
         _filters: &[SimpleFilterEvaluator],
     ) -> ShardReader {
         unimplemented!()
+    }
+
+    /// Returns the memory size of the shard part.
+    pub fn shared_memory_size(&self) -> usize {
+        self.key_dict
+            .as_ref()
+            .map(|dict| dict.shared_memory_size())
+            .unwrap_or(0)
+    }
+
+    /// Forks a shard.
+    pub fn fork(&self, metadata: RegionMetadataRef) -> Shard {
+        Shard {
+            shard_id: self.shard_id,
+            key_dict: self.key_dict.clone(),
+            data_parts: DataParts {
+                active: DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
+                frozen: Vec::new(),
+            },
+        }
     }
 }
 
