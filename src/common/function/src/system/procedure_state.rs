@@ -69,6 +69,8 @@ impl Function for ProcedureStateFunction {
     }
 
     fn eval(&self, func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        crate::ensure_greptime!(func_ctx);
+
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {

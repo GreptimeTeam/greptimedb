@@ -192,6 +192,9 @@ pub enum Error {
 
     #[snafu(display("Invalid function args: {}", err_msg))]
     InvalidFuncArgs { err_msg: String, location: Location },
+
+    #[snafu(display("Permission denied: {}", err_msg))]
+    PermissionDenied { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -234,6 +237,8 @@ impl ErrorExt for Error {
             Error::ProcedureService { source, .. } | Error::TableMutation { source, .. } => {
                 source.status_code()
             }
+
+            Error::PermissionDenied { .. } => StatusCode::PermissionDenied,
         }
     }
 

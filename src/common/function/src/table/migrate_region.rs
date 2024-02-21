@@ -78,6 +78,8 @@ impl Function for MigrateRegionFunction {
     }
 
     fn eval(&self, func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        crate::ensure_greptime!(func_ctx);
+
         let (region_ids, from_peers, to_peers, replay_timeouts) = match columns.len() {
             3 => {
                 let region_ids = cast_u64_vector(&columns[0])?;

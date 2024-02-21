@@ -1785,6 +1785,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "chrono-tz 0.6.3",
+ "common-catalog",
  "common-error",
  "common-macro",
  "common-meta",
