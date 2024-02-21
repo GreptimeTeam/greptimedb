@@ -14,8 +14,13 @@
 
 //! Builder of a shard.
 
+use crate::error::Result;
+use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::DataBuffer;
 use crate::memtable::merge_tree::dict::KeyDictBuilder;
+use crate::memtable::merge_tree::metrics::WriteMetrics;
+use crate::memtable::merge_tree::shard::Shard;
+use crate::memtable::merge_tree::ShardId;
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
@@ -24,4 +29,43 @@ pub struct ShardBuilder {
     dict_builder: KeyDictBuilder,
     /// Buffer to store data.
     data_buffer: DataBuffer,
+    /// Max keys in an index shard.
+    index_max_keys_per_shard: usize,
+    /// Number of rows to freeze a data part.
+    data_freeze_threshold: usize,
 }
+
+impl ShardBuilder {
+    /// Write a key value with its encoded primary key.
+    pub fn write_with_key(
+        &mut self,
+        _key: &[u8],
+        _key_value: KeyValue,
+        _metrics: &mut WriteMetrics,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+
+    /// Returns true if the builder is empty.
+    pub fn is_empty(&self) -> bool {
+        unimplemented!()
+    }
+
+    /// Returns true if the builder need to freeze.
+    pub fn should_freeze(&self) -> bool {
+        unimplemented!()
+    }
+
+    /// Builds a new shard and resets the builder.
+    pub fn finish(&mut self, _shard_id: ShardId) -> Result<Shard> {
+        unimplemented!()
+    }
+
+    /// Scans the shard builder
+    pub fn scan(&mut self, _shard_id: ShardId) -> Result<ShardBuilderReader> {
+        unimplemented!()
+    }
+}
+
+/// Reader to scan a shard. builder.
+pub struct ShardBuilderReader {}

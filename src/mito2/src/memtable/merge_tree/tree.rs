@@ -14,19 +14,31 @@
 
 //! Implementation of the merge tree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 
+use api::v1::OpType;
+use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_time::Timestamp;
+use datafusion_common::ScalarValue;
+use datatypes::arrow;
+use datatypes::data_type::ConcreteDataType;
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::error::Result;
+use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
+use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::partition::{PartitionKey, PartitionRef};
+use crate::memtable::merge_tree::partition::{
+    Partition, PartitionKey, PartitionReader, PartitionRef,
+};
 use crate::memtable::merge_tree::MergeTreeConfig;
+use crate::memtable::time_series::primary_key_schema;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
-use crate::row_converter::{McmpRowCodec, SortField};
+use crate::read::Batch;
+use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// The merge tree.
 pub struct MergeTree {
@@ -38,6 +50,8 @@ pub struct MergeTree {
     row_codec: Arc<McmpRowCodec>,
     /// Partitions in the tree.
     partitions: RwLock<BTreeMap<PartitionKey, PartitionRef>>,
+    /// Whether the tree has multiple partitions.
+    is_partitioned: bool,
 }
 
 impl MergeTree {
@@ -49,12 +63,14 @@ impl MergeTree {
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))
                 .collect(),
         );
+        let is_partitioned = Partition::has_multi_partitions(&metadata);
 
         MergeTree {
             config: config.clone(),
             metadata,
             row_codec: Arc::new(row_codec),
             partitions: Default::default(),
+            is_partitioned,
         }
     }
 
@@ -63,39 +79,219 @@ impl MergeTree {
     ///
     /// # Panics
     /// Panics if the tree is immutable (frozen).
-    pub fn write(&self, _kvs: &KeyValues, _metrics: &mut WriteMetrics) -> Result<()> {
-        todo!()
+    pub fn write(
+        &self,
+        kvs: &KeyValues,
+        pk_buffer: &mut Vec<u8>,
+        metrics: &mut WriteMetrics,
+    ) -> Result<()> {
+        let has_pk = !self.metadata.primary_key.is_empty();
+
+        for kv in kvs.iter() {
+            ensure!(
+                kv.num_primary_keys() == self.row_codec.num_fields(),
+                PrimaryKeyLengthMismatchSnafu {
+                    expect: self.row_codec.num_fields(),
+                    actual: kv.num_primary_keys(),
+                }
+            );
+            // Safety: timestamp of kv must be both present and a valid timestamp value.
+            let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+            metrics.min_ts = metrics.min_ts.min(ts);
+            metrics.max_ts = metrics.max_ts.max(ts);
+            metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
+
+            if !has_pk {
+                // No primary key.
+                self.write_no_key(kv, metrics)?;
+                continue;
+            }
+
+            // Encode primary key.
+            pk_buffer.clear();
+            self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+
+            // Write rows with primary keys.
+            self.write_with_key(pk_buffer, kv, metrics)?;
+        }
+
+        metrics.value_bytes +=
+            kvs.num_rows() * (std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>());
+
+        Ok(())
     }
 
     /// Scans the tree.
     pub fn scan(
         &self,
-        _projection: Option<&[ColumnId]>,
-        _predicate: Option<Predicate>,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
-        todo!()
+        // Creates the projection set.
+        let projection: HashSet<_> = if let Some(projection) = projection {
+            projection.iter().copied().collect()
+        } else {
+            self.metadata.field_columns().map(|c| c.column_id).collect()
+        };
+
+        let filters = predicate
+            .map(|p| {
+                p.exprs()
+                    .iter()
+                    .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let partitions = self.prune_partitions(&filters);
+        let pk_schema = primary_key_schema(&self.metadata);
+        let pk_datatypes = self
+            .metadata
+            .primary_key_columns()
+            .map(|pk| pk.column_schema.data_type.clone())
+            .collect();
+
+        let iter = TreeIter {
+            metadata: self.metadata.clone(),
+            pk_schema,
+            pk_datatypes,
+            projection,
+            filters,
+            row_codec: self.row_codec.clone(),
+            partitions,
+            current_reader: None,
+        };
+
+        Ok(Box::new(iter))
     }
 
     /// Returns true if the tree is empty.
+    ///
+    /// A tree is empty if no partition has data.
     pub fn is_empty(&self) -> bool {
-        todo!()
+        let partitions = self.partitions.read().unwrap();
+        partitions.values().all(|part| !part.has_data())
     }
 
     /// Marks the tree as immutable.
     ///
     /// Once the tree becomes immutable, callers should not write to it again.
     pub fn freeze(&self) -> Result<()> {
-        todo!()
+        let partitions = self.partitions.read().unwrap();
+        for partition in partitions.values() {
+            partition.freeze()?;
+        }
+        Ok(())
     }
 
     /// Forks an immutable tree. Returns a mutable tree that inherits the index
     /// of this tree.
-    pub fn fork(&self, _metadata: RegionMetadataRef) -> MergeTree {
-        todo!()
+    pub fn fork(&self, metadata: RegionMetadataRef) -> MergeTree {
+        if self.metadata.schema_version != metadata.schema_version
+            || self.metadata.column_metadatas != metadata.column_metadatas
+        {
+            // The schema has changed, we can't reuse the tree.
+            return MergeTree::new(metadata, &self.config);
+        }
+
+        let mut forked = BTreeMap::new();
+        let partitions = self.partitions.read().unwrap();
+        for (part_key, part) in partitions.iter() {
+            if !part.has_data() {
+                continue;
+            }
+
+            // Only fork partitions that have data.
+            let forked_part = part.fork(&metadata);
+            forked.insert(*part_key, Arc::new(forked_part));
+        }
+
+        MergeTree {
+            config: self.config.clone(),
+            metadata,
+            row_codec: self.row_codec.clone(),
+            partitions: RwLock::new(forked),
+            is_partitioned: self.is_partitioned,
+        }
     }
 
     /// Returns the memory size shared by forked trees.
     pub fn shared_memory_size(&self) -> usize {
-        todo!()
+        let partitions = self.partitions.read().unwrap();
+        partitions
+            .values()
+            .map(|part| part.shared_memory_size())
+            .sum()
+    }
+
+    fn write_with_key(
+        &self,
+        primary_key: &[u8],
+        key_value: KeyValue,
+        metrics: &mut WriteMetrics,
+    ) -> Result<()> {
+        let partition_key = Partition::get_partition_key(&key_value, self.is_partitioned);
+        let partition = self.get_or_create_partition(partition_key);
+
+        partition.write_with_key(primary_key, key_value, metrics)
+    }
+
+    fn write_no_key(&self, key_value: KeyValue, metrics: &mut WriteMetrics) -> Result<()> {
+        let partition_key = Partition::get_partition_key(&key_value, self.is_partitioned);
+        let partition = self.get_or_create_partition(partition_key);
+
+        partition.write_no_key(key_value, metrics)
+    }
+
+    fn get_or_create_partition(&self, partition_key: PartitionKey) -> PartitionRef {
+        let mut partitions = self.partitions.write().unwrap();
+        partitions
+            .entry(partition_key)
+            .or_insert_with(|| Arc::new(Partition::new(self.metadata.clone(), &self.config)))
+            .clone()
+    }
+
+    fn prune_partitions(&self, filters: &[SimpleFilterEvaluator]) -> VecDeque<PartitionRef> {
+        let partitions = self.partitions.read().unwrap();
+        if self.is_partitioned {
+            // Prune partition keys.
+            for filter in filters {
+                // Only the first filter takes effect.
+                if Partition::is_partition_column(filter.column_name()) {
+                    let mut pruned = VecDeque::new();
+                    for (key, partition) in partitions.iter() {
+                        if filter
+                            .evaluate_scalar(&ScalarValue::UInt32(Some(*key)))
+                            .unwrap_or(true)
+                        {
+                            pruned.push_back(partition.clone());
+                        }
+                    }
+
+                    return pruned;
+                }
+            }
+        }
+
+        partitions.values().cloned().collect()
+    }
+}
+
+struct TreeIter {
+    metadata: RegionMetadataRef,
+    pk_schema: arrow::datatypes::SchemaRef,
+    pk_datatypes: Vec<ConcreteDataType>,
+    projection: HashSet<ColumnId>,
+    filters: Vec<SimpleFilterEvaluator>,
+    row_codec: Arc<McmpRowCodec>,
+    partitions: VecDeque<PartitionRef>,
+    current_reader: Option<PartitionReader>,
+}
+
+impl Iterator for TreeIter {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unimplemented!()
     }
 }

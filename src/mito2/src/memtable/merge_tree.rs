@@ -94,7 +94,8 @@ impl Memtable for MergeTreeMemtable {
         // TODO(yingwen): Validate schema while inserting rows.
 
         let mut metrics = WriteMetrics::default();
-        let res = self.tree.write(kvs, &mut metrics);
+        let mut pk_buffer = Vec::new();
+        let res = self.tree.write(kvs, &mut pk_buffer, &mut metrics);
 
         self.update_stats(&metrics);
 
