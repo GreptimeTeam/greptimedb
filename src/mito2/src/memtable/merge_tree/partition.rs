@@ -101,12 +101,17 @@ impl Partition {
     }
 
     /// Freezes the partition.
-    pub fn freeze(&mut self) -> Result<()> {
+    pub fn freeze(&self) -> Result<()> {
         unimplemented!()
     }
 
     /// Forks the partition.
-    pub fn fork(&self, _metadata: RegionMetadataRef) -> Partition {
+    pub fn fork(&self, _metadata: &RegionMetadataRef) -> Partition {
+        unimplemented!()
+    }
+
+    /// Returns true if the partition has data.
+    pub fn has_data(&self) -> bool {
         unimplemented!()
     }
 

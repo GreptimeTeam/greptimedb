@@ -123,26 +123,62 @@ impl MergeTree {
     }
 
     /// Returns true if the tree is empty.
+    ///
+    /// A tree is empty if no partition has data.
     pub fn is_empty(&self) -> bool {
-        todo!()
+        let partitions = self.partitions.read().unwrap();
+        partitions.values().all(|part| !part.has_data())
     }
 
     /// Marks the tree as immutable.
     ///
     /// Once the tree becomes immutable, callers should not write to it again.
     pub fn freeze(&self) -> Result<()> {
-        todo!()
+        let partitions = self.partitions.read().unwrap();
+        for partition in partitions.values() {
+            partition.freeze()?;
+        }
+        Ok(())
     }
 
     /// Forks an immutable tree. Returns a mutable tree that inherits the index
     /// of this tree.
-    pub fn fork(&self, _metadata: RegionMetadataRef) -> MergeTree {
-        todo!()
+    pub fn fork(&self, metadata: RegionMetadataRef) -> MergeTree {
+        if self.metadata.schema_version != metadata.schema_version
+            || self.metadata.column_metadatas != metadata.column_metadatas
+        {
+            // The schema has changed, we can't reuse the tree.
+            return MergeTree::new(metadata, &self.config);
+        }
+
+        let mut forked = BTreeMap::new();
+        let partitions = self.partitions.read().unwrap();
+        for (part_key, part) in partitions.iter() {
+            if !part.has_data() {
+                continue;
+            }
+
+            // Only fork partitions that have data.
+            let forked_part = part.fork(&metadata);
+            forked.insert(*part_key, Arc::new(forked_part));
+        }
+
+        MergeTree {
+            config: self.config.clone(),
+            metadata,
+            row_codec: self.row_codec.clone(),
+            partitions: RwLock::new(forked),
+            is_partitioned: self.is_partitioned,
+        }
     }
 
     /// Returns the memory size shared by forked trees.
     pub fn shared_memory_size(&self) -> usize {
-        todo!()
+        let partitions = self.partitions.read().unwrap();
+        partitions
+            .values()
+            .map(|part| part.shared_memory_size())
+            .sum()
     }
 
     fn write_with_key(
@@ -165,6 +201,10 @@ impl MergeTree {
     }
 
     fn get_or_create_partition(&self, partition_key: PartitionKey) -> PartitionRef {
-        unimplemented!()
+        let mut partitions = self.partitions.write().unwrap();
+        partitions
+            .entry(partition_key)
+            .or_insert_with(|| Arc::new(Partition::new(self.metadata.clone(), &self.config)))
+            .clone()
     }
 }
