@@ -48,7 +48,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
-          path: ${{ runner.temp }}/greptime-*.log
+          path: /tmp/greptime-*.log
           retention-days: 3
 
   test-on-windows:
