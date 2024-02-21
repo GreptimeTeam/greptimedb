@@ -282,21 +282,27 @@ impl ScalarExpr {
         {
             let expr_1_contains_now = expr1.contains_temporal();
             let expr_2_contains_now = expr2.contains_temporal();
+
             if !(expr_1_contains_now ^ expr_2_contains_now) {
                 return unsupported_err("one side of the comparison must be `now()`");
             }
-            if !expr_1_contains_now
-                && *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
-            {
+
+            // TODO: support simple transform like `now() + a < b` to `now() < b - a`
+
+            let expr1_is_now =
+                *expr1 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now);
+            let expr2_is_now =
+                *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now);
+
+            if expr1_is_now ^ expr2_is_now {
+                return unsupported_err("None of the sides of the comparison is `now()`");
+            }
+
+            if expr2_is_now {
                 std::mem::swap(&mut expr1, &mut expr2);
                 func = BinaryFunc::reverse_compare(&func)?;
             }
-            // TODO: support simple transform like `now() + a < b` to `now() < b - a`
-            if expr_2_contains_now
-                || *expr1 != ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)
-            {
-                return unsupported_err("None of the sides of the comparison is `now()`");
-            }
+
             let step = |expr: ScalarExpr| expr.call_unary(UnaryFunc::StepTimestamp);
             match func {
                 // now == expr2 -> now <= expr2 && now < expr2 + 1
