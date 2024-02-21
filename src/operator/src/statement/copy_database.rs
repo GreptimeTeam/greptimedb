@@ -224,7 +224,7 @@ mod tests {
         object_store.write("d", "").await.unwrap();
         object_store.write("e.f.parquet", "").await.unwrap();
 
-        let location = normalize_dir(dir.path().to_slash().unwrap());
+        let location = normalize_dir(&dir.path().to_slash().unwrap());
         println!("location is {}", location);
         let request = CopyDatabaseRequest {
             catalog_name: "catalog_0".to_string(),
