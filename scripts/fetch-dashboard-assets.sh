@@ -13,13 +13,20 @@ RELEASE_VERSION="$(cat $STATIC_DIR/VERSION | tr -d '\t\r\n ')"
 
 echo "Downloading assets to dir: $OUT_DIR"
 cd $OUT_DIR
+
+if [[ -z "$GITHUB_PROXY_URL" ]]; then
+  GITHUB_URL="https://github.com"
+else
+  GITHUB_URL="${GITHUB_PROXY_URL%/}"
+fi
+
 # Download the SHA256 checksum attached to the release. To verify the integrity
 # of the download, this checksum will be used to check the download tar file
 # containing the built dashboard assets.
-curl -Ls https://github.com/GreptimeTeam/dashboard/releases/download/$RELEASE_VERSION/sha256.txt --output sha256.txt
+curl -Ls ${GITHUB_URL}/GreptimeTeam/dashboard/releases/download/$RELEASE_VERSION/sha256.txt --output sha256.txt
 
 # Download the tar file containing the built dashboard assets.
-curl -L https://github.com/GreptimeTeam/dashboard/releases/download/$RELEASE_VERSION/build.tar.gz --output build.tar.gz
+curl -L ${GITHUB_URL}/GreptimeTeam/dashboard/releases/download/$RELEASE_VERSION/build.tar.gz --output build.tar.gz
 
 # Verify the checksums match; exit if they don't.
 case "$(uname -s)" in
