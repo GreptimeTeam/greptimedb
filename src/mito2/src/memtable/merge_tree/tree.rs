@@ -17,16 +17,20 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use api::v1::OpType;
+use common_time::Timestamp;
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::error::Result;
+use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
+use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::partition::{PartitionKey, PartitionRef};
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
-use crate::row_converter::{McmpRowCodec, SortField};
+use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// The merge tree.
 pub struct MergeTree {
@@ -63,8 +67,46 @@ impl MergeTree {
     ///
     /// # Panics
     /// Panics if the tree is immutable (frozen).
-    pub fn write(&self, _kvs: &KeyValues, _metrics: &mut WriteMetrics) -> Result<()> {
-        todo!()
+    pub fn write(
+        &self,
+        kvs: &KeyValues,
+        pk_buffer: &mut Vec<u8>,
+        metrics: &mut WriteMetrics,
+    ) -> Result<()> {
+        let has_pk = !self.metadata.primary_key.is_empty();
+
+        for kv in kvs.iter() {
+            ensure!(
+                kv.num_primary_keys() == self.row_codec.num_fields(),
+                PrimaryKeyLengthMismatchSnafu {
+                    expect: self.row_codec.num_fields(),
+                    actual: kv.num_primary_keys(),
+                }
+            );
+            // Safety: timestamp of kv must be both present and a valid timestamp value.
+            let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+            metrics.min_ts = metrics.min_ts.min(ts);
+            metrics.max_ts = metrics.max_ts.max(ts);
+            metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
+
+            if !has_pk {
+                // No primary key.
+                self.write_no_key(kv, metrics)?;
+                continue;
+            }
+
+            // Encode primary key.
+            pk_buffer.clear();
+            self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+
+            // Write rows with primary keys.
+            self.write_with_key(&pk_buffer, kv, metrics)?;
+        }
+
+        metrics.value_bytes +=
+            kvs.num_rows() * (std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>());
+
+        Ok(())
     }
 
     /// Scans the tree.
@@ -97,5 +139,18 @@ impl MergeTree {
     /// Returns the memory size shared by forked trees.
     pub fn shared_memory_size(&self) -> usize {
         todo!()
+    }
+
+    fn write_with_key(
+        &self,
+        _primary_key: &[u8],
+        _key_value: KeyValue,
+        _metrics: &mut WriteMetrics,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn write_no_key(&self, _key_value: KeyValue, _metrics: &mut WriteMetrics) -> Result<()> {
+        unimplemented!()
     }
 }
