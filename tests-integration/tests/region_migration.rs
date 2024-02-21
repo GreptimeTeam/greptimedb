@@ -852,7 +852,7 @@ async fn find_region_distribution(
 async fn find_region_distribution_by_sql(cluster: &GreptimeDbCluster) -> RegionDistribution {
     let query_ctx = QueryContext::arc();
 
-    let Output::Stream(stream) = run_sql(
+    let Output::Stream(stream, _) = run_sql(
         &cluster.frontend,
         &format!(r#"select b.peer_id as datanode_id,
                            a.greptime_partition_id as region_id
@@ -899,7 +899,7 @@ async fn trigger_migration_by_sql(
     from_peer_id: u64,
     to_peer_id: u64,
 ) -> String {
-    let Output::Stream(stream) = run_sql(
+    let Output::Stream(stream, _) = run_sql(
         &cluster.frontend,
         &format!("select migrate_region({region_id}, {from_peer_id}, {to_peer_id})"),
         QueryContext::arc(),
@@ -920,7 +920,7 @@ async fn trigger_migration_by_sql(
 
 /// Query procedure state by SQL.
 async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
-    let Output::Stream(stream) = run_sql(
+    let Output::Stream(stream, _) = run_sql(
         instance,
         &format!("select procedure_state('{pid}')"),
         QueryContext::arc(),
