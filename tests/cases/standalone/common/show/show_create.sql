@@ -7,10 +7,10 @@ CREATE TABLE system_metrics (
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
-PARTITION BY RANGE COLUMNS (id) (
-    PARTITION r0 VALUES LESS THAN (5),
-    PARTITION r1 VALUES LESS THAN (9),
-    PARTITION r2 VALUES LESS THAN (MAXVALUE),
+PARTITION ON COLUMNS (id) (
+  id < 5,
+  id >= 5 AND id < 9,
+  id >= 9
 )
 ENGINE=mito
 WITH(
@@ -39,10 +39,10 @@ CREATE TABLE not_supported_table_options_keys (
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
-PARTITION BY RANGE COLUMNS (id) (
-    PARTITION r0 VALUES LESS THAN (5),
-    PARTITION r1 VALUES LESS THAN (9),
-    PARTITION r2 VALUES LESS THAN (MAXVALUE),
+PARTITION ON COLUMNS (id) (
+  id < 5,
+  id >= 5 AND id < 9,
+  id >= 9
 )
 ENGINE=mito
 WITH(
@@ -59,10 +59,10 @@ CREATE TABLE not_supported_table_storage_option (
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
-PARTITION BY RANGE COLUMNS (id) (
-    PARTITION r0 VALUES LESS THAN (5),
-    PARTITION r1 VALUES LESS THAN (9),
-    PARTITION r2 VALUES LESS THAN (MAXVALUE),
+PARTITION ON COLUMNS (id) (
+  id < 5,
+  id >= 5 AND id < 9,
+  id >= 9
 )
 ENGINE=mito
 WITH(

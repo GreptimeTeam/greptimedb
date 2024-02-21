@@ -3,10 +3,10 @@ CREATE TABLE my_table (
   b STRING,
   ts TIMESTAMP TIME INDEX,
 )
-PARTITION BY RANGE COLUMNS (a) (
-  PARTITION p0 VALUES LESS THAN (10),
-  PARTITION p1 VALUES LESS THAN (20),
-  PARTITION p2 VALUES LESS THAN (MAXVALUE),
+PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
 );
 
 Affected Rows: 0
@@ -17,9 +17,7 @@ SELECT table_catalog, table_schema, table_name, partition_name, partition_expres
 +---------------+--------------+------------+----------------+---------------------------------+-----------------------+
 | table_catalog | table_schema | table_name | partition_name | partition_expression            | greptime_partition_id |
 +---------------+--------------+------------+----------------+---------------------------------+-----------------------+
-| greptime      | public       | my_table   | p0             | (a) VALUES LESS THAN (10)       | ID         |
-| greptime      | public       | my_table   | p1             | (a) VALUES LESS THAN (20)       | ID         |
-| greptime      | public       | my_table   | p2             | (a) VALUES LESS THAN (MAXVALUE) | ID         |
+| greptime      | public       | my_table   | p0             | (a) VALUES LESS THAN (MAXVALUE) | ID         |
 +---------------+--------------+------------+----------------+---------------------------------+-----------------------+
 
 -- SQLNESS REPLACE (\d{13}) REGION_ID
@@ -29,8 +27,6 @@ SELECT region_id, peer_id, is_leader, status FROM information_schema.greptime_re
 +---------------+---------+-----------+--------+
 | region_id     | peer_id | is_leader | status |
 +---------------+---------+-----------+--------+
-| REGION_ID | PEER_ID       | Yes       | ALIVE  |
-| REGION_ID | PEER_ID       | Yes       | ALIVE  |
 | REGION_ID | PEER_ID       | Yes       | ALIVE  |
 +---------------+---------+-----------+--------+
 
