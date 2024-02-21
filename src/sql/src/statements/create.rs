@@ -234,12 +234,11 @@ mod tests {
                              cpu double default 0,
                              memory double,
                              TIME INDEX (ts),
-                             PRIMARY KEY(ts, host)
+                             PRIMARY KEY(host)
                        )
-                       PARTITION BY RANGE COLUMNS (ts) (
-                         PARTITION r0 VALUES LESS THAN (5),
-                         PARTITION r1 VALUES LESS THAN (9),
-                         PARTITION r2 VALUES LESS THAN (MAXVALUE),
+                       PARTITION ON COLUMNS (host) (
+                            host = 'a',
+                            host > 'a',
                        )
                        engine=mito
                        with(regions=1, ttl='7d', storage='File');
@@ -260,12 +259,11 @@ CREATE TABLE IF NOT EXISTS demo (
   cpu DOUBLE DEFAULT 0,
   memory DOUBLE,
   TIME INDEX (ts),
-  PRIMARY KEY (ts, host)
+  PRIMARY KEY (host)
 )
-PARTITION BY RANGE COLUMNS (ts) (
-  PARTITION r0 VALUES LESS THAN (5),
-  PARTITION r1 VALUES LESS THAN (9),
-  PARTITION r2 VALUES LESS THAN (MAXVALUE)
+PARTITION ON COLUMNS (host) (
+  host = 'a',
+  host > 'a'
 )
 ENGINE=mito
 WITH(
@@ -342,13 +340,9 @@ ENGINE=mito
             cpu double default 0,
             memory double,
             TIME INDEX (ts),
-            PRIMARY KEY(ts, host)
+            PRIMARY KEY(host)
       )
-      PARTITION BY RANGE COLUMNS (ts) (
-        PARTITION r0 VALUES LESS THAN (5),
-        PARTITION r1 VALUES LESS THAN (9),
-        PARTITION r2 VALUES LESS THAN (MAXVALUE),
-      )
+      PARTITION ON COLUMNS (host) ()
       engine=mito
       with(regions=1, ttl='7d', hello='world');
 ";
