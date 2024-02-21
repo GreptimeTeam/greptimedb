@@ -62,9 +62,9 @@ impl Header for GreptimeDbName {
     }
 
     fn decode<'i, I>(values: &mut I) -> Result<Self, headers::Error>
-        where
-            Self: Sized,
-            I: Iterator<Item=&'i HeaderValue>,
+    where
+        Self: Sized,
+        I: Iterator<Item = &'i HeaderValue>,
     {
         if let Some(value) = values.next() {
             let str_value = value.to_str().map_err(|_| headers::Error::invalid())?;

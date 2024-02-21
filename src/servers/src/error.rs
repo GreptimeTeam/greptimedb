@@ -403,11 +403,11 @@ pub enum Error {
     },
 
     #[snafu(display(
-    "Column: {}, {} incompatible, expected: {}, actual: {}",
-    column_name,
-    datatype,
-    expected,
-    actual
+        "Column: {}, {} incompatible, expected: {}, actual: {}",
+        column_name,
+        datatype,
+        expected,
+        actual
     ))]
     IncompatibleSchema {
         column_name: String,
@@ -438,7 +438,7 @@ pub enum Error {
     MissingQueryContext { location: Location },
 
     #[snafu(display(
-    "Invalid parameter, physical_table is not expected when metric engine is disabled"
+        "Invalid parameter, physical_table is not expected when metric engine is disabled"
     ))]
     UnexpectedPhysicalTable { location: Location },
 }
