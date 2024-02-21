@@ -61,8 +61,11 @@ impl ShardBuilder {
         unimplemented!()
     }
 
-    /// Builds a new shard.
-    pub fn finish_cloned(&mut self, _shard_id: ShardId) -> Result<Shard> {
+    /// Scans the shard builder
+    pub fn scan(&mut self, _shard_id: ShardId) -> Result<ShardBuilderReader> {
         unimplemented!()
     }
 }
+
+/// Reader to scan a shard. builder.
+pub struct ShardBuilderReader {}
