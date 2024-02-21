@@ -1,7 +1,7 @@
 on:
   merge_group:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [ opened, synchronize, reopened, ready_for_review ]
     paths-ignore:
       - 'docs/**'
       - 'config/**'
@@ -57,7 +57,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        with: 
+        with:
           # Shares across multiple jobs
           # Shares with `Clippy` job
           shared-key: "check-lint"
@@ -75,7 +75,7 @@ jobs:
           toolchain: stable
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        with: 
+        with:
           # Shares across multiple jobs
           shared-key: "check-toml"
       - name: Install taplo
@@ -139,7 +139,7 @@ jobs:
       # FIXME: Logs cannot found be on failure (or even success). Need to figure out the cause.
       - name: Upload sqlness logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
           path: ${{ runner.temp }}/greptime-*.log
@@ -170,7 +170,7 @@ jobs:
       # FIXME: Logs cannot be found on failure (or even success). Need to figure out the cause.
       - name: Upload sqlness logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
           path: ${{ runner.temp }}/greptime-*.log
@@ -191,7 +191,7 @@ jobs:
           components: rustfmt
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        with: 
+        with:
           # Shares across multiple jobs
           shared-key: "check-rust-fmt"
       - name: Run cargo fmt
@@ -212,7 +212,7 @@ jobs:
           components: clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        with: 
+        with:
           # Shares across multiple jobs
           # Shares with `Check` job
           shared-key: "check-lint"
@@ -271,7 +271,7 @@ jobs:
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           UNITTEST_LOG_DIR: "__unittest_logs"
       - name: Codecov upload
-        uses: codecov/codecov-action@v2
+        uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./lcov.info
@@ -285,7 +285,7 @@ jobs:
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
