@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionNumber, TableId};
 
+use self::table_meta::TableMetadataAllocatorRef;
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
 use crate::error::Result;
@@ -32,6 +33,10 @@ pub mod create_table;
 mod create_table_template;
 pub mod drop_table;
 pub mod table_meta;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
+#[cfg(test)]
+mod tests;
 pub mod truncate_table;
 pub mod utils;
 
@@ -73,4 +78,5 @@ pub struct DdlContext {
     pub cache_invalidator: CacheInvalidatorRef,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub memory_region_keeper: MemoryRegionKeeperRef,
+    pub table_metadata_allocator: TableMetadataAllocatorRef,
 }

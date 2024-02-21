@@ -1919,6 +1919,7 @@ dependencies = [
  "common-grpc-expr",
  "common-macro",
  "common-procedure",
+ "common-procedure-test",
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",

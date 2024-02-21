@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_procedure::{watcher, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, tracing};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::{RegionNumber, TableId};
+use store_api::storage::TableId;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
@@ -27,12 +26,9 @@ use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
-use crate::ddl::table_meta::TableMetadataAllocator;
+use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::ddl::truncate_table::TruncateTableProcedure;
-use crate::ddl::{
-    utils, DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadata,
-    TableMetadataAllocatorContext,
-};
+use crate::ddl::{utils, DdlContext, DdlTaskExecutor, ExecutorContext};
 use crate::error::{
     self, EmptyCreateTableTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
     SubmitProcedureSnafu, TableNotFoundSnafu, WaitProcedureSnafu,
@@ -62,7 +58,7 @@ pub struct DdlManager {
     datanode_manager: DatanodeManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    table_metadata_allocator: TableMetadataAllocator,
+    table_metadata_allocator: TableMetadataAllocatorRef,
     memory_region_keeper: MemoryRegionKeeperRef,
 }
 
@@ -73,7 +69,7 @@ impl DdlManager {
         datanode_clients: DatanodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
-        table_metadata_allocator: TableMetadataAllocator,
+        table_metadata_allocator: TableMetadataAllocatorRef,
         memory_region_keeper: MemoryRegionKeeperRef,
     ) -> Result<Self> {
         let manager = Self {
@@ -100,6 +96,7 @@ impl DdlManager {
             cache_invalidator: self.cache_invalidator.clone(),
             table_metadata_manager: self.table_metadata_manager.clone(),
             memory_region_keeper: self.memory_region_keeper.clone(),
+            table_metadata_allocator: self.table_metadata_allocator.clone(),
         }
     }
 
@@ -205,18 +202,10 @@ impl DdlManager {
         &self,
         cluster_id: ClusterId,
         create_table_task: CreateTableTask,
-        table_route: TableRouteValue,
-        region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = CreateTableProcedure::new(
-            cluster_id,
-            create_table_task,
-            table_route,
-            region_wal_options,
-            context,
-        );
+        let procedure = CreateTableProcedure::new(cluster_id, create_table_task, context);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -470,31 +459,10 @@ async fn handle_drop_table_task(
 async fn handle_create_table_task(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
-    mut create_table_task: CreateTableTask,
+    create_table_task: CreateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
-    let table_meta = ddl_manager
-        .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_table_task,
-        )
-        .await?;
-
-    let TableMetadata {
-        table_id,
-        table_route,
-        region_wal_options,
-    } = table_meta;
-
-    create_table_task.table_info.ident.table_id = table_id;
-
     let (id, output) = ddl_manager
-        .submit_create_table_task(
-            cluster_id,
-            create_table_task,
-            table_route,
-            region_wal_options,
-        )
+        .submit_create_table_task(cluster_id, create_table_task)
         .await?;
 
     let procedure_id = id.to_string();
@@ -644,12 +612,12 @@ mod tests {
             procedure_manager.clone(),
             Arc::new(DummyDatanodeManager),
             Arc::new(DummyCacheInvalidator),
-            table_metadata_manager,
-            TableMetadataAllocator::new(
+            table_metadata_manager.clone(),
+            Arc::new(TableMetadataAllocator::new(
                 Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
                 Arc::new(WalOptionsAllocator::default()),
-                Arc::new(TableMetadataManager::new(kv_backend)),
-            ),
+                table_metadata_manager.table_name_manager().clone(),
+            )),
             Arc::new(MemoryRegionKeeper::default()),
         );
 

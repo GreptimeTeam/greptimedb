@@ -57,6 +57,22 @@ impl Status {
         Status::Done { output: None }
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Downcasts [Status::Done]'s output to &T
+    ///  #Panic:
+    /// - if [Status] is not the [Status::Done].
+    /// - if the output is None.
+    pub fn downcast_output_ref<T: 'static>(&self) -> Option<&T> {
+        if let Status::Done { output } = self {
+            output
+                .as_ref()
+                .expect("Try to downcast the output of Status::Done, but the output is None")
+                .downcast_ref()
+        } else {
+            panic!("Expected the Status::Done, but got: {:?}", self)
+        }
+    }
+
     /// Returns a [Status::Done] with output.
     pub fn done_with_output<T: Any + Send + Sync>(output: T) -> Status {
         Status::Done {
