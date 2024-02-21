@@ -58,3 +58,4 @@ tonic.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
+path-slash = "0.2"
