@@ -223,23 +223,24 @@ fn data_buffer_to_record_batches(
 
     let mut rows = build_rows_to_sort(pk_weights, &pk_index_v, &ts_v, &sequence_v);
 
+    let pk_array = if replace_pk_index {
+        // replace pk index values with pk weights.
+        Arc::new(UInt16Array::from_iter_values(
+            rows.iter().map(|(_, key)| key.pk_weight),
+        )) as Arc<_>
+    } else {
+        pk_index_v.to_arrow_array()
+    };
+
     // sort and dedup
     rows.sort_unstable_by(|l, r| l.1.cmp(&r.1));
     if dedup {
         rows.dedup_by(|l, r| l.1.pk_weight == r.1.pk_weight && l.1.timestamp == r.1.timestamp);
     }
+
     let indices_to_take = UInt32Array::from_iter_values(rows.iter().map(|(idx, _)| *idx as u32));
 
     let mut columns = Vec::with_capacity(4 + buffer.field_builders.len());
-
-    let pk_array = if replace_pk_index {
-        // replace pk index values with pk weights.
-        Arc::new(UInt16Array::from_iter_values(
-            rows.into_iter().map(|(_, key)| key.pk_weight),
-        )) as Arc<_>
-    } else {
-        pk_index_v.to_arrow_array()
-    };
 
     columns.push(
         arrow::compute::take(&pk_array, &indices_to_take, None)
