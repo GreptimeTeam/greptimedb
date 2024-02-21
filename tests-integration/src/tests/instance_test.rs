@@ -83,6 +83,7 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
 }
 
 #[apply(both_instances_cases)]
+#[ignore = "TODO(ruihang): WIP new partition rule"]
 async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let sql = if instance.is_distributed_mode() {

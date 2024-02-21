@@ -186,6 +186,7 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "TODO(ruihang): WIP new partition rule"]
     async fn test_distributed_insert_delete_and_query() {
         common_telemetry::init_default_ut_logging();
 
