@@ -138,7 +138,7 @@ jobs:
         run: RUST_BACKTRACE=1 ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
       - name: Upload sqlness logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
           path: /tmp/greptime-*.log
@@ -168,9 +168,9 @@ jobs:
         run: RUST_BACKTRACE=1 ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
       - name: Upload sqlness logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: sqlness-logs
+          name: sqlness-logs-with-kafka-wal
           path: /tmp/greptime-*.log
           retention-days: 3
 
@@ -269,7 +269,7 @@ jobs:
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           UNITTEST_LOG_DIR: "__unittest_logs"
       - name: Codecov upload
-        uses: codecov/codecov-action@v2
+        uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./lcov.info
@@ -283,7 +283,7 @@ jobs:
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:

@@ -45,7 +45,7 @@ jobs:
             {"text": "Nightly CI failed for sqlness tests"}
       - name: Upload sqlness logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
           path: /tmp/greptime-*.log
