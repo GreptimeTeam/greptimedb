@@ -75,9 +75,9 @@ pub struct Merger<T, I> {
 }
 
 impl<T, I> Merger<T, I>
-    where
-        I: Item,
-        T: Node<Item=I>,
+where
+    I: Item,
+    T: Node<Item = I>,
 {
     pub(crate) fn try_new(nodes: Vec<T>) -> Result<Self> {
         let mut heap = BinaryHeap::with_capacity(nodes.len());
