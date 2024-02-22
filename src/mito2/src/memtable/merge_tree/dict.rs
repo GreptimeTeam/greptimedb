@@ -135,8 +135,8 @@ impl KeyDictBuilder {
         })
     }
 
-    /// Scans the builder.
-    pub fn scan(&self) -> DictBuilderReader {
+    /// Reads the builder.
+    pub fn read(&self) -> DictBuilderReader {
         let sorted_pk_indices = self.pk_to_index.values().copied().collect();
         let block = self.key_buffer.finish_cloned();
         let mut blocks = Vec::with_capacity(self.dict_blocks.len() + 1);
@@ -165,27 +165,20 @@ impl DictBuilderReader {
         }
     }
 
-    /// Returns true if the item in the reader is valid.
-    pub fn is_valid(&self) -> bool {
-        self.offset < self.sorted_pk_indices.len()
+    /// Returns the number of keys.
+    pub fn num_keys(&self) -> usize {
+        self.sorted_pk_indices.len()
     }
 
-    /// Returns current key.
-    pub fn current_key(&self) -> &[u8] {
-        let pk_index = self.current_pk_index();
+    /// Gets the i-th pk index.
+    pub fn pk_index(&self, offset: usize) -> PkIndex {
+        self.sorted_pk_indices[offset]
+    }
+
+    /// Gets the i-th key.
+    pub fn key(&self, offset: usize) -> &[u8] {
+        let pk_index = self.pk_index(offset);
         self.key_by_pk_index(pk_index)
-    }
-
-    /// Returns current [PkIndex] of the key.
-    pub fn current_pk_index(&self) -> PkIndex {
-        assert!(self.is_valid());
-        self.sorted_pk_indices[self.offset]
-    }
-
-    /// Advances the reader.
-    pub fn next(&mut self) {
-        assert!(self.is_valid());
-        self.offset += 1;
     }
 
     /// Returns pk indices sorted by keys.
@@ -387,6 +380,7 @@ mod tests {
         let mut last_pk_index = None;
         let mut metrics = WriteMetrics::default();
         for key in &keys {
+            assert!(!builder.is_full());
             let pk_index = builder.insert_key(key, &mut metrics);
             last_pk_index = Some(pk_index);
         }
@@ -402,10 +396,9 @@ mod tests {
         expect.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         let mut result = Vec::with_capacity(expect.len());
-        let mut reader = builder.scan();
-        while reader.is_valid() {
-            result.push((reader.current_key().to_vec(), reader.current_pk_index()));
-            reader.next();
+        let reader = builder.read();
+        for i in 0..reader.num_keys() {
+            result.push((reader.key(i).to_vec(), reader.pk_index(i)));
         }
         assert_eq!(expect, result);
     }
