@@ -143,7 +143,7 @@ mod tests {
             encode_keys(&metadata, kvs, &mut keys);
         }
         for key in &keys {
-            dict_builder.insert_key(&key, &mut metrics);
+            dict_builder.insert_key(key, &mut metrics);
         }
 
         let dict = dict_builder.finish().unwrap();
