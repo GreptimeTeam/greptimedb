@@ -363,6 +363,11 @@ impl CreateTableTask {
             table: &table.table_name,
         }
     }
+
+    /// Sets the `table_info`'s table_id.
+    pub fn set_table_id(&mut self, table_id: TableId) {
+        self.table_info.ident.table_id = table_id;
+    }
 }
 
 impl Serialize for CreateTableTask {
