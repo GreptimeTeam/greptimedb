@@ -13,18 +13,23 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use common_base::AffectedRows;
 use common_error::ext::BoxedError;
-use common_function::handlers::{AffectedRows, TableMutationHandler};
+use common_function::handlers::TableMutationHandler;
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sqlparser::ast::ObjectName;
-use table::requests::{DeleteRequest as TableDeleteRequest, InsertRequest as TableInsertRequest};
+use table::requests::{
+    CompactTableRequest, DeleteRequest as TableDeleteRequest, FlushTableRequest,
+    InsertRequest as TableInsertRequest,
+};
 
 use crate::delete::DeleterRef;
 use crate::error::{InvalidSqlSnafu, Result};
 use crate::insert::InserterRef;
+use crate::request::RequesterRef;
 
 // TODO(LFC): Refactor consideration: move this function to some helper mod,
 // could be done together or after `TableReference`'s refactoring, when issue #559 is resolved.
@@ -60,11 +65,16 @@ pub fn table_idents_to_full_name(
 pub struct TableMutationOperator {
     inserter: InserterRef,
     deleter: DeleterRef,
+    requester: RequesterRef,
 }
 
 impl TableMutationOperator {
-    pub fn new(inserter: InserterRef, deleter: DeleterRef) -> Self {
-        Self { inserter, deleter }
+    pub fn new(inserter: InserterRef, deleter: DeleterRef, requester: RequesterRef) -> Self {
+        Self {
+            inserter,
+            deleter,
+            requester,
+        }
     }
 }
 
@@ -89,6 +99,30 @@ impl TableMutationHandler for TableMutationOperator {
     ) -> QueryResult<AffectedRows> {
         self.deleter
             .handle_table_delete(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn flush(
+        &self,
+        request: FlushTableRequest,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_table_flush(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn compact(
+        &self,
+        request: CompactTableRequest,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_table_compaction(request, ctx)
             .await
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)

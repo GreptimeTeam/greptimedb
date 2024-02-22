@@ -12,6 +12,7 @@ api.workspace = true
 arc-swap = "1.0"
 async-trait.workspace = true
 chrono-tz = "0.6"
+common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

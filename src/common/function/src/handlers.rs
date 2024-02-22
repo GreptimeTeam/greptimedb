@@ -15,12 +15,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_base::AffectedRows;
 use common_meta::rpc::procedure::{MigrateRegionRequest, ProcedureStateResponse};
 use common_query::error::Result;
 use session::context::QueryContextRef;
-use table::requests::{DeleteRequest, InsertRequest};
-
-pub type AffectedRows = usize;
+use table::requests::{CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest};
 
 /// A trait for handling table mutations in `QueryEngine`.
 #[async_trait]
@@ -30,6 +29,17 @@ pub trait TableMutationHandler: Send + Sync {
 
     /// Delete rows from the table.
     async fn delete(&self, request: DeleteRequest, ctx: QueryContextRef) -> Result<AffectedRows>;
+
+    /// Trigger a flush task for table.
+    async fn flush(&self, request: FlushTableRequest, ctx: QueryContextRef)
+        -> Result<AffectedRows>;
+
+    /// Trigger a compaction task for table.
+    async fn compact(
+        &self,
+        request: CompactTableRequest,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
 }
 
 /// A trait for handling procedure service requests in `QueryEngine`.

@@ -21,6 +21,8 @@ pub mod readable_size;
 use core::any::Any;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub type AffectedRows = usize;
+
 pub use bit_vec::BitVec;
 
 /// [`Plugins`] is a wrapper of Arc contents.

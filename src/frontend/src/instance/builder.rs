@@ -24,6 +24,7 @@ use common_meta::kv_backend::KvBackendRef;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
+use operator::request::Requester;
 use operator::statement::StatementExecutor;
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
@@ -106,12 +107,18 @@ impl FrontendBuilder {
         ));
         let deleter = Arc::new(Deleter::new(
             catalog_manager.clone(),
+            partition_manager.clone(),
+            datanode_manager.clone(),
+        ));
+        let requester = Arc::new(Requester::new(
+            catalog_manager.clone(),
             partition_manager,
             datanode_manager.clone(),
         ));
         let table_mutation_handler = Arc::new(TableMutationOperator::new(
             inserter.clone(),
             deleter.clone(),
+            requester,
         ));
 
         let procedure_service_handler = Arc::new(ProcedureServiceOperator::new(
