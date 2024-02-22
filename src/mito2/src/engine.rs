@@ -48,6 +48,7 @@ mod truncate_test;
 use std::any::Any;
 use std::sync::Arc;
 
+use api::v1::OpType;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -57,7 +58,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
-use store_api::region_request::{AffectedRows, RegionRequest};
+use store_api::region_request::{AffectedRows, RegionPutRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
 
@@ -67,7 +68,7 @@ use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
 use crate::region::RegionUsage;
-use crate::request::WorkerRequest;
+use crate::request::{SenderWriteRequest, WorkerRequest, WriteRequest};
 use crate::worker::WorkerGroup;
 
 pub const MITO_ENGINE_NAME: &str = "mito";
@@ -144,6 +145,18 @@ impl MitoEngine {
     pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
         self.inner.workers.get_region(id)
     }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn handle_group_puts(
+        &self,
+        region_id: RegionId,
+        requests: Vec<RegionPutRequest>,
+    ) -> Result<AffectedRows, BoxedError> {
+        self.inner
+            .handle_group_puts(region_id, requests)
+            .await
+            .map_err(BoxedError::new)
+    }
 }
 
 /// Check whether the region edit is valid. Only adding files to region is considered valid now.
@@ -215,6 +228,37 @@ impl EngineInner {
         self.workers.submit_to_worker(region_id, request).await?;
 
         receiver.await.context(RecvSnafu)?
+    }
+
+    async fn handle_group_puts(
+        &self,
+        region_id: RegionId,
+        requests: Vec<RegionPutRequest>,
+    ) -> Result<AffectedRows> {
+        let mut write_requests = Vec::with_capacity(requests.len());
+        let mut receivers = Vec::with_capacity(requests.len());
+        for request in requests {
+            let req = WriteRequest::new(region_id, OpType::Put, request.rows)?;
+            let (sender, receiver) = oneshot::channel();
+            write_requests.push(SenderWriteRequest {
+                sender: sender.into(),
+                request: req,
+            });
+            receivers.push(receiver);
+        }
+        self.workers
+            .submit_to_worker(region_id, WorkerRequest::Writes(write_requests))
+            .await?;
+
+        let rets = futures_util::future::try_join_all(receivers)
+            .await
+            .context(RecvSnafu)?;
+
+        let mut affected_rows = 0;
+        for ret in rets {
+            affected_rows += ret?;
+        }
+        Ok(affected_rows)
     }
 
     /// Handles the scan `request` and returns a [Scanner] for the `request`.

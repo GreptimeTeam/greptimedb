@@ -70,7 +70,7 @@ impl RegionRequest {
     }
 
     /// Convert [Body](region_request::Body) to a group of [RegionRequest] with region id.
-    /// Inserts/Deletes request might become multiple requests. Others are one-to-one.
+    /// Inserts/Deletes/Creates request might become multiple requests. Others are one-to-one.
     pub fn try_from_request_body(body: region_request::Body) -> Result<Vec<(RegionId, Self)>> {
         match body {
             region_request::Body::Inserts(inserts) => make_region_puts(inserts),

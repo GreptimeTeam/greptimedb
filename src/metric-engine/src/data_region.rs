@@ -169,6 +169,18 @@ impl DataRegion {
             .context(MitoWriteOperationSnafu)
     }
 
+    pub async fn write_data_batch(
+        &self,
+        region_id: RegionId,
+        requests: Vec<RegionPutRequest>,
+    ) -> Result<AffectedRows> {
+        let region_id = utils::to_data_region_id(region_id);
+        self.mito
+            .handle_group_puts(region_id, requests)
+            .await
+            .context(MitoWriteOperationSnafu)
+    }
+
     pub async fn physical_columns(
         &self,
         physical_region_id: RegionId,

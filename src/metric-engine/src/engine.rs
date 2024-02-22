@@ -34,7 +34,7 @@ use mito2::engine::MitoEngine;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
-use store_api::region_request::{AffectedRows, RegionRequest};
+use store_api::region_request::{AffectedRows, RegionPutRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
@@ -138,6 +138,16 @@ impl RegionEngine for MetricEngine {
         };
 
         result.map_err(BoxedError::new)
+    }
+
+    async fn handle_group_insert_requests(
+        &self,
+        insert_requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows, BoxedError> {
+        self.inner
+            .put_regions(insert_requests)
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Handles substrait query and return a stream of record batches

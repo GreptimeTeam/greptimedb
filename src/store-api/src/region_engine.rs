@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::{AffectedRows, RegionRequest};
+use crate::region_request::{AffectedRows, RegionPutRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
 /// The result of setting readonly for the region.
@@ -130,6 +130,18 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<AffectedRows, BoxedError>;
+
+    /// Handles a group of insert requests to the region. Returns the count of affected rows.
+    ///
+    /// The purpose of providing it is to enhance write throughput and performance for certain
+    /// engines. It is not supported by default, and can be implemented by some engines based
+    /// on their capabilities.
+    async fn handle_group_insert_requests(
+        &self,
+        _insert_requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows, BoxedError> {
+        unimplemented!("handle_group_inserts is not implemented")
+    }
 
     /// Handles substrait query and return a stream of record batches
     async fn handle_query(

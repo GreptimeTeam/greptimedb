@@ -42,6 +42,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
 futures.workspace = true
+futures-util.workspace = true
 humantime-serde.workspace = true
 index.workspace = true
 itertools.workspace = true

@@ -54,7 +54,9 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
-use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
+use store_api::region_request::{
+    AffectedRows, RegionCloseRequest, RegionPutRequest, RegionRequest,
+};
 use store_api::storage::{RegionId, ScanRequest};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::scan::StreamScanAdapter;
@@ -130,6 +132,13 @@ impl RegionServer {
         request: RegionRequest,
     ) -> Result<AffectedRows> {
         self.inner.handle_request(region_id, request).await
+    }
+
+    pub async fn try_handle_fast_inserts(
+        &self,
+        insert_requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
+        self.inner.try_handle_fast_inserts(insert_requests).await
     }
 
     #[tracing::instrument(skip_all)]
@@ -218,32 +227,22 @@ impl RegionServer {
 #[async_trait]
 impl RegionServerHandler for RegionServer {
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponse> {
-        let is_parallel = matches!(
-            request,
-            region_request::Body::Inserts(_) | region_request::Body::Deletes(_)
-        );
+        let try_fast_path = matches!(request, region_request::Body::Inserts(_));
         let requests = RegionRequest::try_from_request_body(request)
             .context(BuildRegionRequestsSnafu)
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)?;
         let tracing_context = TracingContext::from_current_span();
-
-        let results = if is_parallel {
-            let join_tasks = requests.into_iter().map(|(region_id, req)| {
-                let self_to_move = self.clone();
-                let span = tracing_context.attach(info_span!(
-                    "RegionServer::handle_region_request",
-                    region_id = region_id.to_string()
-                ));
-                async move {
-                    self_to_move
-                        .handle_request(region_id, req)
-                        .trace(span)
-                        .await
-                }
-            });
-
-            try_join_all(join_tasks)
+        let affected_rows = if try_fast_path {
+            let insert_requests = requests
+                .into_iter()
+                .map(|(region_id, req)| match req {
+                    RegionRequest::Put(req) => (region_id, req),
+                    _ => unreachable!(),
+                })
+                .collect();
+            self.try_handle_fast_inserts(insert_requests)
+                .trace(info_span!("RegionServer::try_handle_fast_inserts"))
                 .await
                 .map_err(BoxedError::new)
                 .context(ExecuteGrpcRequestSnafu)?
@@ -264,15 +263,8 @@ impl RegionServerHandler for RegionServer {
                     .context(ExecuteGrpcRequestSnafu)?;
                 results.push(result);
             }
-            results
+            results.into_iter().sum()
         };
-
-        // merge results by simply sum up affected rows.
-        // only insert/delete will have multiple results.
-        let mut affected_rows = 0;
-        for result in results {
-            affected_rows += result;
-        }
 
         Ok(RegionResponse {
             header: Some(ResponseHeader {
@@ -508,6 +500,61 @@ impl RegionServerInner {
                 // Removes the region status if the operation fails.
                 self.unset_region_status(region_id, region_change);
                 Err(err)
+            }
+        }
+    }
+
+    async fn try_handle_fast_inserts(
+        &self,
+        insert_requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
+        let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
+            .with_label_values(&["puts"])
+            .start_timer();
+
+        let mut engine: Option<RegionEngineRef> = None;
+        for (region_id, _) in &insert_requests {
+            let curr = match self.get_engine(*region_id, &RegionChange::None)? {
+                CurrentEngine::Engine(engine) => engine,
+                CurrentEngine::EarlyReturn(rows) => return Ok(rows), // never happen
+            };
+
+            match &engine {
+                Some(e) => {
+                    if e.name() != METRIC_ENGINE_NAME {
+                        engine = None;
+                        break;
+                    }
+                }
+                None => {
+                    if curr.name() != METRIC_ENGINE_NAME {
+                        break;
+                    } else {
+                        engine = Some(curr);
+                    }
+                }
+            }
+        }
+
+        match engine {
+            Some(engine) => {
+                // Fast path
+                let engine_type = engine.name();
+                engine
+                    .handle_group_insert_requests(insert_requests)
+                    .trace(info_span!("RegionEngine::handle_inserts", engine_type))
+                    .await
+                    .with_context(|_| HandleRegionRequestSnafu { region_id: 0 })
+            }
+            None => {
+                // Slow path
+                let tasks = insert_requests.into_iter().map(|(region_id, req)| {
+                    self.handle_request(region_id, RegionRequest::Put(req))
+                });
+
+                try_join_all(tasks)
+                    .await
+                    .map(|results| results.into_iter().sum())
             }
         }
     }

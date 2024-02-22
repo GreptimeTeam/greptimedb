@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::hash::Hash;
 
 use api::v1::value::ValueData;
@@ -60,6 +61,25 @@ impl MetricEngineInner {
         }
     }
 
+    pub async fn put_regions(
+        &self,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
+        {
+            let state = self.state.read().unwrap();
+            for region_id in requests.iter().map(|(region_id, _)| region_id) {
+                if state.physical_regions().contains_key(region_id) {
+                    info!("Metric region received put request on physical region {region_id:?}");
+                    FORBIDDEN_OPERATION_COUNT.inc();
+
+                    return ForbiddenPhysicalAlterSnafu.fail();
+                }
+            }
+        }
+
+        self.put_logical_regions(requests).await
+    }
+
     async fn put_logical_region(
         &self,
         logical_region_id: RegionId,
@@ -80,8 +100,7 @@ impl MetricEngineInner {
             })?;
         let data_region_id = to_data_region_id(physical_region_id);
 
-        self.verify_put_request(logical_region_id, physical_region_id, &request)
-            .await?;
+        self.verify_put_request(logical_region_id, physical_region_id, &request)?;
 
         // write to data region
 
@@ -90,12 +109,62 @@ impl MetricEngineInner {
         self.data_region.write_data(data_region_id, request).await
     }
 
+    async fn put_logical_regions(
+        &self,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["puts"])
+            .start_timer();
+
+        let group_by_physical_region = {
+            let state = self.state.read().unwrap();
+            requests
+                .into_iter()
+                .map(|(region_id, request)| {
+                    state
+                        .logical_regions()
+                        .get(&region_id)
+                        .with_context(|| LogicalRegionNotFoundSnafu { region_id })
+                        .map(|physical_region_id| (*physical_region_id, (region_id, request)))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .fold(
+                    HashMap::new(),
+                    |mut map: HashMap<_, Vec<_>>, (physical_region_id, request)| {
+                        map.entry(physical_region_id).or_default().push(request);
+                        map
+                    },
+                )
+        };
+
+        let mut tasks = Vec::with_capacity(group_by_physical_region.len());
+        for (physical_region_id, requests) in group_by_physical_region {
+            let data_region_id = to_data_region_id(physical_region_id);
+            let mut batch_requests = Vec::with_capacity(requests.len());
+            for (logical_region_id, mut request) in requests {
+                self.verify_put_request(logical_region_id, physical_region_id, &request)?;
+                self.modify_rows(logical_region_id.table_id(), &mut request.rows)?;
+                batch_requests.push(request);
+            }
+            tasks.push(
+                self.data_region
+                    .write_data_batch(data_region_id, batch_requests),
+            );
+        }
+
+        futures_util::future::try_join_all(tasks.into_iter())
+            .await
+            .map(|results| results.into_iter().sum())
+    }
+
     /// Verifies a put request for a logical region against its corresponding metadata region.
     ///
     /// Includes:
     /// - Check if the logical region exists
     /// - Check if the columns exist
-    async fn verify_put_request(
+    fn verify_put_request(
         &self,
         logical_region_id: RegionId,
         physical_region_id: RegionId,

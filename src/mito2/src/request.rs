@@ -470,6 +470,8 @@ pub(crate) enum WorkerRequest {
     /// Write to a region.
     Write(SenderWriteRequest),
 
+    Writes(Vec<SenderWriteRequest>),
+
     /// Ddl request to a region.
     Ddl(SenderDdlRequest),
 
