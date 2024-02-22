@@ -14,17 +14,16 @@
 
 //! Builder of a shard.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_recordbatch::filter::SimpleFilterEvaluator;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataBuffer, DataParts, DATA_INIT_CAP};
-use crate::memtable::merge_tree::dict::KeyDictBuilder;
+use crate::memtable::merge_tree::data::{
+    DataBatch, DataBuffer, DataBufferReader, DataParts, DATA_INIT_CAP,
+};
+use crate::memtable::merge_tree::dict::{DictBuilderReader, KeyDictBuilder};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::shard::Shard;
 use crate::memtable::merge_tree::{MergeTreeConfig, ShardId};
@@ -94,19 +93,43 @@ impl ShardBuilder {
     }
 
     /// Scans the shard builder.
-    pub fn scan(
-        &mut self,
-        _projection: &HashSet<ColumnId>,
-        _filters: &[SimpleFilterEvaluator],
-    ) -> Result<ShardBuilderReader> {
-        unimplemented!()
+    pub fn scan(&mut self) -> Result<ShardBuilderReader> {
+        let dict_reader = self.dict_builder.read();
+        let pk_weights = dict_reader.pk_weights_to_sort_data();
+        let data_reader = self.data_buffer.read(&pk_weights)?;
+
+        Ok(ShardBuilderReader {
+            dict_reader,
+            data_reader,
+        })
     }
 }
 
 /// Reader to scan a shard builder.
-pub struct ShardBuilderReader {}
+pub struct ShardBuilderReader {
+    dict_reader: DictBuilderReader,
+    data_reader: DataBufferReader,
+}
 
 // TODO(yingwen): Can we use generic for data reader?
+impl ShardBuilderReader {
+    fn is_valid(&self) -> bool {
+        self.data_reader.is_valid()
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.data_reader.next()
+    }
+
+    fn current_key(&self) -> Option<&[u8]> {
+        let pk_index = self.data_reader.current_data_batch().pk_index();
+        Some(self.dict_reader.key_by_pk_index(pk_index))
+    }
+
+    fn current_batch(&self) -> DataBatch {
+        self.data_reader.current_data_batch()
+    }
+}
 
 #[cfg(test)]
 mod tests {
