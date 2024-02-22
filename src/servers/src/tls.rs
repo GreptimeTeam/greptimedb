@@ -16,6 +16,7 @@ use std::fs::File;
 use std::io::{BufReader, Error as IoError, ErrorKind};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::{error, info};
@@ -162,7 +163,6 @@ impl ReloadableTlsServerConfig {
     /// Reread server certificates and keys from file system.
     pub fn reload(&self) -> Result<()> {
         let server_config = self.tls_option.setup()?;
-        dbg!(&server_config);
         *self.config.write().unwrap() = server_config.map(Arc::new);
         self.version.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -188,38 +188,40 @@ impl ReloadableTlsServerConfig {
 
 pub fn watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>) -> Result<()> {
     let tls_server_config_for_watcher = tls_server_config.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        println!("{:?}", &res);
-        if let Ok(event) = res {
-            match event.kind {
-                EventKind::Modify(_) | EventKind::Create(_) => {
-                    info!("Detected TLS cert/key file change: {:?}", event);
-                    if let Err(err) = tls_server_config_for_watcher.reload() {
-                        error!(err; "Failed to reload TLS server config");
+
+    let (tx, rx) = channel::<notify::Result<notify::Event>>();
+    let mut watcher = notify::recommended_watcher(tx).context(FileWatchSnafu)?;
+
+    watcher
+        .watch(
+            tls_server_config.get_tls_option().cert_path(),
+            RecursiveMode::NonRecursive,
+        )
+        .context(FileWatchSnafu)?;
+
+    watcher
+        .watch(
+            tls_server_config.get_tls_option().key_path(),
+            RecursiveMode::NonRecursive,
+        )
+        .context(FileWatchSnafu)?;
+
+    std::thread::spawn(move || {
+        let _watcher = watcher;
+        while let Ok(res) = rx.recv() {
+            if let Ok(event) = res {
+                match event.kind {
+                    EventKind::Modify(_) | EventKind::Create(_) => {
+                        info!("Detected TLS cert/key file change: {:?}", event);
+                        if let Err(err) = tls_server_config_for_watcher.reload() {
+                            error!(err; "Failed to reload TLS server config");
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
-    })
-    .context(FileWatchSnafu)?;
-
-    // we can only watch directory for better
-    let parent_dir = tls_server_config.get_tls_option().cert_path().parent();
-    if let Some(parent_dir) = parent_dir {
-        watcher
-            .watch(parent_dir, RecursiveMode::NonRecursive)
-            .context(FileWatchSnafu)?;
-    }
-
-    let key_parent_dir = tls_server_config.get_tls_option().key_path().parent();
-    if parent_dir != key_parent_dir {
-        if let Some(parent_dir) = key_parent_dir {
-            watcher
-                .watch(parent_dir, RecursiveMode::NonRecursive)
-                .context(FileWatchSnafu)?;
-        }
-    }
+    });
 
     Ok(())
 }
@@ -383,11 +385,10 @@ mod tests {
 
         std::fs::copy("tests/ssl/server-pkcs8.key", &key_path)
             .expect("failed to copy key to tmpdir");
-        dbg!(&dir);
 
         // waiting for async load
-        std::thread::sleep(std::time::Duration::from_millis(10000));
-        assert_eq!(1, server_config.get_version());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(server_config.get_version() > 1);
         assert!(server_config.get_server_config().is_some());
     }
 }
