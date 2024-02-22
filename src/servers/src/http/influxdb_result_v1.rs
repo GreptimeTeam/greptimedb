@@ -217,11 +217,11 @@ impl IntoResponse for InfluxdbV1Response {
         let execution_time = self.execution_time_ms;
         let mut resp = Json(self).into_response();
         resp.headers_mut().insert(
-            GREPTIME_DB_HEADER_FORMAT,
+            &GREPTIME_DB_HEADER_FORMAT,
             HeaderValue::from_static("influxdb_v1"),
         );
         resp.headers_mut().insert(
-            GREPTIME_DB_HEADER_EXECUTION_TIME,
+            &GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),
         );
         resp

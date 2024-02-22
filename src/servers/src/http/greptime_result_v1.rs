@@ -76,15 +76,15 @@ impl IntoResponse for GreptimedbV1Response {
         let mut resp = Json(self).into_response();
 
         resp.headers_mut().insert(
-            GREPTIME_DB_HEADER_FORMAT,
+            &GREPTIME_DB_HEADER_FORMAT,
             HeaderValue::from_static("greptimedb_v1"),
         );
         resp.headers_mut().insert(
-            GREPTIME_DB_HEADER_EXECUTION_TIME,
+            &GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),
         );
         if let Some(m) = metrics.and_then(|m| HeaderValue::from_str(&m).ok()) {
-            resp.headers_mut().insert(GREPTIME_DB_HEADER_METRICS, m);
+            resp.headers_mut().insert(&GREPTIME_DB_HEADER_METRICS, m);
         }
 
         resp

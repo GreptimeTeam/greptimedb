@@ -9,6 +9,9 @@ protobuf-build = { version = "0.15", default-features = false, features = [
     "protobuf-codec",
 ] }
 
+[lints]
+workspace = true
+
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true

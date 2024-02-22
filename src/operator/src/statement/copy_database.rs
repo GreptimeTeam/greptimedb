@@ -206,6 +206,7 @@ mod tests {
     use object_store::services::Fs;
     use object_store::util::normalize_dir;
     use object_store::ObjectStore;
+    use path_slash::PathExt;
     use table::requests::CopyDatabaseRequest;
 
     use crate::statement::copy_database::{list_files_to_copy, parse_file_name_to_copy};
@@ -223,10 +224,11 @@ mod tests {
         object_store.write("d", "").await.unwrap();
         object_store.write("e.f.parquet", "").await.unwrap();
 
+        let location = normalize_dir(&dir.path().to_slash().unwrap());
         let request = CopyDatabaseRequest {
             catalog_name: "catalog_0".to_string(),
             schema_name: "schema_0".to_string(),
-            location: store_dir,
+            location,
             with: [("FORMAT".to_string(), "parquet".to_string())]
                 .into_iter()
                 .collect(),

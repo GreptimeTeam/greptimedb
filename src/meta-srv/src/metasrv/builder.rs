@@ -329,7 +329,7 @@ impl MetaSrvBuilder {
             lock,
             procedure_manager,
             mailbox,
-            ddl_executor: ddl_manager,
+            procedure_executor: ddl_manager,
             wal_options_allocator,
             table_metadata_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(

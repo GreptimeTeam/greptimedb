@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 async-trait = "0.1"
@@ -58,3 +61,4 @@ tonic.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
+path-slash = "0.2"

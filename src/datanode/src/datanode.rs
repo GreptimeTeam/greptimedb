@@ -310,6 +310,7 @@ impl DatanodeBuilder {
             MemoryCatalogManager::with_default_setup(),
             None,
             None,
+            None,
             false,
             self.plugins.clone(),
         );

@@ -26,6 +26,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 
 pub mod alter_table;
 pub mod create_logical_tables;
@@ -46,16 +47,32 @@ pub struct ExecutorContext {
     pub tracing_context: Option<W3cTrace>,
 }
 
+/// The procedure executor that accepts ddl, region migration task etc.
 #[async_trait::async_trait]
-pub trait DdlTaskExecutor: Send + Sync {
+pub trait ProcedureExecutor: Send + Sync {
+    /// Submit a ddl task
     async fn submit_ddl_task(
         &self,
         ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse>;
+
+    /// Submit a region migration task
+    async fn migrate_region(
+        &self,
+        ctx: &ExecutorContext,
+        request: MigrateRegionRequest,
+    ) -> Result<MigrateRegionResponse>;
+
+    /// Query the procedure state by its id
+    async fn query_procedure_state(
+        &self,
+        ctx: &ExecutorContext,
+        pid: &str,
+    ) -> Result<ProcedureStateResponse>;
 }
 
-pub type DdlTaskExecutorRef = Arc<dyn DdlTaskExecutor>;
+pub type ProcedureExecutorRef = Arc<dyn ProcedureExecutor>;
 
 pub struct TableMetadataAllocatorContext {
     pub cluster_id: u64,

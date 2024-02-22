@@ -22,7 +22,7 @@ use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -459,8 +459,8 @@ impl StartCommand {
         procedure_manager: ProcedureManagerRef,
         datanode_manager: DatanodeManagerRef,
         table_meta_allocator: TableMetadataAllocatorRef,
-    ) -> Result<DdlTaskExecutorRef> {
-        let ddl_task_executor: DdlTaskExecutorRef = Arc::new(
+    ) -> Result<ProcedureExecutorRef> {
+        let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
                 procedure_manager,
                 datanode_manager,
@@ -472,7 +472,7 @@ impl StartCommand {
             .context(InitDdlManagerSnafu)?,
         );
 
-        Ok(ddl_task_executor)
+        Ok(procedure_executor)
     }
 
     pub async fn create_table_metadata_manager(

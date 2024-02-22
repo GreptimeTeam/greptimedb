@@ -8,6 +8,9 @@ license.workspace = true
 tokio-console = ["console-subscriber", "tokio/tracing"]
 deadlock_detection = ["parking_lot/deadlock_detection"]
 
+[lints]
+workspace = true
+
 [dependencies]
 atty = "0.2"
 backtrace = "0.3"

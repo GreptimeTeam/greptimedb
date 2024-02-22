@@ -1768,8 +1768,10 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "chrono-tz 0.6.3",
+ "common-catalog",
  "common-error",
  "common-macro",
+ "common-meta",
  "common-query",
  "common-runtime",
  "common-telemetry",
@@ -1784,6 +1786,7 @@ dependencies = [
  "paste",
  "ron",
  "serde",
+ "serde_json",
  "session",
  "snafu",
  "statrs",
@@ -3406,6 +3409,7 @@ dependencies = [
  "datatypes",
  "hydroflow",
  "itertools 0.10.5",
+ "num-traits",
  "serde",
  "servers",
  "session",
@@ -6062,6 +6066,7 @@ dependencies = [
  "meter-macros",
  "object-store",
  "partition",
+ "path-slash",
  "prometheus",
  "query",
  "regex",
@@ -6335,6 +6340,12 @@ name = "paste"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de3145af08024dea9fa9914f381a17b8fc6034dfb00f3a84013f7ff43f29ed4c"
+
+[[package]]
+name = "path-slash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e91099d4268b0e11973f036e885d652fb0b21fedcf69738c627f94db6a44f42"
 
 [[package]]
 name = "pathdiff"
