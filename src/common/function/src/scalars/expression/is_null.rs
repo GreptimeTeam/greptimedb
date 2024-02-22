@@ -30,7 +30,7 @@ use crate::function::{Function, FunctionContext};
 
 const NAME: &str = "isnull";
 
-/// The function to find remainders
+/// The function to check whether an expression is NULL
 #[derive(Clone, Debug, Default)]
 pub struct IsNullFunction;
 
