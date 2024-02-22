@@ -14,8 +14,8 @@
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
+use std::fmt::Debug;
 use std::ops::Range;
-use std::sync::Arc;
 
 use datatypes::arrow::array::{
     ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
@@ -76,7 +76,7 @@ pub struct Merger<T, I> {
 
 impl<T, I> Merger<T, I>
     where
-        I: Item,
+        I: Item + Debug,
         T: Node<Item=I>,
 {
     pub(crate) fn try_new(nodes: Vec<T>) -> Result<Self> {
@@ -86,7 +86,6 @@ impl<T, I> Merger<T, I>
                 heap.push(node);
             }
         }
-
         let mut merger = Merger {
             heap,
             current_item: None,
@@ -130,16 +129,13 @@ impl<T, I> Merger<T, I>
                         }
                     };
                     self.current_item = Some(res);
-                    if top_node.is_valid() {
-                        self.heap.push(top_node);
-                    }
                 }
             } else {
                 // top is the only node left.
                 self.current_item = Some(top_node.fetch_next()?);
-                if top_node.is_valid() {
-                    self.heap.push(top_node);
-                }
+            }
+            if top_node.is_valid() {
+                self.heap.push(top_node);
             }
         } else {
             // heap is empty
@@ -264,16 +260,14 @@ impl Item for DataBatch {
 }
 
 pub struct DataNode {
-    pk_weights: Arc<Vec<u16>>,
     source: DataSource,
     current_data_batch: Option<DataBatch>,
 }
 
 impl DataNode {
-    pub(crate) fn new(source: DataSource, weight: Arc<Vec<u16>>) -> Self {
+    pub(crate) fn new(source: DataSource) -> Self {
         let current_data_batch = source.current_data_batch();
         Self {
-            pk_weights: weight,
             source,
             current_data_batch: Some(current_data_batch),
         }
@@ -323,10 +317,13 @@ impl DataSource {
 
 impl Ord for DataNode {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.current_data_batch()
-            .current_range()
-            .start
-            .cmp(&other.current_data_batch().current_range().start)
+        let weight = self.current_data_batch().pk_index;
+        let (ts_start, sequence) = self.current_data_batch().first_row();
+        let other_weight = other.current_data_batch().pk_index;
+        let (other_ts_start, other_sequence) = other.current_data_batch().first_row();
+        (weight, ts_start, Reverse(sequence))
+            .cmp(&(other_weight, other_ts_start, Reverse(other_sequence)))
+            .reverse()
     }
 }
 
@@ -343,16 +340,7 @@ impl PartialEq<Self> for DataNode {
 #[allow(clippy::non_canonical_partial_ord_impl)]
 impl PartialOrd<Self> for DataNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let weight = self.pk_weights[self.current_data_batch().pk_index as usize];
-        let (ts_start, sequence) = self.current_data_batch().first_row();
-        let other_weight = self.pk_weights[other.current_data_batch().pk_index as usize];
-        let (other_ts_start, other_sequence) = other.current_data_batch().first_row();
-
-        Some(
-            (weight, ts_start, Reverse(sequence))
-                .cmp(&(other_weight, other_ts_start, Reverse(other_sequence)))
-                .reverse(),
-        )
+        Some(self.cmp(other))
     }
 }
 
@@ -361,6 +349,7 @@ impl Node for DataNode {
 
     fn fetch_next(&mut self) -> Result<Self::Item> {
         let current = self.current_data_batch.take();
+        self.next()?;
         Ok(current.unwrap())
     }
 
@@ -373,11 +362,11 @@ impl Node for DataNode {
     }
 
     fn is_behind(&self, other: &Self) -> bool {
-        let pk_weight = self.pk_weights[self.current_data_batch().pk_index as usize];
-        let (start, _) = self.current_data_batch().first_row();
-        let other_pk_weight = self.pk_weights[other.current_data_batch().pk_index as usize];
-        let (other_end, _) = other.current_data_batch().last_row();
-        (pk_weight, start) > (other_pk_weight, other_end)
+        let pk_weight = self.current_data_batch().pk_index;
+        let (start, seq) = self.current_data_batch().first_row();
+        let other_pk_weight = other.current_data_batch().pk_index;
+        let (other_end, other_seq) = other.current_data_batch().last_row();
+        (pk_weight, start, Reverse(seq)) > (other_pk_weight, other_end, Reverse(other_seq))
     }
 
     fn skip(&mut self, offset_to_skip: usize) -> Result<()> {
@@ -495,33 +484,57 @@ mod tests {
     fn test_merger() {
         let metadata = metadata_for_test();
         let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
-        let weight = Arc::new(vec![2, 1, 0]);
+        let weight = &[2, 1, 0];
         let mut seq = 0;
+        write_rows_to_buffer(&mut buffer1, &metadata, 1, vec![2, 3], &mut seq);
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2], &mut seq);
-        let node1 = DataNode::new(
-            DataSource::Buffer(buffer1.read(&weight).unwrap()),
-            weight.clone(),
-        );
+        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
 
         let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
-        write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
-        let node2 = DataNode::new(
-            DataSource::Buffer(buffer2.read(&weight).unwrap()),
-            weight.clone(),
+        write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![3], &mut seq);
+        write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![1], &mut seq);
+        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+
+        check_merger_read(
+            vec![node1, node2],
+            &[
+                (1, vec![(2, 0)]),
+                (1, vec![(3, 4)]),
+                (1, vec![(3, 1)]),
+                (2, vec![(1, 5)]),
+                (2, vec![(1, 2), (2, 3)]),
+            ],
         );
+    }
+
+    #[test]
+    fn test_merger2() {
+        let metadata = metadata_for_test();
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let weight = &[2, 1, 0];
+        let mut seq = 0;
+        write_rows_to_buffer(&mut buffer1, &metadata, 1, vec![2, 3], &mut seq);
+        write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2], &mut seq);
+        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![3], &mut seq);
+        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
 
         let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
-        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(&weight).unwrap()), weight);
+        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(weight).unwrap()));
 
         check_merger_read(
             vec![node1, node3, node2],
             &[
-                (2, vec![(1, 0)]),
-                (2, vec![(2, 4)]),
-                (2, vec![(2, 1)]),
-                (2, vec![(3, 5)]),
-                (1, vec![(2, 2), (3, 3)]),
+                (1, vec![(2, 0)]),
+                (1, vec![(3, 4)]),
+                (1, vec![(3, 1)]),
+                (2, vec![(1, 2)]),
+                (2, vec![(2, 5)]),
+                (2, vec![(2, 3)]),
+                (2, vec![(3, 6)]),
             ],
         );
     }
@@ -530,24 +543,18 @@ mod tests {
     fn test_merger_overlapping() {
         let metadata = metadata_for_test();
         let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
-        let weight = Arc::new(vec![0, 1, 2]);
+        let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 3], &mut seq);
-        let node1 = DataNode::new(
-            DataSource::Buffer(buffer1.read(&weight).unwrap()),
-            weight.clone(),
-        );
+        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
 
         let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
-        let node2 = DataNode::new(
-            DataSource::Buffer(buffer2.read(&weight).unwrap()),
-            weight.clone(),
-        );
+        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
 
         let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
-        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(&weight).unwrap()), weight);
+        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(weight).unwrap()));
 
         check_merger_read(
             vec![node1, node3, node2],
@@ -566,27 +573,22 @@ mod tests {
     fn test_merger_parts_and_buffer() {
         let metadata = metadata_for_test();
         let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
-        let weight = Arc::new(vec![0, 1, 2]);
+        let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 3], &mut seq);
-        let node1 = DataNode::new(
-            DataSource::Buffer(buffer1.read(&weight).unwrap()),
-            weight.clone(),
-        );
+        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
 
         let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
-        let node2 = DataNode::new(
-            DataSource::Part(buffer2.freeze(&weight).unwrap().read().unwrap()),
-            weight.clone(),
-        );
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(weight).unwrap().read().unwrap(),
+        ));
 
         let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
-        let node3 = DataNode::new(
-            DataSource::Part(buffer3.freeze(&weight).unwrap().read().unwrap()),
-            weight.clone(),
-        );
+        let node3 = DataNode::new(DataSource::Part(
+            buffer3.freeze(weight).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
             vec![node1, node3, node2],
@@ -605,24 +607,18 @@ mod tests {
     fn test_merger_overlapping_2() {
         let metadata = metadata_for_test();
         let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
-        let weight = Arc::new(vec![0, 1, 2]);
+        let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 2], &mut seq);
-        let node1 = DataNode::new(
-            DataSource::Buffer(buffer1.read(&weight).unwrap()),
-            weight.clone(),
-        );
+        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
 
         let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2], &mut seq);
-        let node3 = DataNode::new(
-            DataSource::Buffer(buffer3.read(&weight).unwrap()),
-            weight.clone(),
-        );
+        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(weight).unwrap()));
 
         let mut buffer4 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer4, &metadata, 0, vec![2], &mut seq);
-        let node4 = DataNode::new(DataSource::Buffer(buffer4.read(&weight).unwrap()), weight);
+        let node4 = DataNode::new(DataSource::Buffer(buffer4.read(weight).unwrap()));
 
         check_merger_read(
             vec![node1, node3, node4],

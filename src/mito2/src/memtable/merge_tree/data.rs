@@ -692,12 +692,11 @@ impl DataParts {
     pub fn read(&mut self, pk_weights: Vec<u16>) -> Result<DataPartsReader> {
         let weights = Arc::new(pk_weights);
         let mut nodes = Vec::with_capacity(self.frozen.len() + 1);
-        nodes.push(DataNode::new(
-            DataSource::Buffer(self.active.read(&weights)?),
-            weights.clone(),
-        ));
+        nodes.push(DataNode::new(DataSource::Buffer(
+            self.active.read(&weights)?,
+        )));
         for p in &self.frozen {
-            nodes.push(DataNode::new(DataSource::Part(p.read()?), weights.clone()));
+            nodes.push(DataNode::new(DataSource::Part(p.read()?)));
         }
         let merger = Merger::try_new(nodes)?;
         Ok(DataPartsReader { merger })
