@@ -226,7 +226,7 @@ struct Inner {
 impl Inner {
     fn find_key_in_shards(&self, primary_key: &[u8]) -> Option<PkId> {
         for shard in &self.shards {
-            if let Some(pkid) = shard.find_key(primary_key) {
+            if let Some(pkid) = shard.find_id_by_key(primary_key) {
                 return Some(pkid);
             }
         }

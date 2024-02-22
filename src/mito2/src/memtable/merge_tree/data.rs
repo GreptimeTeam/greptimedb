@@ -531,6 +531,7 @@ impl<'a> DataPartEncoder<'a> {
     }
 }
 
+// TODO(yingwen): rm pub(crate) and add a new method.
 /// Data parts under a shard.
 pub struct DataParts {
     /// The active writing buffer.

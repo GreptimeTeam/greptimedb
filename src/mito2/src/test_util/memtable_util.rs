@@ -22,15 +22,18 @@ use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use datatypes::value::ValueRef;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::Result;
+use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRef,
     MemtableStats,
 };
+use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
@@ -197,4 +200,41 @@ pub(crate) fn build_key_values_with_ts_seq_values(
         }),
     };
     KeyValues::new(schema.as_ref(), mutation).unwrap()
+}
+
+/// Encode keys.
+pub(crate) fn encode_keys(
+    metadata: &RegionMetadataRef,
+    key_values: &KeyValues,
+    keys: &mut Vec<Vec<u8>>,
+) {
+    let row_codec = McmpRowCodec::new(
+        metadata
+            .primary_key_columns()
+            .map(|c| SortField::new(c.column_schema.data_type.clone()))
+            .collect(),
+    );
+    for kv in key_values.iter() {
+        let key = row_codec.encode(kv.primary_keys()).unwrap();
+        keys.push(key);
+    }
+}
+
+/// Encode one key.
+pub(crate) fn encode_key(k0: &str, k1: i64) -> Vec<u8> {
+    let row_codec = McmpRowCodec::new(vec![
+        SortField::new(ConcreteDataType::string_datatype()),
+        SortField::new(ConcreteDataType::int64_datatype()),
+    ]);
+    let key = [ValueRef::String(k0), ValueRef::Int64(k1)];
+    row_codec.encode(key.into_iter()).unwrap()
+}
+
+/// Encode one key.
+pub(crate) fn encode_key_by_kv(key_value: &KeyValue) -> Vec<u8> {
+    let row_codec = McmpRowCodec::new(vec![
+        SortField::new(ConcreteDataType::string_datatype()),
+        SortField::new(ConcreteDataType::int64_datatype()),
+    ]);
+    row_codec.encode(key_value.primary_keys()).unwrap()
 }
