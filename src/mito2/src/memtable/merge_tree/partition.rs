@@ -46,13 +46,7 @@ impl Partition {
         let shard_builder = ShardBuilder::new(metadata.clone(), config);
 
         Partition {
-            inner: RwLock::new(Inner {
-                metadata,
-                shard_builder,
-                active_shard_id: 0,
-                shards: Vec::new(),
-                num_rows: 0,
-            }),
+            inner: RwLock::new(Inner::new(metadata, shard_builder)),
         }
     }
 
@@ -72,12 +66,7 @@ impl Partition {
         }
 
         if inner.shard_builder.should_freeze() {
-            let shard_id = inner.active_shard_id;
-            let metadata = inner.metadata.clone();
-            // Safety: The builder is not empty.
-            let shard = inner.shard_builder.finish(shard_id, metadata)?.unwrap();
-            inner.active_shard_id += 1;
-            inner.shards.push(shard);
+            inner.freeze_active_shard()?;
         }
 
         // Write to the shard builder.
@@ -93,20 +82,12 @@ impl Partition {
     pub fn write_no_key(&self, key_value: KeyValue) {
         let mut inner = self.inner.write().unwrap();
         // If no primary key, always write to the first shard.
-        if inner.shards.is_empty() {
-            // Create the shard if it doesn't exist.
-            let shard_id = inner.active_shard_id;
-            let data_parts = DataParts::new(
-                DataBuffer::with_capacity(inner.metadata.clone(), DATA_INIT_CAP),
-                Vec::new(),
-            );
-            inner.shards.push(Shard::new(shard_id, None, data_parts));
-            inner.active_shard_id += 1;
-        }
+        debug_assert!(!inner.shards.is_empty());
+        debug_assert_eq!(1, inner.active_shard_id);
 
         // A dummy pk id.
         let pk_id = PkId {
-            shard_id: inner.active_shard_id - 1,
+            shard_id: 0,
             pk_index: 0,
         };
         inner.shards[0].write_key_value(pk_id, key_value);
@@ -125,15 +106,7 @@ impl Partition {
     /// Freezes the partition.
     pub fn freeze(&self) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
-        // TODO(yingwen): wrap a method to bump shard id and create shard?
-        let shard_id = inner.active_shard_id;
-        let metadata = inner.metadata.clone();
-        let Some(shard) = inner.shard_builder.finish(shard_id, metadata)? else {
-            return Ok(());
-        };
-        inner.active_shard_id += 1;
-
-        inner.shards.push(shard);
+        inner.freeze_active_shard()?;
         Ok(())
     }
 
@@ -224,6 +197,27 @@ struct Inner {
 }
 
 impl Inner {
+    fn new(metadata: RegionMetadataRef, shard_builder: ShardBuilder) -> Self {
+        let mut inner = Self {
+            metadata,
+            shard_builder,
+            active_shard_id: 0,
+            shards: Vec::new(),
+            num_rows: 0,
+        };
+
+        if inner.metadata.primary_key.is_empty() {
+            let data_parts = DataParts::new(
+                DataBuffer::with_capacity(inner.metadata.clone(), DATA_INIT_CAP),
+                Vec::new(),
+            );
+            inner.shards.push(Shard::new(0, None, data_parts));
+            inner.active_shard_id = 1;
+        }
+
+        inner
+    }
+
     fn find_key_in_shards(&self, primary_key: &[u8]) -> Option<PkId> {
         for shard in &self.shards {
             if let Some(pkid) = shard.find_id_by_key(primary_key) {
@@ -242,5 +236,16 @@ impl Inner {
                 return;
             }
         }
+    }
+
+    fn freeze_active_shard(&mut self) -> Result<()> {
+        if let Some(shard) = self
+            .shard_builder
+            .finish(self.active_shard_id, self.metadata.clone())?
+        {
+            self.active_shard_id += 1;
+            self.shards.push(shard);
+        }
+        Ok(())
     }
 }

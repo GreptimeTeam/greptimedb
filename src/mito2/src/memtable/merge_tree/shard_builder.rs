@@ -57,23 +57,20 @@ impl ShardBuilder {
         self.data_buffer.write_row(pk_index, key_value);
     }
 
-    /// Returns true if the builder is empty.
-    pub fn is_empty(&self) -> bool {
-        self.data_buffer.is_empty()
-    }
-
     /// Returns true if the builder need to freeze.
     pub fn should_freeze(&self) -> bool {
         self.dict_builder.is_full() || self.data_buffer.num_rows() == self.data_freeze_threshold
     }
 
     /// Builds a new shard and resets the builder.
+    ///
+    /// Returns `None` if the builder is empty.
     pub fn finish(
         &mut self,
         shard_id: ShardId,
         metadata: RegionMetadataRef,
     ) -> Result<Option<Shard>> {
-        if self.is_empty() {
+        if self.data_buffer.is_empty() {
             return Ok(None);
         }
 
@@ -183,13 +180,14 @@ mod tests {
         let config = MergeTreeConfig::default();
         let mut shard_builder = ShardBuilder::new(metadata.clone(), &config);
         let mut metrics = WriteMetrics::default();
+        assert!(shard_builder.finish(1, metadata.clone()).unwrap().is_none());
 
-        assert!(shard_builder.is_empty());
         for key_values in &input {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
                 shard_builder.write_with_key(&key, kv, &mut metrics);
             }
         }
+        shard_builder.finish(1, metadata).unwrap().unwrap();
     }
 }
