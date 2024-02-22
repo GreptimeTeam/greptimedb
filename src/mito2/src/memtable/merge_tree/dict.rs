@@ -181,15 +181,30 @@ impl DictBuilderReader {
         self.key_by_pk_index(pk_index)
     }
 
+    /// Gets the key by the pk index.
+    pub fn key_by_pk_index(&self, pk_index: PkIndex) -> &[u8] {
+        let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
+        self.blocks[block_idx as usize].key_by_pk_index(pk_index)
+    }
+
+    /// Returns pk weights to sort a data part and replaces pk indices.
+    pub(crate) fn pk_weights_to_sort_data(&self) -> Vec<u16> {
+        compute_pk_weights(&self.sorted_pk_indices)
+    }
+
     /// Returns pk indices sorted by keys.
     pub(crate) fn sorted_pk_index(&self) -> &[PkIndex] {
         &self.sorted_pk_indices
     }
+}
 
-    fn key_by_pk_index(&self, pk_index: PkIndex) -> &[u8] {
-        let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
-        self.blocks[block_idx as usize].key_by_pk_index(pk_index)
+/// Returns pk weights to sort a data part and replaces pk indices.
+fn compute_pk_weights(sorted_pk_indices: &[PkIndex]) -> Vec<u16> {
+    let mut pk_weights = vec![0; sorted_pk_indices.len()];
+    for (weight, pk_index) in sorted_pk_indices.iter().enumerate() {
+        pk_weights[*pk_index as usize] = weight as u16;
     }
+    pk_weights
 }
 
 /// A key dictionary.
@@ -223,13 +238,9 @@ impl KeyDict {
         self.pk_to_index.get(key).copied()
     }
 
-    /// Sets the pk weights to sort a data part and replaces pk indices.
+    /// Returns pk weights to sort a data part and replaces pk indices.
     pub(crate) fn pk_weights_to_sort_data(&self) -> Vec<u16> {
-        let mut pk_weights = vec![0; self.key_positions.len()];
-        for (weight, pk_index) in self.key_positions.iter().enumerate() {
-            pk_weights[*pk_index as usize] = weight as u16;
-        }
-        pk_weights
+        compute_pk_weights(&self.key_positions)
     }
 
     /// Returns the shared memory size.
