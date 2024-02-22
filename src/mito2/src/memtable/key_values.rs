@@ -42,17 +42,6 @@ impl KeyValues {
         Some(KeyValues { mutation, helper })
     }
 
-    /// Creates [KeyValues] from specific `mutation`. This method is used for [Mutation] that
-    /// has not been filled with all columns.
-    ///
-    /// Returns `None` if `rows` of the `mutation` is `None`.
-    pub fn new_sparse(metadata: &RegionMetadata, mutation: Mutation) -> Option<KeyValues> {
-        let rows = mutation.rows.as_ref()?;
-        let helper = SparseReadRowHelper::new(metadata, rows);
-
-        Some(KeyValues { mutation, helper })
-    }
-
     /// Returns a key value iterator.
     pub fn iter(&self) -> impl Iterator<Item = KeyValue> {
         let rows = self.mutation.rows.as_ref().unwrap();
@@ -146,68 +135,6 @@ impl<'a> KeyValue<'a> {
     /// Get op type.
     pub fn op_type(&self) -> OpType {
         self.op_type
-    }
-}
-
-/// Helper to read rows in key, value order.
-#[derive(Debug)]
-struct ReadRowHelper {
-    /// Key and value column indices.
-    ///
-    /// `indices[..num_primary_key_column]` are primary key columns, `indices[num_primary_key_column]`
-    /// is the timestamp column and remainings are field columns.
-    indices: Vec<usize>,
-    /// Number of primary key columns.
-    num_primary_key_column: usize,
-}
-
-impl ReadRowHelper {
-    /// Creates a [ReadRowHelper] for specific `rows`.
-    ///
-    /// # Panics
-    /// The `rows` must fill their missing columns first and have same columns with `metadata`.
-    /// Otherwise this method will panic.
-    fn new(metadata: &RegionMetadata, rows: &Rows) -> ReadRowHelper {
-        assert_eq!(
-            metadata.column_metadatas.len(),
-            rows.schema.len(),
-            "Length mismatch, column_metas: {:?}, rows_schema: {:?}",
-            metadata.column_metadatas,
-            rows.schema
-        );
-
-        // Build a name to index mapping for rows.
-        let name_to_index: HashMap<_, _> = rows
-            .schema
-            .iter()
-            .enumerate()
-            .map(|(index, col)| (&col.column_name, index))
-            .collect();
-        let mut indices = Vec::with_capacity(metadata.column_metadatas.len());
-
-        // Get primary key indices.
-        for pk_id in &metadata.primary_key {
-            // Safety: Id comes from primary key.
-            let column = metadata.column_by_id(*pk_id).unwrap();
-            let index = name_to_index.get(&column.column_schema.name).unwrap();
-            indices.push(*index);
-        }
-        // Get timestamp index.
-        let ts_index = name_to_index
-            .get(&metadata.time_index_column().column_schema.name)
-            .unwrap();
-        indices.push(*ts_index);
-        // Iterate columns and find field columns.
-        for column in metadata.field_columns() {
-            // Get index in request for each field column.
-            let index = name_to_index.get(&column.column_schema.name).unwrap();
-            indices.push(*index);
-        }
-
-        ReadRowHelper {
-            indices,
-            num_primary_key_column: metadata.primary_key.len(),
-        }
     }
 }
 
