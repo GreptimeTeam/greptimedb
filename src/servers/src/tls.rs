@@ -187,6 +187,10 @@ impl ReloadableTlsServerConfig {
 }
 
 pub fn watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>) -> Result<()> {
+    if tls_server_config.get_tls_option().mode == TlsMode::Disable {
+        return Ok(());
+    }
+
     let tls_server_config_for_watcher = tls_server_config.clone();
 
     let (tx, rx) = channel::<notify::Result<notify::Event>>();
