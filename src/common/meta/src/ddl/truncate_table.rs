@@ -169,10 +169,10 @@ impl TruncateTableProcedure {
                 let requester = requester.clone();
 
                 truncate_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await {
-                        return Err(add_peer_context_if_needed(datanode)(err));
-                    }
-                    Ok(())
+                    requester
+                        .handle(request)
+                        .await
+                        .map_err(add_peer_context_if_needed(datanode))
                 });
             }
         }
