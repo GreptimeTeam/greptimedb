@@ -55,7 +55,7 @@ impl Shard {
     pub fn write_key_value(&mut self, pk_id: PkId, key_value: KeyValue) {
         debug_assert_eq!(self.shard_id, pk_id.shard_id);
 
-        self.data_parts.active.write_row(pk_id.pk_index, key_value);
+        self.data_parts.write_row(pk_id.pk_index, key_value);
     }
 
     /// Scans the shard.
@@ -77,10 +77,10 @@ impl Shard {
         Shard {
             shard_id: self.shard_id,
             key_dict: self.key_dict.clone(),
-            data_parts: DataParts {
-                active: DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
-                frozen: Vec::new(),
-            },
+            data_parts: DataParts::new(
+                DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
+                Vec::new(),
+            ),
         }
     }
 }
@@ -147,10 +147,7 @@ mod tests {
         }
 
         let dict = dict_builder.finish().unwrap();
-        let data_parts = DataParts {
-            active: DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
-            frozen: vec![],
-        };
+        let data_parts = DataParts::new(DataBuffer::with_capacity(metadata, DATA_INIT_CAP), vec![]);
 
         Shard::new(shard_id, Some(Arc::new(dict)), data_parts)
     }

@@ -96,10 +96,10 @@ impl Partition {
         if inner.shards.is_empty() {
             // Create the shard if it doesn't exist.
             let shard_id = inner.active_shard_id;
-            let data_parts = DataParts {
-                active: DataBuffer::with_capacity(inner.metadata.clone(), DATA_INIT_CAP),
-                frozen: Vec::new(),
-            };
+            let data_parts = DataParts::new(
+                DataBuffer::with_capacity(inner.metadata.clone(), DATA_INIT_CAP),
+                Vec::new(),
+            );
             inner.shards.push(Shard::new(shard_id, None, data_parts));
             inner.active_shard_id += 1;
         }
@@ -218,7 +218,7 @@ struct Inner {
     /// Shard whose dictionary is active.
     shard_builder: ShardBuilder,
     active_shard_id: ShardId,
-    /// Shards with frozon dictionary.
+    /// Shards with frozen dictionary.
     shards: Vec<Shard>,
     num_rows: usize,
 }

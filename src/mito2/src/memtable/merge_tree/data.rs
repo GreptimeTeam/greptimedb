@@ -531,13 +531,24 @@ impl<'a> DataPartEncoder<'a> {
     }
 }
 
-// TODO(yingwen): rm pub(crate) and add a new method.
 /// Data parts under a shard.
 pub struct DataParts {
     /// The active writing buffer.
-    pub(crate) active: DataBuffer,
+    active: DataBuffer,
     /// immutable (encoded) parts.
-    pub(crate) frozen: Vec<DataPart>,
+    frozen: Vec<DataPart>,
+}
+
+impl DataParts {
+    /// Creates a new [DataParts].
+    pub fn new(active: DataBuffer, frozen: Vec<DataPart>) -> DataParts {
+        DataParts { active, frozen }
+    }
+
+    /// Writes a row into parts.
+    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
+        self.active.write_row(pk_index, kv)
+    }
 }
 
 /// Format of immutable data part.

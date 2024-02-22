@@ -90,10 +90,10 @@ impl ShardBuilder {
         };
 
         // build data parts.
-        let data_parts = DataParts {
-            active: DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
-            frozen: vec![data_part],
-        };
+        let data_parts = DataParts::new(
+            DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
+            vec![data_part],
+        );
         let key_dict = key_dict.map(Arc::new);
 
         Ok(Some(Shard::new(shard_id, key_dict, data_parts)))
@@ -171,10 +171,7 @@ mod tests {
         }
 
         let dict = dict_builder.finish().unwrap();
-        let data_parts = DataParts {
-            active: DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
-            frozen: vec![],
-        };
+        let data_parts = DataParts::new(DataBuffer::with_capacity(metadata, DATA_INIT_CAP), vec![]);
 
         Shard::new(shard_id, Some(Arc::new(dict)), data_parts)
     }
