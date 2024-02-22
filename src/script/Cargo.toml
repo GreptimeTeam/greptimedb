@@ -23,6 +23,9 @@ python = [
     "dep:paste",
 ]
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 arc-swap = "1.0"

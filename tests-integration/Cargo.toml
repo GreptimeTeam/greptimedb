@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 dashboard = []
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true
