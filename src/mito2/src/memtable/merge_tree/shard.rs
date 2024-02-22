@@ -52,7 +52,7 @@ impl Shard {
     }
 
     /// Writes a key value into the shard.
-    pub fn write_key_value(&mut self, pk_id: PkId, key_value: KeyValue) {
+    pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: KeyValue) {
         debug_assert_eq!(self.shard_id, pk_id.shard_id);
 
         self.data_parts.write_row(pk_id.pk_index, key_value);
@@ -179,7 +179,7 @@ mod tests {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
                 let pk_id = shard.find_id_by_key(&key).unwrap();
-                shard.write_key_value(pk_id, kv);
+                shard.write_with_pk_id(pk_id, kv);
             }
         }
     }

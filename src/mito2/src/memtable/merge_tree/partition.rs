@@ -90,7 +90,7 @@ impl Partition {
             shard_id: 0,
             pk_index: 0,
         };
-        inner.shards[0].write_key_value(pk_id, key_value);
+        inner.shards[0].write_with_pk_id(pk_id, key_value);
         inner.num_rows += 1;
     }
 
@@ -231,7 +231,7 @@ impl Inner {
     fn write_to_shard(&mut self, pk_id: PkId, key_value: KeyValue) {
         for shard in &mut self.shards {
             if shard.shard_id == pk_id.shard_id {
-                shard.write_key_value(pk_id, key_value);
+                shard.write_with_pk_id(pk_id, key_value);
                 self.num_rows += 1;
                 return;
             }
