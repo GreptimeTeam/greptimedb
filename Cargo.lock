@@ -9096,6 +9096,7 @@ dependencies = [
  "sql",
  "strum 0.25.0",
  "table",
+ "tempfile",
  "tikv-jemalloc-ctl",
  "tokio",
  "tokio-postgres",

@@ -162,6 +162,7 @@ impl ReloadableTlsServerConfig {
     /// Reread server certificates and keys from file system.
     pub fn reload(&self) -> Result<()> {
         let server_config = self.tls_option.setup()?;
+        dbg!(&server_config);
         *self.config.write().unwrap() = server_config.map(Arc::new);
         self.version.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -188,6 +189,7 @@ impl ReloadableTlsServerConfig {
 pub fn watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>) -> Result<()> {
     let tls_server_config_for_watcher = tls_server_config.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        println!("{:?}", &res);
         if let Ok(event) = res {
             match event.kind {
                 EventKind::Modify(_) | EventKind::Create(_) => {
@@ -202,20 +204,22 @@ pub fn watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>) -> Re
     })
     .context(FileWatchSnafu)?;
 
-    // Add a path to be watched. All files and directories at that path and
-    // below will be monitored for changes.
-    watcher
-        .watch(
-            tls_server_config.get_tls_option().cert_path(),
-            RecursiveMode::NonRecursive,
-        )
-        .context(FileWatchSnafu)?;
-    watcher
-        .watch(
-            tls_server_config.get_tls_option().key_path(),
-            RecursiveMode::NonRecursive,
-        )
-        .context(FileWatchSnafu)?;
+    // we can only watch directory for better
+    let parent_dir = tls_server_config.get_tls_option().cert_path().parent();
+    if let Some(parent_dir) = parent_dir {
+        watcher
+            .watch(parent_dir, RecursiveMode::NonRecursive)
+            .context(FileWatchSnafu)?;
+    }
+
+    let key_parent_dir = tls_server_config.get_tls_option().key_path().parent();
+    if parent_dir != key_parent_dir {
+        if let Some(parent_dir) = key_parent_dir {
+            watcher
+                .watch(parent_dir, RecursiveMode::NonRecursive)
+                .context(FileWatchSnafu)?;
+        }
+    }
 
     Ok(())
 }
@@ -347,5 +351,43 @@ mod tests {
     }
 
     #[test]
-    fn test_tls_file_change_watch() {}
+    fn test_tls_file_change_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("serevr.crt");
+        let key_path = dir.path().join("server.key");
+
+        std::fs::copy("tests/ssl/server.crt", &cert_path).expect("failed to copy cert to tmpdir");
+        std::fs::copy("tests/ssl/server-rsa.key", &key_path).expect("failed to copy key to tmpdir");
+
+        let server_tls = TlsOption {
+            mode: TlsMode::Require,
+            cert_path: cert_path
+                .clone()
+                .into_os_string()
+                .into_string()
+                .expect("failed to convert path to string"),
+            key_path: key_path
+                .clone()
+                .into_os_string()
+                .into_string()
+                .expect("failed to convert path to string"),
+        };
+
+        let server_config = Arc::new(
+            ReloadableTlsServerConfig::try_new(server_tls).expect("failed to create server config"),
+        );
+        watch_tls_config(server_config.clone()).expect("failed to watch server config");
+
+        assert_eq!(0, server_config.get_version());
+        assert!(server_config.get_server_config().is_some());
+
+        std::fs::copy("tests/ssl/server-pkcs8.key", &key_path)
+            .expect("failed to copy key to tmpdir");
+        dbg!(&dir);
+
+        // waiting for async load
+        std::thread::sleep(std::time::Duration::from_millis(10000));
+        assert_eq!(1, server_config.get_version());
+        assert!(server_config.get_server_config().is_some());
+    }
 }
