@@ -161,7 +161,7 @@ mod tests {
         let input = input_with_key(&metadata);
         let shard = new_shard_with_dict(8, metadata, &input);
         for i in 0..input.len() {
-            let key = encode_key("shard", i as i64);
+            let key = encode_key("shard", i as u32);
             assert_eq!(
                 PkId {
                     shard_id: 8,

@@ -260,3 +260,85 @@ impl MemtableBuilder for MergeTreeMemtableBuilder {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use common_time::Timestamp;
+
+    use super::*;
+    use crate::test_util::memtable_util;
+
+    #[test]
+    fn test_memtable_sorted_input() {
+        write_sorted_input(true);
+        write_sorted_input(false);
+    }
+
+    fn write_sorted_input(has_pk: bool) {
+        let metadata = if has_pk {
+            memtable_util::metadata_with_primary_key(vec![1, 0], true)
+        } else {
+            memtable_util::metadata_with_primary_key(vec![], false)
+        };
+        let timestamps = (0..100).collect::<Vec<_>>();
+        let kvs =
+            memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
+        let memtable = MergeTreeMemtable::new(1, metadata, None, &MergeTreeConfig::default());
+        memtable.write(&kvs).unwrap();
+
+        // TODO(yingwen): Test iter.
+
+        let stats = memtable.stats();
+        assert!(stats.bytes_allocated() > 0);
+        assert_eq!(
+            Some((
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(99)
+            )),
+            stats.time_range()
+        );
+    }
+
+    #[test]
+    fn test_memtable_unsorted_input() {
+        write_iter_unsorted_input(true);
+        write_iter_unsorted_input(false);
+    }
+
+    fn write_iter_unsorted_input(has_pk: bool) {
+        let metadata = if has_pk {
+            memtable_util::metadata_with_primary_key(vec![1, 0], true)
+        } else {
+            memtable_util::metadata_with_primary_key(vec![], false)
+        };
+        let memtable =
+            MergeTreeMemtable::new(1, metadata.clone(), None, &MergeTreeConfig::default());
+
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            "hello".to_string(),
+            0,
+            &[1, 3, 7, 5, 6],
+            0, // sequence 0, 1, 2, 3, 4
+        );
+        memtable.write(&kvs).unwrap();
+
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            "hello".to_string(),
+            0,
+            &[5, 2, 4, 0, 7],
+            5, // sequence 5, 6, 7, 8, 9
+        );
+        memtable.write(&kvs).unwrap();
+
+        // TODO(yingwen): Test iter.
+
+        let stats = memtable.stats();
+        assert!(stats.bytes_allocated() > 0);
+        assert_eq!(
+            Some((Timestamp::new_millisecond(0), Timestamp::new_millisecond(7))),
+            stats.time_range()
+        );
+    }
+}
