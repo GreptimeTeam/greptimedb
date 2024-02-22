@@ -2,17 +2,9 @@ CREATE TABLE t(a INTEGER, ts timestamp time index);
 
 Affected Rows: 0
 
-INSERT INTO t VALUES (1, 1);
+INSERT INTO t VALUES (1, 1), (null, 2), (3, 3);
 
-Affected Rows: 1
-
-INSERT INTO t VALUES (null, 2);
-
-Affected Rows: 1
-
-INSERT INTO t VALUES (3, 3);
-
-Affected Rows: 1
+Affected Rows: 3
 
 SELECT ISNULL(a) from t;
 

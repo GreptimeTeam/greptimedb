@@ -1,10 +1,6 @@
 CREATE TABLE t(a INTEGER, ts timestamp time index);
 
-INSERT INTO t VALUES (1, 1);
-
-INSERT INTO t VALUES (null, 2);
-
-INSERT INTO t VALUES (3, 3);
+INSERT INTO t VALUES (1, 1), (null, 2), (3, 3);
 
 SELECT ISNULL(a) from t;
 
