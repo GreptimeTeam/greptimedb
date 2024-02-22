@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
+pub use api::v1::meta::{MigrateRegionResponse, ProcedureStateResponse};
 use api::v1::meta::{
     ProcedureId as PbProcedureId, ProcedureStateResponse as PbProcedureStateResponse,
     ProcedureStatus as PbProcedureStatus,
@@ -20,6 +23,15 @@ use common_procedure::{ProcedureId, ProcedureState};
 use snafu::ResultExt;
 
 use crate::error::{ParseProcedureIdSnafu, Result};
+
+/// A request to migrate region.
+#[derive(Clone)]
+pub struct MigrateRegionRequest {
+    pub region_id: u64,
+    pub from_peer: u64,
+    pub to_peer: u64,
+    pub replay_timeout: Duration,
+}
 
 /// Cast the protobuf [`ProcedureId`] to common [`ProcedureId`].
 pub fn pb_pid_to_pid(pid: &PbProcedureId) -> Result<ProcedureId> {

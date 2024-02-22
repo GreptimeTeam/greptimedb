@@ -404,7 +404,7 @@ impl StatementExecutor {
             task: DdlTask::new_alter_table(expr.clone()),
         };
 
-        self.ddl_executor
+        self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), req)
             .await
             .context(error::ExecuteDdlSnafu)?;
@@ -438,7 +438,7 @@ impl StatementExecutor {
             task: DdlTask::new_create_table(create_table, partitions, table_info),
         };
 
-        self.ddl_executor
+        self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
@@ -452,7 +452,7 @@ impl StatementExecutor {
             task: DdlTask::new_create_logical_tables(tables_data),
         };
 
-        self.ddl_executor
+        self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
@@ -474,7 +474,7 @@ impl StatementExecutor {
             ),
         };
 
-        self.ddl_executor
+        self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
@@ -494,7 +494,7 @@ impl StatementExecutor {
             ),
         };
 
-        self.ddl_executor
+        self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)

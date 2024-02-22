@@ -19,11 +19,12 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::Plugins;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::datanode_manager::DatanodeManagerRef;
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
+use operator::procedure::ProcedureServiceOperator;
 use operator::statement::StatementExecutor;
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
@@ -35,12 +36,13 @@ use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::{Instance, StatementExecutorRef};
 use crate::script::ScriptExecutor;
 
+/// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
     kv_backend: KvBackendRef,
     cache_invalidator: Option<CacheInvalidatorRef>,
     datanode_manager: DatanodeManagerRef,
     plugins: Option<Plugins>,
-    ddl_task_executor: DdlTaskExecutorRef,
+    procedure_executor: ProcedureExecutorRef,
     heartbeat_task: Option<HeartbeatTask>,
 }
 
@@ -48,14 +50,14 @@ impl FrontendBuilder {
     pub fn new(
         kv_backend: KvBackendRef,
         datanode_manager: DatanodeManagerRef,
-        ddl_task_executor: DdlTaskExecutorRef,
+        procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {
             kv_backend,
             cache_invalidator: None,
             datanode_manager,
             plugins: None,
-            ddl_task_executor,
+            procedure_executor,
             heartbeat_task: None,
         }
     }
@@ -112,10 +114,15 @@ impl FrontendBuilder {
             deleter.clone(),
         ));
 
+        let procedure_service_handler = Arc::new(ProcedureServiceOperator::new(
+            self.procedure_executor.clone(),
+        ));
+
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
             Some(region_query_handler.clone()),
             Some(table_mutation_handler),
+            Some(procedure_service_handler),
             true,
             plugins.clone(),
         )
@@ -127,7 +134,7 @@ impl FrontendBuilder {
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
             query_engine.clone(),
-            self.ddl_task_executor,
+            self.procedure_executor,
             kv_backend.clone(),
             catalog_manager.clone(),
             inserter.clone(),

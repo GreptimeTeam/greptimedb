@@ -66,7 +66,7 @@ impl procedure_service_server::ProcedureService for MetaSrv {
             .context(error::ConvertProtoDataSnafu)?;
 
         let resp = self
-            .ddl_executor()
+            .procedure_executor()
             .submit_ddl_task(
                 &ExecutorContext {
                     cluster_id: Some(cluster_id),

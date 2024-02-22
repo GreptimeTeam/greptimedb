@@ -12,13 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod macros;
-pub mod scalars;
-mod system;
-mod table;
-
-pub mod function;
-pub mod function_registry;
-pub mod handlers;
-pub mod helper;
-pub mod state;
+/// Ensure current function is invokded under `greptime` catalog.
+#[macro_export]
+macro_rules! ensure_greptime {
+    ($func_ctx: expr) => {{
+        use common_catalog::consts::DEFAULT_CATALOG_NAME;
+        snafu::ensure!(
+            $func_ctx.query_ctx.current_catalog() == DEFAULT_CATALOG_NAME,
+            common_query::error::PermissionDeniedSnafu {
+                err_msg: format!("current catalog is not {DEFAULT_CATALOG_NAME}")
+            }
+        );
+    }};
+}

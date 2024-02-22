@@ -178,14 +178,23 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to do procedure task"))]
+    ProcedureService {
+        source: BoxedError,
+        location: Location,
+    },
+
     #[snafu(display("Missing TableMutationHandler, not expected"))]
     MissingTableMutationHandler { location: Location },
 
-    #[snafu(display("Missing MetaServiceHandler, not expected"))]
-    MissingMetaServiceHandler { location: Location },
+    #[snafu(display("Missing ProcedureServiceHandler, not expected"))]
+    MissingProcedureServiceHandler { location: Location },
 
     #[snafu(display("Invalid function args: {}", err_msg))]
     InvalidFuncArgs { err_msg: String, location: Location },
+
+    #[snafu(display("Permission denied: {}", err_msg))]
+    PermissionDenied { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -213,7 +222,7 @@ impl ErrorExt for Error {
             | Error::FromArrowArray { source, .. } => source.status_code(),
 
             Error::MissingTableMutationHandler { .. }
-            | Error::MissingMetaServiceHandler { .. }
+            | Error::MissingProcedureServiceHandler { .. }
             | Error::ExecuteRepeatedly { .. }
             | Error::ThreadJoin { .. }
             | Error::GeneralDataFusion { .. } => StatusCode::Unexpected,
@@ -225,7 +234,11 @@ impl ErrorExt for Error {
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
             Error::ExecutePhysicalPlan { source, .. } => source.status_code(),
             Error::Execute { source, .. } => source.status_code(),
-            Error::TableMutation { source, .. } => source.status_code(),
+            Error::ProcedureService { source, .. } | Error::TableMutation { source, .. } => {
+                source.status_code()
+            }
+
+            Error::PermissionDenied { .. } => StatusCode::PermissionDenied,
         }
     }
 

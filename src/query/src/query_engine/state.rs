@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
-use common_function::handlers::{MetaServiceHandlerRef, TableMutationHandlerRef};
+use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::state::FunctionState;
 use common_query::physical_plan::SessionContext;
@@ -80,6 +80,7 @@ impl QueryEngineState {
         catalog_list: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
     ) -> Self {
@@ -120,8 +121,7 @@ impl QueryEngineState {
             catalog_manager: catalog_list,
             function_state: Arc::new(FunctionState {
                 table_mutation_handler,
-                // FIXME(dennis): implemented in the following PR.
-                meta_service_handler: None,
+                procedure_service_handler,
             }),
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
@@ -219,9 +219,9 @@ impl QueryEngineState {
         self.function_state.table_mutation_handler.as_ref()
     }
 
-    /// Returns the [`MetaServiceHandlerRef`] in state.
-    pub fn meta_service_handler(&self) -> Option<&MetaServiceHandlerRef> {
-        self.function_state.meta_service_handler.as_ref()
+    /// Returns the [`ProcedureServiceHandlerRef`] in state.
+    pub fn procedure_service_handler(&self) -> Option<&ProcedureServiceHandlerRef> {
+        self.function_state.procedure_service_handler.as_ref()
     }
 
     pub(crate) fn disallow_cross_catalog_query(&self) -> bool {
