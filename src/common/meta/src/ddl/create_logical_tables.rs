@@ -262,10 +262,10 @@ impl CreateLogicalTablesProcedure {
                 body: Some(PbRegionRequest::Creates(creates)),
             };
             create_region_tasks.push(async move {
-                if let Err(err) = requester.handle(request).await {
-                    return Err(add_peer_context_if_needed(datanode)(err));
-                }
-                Ok(())
+                requester
+                    .handle(request)
+                    .await
+                    .map_err(add_peer_context_if_needed(datanode))
             });
         }
 
@@ -354,9 +354,6 @@ pub struct CreateTablesData {
     cluster_id: ClusterId,
     state: CreateTablesState,
     tasks: Vec<CreateTableTask>,
-    // Because the table_id is allocated before entering the distributed lock,
-    // it needs to recheck if the table exists when creating a table.
-    // If it does exist, then the table_id needs to be replaced with the existing one.
     table_ids_already_exists: Vec<Option<TableId>>,
     physical_table_id: TableId,
     physical_region_numbers: Vec<RegionNumber>,
