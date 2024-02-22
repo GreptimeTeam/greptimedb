@@ -10,6 +10,9 @@ mem-prof = ["dep:common-mem-prof"]
 pprof = ["dep:pprof"]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }
 api.workspace = true

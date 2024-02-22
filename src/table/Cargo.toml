@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 anymap = "1.0.0-beta.2"
 async-trait = "0.1"

@@ -66,6 +66,11 @@ version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[workspace.lints]
+clippy.print_stdout = "warn"
+clippy.print_sterr = "warn"
+clippy.implicit_clone = "warn"
+
 [workspace.dependencies]
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.3"
