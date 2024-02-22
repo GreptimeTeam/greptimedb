@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::ops::Range;
 use std::sync::Arc;
 
 use datatypes::arrow::array::{
     ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
+    TimestampSecondArray, UInt64Array,
 };
 use datatypes::arrow::datatypes::{DataType, TimeUnit};
 
@@ -75,9 +75,9 @@ pub struct Merger<T, I> {
 }
 
 impl<T, I> Merger<T, I>
-where
-    I: Item,
-    T: Node<Item = I>,
+    where
+        I: Item,
+        T: Node<Item=I>,
 {
     pub(crate) fn try_new(nodes: Vec<T>) -> Result<Self> {
         let mut heap = BinaryHeap::with_capacity(nodes.len());
@@ -112,14 +112,20 @@ where
                     let res = match top_node.current_item().search_key(&next_start) {
                         Ok(pos) => {
                             // duplicate timestamp found, yield duplicated row in this item
-                            let to_yield = top_node.current_item().slice(0..pos + 1);
-                            top_node.skip(pos + 1).unwrap();
-                            to_yield
+                            if pos == 0 {
+                                let to_yield = top_node.current_item().slice(0..1);
+                                top_node.skip(1)?;
+                                to_yield
+                            } else {
+                                let to_yield = top_node.current_item().slice(0..pos);
+                                top_node.skip(pos)?;
+                                to_yield
+                            }
                         }
                         Err(pos) => {
                             // no duplicated timestamp
                             let to_yield = top_node.current_item().slice(0..pos);
-                            top_node.skip(pos).unwrap();
+                            top_node.skip(pos)?;
                             to_yield
                         }
                     };
@@ -178,10 +184,30 @@ impl Ord for DataBatchKey {
 }
 
 impl DataBatch {
-    fn current_ts_range(&self) -> (i64, i64) {
+    fn first_row(&self) -> (i64, u64) {
         let range = self.range();
         let ts_values = timestamp_array_to_i64_slice(self.rb.column(1));
-        (ts_values[range.start], ts_values[range.end - 1])
+        let sequence_values = self
+            .rb
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values();
+        (ts_values[range.start], sequence_values[range.start])
+    }
+
+    fn last_row(&self) -> (i64, u64) {
+        let range = self.range();
+        let ts_values = timestamp_array_to_i64_slice(self.rb.column(1));
+        let sequence_values = self
+            .rb
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values();
+        (ts_values[range.end - 1], sequence_values[range.end - 1])
     }
 }
 
@@ -309,24 +335,22 @@ impl Eq for DataNode {}
 impl PartialEq<Self> for DataNode {
     fn eq(&self, other: &Self) -> bool {
         self.current_data_batch()
-            .current_range()
-            .start
-            .eq(&other.current_data_batch().current_range().start)
+            .first_row()
+            .eq(&other.current_data_batch().first_row())
     }
 }
 
 #[allow(clippy::non_canonical_partial_ord_impl)]
 impl PartialOrd<Self> for DataNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let weight = self.pk_weights[self.current_data_batch().pk_index as usize];
+        let (ts_start, sequence) = self.current_data_batch().first_row();
+        let other_weight = self.pk_weights[other.current_data_batch().pk_index as usize];
+        let (other_ts_start, other_sequence) = other.current_data_batch().first_row();
+
         Some(
-            (
-                self.pk_weights[self.current_data_batch().pk_index as usize],
-                self.current_data_batch().current_ts_range().0,
-            )
-                .cmp(&(
-                    self.pk_weights[other.current_data_batch().pk_index as usize],
-                    other.current_data_batch().current_ts_range().0,
-                ))
+            (weight, ts_start, Reverse(sequence))
+                .cmp(&(other_weight, other_ts_start, Reverse(other_sequence)))
                 .reverse(),
         )
     }
@@ -350,10 +374,9 @@ impl Node for DataNode {
 
     fn is_behind(&self, other: &Self) -> bool {
         let pk_weight = self.pk_weights[self.current_data_batch().pk_index as usize];
-        let start = self.current_data_batch().current_ts_range().0;
-
+        let (start, _) = self.current_data_batch().first_row();
         let other_pk_weight = self.pk_weights[other.current_data_batch().pk_index as usize];
-        let other_end = other.current_data_batch().current_ts_range().1;
+        let (other_end, _) = other.current_data_batch().last_row();
         (pk_weight, start) > (other_pk_weight, other_end)
     }
 
@@ -448,40 +471,7 @@ mod tests {
             let data_batch = merger.current_item();
             let batch = data_batch.slice_record_batch();
             let ts_array = batch.column(1);
-            let ts_values: Vec<_> = match ts_array.data_type() {
-                DataType::Timestamp(t, _) => match t {
-                    TimeUnit::Second => ts_array
-                        .as_any()
-                        .downcast_ref::<TimestampSecondArray>()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.unwrap())
-                        .collect(),
-                    TimeUnit::Millisecond => ts_array
-                        .as_any()
-                        .downcast_ref::<TimestampMillisecondArray>()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.unwrap())
-                        .collect(),
-                    TimeUnit::Microsecond => ts_array
-                        .as_any()
-                        .downcast_ref::<TimestampMicrosecondArray>()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.unwrap())
-                        .collect(),
-                    TimeUnit::Nanosecond => ts_array
-                        .as_any()
-                        .downcast_ref::<TimestampNanosecondArray>()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.unwrap())
-                        .collect(),
-                },
-                _ => unreachable!(),
-            };
-
+            let ts_values: Vec<_> = timestamp_array_to_i64_slice(ts_array).to_vec();
             let ts_and_seq = ts_values
                 .into_iter()
                 .zip(
@@ -527,8 +517,10 @@ mod tests {
         check_merger_read(
             vec![node1, node3, node2],
             &[
-                (2, vec![(1, 0), (2, 1)]),
-                (2, vec![(2, 4), (3, 5)]),
+                (2, vec![(1, 0)]),
+                (2, vec![(2, 4)]),
+                (2, vec![(2, 1)]),
+                (2, vec![(3, 5)]),
                 (1, vec![(2, 2), (3, 3)]),
             ],
         );
@@ -560,8 +552,10 @@ mod tests {
         check_merger_read(
             vec![node1, node3, node2],
             &[
-                (0, vec![(1, 0), (2, 1)]),
-                (0, vec![(2, 5), (3, 6)]),
+                (0, vec![(1, 0)]),
+                (0, vec![(2, 5)]),
+                (0, vec![(2, 1)]),
+                (0, vec![(3, 6)]),
                 (0, vec![(3, 2)]),
                 (1, vec![(2, 3), (3, 4)]),
             ],
@@ -597,10 +591,46 @@ mod tests {
         check_merger_read(
             vec![node1, node3, node2],
             &[
-                (0, vec![(1, 0), (2, 1)]),
-                (0, vec![(2, 5), (3, 6)]),
+                (0, vec![(1, 0)]),
+                (0, vec![(2, 5)]),
+                (0, vec![(2, 1)]),
+                (0, vec![(3, 6)]),
                 (0, vec![(3, 2)]),
                 (1, vec![(2, 3), (3, 4)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_merger_overlapping_2() {
+        let metadata = metadata_for_test();
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let weight = Arc::new(vec![0, 1, 2]);
+        let mut seq = 0;
+        write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 2], &mut seq);
+        let node1 = DataNode::new(
+            DataSource::Buffer(buffer1.read(&weight).unwrap()),
+            weight.clone(),
+        );
+
+        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
+        write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2], &mut seq);
+        let node3 = DataNode::new(
+            DataSource::Buffer(buffer3.read(&weight).unwrap()),
+            weight.clone(),
+        );
+
+        let mut buffer4 = DataBuffer::with_capacity(metadata.clone(), 10);
+        write_rows_to_buffer(&mut buffer4, &metadata, 0, vec![2], &mut seq);
+        let node4 = DataNode::new(DataSource::Buffer(buffer4.read(&weight).unwrap()), weight);
+
+        check_merger_read(
+            vec![node1, node3, node4],
+            &[
+                (0, vec![(1, 0)]),
+                (0, vec![(2, 4)]),
+                (0, vec![(2, 3)]),
+                (0, vec![(2, 2)]),
             ],
         );
     }
