@@ -14,9 +14,12 @@
 
 //! Builder of a shard.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
@@ -97,10 +100,16 @@ impl ShardBuilder {
     }
 
     /// Scans the shard builder.
-    pub fn scan(&mut self, _shard_id: ShardId) -> Result<ShardBuilderReader> {
+    pub fn scan(
+        &mut self,
+        _projection: &HashSet<ColumnId>,
+        _filters: &[SimpleFilterEvaluator],
+    ) -> Result<ShardBuilderReader> {
         unimplemented!()
     }
 }
 
 /// Reader to scan a shard. builder.
 pub struct ShardBuilderReader {}
+
+// TODO(yingwen): Can we use generic for data reader?

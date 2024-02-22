@@ -63,11 +63,8 @@ impl Shard {
     }
 
     /// Scans the shard.
-    pub fn scan(
-        &self,
-        _projection: &HashSet<ColumnId>,
-        _filters: &[SimpleFilterEvaluator],
-    ) -> ShardReader {
+    // TODO(yingwen): Push down projection to data parts.
+    pub fn scan(&self) -> ShardReader {
         unimplemented!()
     }
 
