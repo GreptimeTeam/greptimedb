@@ -18,7 +18,6 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
-use servers::error::InternalIoSnafu;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
@@ -30,7 +29,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::server::{Server, ServerHandlers};
-use servers::tls::ReloadableTlsServerConfig;
+use servers::tls::{watch_tls_config, ReloadableTlsServerConfig};
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu};
@@ -197,10 +196,10 @@ where
             let mysql_addr = parse_addr(&opts.addr)?;
 
             let tls_server_config = Arc::new(
-                ReloadableTlsServerConfig::try_new(opts.tls.clone())
-                    .context(InternalIoSnafu)
-                    .context(StartServerSnafu)?,
+                ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
             );
+
+            watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let mysql_io_runtime = Arc::new(
                 RuntimeBuilder::default()
@@ -230,10 +229,10 @@ where
             let pg_addr = parse_addr(&opts.addr)?;
 
             let tls_server_config = Arc::new(
-                ReloadableTlsServerConfig::try_new(opts.tls.clone())
-                    .context(InternalIoSnafu)
-                    .context(StartServerSnafu)?,
+                ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
             );
+
+            watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let pg_io_runtime = Arc::new(
                 RuntimeBuilder::default()
