@@ -43,12 +43,16 @@ pub struct Instance {
 }
 
 impl Instance {
-    fn new(frontend: FeInstance) -> Self {
+    pub fn new(frontend: FeInstance) -> Self {
         Self { frontend }
     }
 
     pub fn mut_inner(&mut self) -> &mut FeInstance {
         &mut self.frontend
+    }
+
+    pub fn inner(&self) -> &FeInstance {
+        &self.frontend
     }
 }
 
@@ -271,6 +275,7 @@ impl StartCommand {
 
         let servers = Services::new(opts.clone(), Arc::new(instance.clone()), plugins)
             .build()
+            .await
             .context(StartFrontendSnafu)?;
         instance
             .build_servers(opts, servers)

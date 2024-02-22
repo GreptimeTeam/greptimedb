@@ -29,7 +29,7 @@ use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
-use servers::server::{Server, ServerHandler, ServerHandlers};
+use servers::server::{Server, ServerHandlers};
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu};
@@ -164,14 +164,14 @@ where
         Ok(http_server)
     }
 
-    pub fn build(mut self) -> Result<ServerHandlers> {
+    pub async fn build(mut self) -> Result<ServerHandlers> {
         let opts = self.opts.clone();
         let instance = self.instance.clone();
 
         let toml = opts.to_toml()?;
         let opts: FrontendOptions = opts.into();
 
-        let mut result = Vec::<ServerHandler>::new();
+        let handlers = ServerHandlers::default();
 
         let user_provider = self.plugins.get::<UserProviderRef>();
 
@@ -179,7 +179,7 @@ where
             // Always init GRPC server
             let grpc_addr = parse_addr(&opts.grpc.addr)?;
             let grpc_server = self.build_grpc_server(&opts)?;
-            result.push((Box::new(grpc_server), grpc_addr));
+            handlers.insert((Box::new(grpc_server), grpc_addr)).await;
         }
 
         {
@@ -187,7 +187,7 @@ where
             let http_options = &opts.http;
             let http_addr = parse_addr(&http_options.addr)?;
             let http_server = self.build_http_server(&opts, toml)?;
-            result.push((Box::new(http_server), http_addr));
+            handlers.insert((Box::new(http_server), http_addr)).await;
         }
 
         if opts.mysql.enable {
@@ -218,7 +218,7 @@ where
                     opts.reject_no_database.unwrap_or(false),
                 )),
             );
-            result.push((mysql_server, mysql_addr));
+            handlers.insert((mysql_server, mysql_addr)).await;
         }
 
         if opts.postgres.enable {
@@ -241,7 +241,7 @@ where
                 user_provider.clone(),
             )) as Box<dyn Server>;
 
-            result.push((pg_server, pg_addr));
+            handlers.insert((pg_server, pg_addr)).await;
         }
 
         if opts.opentsdb.enable {
@@ -259,13 +259,10 @@ where
 
             let server = OpentsdbServer::create_server(instance.clone(), io_runtime);
 
-            result.push((server, addr));
+            handlers.insert((server, addr)).await;
         }
 
-        Ok(result
-            .into_iter()
-            .map(|(server, addr)| (server.name().to_string(), (server, addr)))
-            .collect())
+        Ok(handlers)
     }
 }
 

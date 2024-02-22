@@ -43,6 +43,10 @@ impl Instance {
     pub fn datanode_mut(&mut self) -> &mut Datanode {
         &mut self.datanode
     }
+
+    pub fn datanode(&self) -> &Datanode {
+        &self.datanode
+    }
 }
 
 #[async_trait]
@@ -235,6 +239,7 @@ impl StartCommand {
             .with_default_grpc_server(&datanode.region_server())
             .enable_http_service()
             .build()
+            .await
             .context(StartDatanodeSnafu)?;
         datanode.setup_services(services);
 

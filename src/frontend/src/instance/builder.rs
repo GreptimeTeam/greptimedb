@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::kvbackend::KvBackendCatalogManager;
@@ -28,6 +27,7 @@ use operator::statement::StatementExecutor;
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use query::QueryEngineFactory;
+use servers::server::ServerHandlers;
 
 use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
@@ -141,7 +141,7 @@ impl FrontendBuilder {
             statement_executor,
             query_engine,
             plugins,
-            servers: Arc::new(HashMap::new()),
+            servers: ServerHandlers::default(),
             heartbeat_task: self.heartbeat_task,
             inserter,
             deleter,

@@ -78,7 +78,7 @@ pub struct MetaSrvBuilder {
     lock: Option<DistLockRef>,
     datanode_manager: Option<DatanodeManagerRef>,
     plugins: Option<Plugins>,
-    table_metadata_allocator: Option<TableMetadataAllocator>,
+    table_metadata_allocator: Option<TableMetadataAllocatorRef>,
 }
 
 impl MetaSrvBuilder {
@@ -150,7 +150,7 @@ impl MetaSrvBuilder {
 
     pub fn table_metadata_allocator(
         mut self,
-        table_metadata_allocator: TableMetadataAllocator,
+        table_metadata_allocator: TableMetadataAllocatorRef,
     ) -> Self {
         self.table_metadata_allocator = Some(table_metadata_allocator);
         self
@@ -211,7 +211,7 @@ impl MetaSrvBuilder {
             options.wal.clone(),
             kv_backend.clone(),
         ));
-        let table_metadata_allocator = Arc::new(table_metadata_allocator.unwrap_or_else(|| {
+        let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             let sequence = Arc::new(
                 SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
                     .initial(MIN_USER_TABLE_ID as u64)
@@ -222,13 +222,13 @@ impl MetaSrvBuilder {
                 selector_ctx.clone(),
                 selector.clone(),
             ));
-            TableMetadataAllocator::with_peer_allocator(
+            Arc::new(TableMetadataAllocator::with_peer_allocator(
                 sequence,
                 wal_options_allocator.clone(),
                 table_metadata_manager.table_name_manager().clone(),
                 peer_allocator,
-            )
-        }));
+            ))
+        });
 
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 

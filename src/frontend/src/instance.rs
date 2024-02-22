@@ -67,7 +67,7 @@ use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
-use servers::server::{start_server, ServerHandlers};
+use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
@@ -115,7 +115,7 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
-    servers: Arc<ServerHandlers>,
+    servers: ServerHandlers,
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
@@ -198,8 +198,7 @@ impl Instance {
             ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
-        self.servers = Arc::new(servers);
-
+        self.servers = servers;
         Ok(())
     }
 
@@ -212,10 +211,14 @@ impl Instance {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        futures::future::try_join_all(self.servers.values().map(|server| server.0.shutdown()))
+        self.servers
+            .shutdown_all()
             .await
             .context(error::ShutdownServerSnafu)
-            .map(|_| ())
+    }
+
+    pub fn server_handlers(&self) -> &ServerHandlers {
+        &self.servers
     }
 
     pub fn statement_executor(&self) -> Arc<StatementExecutor> {
@@ -248,13 +251,7 @@ impl FrontendInstance for Instance {
             }
         }
 
-        futures::future::try_join_all(self.servers.iter().map(|(name, handler)| async move {
-            info!("Starting service: {name}");
-            start_server(handler).await
-        }))
-        .await
-        .context(error::StartServerSnafu)
-        .map(|_| ())
+        self.servers.start_all().await.context(StartServerSnafu)
     }
 }
 
