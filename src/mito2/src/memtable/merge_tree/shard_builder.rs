@@ -109,7 +109,90 @@ impl ShardBuilder {
     }
 }
 
-/// Reader to scan a shard. builder.
+/// Reader to scan a shard builder.
 pub struct ShardBuilderReader {}
 
 // TODO(yingwen): Can we use generic for data reader?
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::memtable::merge_tree::dict::KeyDictBuilder;
+    use crate::memtable::merge_tree::metrics::WriteMetrics;
+    use crate::memtable::KeyValues;
+    use crate::test_util::memtable_util::{
+        build_key_values_with_ts_seq_values, encode_key_by_kv, encode_keys, metadata_for_test,
+    };
+
+    fn input_with_key(metadata: &RegionMetadataRef) -> Vec<KeyValues> {
+        vec![
+            build_key_values_with_ts_seq_values(
+                metadata,
+                "shard_builder".to_string(),
+                3,
+                [30, 31].into_iter(),
+                [Some(0.0), Some(1.0)].into_iter(),
+                0,
+            ),
+            build_key_values_with_ts_seq_values(
+                metadata,
+                "shard_builder".to_string(),
+                1,
+                [10, 11].into_iter(),
+                [Some(0.0), Some(1.0)].into_iter(),
+                1,
+            ),
+            build_key_values_with_ts_seq_values(
+                metadata,
+                "shard_builder".to_string(),
+                2,
+                [20, 21].into_iter(),
+                [Some(0.0), Some(1.0)].into_iter(),
+                2,
+            ),
+        ]
+    }
+
+    fn new_shard_builder(
+        shard_id: ShardId,
+        metadata: RegionMetadataRef,
+        input: &[KeyValues],
+    ) -> Shard {
+        let mut dict_builder = KeyDictBuilder::new(1024);
+        let mut metrics = WriteMetrics::default();
+        let mut keys = Vec::with_capacity(input.len());
+        for kvs in input {
+            encode_keys(&metadata, kvs, &mut keys);
+        }
+        for key in &keys {
+            dict_builder.insert_key(&key, &mut metrics);
+        }
+
+        let dict = dict_builder.finish().unwrap();
+        let data_parts = DataParts {
+            active: DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
+            frozen: vec![],
+        };
+
+        Shard::new(shard_id, Some(Arc::new(dict)), data_parts)
+    }
+
+    #[test]
+    fn test_write_shard_builder() {
+        let metadata = metadata_for_test();
+        let input = input_with_key(&metadata);
+        let config = MergeTreeConfig::default();
+        let mut shard_builder = ShardBuilder::new(metadata.clone(), &config);
+        let mut metrics = WriteMetrics::default();
+
+        assert!(shard_builder.is_empty());
+        for key_values in &input {
+            for kv in key_values.iter() {
+                let key = encode_key_by_kv(&kv);
+                shard_builder.write_with_key(&key, kv, &mut metrics);
+            }
+        }
+    }
+}
