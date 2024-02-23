@@ -15,11 +15,10 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::fmt::Debug;
-use std::ops::Range;
 
 use datatypes::arrow::array::{
     ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt64Array,
+    TimestampSecondArray,
 };
 use datatypes::arrow::datatypes::{DataType, TimeUnit};
 
@@ -171,97 +170,9 @@ impl<T: Node> Merger<T> {
 }
 
 #[derive(Debug)]
-pub struct DataBatchKey {
-    pk_index: PkIndex,
-    timestamp: i64,
-}
-
-impl Eq for DataBatchKey {}
-
-impl PartialEq<Self> for DataBatchKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.pk_index == other.pk_index && self.timestamp == other.timestamp
-    }
-}
-
-impl PartialOrd<Self> for DataBatchKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for DataBatchKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.pk_index
-            .cmp(&other.pk_index)
-            .then(self.timestamp.cmp(&other.timestamp))
-            .reverse()
-    }
-}
-
-impl DataBatch {
-    fn first_row(&self) -> (i64, u64) {
-        let range = self.range();
-        let ts_values = timestamp_array_to_i64_slice(self.rb.column(1));
-        let sequence_values = self
-            .rb
-            .column(2)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values();
-        (ts_values[range.start], sequence_values[range.start])
-    }
-
-    fn last_row(&self) -> (i64, u64) {
-        let range = self.range();
-        let ts_values = timestamp_array_to_i64_slice(self.rb.column(1));
-        let sequence_values = self
-            .rb
-            .column(2)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values();
-        (ts_values[range.end - 1], sequence_values[range.end - 1])
-    }
-}
-
-impl DataBatch {
-    fn first_key(&self) -> DataBatchKey {
-        let range = self.range();
-        let batch = self.record_batch();
-        let pk_index = self.pk_index();
-        let ts_array = batch.column(1);
-
-        // maybe safe the result somewhere.
-        let ts_values = timestamp_array_to_i64_slice(ts_array);
-        let timestamp = ts_values[range.start];
-        DataBatchKey {
-            pk_index,
-            timestamp,
-        }
-    }
-
-    fn search_key(&self, key: &DataBatchKey) -> Result<usize, usize> {
-        let DataBatchKey {
-            pk_index,
-            timestamp,
-        } = key;
-        assert_eq!(*pk_index, self.pk_index);
-        let ts_values = timestamp_array_to_i64_slice(self.record_batch().column(1));
-        ts_values.binary_search(timestamp)
-    }
-
-    fn slice(&self, range: Range<usize>) -> Self {
-        let rb = self.rb.slice(range.start, range.len());
-        let range = 0..rb.num_rows();
-        Self {
-            pk_index: self.pk_index,
-            rb,
-            range,
-        }
-    }
+pub(crate) struct DataBatchKey {
+    pub(crate) pk_index: PkIndex,
+    pub(crate) timestamp: i64,
 }
 
 pub enum DataSource {
@@ -270,7 +181,7 @@ pub enum DataSource {
 }
 
 impl DataSource {
-    pub(crate) fn current_data_batch(&self) -> &DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch {
         match self {
             DataSource::Buffer(buffer) => buffer.current_data_batch(),
             DataSource::Part(p) => p.current_data_batch(),
@@ -298,12 +209,10 @@ pub struct DataNode {
 }
 
 impl DataNode {
-    /// Returns a new [DataNode].
     pub(crate) fn new(source: DataSource) -> Self {
-        let current_range = source.is_valid().then(|| DataBatchRange {
-            pk_index: source.current_data_batch().pk_index,
-            range: source.current_data_batch().range.clone(),
-        });
+        let current_range = source
+            .is_valid()
+            .then(|| source.current_data_batch().range());
 
         Self {
             source,
@@ -311,20 +220,20 @@ impl DataNode {
         }
     }
 
-    pub(crate) fn current_data_batch(&self) -> &DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch {
         self.source.current_data_batch()
     }
 
     fn current_range(&self) -> DataBatchRange {
-        self.current_range.clone().unwrap()
+        self.current_range.unwrap()
     }
 }
 
 impl Ord for DataNode {
     fn cmp(&self, other: &Self) -> Ordering {
-        let weight = self.current_data_batch().pk_index;
+        let weight = self.current_data_batch().pk_index();
         let (ts_start, sequence) = self.current_data_batch().first_row();
-        let other_weight = other.current_data_batch().pk_index;
+        let other_weight = other.current_data_batch().pk_index();
         let (other_ts_start, other_sequence) = other.current_data_batch().first_row();
         (weight, ts_start, Reverse(sequence))
             .cmp(&(other_weight, other_ts_start, Reverse(other_sequence)))
@@ -354,27 +263,24 @@ impl Node for DataNode {
     }
 
     fn is_behind(&self, other: &Self) -> bool {
-        let pk_weight = self.current_data_batch().pk_index;
+        let pk_weight = self.current_data_batch().pk_index();
         let (start, seq) = self.current_data_batch().first_row();
-        let other_pk_weight = other.current_data_batch().pk_index;
+        let other_pk_weight = other.current_data_batch().pk_index();
         let (other_end, other_seq) = other.current_data_batch().last_row();
         (pk_weight, start, Reverse(seq)) > (other_pk_weight, other_end, Reverse(other_seq))
     }
 
     fn advance(&mut self, len: usize) -> Result<()> {
         let mut range = self.current_range();
-        debug_assert!(range.range.len() >= len);
+        debug_assert!(range.len() >= len);
 
-        let remaining = range.range.len() - len;
+        let remaining = range.len() - len;
         if remaining == 0 {
             // Nothing remains, we need to fetch next batch to ensure the current batch is not empty.
             self.source.next()?;
-            self.current_range = Some(DataBatchRange {
-                pk_index: self.source.current_data_batch().pk_index,
-                range: self.source.current_data_batch().range.clone(),
-            });
+            self.current_range = Some(self.source.current_data_batch().range());
         } else {
-            range.range.start += len;
+            range.start += len;
             self.current_range = Some(range);
         }
 
@@ -382,7 +288,7 @@ impl Node for DataNode {
     }
 
     fn current_item_len(&self) -> usize {
-        self.current_range.clone().unwrap().range.len()
+        self.current_range.unwrap().len()
     }
 
     fn search_key_in_current_item(&self, other: &Self) -> Result<usize, usize> {
@@ -391,6 +297,7 @@ impl Node for DataNode {
     }
 }
 
+// TODO(yingwen): Move to data mod.
 pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
     match arr.data_type() {
         DataType::Timestamp(t, _) => match t {
@@ -458,8 +365,8 @@ mod tests {
 
         let mut res = vec![];
         while merger.is_valid() {
-            // FIXME(yingwen): Consider range.
             let data_batch = merger.current_node().current_data_batch();
+            let data_batch = data_batch.slice(0, merger.current_rows());
             let batch = data_batch.slice_record_batch();
             let ts_array = batch.column(1);
             let ts_values: Vec<_> = timestamp_array_to_i64_slice(ts_array).to_vec();
@@ -476,7 +383,7 @@ mod tests {
                 .map(|(ts, seq)| (ts, seq.unwrap()))
                 .collect::<Vec<_>>();
 
-            res.push((data_batch.pk_index, ts_and_seq));
+            res.push((data_batch.pk_index(), ts_and_seq));
             merger.next().unwrap();
         }
         assert_eq!(expected, &res);
