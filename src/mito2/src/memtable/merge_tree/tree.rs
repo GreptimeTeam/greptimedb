@@ -32,7 +32,7 @@ use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::partition::{
-    Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionRequest,
+    Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
 };
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::time_series::primary_key_schema;
@@ -159,8 +159,8 @@ impl MergeTree {
             partitions,
             current_reader: None,
         };
-        let part_read_request = ReadPartitionRequest::new(projection, filters);
-        iter.fetch_next_partition(part_read_request)?;
+        let context = ReadPartitionContext::new(projection, filters);
+        iter.fetch_next_partition(context)?;
 
         Ok(Box::new(iter))
     }
@@ -296,11 +296,11 @@ impl Iterator for TreeIter {
 
 impl TreeIter {
     /// Fetch next partition.
-    fn fetch_next_partition(&mut self, mut request: ReadPartitionRequest) -> Result<()> {
+    fn fetch_next_partition(&mut self, mut context: ReadPartitionContext) -> Result<()> {
         while let Some(partition) = self.partitions.pop_front() {
-            let part_reader = partition.read(request)?;
+            let part_reader = partition.read(context)?;
             if !part_reader.is_valid() {
-                request = part_reader.into_request();
+                context = part_reader.into_context();
                 continue;
             }
             self.current_reader = Some(part_reader);
@@ -325,8 +325,8 @@ impl TreeIter {
 
         // Safety: current reader is Some.
         let part_reader = self.current_reader.take().unwrap();
-        let request = part_reader.into_request();
-        self.fetch_next_partition(request)?;
+        let context = part_reader.into_context();
+        self.fetch_next_partition(context)?;
 
         Ok(Some(batch))
     }

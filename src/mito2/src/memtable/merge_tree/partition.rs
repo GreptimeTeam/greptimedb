@@ -19,6 +19,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
+use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
@@ -32,6 +33,7 @@ use crate::memtable::merge_tree::shard::{Shard, ShardReader};
 use crate::memtable::merge_tree::shard_builder::{ShardBuilder, ShardBuilderReader};
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
 use crate::read::{Batch, BatchBuilder};
+use crate::row_converter::{McmpRowCodec, RowCodec};
 
 /// Key of a partition.
 pub type PartitionKey = u32;
@@ -96,7 +98,7 @@ impl Partition {
     }
 
     /// Scans data in the partition.
-    pub fn read(&self, request: ReadPartitionRequest) -> Result<PartitionReader> {
+    pub fn read(&self, _context: ReadPartitionContext) -> Result<PartitionReader> {
         unimplemented!()
     }
 
@@ -199,8 +201,8 @@ impl PartitionReader {
         unimplemented!()
     }
 
-    pub(crate) fn into_request(self) -> ReadPartitionRequest {
-        ReadPartitionRequest {
+    pub(crate) fn into_context(self) -> ReadPartitionContext {
+        ReadPartitionContext {
             projection: self.projection,
             filters: self.filters,
             pk_weights: self.pk_weights,
@@ -208,20 +210,68 @@ impl PartitionReader {
     }
 }
 
+// TODO(yingwen): Improve performance of key prunning. Now we need to find index and
+// then decode and convert each value.
+fn prune_primary_key(
+    metadata: &RegionMetadataRef,
+    predicates: &[SimpleFilterEvaluator],
+    codec: &McmpRowCodec,
+    pk: &[u8],
+) -> bool {
+    if predicates.is_empty() {
+        return true;
+    }
+
+    // no primary key, we simply return true.
+    if metadata.primary_key.is_empty() {
+        return true;
+    }
+
+    let pk_values = match codec.decode(pk) {
+        Ok(values) => values,
+        Err(e) => {
+            common_telemetry::error!(e; "Failed to decode primary key");
+            return true;
+        }
+    };
+
+    // evaluate predicates against primary key values
+    let mut result = true;
+    for predicate in predicates {
+        let Some(column) = metadata.column_by_name(predicate.column_name()) else {
+            continue;
+        };
+        // ignore predicates that are not referencing primary key columns
+        if column.semantic_type != SemanticType::Tag {
+            continue;
+        }
+        // index of the column in primary keys.
+        // Safety: A tag column is always in primary key.
+        let index = metadata.primary_key_index(column.column_id).unwrap();
+        // Safety: arrow schema and datatypes are constructed from the same source.
+        let scalar_value = pk_values[index]
+            .try_to_scalar_value(&column.column_schema.data_type)
+            .unwrap();
+        result &= predicate.evaluate_scalar(&scalar_value).unwrap_or(true);
+    }
+
+    result
+}
+
 /// Structs to reuse across readers to avoid allocating for each reader.
-pub(crate) struct ReadPartitionRequest {
+pub(crate) struct ReadPartitionContext {
     projection: HashSet<ColumnId>,
     filters: Vec<SimpleFilterEvaluator>,
     /// Buffer to store pk weights.
     pk_weights: Vec<u16>,
 }
 
-impl ReadPartitionRequest {
+impl ReadPartitionContext {
     pub(crate) fn new(
         projection: HashSet<ColumnId>,
         filters: Vec<SimpleFilterEvaluator>,
-    ) -> ReadPartitionRequest {
-        ReadPartitionRequest {
+    ) -> ReadPartitionContext {
+        ReadPartitionContext {
             projection,
             filters,
             pk_weights: Vec::new(),
