@@ -27,24 +27,9 @@ use crate::error::Result;
 use crate::memtable::merge_tree::data::{DataBatch, DataBufferReader, DataPartReader};
 use crate::memtable::merge_tree::PkIndex;
 
-pub trait Item: Clone {
-    type Key: Ord;
-
-    /// Remaining rows in item.
-    fn remaining(&self) -> usize;
-
-    /// The key range of item.
-    fn current_range(&self) -> Range<Self::Key>;
-
-    /// Searches given key in current item.
-    fn search_key(&self, key: &Self::Key) -> std::result::Result<usize, usize>;
-
-    /// Slice item.
-    fn slice(&self, range: Range<usize>) -> Self;
-}
-
+/// Nodes of merger's heap.
 pub trait Node: Ord {
-    type Item: Item;
+    type Item;
 
     /// Returns current item of node and fetch next.
     fn fetch_next(&mut self) -> Result<Self::Item>;
@@ -64,6 +49,12 @@ pub trait Node: Ord {
     /// # Panics
     /// If the node is EOF.
     fn skip(&mut self, offset_to_skip: usize) -> Result<()>;
+
+    /// Searches given item in node's current item and returns the index.
+    fn search_key_in_current_item(&self, key: &Self::Item) -> std::result::Result<usize, usize>;
+
+    /// Slice current item.
+    fn slice_current_item(&self, range: Range<usize>) -> Self::Item;
 }
 
 pub struct Merger<T, I> {
@@ -73,7 +64,6 @@ pub struct Merger<T, I> {
 
 impl<T, I> Merger<T, I>
 where
-    I: Item + Debug,
     T: Node<Item = I>,
 {
     pub(crate) fn try_new(nodes: Vec<T>) -> Result<Self> {
@@ -108,23 +98,24 @@ where
                 // does not overlap
                 self.current_item = Some(top_node.fetch_next()?);
             } else {
-                let next_start = next_node.current_item().current_range().start;
-                let res = match top_node.current_item().search_key(&next_start) {
+                let res = match top_node.search_key_in_current_item(next_node.current_item()) {
                     Ok(pos) => {
-                        // duplicate timestamp found, yield duplicated row in this item
                         if pos == 0 {
-                            let to_yield = top_node.current_item().slice(0..1);
+                            // if the first item of top node has duplicate ts with next node,
+                            // we can simply return the first row in that it must be the one
+                            // with max sequence.
+                            let to_yield = top_node.slice_current_item(0..1);
                             top_node.skip(1)?;
                             to_yield
                         } else {
-                            let to_yield = top_node.current_item().slice(0..pos);
+                            let to_yield = top_node.slice_current_item(0..pos);
                             top_node.skip(pos)?;
                             to_yield
                         }
                     }
                     Err(pos) => {
                         // no duplicated timestamp
-                        let to_yield = top_node.current_item().slice(0..pos);
+                        let to_yield = top_node.slice_current_item(0..pos);
                         top_node.skip(pos)?;
                         to_yield
                     }
@@ -204,14 +195,12 @@ impl DataBatch {
     }
 }
 
-impl Item for DataBatch {
-    type Key = DataBatchKey;
-
+impl DataBatch {
     fn remaining(&self) -> usize {
         self.range().len()
     }
 
-    fn current_range(&self) -> Range<Self::Key> {
+    fn current_range(&self) -> Range<DataBatchKey> {
         let range = self.range();
         let batch = self.record_batch();
         let pk_index = self.pk_index();
@@ -229,7 +218,7 @@ impl Item for DataBatch {
         }
     }
 
-    fn search_key(&self, key: &Self::Key) -> std::result::Result<usize, usize> {
+    fn search_key(&self, key: &DataBatchKey) -> std::result::Result<usize, usize> {
         let DataBatchKey {
             pk_index,
             timestamp,
@@ -267,25 +256,7 @@ impl DataNode {
     }
 
     fn next(&mut self) -> Result<()> {
-        let next = match &mut self.source {
-            DataSource::Buffer(b) => {
-                b.next()?;
-                if b.is_valid() {
-                    Some(b.current_data_batch())
-                } else {
-                    None
-                }
-            }
-            DataSource::Part(p) => {
-                p.next()?;
-                if p.is_valid() {
-                    Some(p.current_data_batch())
-                } else {
-                    None
-                }
-            }
-        };
-        self.current_data_batch = next;
+        self.current_data_batch = self.source.fetch_next()?;
         Ok(())
     }
 
@@ -305,6 +276,28 @@ impl DataSource {
             DataSource::Buffer(buffer) => buffer.current_data_batch(),
             DataSource::Part(p) => p.current_data_batch(),
         }
+    }
+
+    fn fetch_next(&mut self) -> Result<Option<DataBatch>> {
+        let res = match self {
+            DataSource::Buffer(b) => {
+                b.next()?;
+                if b.is_valid() {
+                    Some(b.current_data_batch())
+                } else {
+                    None
+                }
+            }
+            DataSource::Part(p) => {
+                p.next()?;
+                if p.is_valid() {
+                    Some(p.current_data_batch())
+                } else {
+                    None
+                }
+            }
+        };
+        Ok(res)
     }
 }
 
@@ -372,6 +365,15 @@ impl Node for DataNode {
         }
 
         Ok(())
+    }
+
+    fn search_key_in_current_item(&self, key: &Self::Item) -> std::result::Result<usize, usize> {
+        let key = key.current_range().start;
+        self.current_data_batch.as_ref().unwrap().search_key(&key)
+    }
+
+    fn slice_current_item(&self, range: Range<usize>) -> Self::Item {
+        self.current_data_batch.as_ref().unwrap().slice(range)
     }
 }
 
