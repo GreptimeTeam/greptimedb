@@ -407,7 +407,6 @@ mod tests {
 
     use super::*;
     use crate::memtable::merge_tree::data::DataBuffer;
-    use crate::memtable::merge_tree::PkId;
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     fn write_rows_to_buffer(
@@ -429,13 +428,7 @@ mod tests {
         );
 
         for kv in kvs.iter() {
-            buffer.write_row(
-                PkId {
-                    shard_id: 0,
-                    pk_index,
-                },
-                kv,
-            );
+            buffer.write_row(pk_index, kv);
         }
 
         *sequence += rows;

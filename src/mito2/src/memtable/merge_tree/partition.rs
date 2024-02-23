@@ -26,6 +26,7 @@ use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
+use crate::memtable::merge_tree::data::{DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::shard::Shard;
 use crate::memtable::merge_tree::shard_builder::ShardBuilder;
@@ -41,8 +42,12 @@ pub struct Partition {
 
 impl Partition {
     /// Creates a new partition.
-    pub fn new(_metadata: RegionMetadataRef, _config: &MergeTreeConfig) -> Self {
-        unimplemented!()
+    pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+        let shard_builder = ShardBuilder::new(metadata.clone(), config);
+
+        Partition {
+            inner: RwLock::new(Inner::new(metadata, shard_builder)),
+        }
     }
 
     /// Writes to the partition with a primary key.
@@ -56,40 +61,37 @@ impl Partition {
         // Now we ensure one key only exists in one shard.
         if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
             // Key already in shards.
-            return inner.write_to_shard(pk_id, key_value);
+            inner.write_to_shard(pk_id, key_value);
+            return Ok(());
         }
 
         if inner.shard_builder.should_freeze() {
-            let shard_id = inner.active_shard_id;
-            let shard = inner.shard_builder.finish(shard_id)?;
-            inner.active_shard_id += 1;
-            inner.shards.push(shard);
+            inner.freeze_active_shard()?;
         }
 
         // Write to the shard builder.
         inner
             .shard_builder
-            .write_with_key(primary_key, key_value, metrics)?;
+            .write_with_key(primary_key, key_value, metrics);
+        inner.num_rows += 1;
 
         Ok(())
     }
 
     /// Writes to the partition without a primary key.
-    pub fn write_no_key(&self, key_value: KeyValue, metrics: &mut WriteMetrics) -> Result<()> {
+    pub fn write_no_key(&self, key_value: KeyValue) {
         let mut inner = self.inner.write().unwrap();
         // If no primary key, always write to the first shard.
-        if inner.shards.is_empty() {
-            let shard_id = inner.active_shard_id;
-            inner.shards.push(Shard::new_no_dict(shard_id));
-            inner.active_shard_id += 1;
-        }
+        debug_assert!(!inner.shards.is_empty());
+        debug_assert_eq!(1, inner.active_shard_id);
 
         // A dummy pk id.
         let pk_id = PkId {
-            shard_id: inner.active_shard_id - 1,
+            shard_id: 0,
             pk_index: 0,
         };
-        inner.shards[0].write_key_value(pk_id, key_value, metrics)
+        inner.shards[0].write_with_pk_id(pk_id, key_value);
+        inner.num_rows += 1;
     }
 
     /// Scans data in the partition.
@@ -103,22 +105,47 @@ impl Partition {
 
     /// Freezes the partition.
     pub fn freeze(&self) -> Result<()> {
-        unimplemented!()
+        let mut inner = self.inner.write().unwrap();
+        inner.freeze_active_shard()?;
+        Ok(())
     }
 
     /// Forks the partition.
-    pub fn fork(&self, _metadata: &RegionMetadataRef) -> Partition {
-        unimplemented!()
+    pub fn fork(&self, metadata: &RegionMetadataRef, config: &MergeTreeConfig) -> Partition {
+        let inner = self.inner.read().unwrap();
+        // TODO(yingwen): TTL or evict shards.
+        let shard_builder = ShardBuilder::new(metadata.clone(), config);
+        let shards = inner
+            .shards
+            .iter()
+            .map(|shard| shard.fork(metadata.clone()))
+            .collect();
+
+        Partition {
+            inner: RwLock::new(Inner {
+                metadata: metadata.clone(),
+                shard_builder,
+                active_shard_id: inner.active_shard_id,
+                shards,
+                num_rows: 0,
+            }),
+        }
     }
 
     /// Returns true if the partition has data.
     pub fn has_data(&self) -> bool {
-        unimplemented!()
+        let inner = self.inner.read().unwrap();
+        inner.num_rows > 0
     }
 
     /// Returns shared memory size of the partition.
     pub fn shared_memory_size(&self) -> usize {
-        unimplemented!()
+        let inner = self.inner.read().unwrap();
+        inner
+            .shards
+            .iter()
+            .map(|shard| shard.shared_memory_size())
+            .sum()
     }
 
     /// Get partition key from the key value.
@@ -160,17 +187,37 @@ pub type PartitionRef = Arc<Partition>;
 ///
 /// A key only exists in one shard.
 struct Inner {
+    metadata: RegionMetadataRef,
     /// Shard whose dictionary is active.
     shard_builder: ShardBuilder,
     active_shard_id: ShardId,
-    /// Shards with frozon dictionary.
+    /// Shards with frozen dictionary.
     shards: Vec<Shard>,
+    num_rows: usize,
 }
 
 impl Inner {
+    fn new(metadata: RegionMetadataRef, shard_builder: ShardBuilder) -> Self {
+        let mut inner = Self {
+            metadata,
+            shard_builder,
+            active_shard_id: 0,
+            shards: Vec::new(),
+            num_rows: 0,
+        };
+
+        if inner.metadata.primary_key.is_empty() {
+            let data_parts = DataParts::new(inner.metadata.clone(), DATA_INIT_CAP);
+            inner.shards.push(Shard::new(0, None, data_parts));
+            inner.active_shard_id = 1;
+        }
+
+        inner
+    }
+
     fn find_key_in_shards(&self, primary_key: &[u8]) -> Option<PkId> {
         for shard in &self.shards {
-            if let Some(pkid) = shard.find_key(primary_key) {
+            if let Some(pkid) = shard.find_id_by_key(primary_key) {
                 return Some(pkid);
             }
         }
@@ -178,7 +225,24 @@ impl Inner {
         None
     }
 
-    fn write_to_shard(&mut self, _pk_id: PkId, _key_value: KeyValue) -> Result<()> {
-        unimplemented!()
+    fn write_to_shard(&mut self, pk_id: PkId, key_value: KeyValue) {
+        for shard in &mut self.shards {
+            if shard.shard_id == pk_id.shard_id {
+                shard.write_with_pk_id(pk_id, key_value);
+                self.num_rows += 1;
+                return;
+            }
+        }
+    }
+
+    fn freeze_active_shard(&mut self) -> Result<()> {
+        if let Some(shard) = self
+            .shard_builder
+            .finish(self.active_shard_id, self.metadata.clone())?
+        {
+            self.active_shard_id += 1;
+            self.shards.push(shard);
+        }
+        Ok(())
     }
 }

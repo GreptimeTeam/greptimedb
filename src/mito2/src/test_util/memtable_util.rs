@@ -22,15 +22,18 @@ use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use datatypes::value::ValueRef;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::Result;
+use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRef,
     MemtableStats,
 };
+use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
@@ -93,14 +96,19 @@ impl MemtableBuilder for EmptyMemtableBuilder {
 ///
 /// The schema is `k0, k1, ts, v0, v1` and pk is `k0, k1`.
 pub(crate) fn metadata_for_test() -> RegionMetadataRef {
-    metadata_with_primary_key(vec![0, 1])
+    metadata_with_primary_key(vec![0, 1], false)
 }
 
 /// Creates a region metadata to test memtable and specific primary key.
 ///
-/// The schema is `k0, k1, ts, v0, v1`.
-pub(crate) fn metadata_with_primary_key(primary_key: Vec<ColumnId>) -> RegionMetadataRef {
+/// If `enable_table_id` is false, the schema is `k0, k1, ts, v0, v1`.
+/// If `enable_table_id` is true, the schema is `k0, __table_id, ts, v0, v1`.
+pub(crate) fn metadata_with_primary_key(
+    primary_key: Vec<ColumnId>,
+    enable_table_id: bool,
+) -> RegionMetadataRef {
     let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+    let maybe_table_id = if enable_table_id { "table_id" } else { "k1" };
     builder
         .push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
@@ -108,7 +116,11 @@ pub(crate) fn metadata_with_primary_key(primary_key: Vec<ColumnId>) -> RegionMet
             column_id: 0,
         })
         .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("k1", ConcreteDataType::int64_datatype(), false),
+            column_schema: ColumnSchema::new(
+                maybe_table_id,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
             semantic_type: semantic_type_of_column(1, &primary_key),
             column_id: 1,
         })
@@ -144,11 +156,31 @@ fn semantic_type_of_column(column_id: ColumnId, primary_key: &[ColumnId]) -> Sem
     }
 }
 
+/// Builds key values with `len` rows for test.
+pub(crate) fn build_key_values(
+    schema: &RegionMetadataRef,
+    k0: String,
+    k1: u32,
+    timestamps: &[i64],
+    sequence: SequenceNumber,
+) -> KeyValues {
+    let values = timestamps.iter().map(|v| Some(*v as f64));
+
+    build_key_values_with_ts_seq_values(
+        schema,
+        k0,
+        k1,
+        timestamps.iter().copied(),
+        values,
+        sequence,
+    )
+}
+
 /// Builds key values with timestamps (ms) and sequences for test.
 pub(crate) fn build_key_values_with_ts_seq_values(
     schema: &RegionMetadataRef,
     k0: String,
-    k1: i64,
+    k1: u32,
     timestamps: impl Iterator<Item = i64>,
     values: impl Iterator<Item = Option<f64>>,
     sequence: SequenceNumber,
@@ -174,7 +206,7 @@ pub(crate) fn build_key_values_with_ts_seq_values(
                     value_data: Some(ValueData::StringValue(k0.clone())),
                 },
                 api::v1::Value {
-                    value_data: Some(ValueData::I64Value(k1)),
+                    value_data: Some(ValueData::U32Value(k1)),
                 },
                 api::v1::Value {
                     value_data: Some(ValueData::TimestampMillisecondValue(ts)),
@@ -197,4 +229,41 @@ pub(crate) fn build_key_values_with_ts_seq_values(
         }),
     };
     KeyValues::new(schema.as_ref(), mutation).unwrap()
+}
+
+/// Encode keys.
+pub(crate) fn encode_keys(
+    metadata: &RegionMetadataRef,
+    key_values: &KeyValues,
+    keys: &mut Vec<Vec<u8>>,
+) {
+    let row_codec = McmpRowCodec::new(
+        metadata
+            .primary_key_columns()
+            .map(|c| SortField::new(c.column_schema.data_type.clone()))
+            .collect(),
+    );
+    for kv in key_values.iter() {
+        let key = row_codec.encode(kv.primary_keys()).unwrap();
+        keys.push(key);
+    }
+}
+
+/// Encode one key.
+pub(crate) fn encode_key(k0: &str, k1: u32) -> Vec<u8> {
+    let row_codec = McmpRowCodec::new(vec![
+        SortField::new(ConcreteDataType::string_datatype()),
+        SortField::new(ConcreteDataType::uint32_datatype()),
+    ]);
+    let key = [ValueRef::String(k0), ValueRef::UInt32(k1)];
+    row_codec.encode(key.into_iter()).unwrap()
+}
+
+/// Encode one key.
+pub(crate) fn encode_key_by_kv(key_value: &KeyValue) -> Vec<u8> {
+    let row_codec = McmpRowCodec::new(vec![
+        SortField::new(ConcreteDataType::string_datatype()),
+        SortField::new(ConcreteDataType::uint32_datatype()),
+    ]);
+    row_codec.encode(key_value.primary_keys()).unwrap()
 }

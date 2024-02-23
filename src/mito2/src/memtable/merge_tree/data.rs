@@ -43,9 +43,12 @@ use crate::error;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::merger::{DataNode, DataSource, Merger};
-use crate::memtable::merge_tree::{PkId, PkIndex};
+use crate::memtable::merge_tree::PkIndex;
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
+
+/// Initial capacity for the data buffer.
+pub(crate) const DATA_INIT_CAP: usize = 8;
 
 /// Data part batches returns by `DataParts::read`.
 #[derive(Debug, Clone)]
@@ -128,9 +131,9 @@ impl DataBuffer {
     }
 
     /// Writes a row to data buffer.
-    pub fn write_row(&mut self, pk_id: PkId, kv: KeyValue) {
+    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
         self.ts_builder.push_value_ref(kv.timestamp());
-        self.pk_index_builder.push(Some(pk_id.pk_index));
+        self.pk_index_builder.push(Some(pk_index));
         self.sequence_builder.push(Some(kv.sequence()));
         self.op_type_builder.push(Some(kv.op_type() as u8));
 
@@ -662,9 +665,9 @@ pub struct ParquetPart {
 /// Data parts under a shard.
 pub struct DataParts {
     /// The active writing buffer.
-    pub(crate) active: DataBuffer,
+    active: DataBuffer,
     /// immutable (encoded) parts.
-    pub(crate) frozen: Vec<DataPart>,
+    frozen: Vec<DataPart>,
 }
 
 impl DataParts {
@@ -675,9 +678,14 @@ impl DataParts {
         }
     }
 
-    /// Writes one row into active part.
-    pub fn write_row(&mut self, pk_id: PkId, kv: KeyValue) {
-        self.active.write_row(pk_id, kv)
+    pub(crate) fn with_frozen(mut self, frozen: Vec<DataPart>) -> Self {
+        self.frozen = frozen;
+        self
+    }
+
+    /// Writes a row into parts.
+    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
+        self.active.write_row(pk_index, kv)
     }
 
     /// Freezes the active data buffer into frozen data parts.
@@ -932,13 +940,7 @@ mod tests {
         );
 
         for kv in kvs.iter() {
-            buffer.write_row(
-                PkId {
-                    shard_id: 0,
-                    pk_index,
-                },
-                kv,
-            );
+            buffer.write_row(pk_index, kv);
         }
     }
 

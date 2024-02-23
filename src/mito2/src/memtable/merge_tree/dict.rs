@@ -61,19 +61,21 @@ impl KeyDictBuilder {
         self.pk_to_index.get(key).copied()
     }
 
+    /// Returns true if the builder is full.
+    pub fn is_full(&self) -> bool {
+        self.num_keys >= self.capacity
+    }
+
     /// Adds the key to the builder and returns its index if the builder is not full.
     ///
-    /// Returns `None` if the builder is full.
-    pub fn try_insert_key(&mut self, key: &[u8], metrics: &mut WriteMetrics) -> Option<PkIndex> {
+    /// # Panics
+    /// Panics if the builder is full.
+    pub fn insert_key(&mut self, key: &[u8], metrics: &mut WriteMetrics) -> PkIndex {
+        assert!(!self.is_full());
+
         if let Some(pk_index) = self.pk_to_index.get(key).copied() {
             // Already in the builder.
-            return Some(pk_index);
-        }
-
-        // A new key.
-        if self.num_keys >= self.capacity {
-            // The builder is full.
-            return None;
+            return pk_index;
         }
 
         if self.key_buffer.len() >= MAX_KEYS_PER_BLOCK.into() {
@@ -91,7 +93,7 @@ impl KeyDictBuilder {
         metrics.key_bytes += key.len() * 2;
         self.key_bytes_in_index += key.len();
 
-        Some(pk_index)
+        pk_index
     }
 
     /// Memory size of the builder.
@@ -129,11 +131,12 @@ impl KeyDictBuilder {
             pk_to_index,
             dict_blocks: std::mem::take(&mut self.dict_blocks),
             key_positions,
+            key_bytes_in_index: self.key_bytes_in_index,
         })
     }
 
-    /// Scans the builder.
-    pub fn scan(&self) -> DictBuilderReader {
+    /// Reads the builder.
+    pub fn read(&self) -> DictBuilderReader {
         let sorted_pk_indices = self.pk_to_index.values().copied().collect();
         let block = self.key_buffer.finish_cloned();
         let mut blocks = Vec::with_capacity(self.dict_blocks.len() + 1);
@@ -162,38 +165,46 @@ impl DictBuilderReader {
         }
     }
 
-    /// Returns true if the item in the reader is valid.
-    pub fn is_valid(&self) -> bool {
-        self.offset < self.sorted_pk_indices.len()
+    /// Returns the number of keys.
+    pub fn num_keys(&self) -> usize {
+        self.sorted_pk_indices.len()
     }
 
-    /// Returns current key.
-    pub fn current_key(&self) -> &[u8] {
-        let pk_index = self.current_pk_index();
+    /// Gets the i-th pk index.
+    pub fn pk_index(&self, offset: usize) -> PkIndex {
+        self.sorted_pk_indices[offset]
+    }
+
+    /// Gets the i-th key.
+    pub fn key(&self, offset: usize) -> &[u8] {
+        let pk_index = self.pk_index(offset);
         self.key_by_pk_index(pk_index)
     }
 
-    /// Returns current [PkIndex] of the key.
-    pub fn current_pk_index(&self) -> PkIndex {
-        assert!(self.is_valid());
-        self.sorted_pk_indices[self.offset]
+    /// Gets the key by the pk index.
+    pub fn key_by_pk_index(&self, pk_index: PkIndex) -> &[u8] {
+        let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
+        self.blocks[block_idx as usize].key_by_pk_index(pk_index)
     }
 
-    /// Advances the reader.
-    pub fn next(&mut self) {
-        assert!(self.is_valid());
-        self.offset += 1;
+    /// Returns pk weights to sort a data part and replaces pk indices.
+    pub(crate) fn pk_weights_to_sort_data(&self) -> Vec<u16> {
+        compute_pk_weights(&self.sorted_pk_indices)
     }
 
     /// Returns pk indices sorted by keys.
     pub(crate) fn sorted_pk_index(&self) -> &[PkIndex] {
         &self.sorted_pk_indices
     }
+}
 
-    fn key_by_pk_index(&self, pk_index: PkIndex) -> &[u8] {
-        let block_idx = pk_index / MAX_KEYS_PER_BLOCK;
-        self.blocks[block_idx as usize].key_by_pk_index(pk_index)
+/// Returns pk weights to sort a data part and replaces pk indices.
+fn compute_pk_weights(sorted_pk_indices: &[PkIndex]) -> Vec<u16> {
+    let mut pk_weights = vec![0; sorted_pk_indices.len()];
+    for (weight, pk_index) in sorted_pk_indices.iter().enumerate() {
+        pk_weights[*pk_index as usize] = weight as u16;
     }
+    pk_weights
 }
 
 /// A key dictionary.
@@ -206,6 +217,7 @@ pub struct KeyDict {
     dict_blocks: Vec<DictBlock>,
     /// Maps pk index to position of the key in [Self::dict_blocks].
     key_positions: Vec<PkIndex>,
+    key_bytes_in_index: usize,
 }
 
 pub type KeyDictRef = Arc<KeyDict>;
@@ -219,6 +231,21 @@ impl KeyDict {
         let position = self.key_positions[index as usize];
         let block_index = position / MAX_KEYS_PER_BLOCK;
         self.dict_blocks[block_index as usize].key_by_pk_index(position)
+    }
+
+    /// Gets the pk index by the key.
+    pub fn get_pk_index(&self, key: &[u8]) -> Option<PkIndex> {
+        self.pk_to_index.get(key).copied()
+    }
+
+    /// Returns pk weights to sort a data part and replaces pk indices.
+    pub(crate) fn pk_weights_to_sort_data(&self) -> Vec<u16> {
+        compute_pk_weights(&self.key_positions)
+    }
+
+    /// Returns the shared memory size.
+    pub(crate) fn shared_memory_size(&self) -> usize {
+        self.key_bytes_in_index
     }
 }
 
@@ -364,7 +391,8 @@ mod tests {
         let mut last_pk_index = None;
         let mut metrics = WriteMetrics::default();
         for key in &keys {
-            let pk_index = builder.try_insert_key(key, &mut metrics).unwrap();
+            assert!(!builder.is_full());
+            let pk_index = builder.insert_key(key, &mut metrics);
             last_pk_index = Some(pk_index);
         }
         assert_eq!(num_keys - 1, last_pk_index.unwrap());
@@ -379,10 +407,9 @@ mod tests {
         expect.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         let mut result = Vec::with_capacity(expect.len());
-        let mut reader = builder.scan();
-        while reader.is_valid() {
-            result.push((reader.current_key().to_vec(), reader.current_pk_index()));
-            reader.next();
+        let reader = builder.read();
+        for i in 0..reader.num_keys() {
+            result.push((reader.key(i).to_vec(), reader.pk_index(i)));
         }
         assert_eq!(expect, result);
     }
@@ -397,9 +424,7 @@ mod tests {
         for i in 0..num_keys {
             // Each key is 5 bytes.
             let key = format!("{i:05}");
-            builder
-                .try_insert_key(key.as_bytes(), &mut metrics)
-                .unwrap();
+            builder.insert_key(key.as_bytes(), &mut metrics);
         }
         // num_keys * 5 * 2
         assert_eq!(5130, metrics.key_bytes);
