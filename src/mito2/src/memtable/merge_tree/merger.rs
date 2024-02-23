@@ -57,14 +57,14 @@ pub trait Node: Ord {
     fn slice_current_item(&self, range: Range<usize>) -> Self::Item;
 }
 
-pub struct Merger<T, I> {
+pub struct Merger<T: Node> {
     heap: BinaryHeap<T>,
-    current_item: Option<I>,
+    current_item: Option<T::Item>,
 }
 
-impl<T, I> Merger<T, I>
+impl<T> Merger<T>
 where
-    T: Node<Item = I>,
+    T: Node,
 {
     pub(crate) fn try_new(nodes: Vec<T>) -> Result<Self> {
         let mut heap = BinaryHeap::with_capacity(nodes.len());
@@ -133,7 +133,7 @@ where
     }
 
     /// Returns current item held by merger.
-    pub(crate) fn current_item(&self) -> &I {
+    pub(crate) fn current_item(&self) -> &T::Item {
         self.current_item.as_ref().unwrap()
     }
 }
@@ -200,7 +200,7 @@ impl DataBatch {
         self.range().len()
     }
 
-    fn current_range(&self) -> Range<DataBatchKey> {
+    fn first_key(&self) -> DataBatchKey {
         let range = self.range();
         let batch = self.record_batch();
         let pk_index = self.pk_index();
@@ -208,13 +208,10 @@ impl DataBatch {
 
         // maybe safe the result somewhere.
         let ts_values = timestamp_array_to_i64_slice(ts_array);
-        let (ts_start, ts_end) = (ts_values[range.start], ts_values[range.end - 1]);
+        let timestamp = ts_values[range.start];
         DataBatchKey {
             pk_index,
-            timestamp: ts_start,
-        }..DataBatchKey {
-            pk_index,
-            timestamp: ts_end,
+            timestamp,
         }
     }
 
@@ -223,9 +220,7 @@ impl DataBatch {
             pk_index,
             timestamp,
         } = key;
-        if *pk_index != self.pk_index() {
-            return Err(self.range().end);
-        }
+        assert_eq!(*pk_index, self.pk_index);
         let ts_values = timestamp_array_to_i64_slice(self.record_batch().column(1));
         ts_values.binary_search(timestamp)
     }
@@ -368,7 +363,7 @@ impl Node for DataNode {
     }
 
     fn search_key_in_current_item(&self, key: &Self::Item) -> std::result::Result<usize, usize> {
-        let key = key.current_range().start;
+        let key = key.first_key();
         self.current_data_batch.as_ref().unwrap().search_key(&key)
     }
 

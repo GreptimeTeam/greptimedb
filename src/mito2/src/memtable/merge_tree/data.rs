@@ -709,7 +709,7 @@ impl DataParts {
 
 /// Reader for all parts inside a `DataParts`.
 pub struct DataPartsReader {
-    merger: Merger<DataNode, DataBatch>,
+    merger: Merger<DataNode>,
 }
 
 impl DataPartsReader {
