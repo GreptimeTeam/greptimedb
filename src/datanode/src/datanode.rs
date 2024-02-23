@@ -14,7 +14,6 @@
 
 //! Datanode implementation.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,7 +31,6 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use file_engine::engine::FileRegionEngine;
-use futures::future;
 use futures_util::future::try_join_all;
 use futures_util::TryStreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
@@ -45,7 +43,7 @@ use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
-use servers::server::{start_server, ServerHandlers};
+use servers::server::ServerHandlers;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
@@ -97,7 +95,11 @@ impl Datanode {
             t.start(None).context(StartServerSnafu)?
         }
 
-        self.start_services().await
+        self.services.start_all().await.context(StartServerSnafu)
+    }
+
+    pub fn server_handlers(&self) -> &ServerHandlers {
+        &self.services
     }
 
     pub fn start_telemetry(&self) {
@@ -127,24 +129,12 @@ impl Datanode {
         self.services = services;
     }
 
-    /// Start services of datanode. This method call will block until services are shutdown.
-    pub async fn start_services(&mut self) -> Result<()> {
-        let _ = future::try_join_all(self.services.values().map(start_server))
-            .await
-            .context(StartServerSnafu)?;
-        Ok(())
-    }
-
-    async fn shutdown_services(&self) -> Result<()> {
-        let _ = future::try_join_all(self.services.values().map(|server| server.0.shutdown()))
+    pub async fn shutdown(&self) -> Result<()> {
+        self.services
+            .shutdown_all()
             .await
             .context(ShutdownServerSnafu)?;
-        Ok(())
-    }
 
-    pub async fn shutdown(&self) -> Result<()> {
-        // We must shutdown services first
-        self.shutdown_services().await?;
         let _ = self.greptimedb_telemetry_task.stop().await;
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task
@@ -268,7 +258,7 @@ impl DatanodeBuilder {
                 .context(StartServerSnafu)?;
 
         Ok(Datanode {
-            services: HashMap::new(),
+            services: ServerHandlers::default(),
             heartbeat_task,
             region_server,
             greptimedb_telemetry_task,
@@ -308,6 +298,7 @@ impl DatanodeBuilder {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
             MemoryCatalogManager::with_default_setup(),
+            None,
             None,
             None,
             false,

@@ -389,7 +389,7 @@ async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) ->
     assert_eq!(column_schemas.len(), columns.len());
 
     for (i, column) in columns.iter().enumerate() {
-        assert_eq!(mysql_columns_def[i], column.column_type());
+        assert_eq!(mysql_columns_def[i] as u8, column.column_type() as u8);
         assert_eq!(column_schemas[i].name, column.name_str());
     }
 

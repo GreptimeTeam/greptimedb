@@ -3,13 +3,3 @@ linker = "aarch64-linux-gnu-gcc"
 
 [alias]
 sqlness = "run --bin sqlness-runner --"
-
-
-[build]
-rustflags = [
-    # lints
-    # TODO: use lint configuration in cargo https://github.com/rust-lang/cargo/issues/5034
-    "-Wclippy::print_stdout",
-    "-Wclippy::print_stderr",
-    "-Wclippy::implicit_clone",
-]

@@ -26,6 +26,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use etcd_client::Client;
+use futures::future;
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
@@ -33,7 +34,6 @@ use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
-use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tonic::transport::server::{Router, TcpIncoming};
 
@@ -110,12 +110,14 @@ impl MetaSrvInstance {
         let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
             addr: &self.opts.http.addr,
         })?;
-        let http_srv = self.http_srv.start(addr);
-        select! {
-            v = meta_srv => v?,
-            v = http_srv => v.map(|_| ()).context(error::StartHttpSnafu)?,
-        }
-
+        let http_srv = async {
+            self.http_srv
+                .start(addr)
+                .await
+                .map(|_| ())
+                .context(error::StartHttpSnafu)
+        };
+        future::try_join(meta_srv, http_srv).await?;
         Ok(())
     }
 

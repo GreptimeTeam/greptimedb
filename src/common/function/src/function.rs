@@ -30,6 +30,17 @@ pub struct FunctionContext {
     pub state: Arc<FunctionState>,
 }
 
+impl FunctionContext {
+    /// Create a mock [`FunctionContext`] for test.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn mock() -> Self {
+        Self {
+            query_ctx: QueryContextBuilder::default().build(),
+            state: Arc::new(FunctionState::mock()),
+        }
+    }
+}
+
 impl Default for FunctionContext {
     fn default() -> Self {
         Self {

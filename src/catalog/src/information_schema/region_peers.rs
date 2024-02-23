@@ -199,7 +199,7 @@ impl InformationSchemaRegionPeersBuilder {
 
                 let table_routes = if let Some(partition_manager) = &partition_manager {
                     partition_manager
-                        .find_region_routes_batch(&table_ids)
+                        .batch_find_region_routes(&table_ids)
                         .await
                         .context(FindRegionRoutesSnafu)?
                 } else {

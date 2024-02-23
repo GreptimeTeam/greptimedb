@@ -10,6 +10,9 @@ mem-prof = ["dep:common-mem-prof"]
 pprof = ["dep:pprof"]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }
 api.workspace = true
@@ -58,8 +61,7 @@ lazy_static.workspace = true
 mime_guess = "2.0"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
-# TODO(LFC): Wait for https://github.com/datafuselabs/opensrv/pull/60
-opensrv-mysql = { git = "https://github.com/MichaelScofield/opensrv.git", rev = "1676c1d" }
+opensrv-mysql = "0.7.0"
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
 pgwire = "0.19.1"

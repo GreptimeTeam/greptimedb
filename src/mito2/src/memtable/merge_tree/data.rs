@@ -42,6 +42,7 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use crate::error;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
+use crate::memtable::merge_tree::merger::{DataNode, DataSource, Merger};
 use crate::memtable::merge_tree::PkIndex;
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
@@ -51,26 +52,30 @@ pub(crate) const DATA_INIT_CAP: usize = 8;
 
 /// Data part batches returns by `DataParts::read`.
 #[derive(Debug, Clone)]
-pub struct DataBatch<'a> {
+pub struct DataBatch {
     /// Primary key index of this batch.
-    pk_index: PkIndex,
+    pub(crate) pk_index: PkIndex,
     /// Record batch of data.
-    rb: &'a RecordBatch,
+    pub(crate) rb: RecordBatch,
     /// Range of current primary key inside record batch
-    range: Range<usize>,
+    pub(crate) range: Range<usize>,
 }
 
-impl<'a> DataBatch<'a> {
+impl DataBatch {
     pub(crate) fn pk_index(&self) -> PkIndex {
         self.pk_index
     }
 
     pub(crate) fn record_batch(&self) -> &RecordBatch {
-        self.rb
+        &self.rb
     }
 
     pub(crate) fn range(&self) -> Range<usize> {
         self.range.clone()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.range.is_empty()
     }
 
     pub(crate) fn slice_record_batch(&self) -> RecordBatch {
@@ -317,10 +322,12 @@ impl DataBufferReader {
     /// If Current reader is exhausted.
     pub(crate) fn current_data_batch(&self) -> DataBatch {
         let (pk_index, range) = self.current_batch.as_ref().unwrap();
+        let rb = self.batch.slice(range.start, range.len());
+        let range = 0..rb.num_rows();
         DataBatch {
             pk_index: *pk_index,
-            rb: &self.batch,
-            range: range.clone(),
+            rb,
+            range,
         }
     }
 
@@ -531,26 +538,6 @@ impl<'a> DataPartEncoder<'a> {
     }
 }
 
-/// Data parts under a shard.
-pub struct DataParts {
-    /// The active writing buffer.
-    active: DataBuffer,
-    /// immutable (encoded) parts.
-    frozen: Vec<DataPart>,
-}
-
-impl DataParts {
-    /// Creates a new [DataParts].
-    pub fn new(active: DataBuffer, frozen: Vec<DataPart>) -> DataParts {
-        DataParts { active, frozen }
-    }
-
-    /// Writes a row into parts.
-    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
-        self.active.write_row(pk_index, kv)
-    }
-}
-
 /// Format of immutable data part.
 pub enum DataPart {
     Parquet(ParquetPart),
@@ -622,9 +609,15 @@ impl DataPartReader {
     /// # Panics
     /// If reader is exhausted.
     pub(crate) fn current_data_batch(&self) -> DataBatch {
-        let rb = self.current_batch.as_ref().unwrap();
         let pk_index = self.current_pk_index.unwrap();
         let range = self.current_range.clone();
+        let rb = self
+            .current_batch
+            .as_ref()
+            .unwrap()
+            .slice(range.start, range.len());
+
+        let range = 0..rb.num_rows();
         DataBatch {
             pk_index,
             rb,
@@ -667,6 +660,73 @@ impl DataPartReader {
 /// Parquet-encoded `DataPart`.
 pub struct ParquetPart {
     data: Bytes,
+}
+
+/// Data parts under a shard.
+pub struct DataParts {
+    /// The active writing buffer.
+    active: DataBuffer,
+    /// immutable (encoded) parts.
+    frozen: Vec<DataPart>,
+}
+
+impl DataParts {
+    pub(crate) fn new(metadata: RegionMetadataRef, capacity: usize) -> Self {
+        Self {
+            active: DataBuffer::with_capacity(metadata, capacity),
+            frozen: Vec::new(),
+        }
+    }
+
+    /// Writes a row into parts.
+    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
+        self.active.write_row(pk_index, kv)
+    }
+
+    /// Freezes the active data buffer into frozen data parts.
+    pub fn freeze(&mut self, pk_weights: &[u16]) -> Result<()> {
+        self.frozen.push(self.active.freeze(pk_weights)?);
+        Ok(())
+    }
+
+    /// Reads data from all parts including active and frozen parts.
+    /// The returned iterator yields a record batch of one primary key at a time.
+    /// The order of yielding primary keys is determined by provided weights.
+    /// todo(hl): read may not take any pk weights if is read by `Shard`.
+    pub fn read(&mut self, pk_weights: &[u16]) -> Result<DataPartsReader> {
+        let mut nodes = Vec::with_capacity(self.frozen.len() + 1);
+        nodes.push(DataNode::new(DataSource::Buffer(
+            self.active.read(pk_weights)?,
+        )));
+        for p in &self.frozen {
+            nodes.push(DataNode::new(DataSource::Part(p.read()?)));
+        }
+        let merger = Merger::try_new(nodes)?;
+        Ok(DataPartsReader { merger })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.active.is_empty() && self.frozen.iter().all(|part| part.is_empty())
+    }
+}
+
+/// Reader for all parts inside a `DataParts`.
+pub struct DataPartsReader {
+    merger: Merger<DataNode>,
+}
+
+impl DataPartsReader {
+    pub(crate) fn current_data_batch(&self) -> &DataBatch {
+        self.merger.current_item()
+    }
+
+    pub(crate) fn next(&mut self) -> Result<()> {
+        self.merger.next()
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        self.merger.is_valid()
+    }
 }
 
 #[cfg(test)]

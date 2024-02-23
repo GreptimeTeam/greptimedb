@@ -260,6 +260,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         catalog_list,
         None,
         None,
+        None,
         false,
         plugins.clone(),
     ));

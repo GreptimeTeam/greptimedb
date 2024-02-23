@@ -1,0 +1,70 @@
+CREATE TABLE t(a INTEGER, ts timestamp time index);
+
+Affected Rows: 0
+
+INSERT INTO t VALUES (1, 1), (null, 2), (3, 3);
+
+Affected Rows: 3
+
+SELECT ISNULL(a) from t;
+
++-------------+
+| isnull(t.a) |
++-------------+
+| false       |
+| true        |
+| false       |
++-------------+
+
+SELECT ISNULL(null);
+
++--------------+
+| isnull(NULL) |
++--------------+
+| true         |
++--------------+
+
+SELECT ISNULL(1);
+
++------------------+
+| isnull(Int64(1)) |
++------------------+
+| false            |
++------------------+
+
+SELECT ISNULL(-1);
+
++-------------------+
+| isnull(Int64(-1)) |
++-------------------+
+| false             |
++-------------------+
+
+SELECT ISNULL(1.0);
+
++--------------------+
+| isnull(Float64(1)) |
++--------------------+
+| false              |
++--------------------+
+
+SELECT ISNULL(true);
+
++-----------------------+
+| isnull(Boolean(true)) |
++-----------------------+
+| false                 |
++-----------------------+
+
+SELECT ISNULL('string');
+
++------------------------+
+| isnull(Utf8("string")) |
++------------------------+
+| false                  |
++------------------------+
+
+DROP TABLE t;
+
+Affected Rows: 0
+

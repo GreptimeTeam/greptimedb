@@ -21,7 +21,7 @@ use std::time::Duration;
 use common_base::Plugins;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::peer::Peer;
@@ -253,7 +253,7 @@ pub struct MetaSrv {
     lock: DistLockRef,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
-    ddl_executor: DdlTaskExecutorRef,
+    procedure_executor: ProcedureExecutorRef,
     wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
@@ -423,8 +423,8 @@ impl MetaSrv {
         &self.mailbox
     }
 
-    pub fn ddl_executor(&self) -> &DdlTaskExecutorRef {
-        &self.ddl_executor
+    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
+        &self.procedure_executor
     }
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {

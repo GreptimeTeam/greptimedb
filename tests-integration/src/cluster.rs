@@ -345,7 +345,7 @@ impl GreptimeDbClusterBuilder {
             .enable_store()
             .enable_heartbeat()
             .channel_manager(meta_srv.channel_manager)
-            .enable_ddl()
+            .enable_procedure()
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);

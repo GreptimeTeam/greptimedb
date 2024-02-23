@@ -15,9 +15,10 @@
 use std::fmt::{self};
 use std::time::Duration;
 
+use common_meta::rpc::procedure::MigrateRegionRequest;
 use common_query::error::Error::ThreadJoin;
 use common_query::error::{
-    InvalidFuncArgsSnafu, InvalidInputTypeSnafu, MissingTableMutationHandlerSnafu, Result,
+    InvalidFuncArgsSnafu, InvalidInputTypeSnafu, MissingProcedureServiceHandlerSnafu, Result,
 };
 use common_query::prelude::{Signature, TypeSignature, Volatility};
 use common_telemetry::logging::error;
@@ -77,6 +78,8 @@ impl Function for MigrateRegionFunction {
     }
 
     fn eval(&self, func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        crate::ensure_greptime!(func_ctx);
+
         let (region_ids, from_peers, to_peers, replay_timeouts) = match columns.len() {
             3 => {
                 let region_ids = cast_u64_vector(&columns[0])?;
@@ -106,9 +109,15 @@ impl Function for MigrateRegionFunction {
             }
         };
 
+        // TODO(dennis): datafusion UDF doesn't support async function currently
         std::thread::spawn(move || {
             let len = region_ids.len();
             let mut results = StringVectorBuilder::with_capacity(len);
+            let procedure_service_handler = func_ctx
+                .state
+                .procedure_service_handler
+                .as_ref()
+                .context(MissingProcedureServiceHandlerSnafu)?;
 
             for index in 0..len {
                 let region_id = region_ids.get(index);
@@ -126,24 +135,18 @@ impl Function for MigrateRegionFunction {
                         Value::UInt64(to_peer),
                         Value::UInt64(replay_timeout),
                     ) => {
-                        let func_ctx = func_ctx.clone();
-
                         let pid = common_runtime::block_on_read(async move {
-                            func_ctx
-                                .state
-                                .table_mutation_handler
-                                .as_ref()
-                                .context(MissingTableMutationHandlerSnafu)?
-                                .migrate_region(
+                            procedure_service_handler
+                                .migrate_region(MigrateRegionRequest {
                                     region_id,
                                     from_peer,
                                     to_peer,
-                                    Duration::from_secs(replay_timeout),
-                                )
+                                    replay_timeout: Duration::from_secs(replay_timeout),
+                                })
                                 .await
                         })?;
 
-                        results.push(Some(&pid));
+                        results.push(pid.as_deref())
                     }
                     _ => {
                         results.push(None);
@@ -171,5 +174,60 @@ impl fmt::Display for MigrateRegionFunction {
 
 #[cfg(test)]
 mod tests {
-    // FIXME(dennis): test in the following PR.
+    use std::sync::Arc;
+
+    use common_query::prelude::TypeSignature;
+    use datatypes::vectors::{StringVector, UInt64Vector};
+
+    use super::*;
+
+    #[test]
+    fn test_migrate_region_misc() {
+        let f = MigrateRegionFunction;
+        assert_eq!("migrate_region", f.name());
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            f.return_type(&[]).unwrap()
+        );
+        assert!(matches!(f.signature(),
+                         Signature {
+                             type_signature: TypeSignature::OneOf(sigs),
+                             volatility: Volatility::Immutable
+                         } if sigs.len() == 2));
+    }
+
+    #[test]
+    fn test_missing_procedure_service() {
+        let f = MigrateRegionFunction;
+
+        let args = vec![1, 1, 1];
+
+        let args = args
+            .into_iter()
+            .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
+            .collect::<Vec<_>>();
+
+        let result = f.eval(FunctionContext::default(), &args).unwrap_err();
+        assert_eq!(
+            "Missing ProcedureServiceHandler, not expected",
+            result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_migrate_region() {
+        let f = MigrateRegionFunction;
+
+        let args = vec![1, 1, 1];
+
+        let args = args
+            .into_iter()
+            .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
+            .collect::<Vec<_>>();
+
+        let result = f.eval(FunctionContext::mock(), &args).unwrap();
+
+        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
+        assert_eq!(expect, result);
+    }
 }

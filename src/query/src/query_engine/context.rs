@@ -70,6 +70,7 @@ impl QueryEngineContext {
             catalog::memory::new_memory_catalog_manager().unwrap(),
             None,
             None,
+            None,
             false,
             Plugins::default(),
         ));

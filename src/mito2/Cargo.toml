@@ -8,6 +8,9 @@ license.workspace = true
 default = []
 test = ["common-test-util", "log-store"]
 
+[lints]
+workspace = true
+
 [dependencies]
 anymap = "1.0.0-beta.2"
 api.workspace = true
