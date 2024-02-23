@@ -372,7 +372,7 @@ impl Node for DataNode {
     }
 }
 
-fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
+pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
     match arr.data_type() {
         DataType::Timestamp(t, _) => match t {
             TimeUnit::Second => arr
@@ -470,12 +470,16 @@ mod tests {
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 1, vec![2, 3], &mut seq);
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![3], &mut seq);
         write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![1], &mut seq);
-        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
             vec![node1, node2],
@@ -497,15 +501,21 @@ mod tests {
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 1, vec![2, 3], &mut seq);
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![3], &mut seq);
-        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
-        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(weight).unwrap()));
+        let node3 = DataNode::new(DataSource::Part(
+            buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
             vec![node1, node3, node2],
@@ -528,15 +538,21 @@ mod tests {
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 3], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
-        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
-        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(weight).unwrap()));
+        let node3 = DataNode::new(DataSource::Part(
+            buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
             vec![node1, node3, node2],
@@ -558,18 +574,18 @@ mod tests {
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 3], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(Some(weight)).unwrap()));
 
         let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
         let node2 = DataNode::new(DataSource::Part(
-            buffer2.freeze(weight).unwrap().read().unwrap(),
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
         let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
         let node3 = DataNode::new(DataSource::Part(
-            buffer3.freeze(weight).unwrap().read().unwrap(),
+            buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
         check_merger_read(
@@ -592,18 +608,24 @@ mod tests {
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 2], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
+
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![2], &mut seq);
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2], &mut seq);
-        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(weight).unwrap()));
-
-        let mut buffer4 = DataBuffer::with_capacity(metadata.clone(), 10);
-        write_rows_to_buffer(&mut buffer4, &metadata, 0, vec![2], &mut seq);
-        let node4 = DataNode::new(DataSource::Buffer(buffer4.read(weight).unwrap()));
+        let node3 = DataNode::new(DataSource::Part(
+            buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
-            vec![node1, node3, node4],
+            vec![node1, node2, node3],
             &[
                 (0, vec![(1, 0)]),
                 (0, vec![(2, 4)]),
@@ -620,11 +642,15 @@ mod tests {
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![0, 1], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
         write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![1], &mut seq);
-        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
             vec![node1, node2],
