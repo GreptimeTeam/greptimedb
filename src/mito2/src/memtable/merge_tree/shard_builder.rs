@@ -93,10 +93,10 @@ impl ShardBuilder {
     }
 
     /// Scans the shard builder.
-    pub fn scan(&mut self) -> Result<ShardBuilderReader> {
+    pub fn scan(&mut self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReader> {
         let dict_reader = self.dict_builder.read();
-        let pk_weights = dict_reader.pk_weights_to_sort_data();
-        let data_reader = self.data_buffer.read(&pk_weights)?;
+        dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
+        let data_reader = self.data_buffer.read(&pk_weights_buffer)?;
 
         Ok(ShardBuilderReader {
             dict_reader,

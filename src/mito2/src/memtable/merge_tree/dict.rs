@@ -188,8 +188,8 @@ impl DictBuilderReader {
     }
 
     /// Returns pk weights to sort a data part and replaces pk indices.
-    pub(crate) fn pk_weights_to_sort_data(&self) -> Vec<u16> {
-        compute_pk_weights(&self.sorted_pk_indices)
+    pub(crate) fn pk_weights_to_sort_data(&self, pk_weights: &mut Vec<u16>) {
+        compute_pk_weights(&self.sorted_pk_indices, pk_weights)
     }
 
     /// Returns pk indices sorted by keys.
@@ -199,12 +199,11 @@ impl DictBuilderReader {
 }
 
 /// Returns pk weights to sort a data part and replaces pk indices.
-fn compute_pk_weights(sorted_pk_indices: &[PkIndex]) -> Vec<u16> {
-    let mut pk_weights = vec![0; sorted_pk_indices.len()];
+fn compute_pk_weights(sorted_pk_indices: &[PkIndex], pk_weights: &mut Vec<u16>) {
+    pk_weights.resize(sorted_pk_indices.len(), 0);
     for (weight, pk_index) in sorted_pk_indices.iter().enumerate() {
         pk_weights[*pk_index as usize] = weight as u16;
     }
-    pk_weights
 }
 
 /// A key dictionary.
@@ -240,7 +239,9 @@ impl KeyDict {
 
     /// Returns pk weights to sort a data part and replaces pk indices.
     pub(crate) fn pk_weights_to_sort_data(&self) -> Vec<u16> {
-        compute_pk_weights(&self.key_positions)
+        let mut pk_weights = Vec::with_capacity(self.key_positions.len());
+        compute_pk_weights(&self.key_positions, &mut pk_weights);
+        pk_weights
     }
 
     /// Returns the shared memory size.

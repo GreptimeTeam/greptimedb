@@ -32,7 +32,7 @@ use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::partition::{
-    Partition, PartitionKey, PartitionReader, PartitionRef,
+    Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionRequest,
 };
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::time_series::primary_key_schema;
@@ -151,16 +151,16 @@ impl MergeTree {
             .map(|pk| pk.column_schema.data_type.clone())
             .collect();
 
-        let iter = TreeIter {
+        let mut iter = TreeIter {
             metadata: self.metadata.clone(),
             pk_schema,
             pk_datatypes,
-            projection,
-            filters,
             row_codec: self.row_codec.clone(),
             partitions,
             current_reader: None,
         };
+        let part_read_request = ReadPartitionRequest::new(projection, filters);
+        iter.fetch_next_partition(part_read_request)?;
 
         Ok(Box::new(iter))
     }
@@ -281,8 +281,6 @@ struct TreeIter {
     metadata: RegionMetadataRef,
     pk_schema: arrow::datatypes::SchemaRef,
     pk_datatypes: Vec<ConcreteDataType>,
-    projection: HashSet<ColumnId>,
-    filters: Vec<SimpleFilterEvaluator>,
     row_codec: Arc<McmpRowCodec>,
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
@@ -292,6 +290,44 @@ impl Iterator for TreeIter {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        unimplemented!()
+        self.next_batch().transpose()
+    }
+}
+
+impl TreeIter {
+    /// Fetch next partition.
+    fn fetch_next_partition(&mut self, mut request: ReadPartitionRequest) -> Result<()> {
+        while let Some(partition) = self.partitions.pop_front() {
+            let part_reader = partition.read(request)?;
+            if !part_reader.is_valid() {
+                request = part_reader.into_request();
+                continue;
+            }
+            self.current_reader = Some(part_reader);
+            break;
+        }
+
+        Ok(())
+    }
+
+    /// Fetches next batch.
+    fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let Some(part_reader) = &mut self.current_reader else {
+            return Ok(None);
+        };
+
+        debug_assert!(part_reader.is_valid());
+        let batch = part_reader.current_batch();
+        part_reader.next();
+        if part_reader.is_valid() {
+            return Ok(Some(batch));
+        }
+
+        // Safety: current reader is Some.
+        let part_reader = self.current_reader.take().unwrap();
+        let request = part_reader.into_request();
+        self.fetch_next_partition(request)?;
+
+        Ok(Some(batch))
     }
 }

@@ -26,11 +26,12 @@ use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataParts, DATA_INIT_CAP};
+use crate::memtable::merge_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::shard::Shard;
-use crate::memtable::merge_tree::shard_builder::ShardBuilder;
+use crate::memtable::merge_tree::shard::{Shard, ShardReader};
+use crate::memtable::merge_tree::shard_builder::{ShardBuilder, ShardBuilderReader};
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
+use crate::read::{Batch, BatchBuilder};
 
 /// Key of a partition.
 pub type PartitionKey = u32;
@@ -95,11 +96,7 @@ impl Partition {
     }
 
     /// Scans data in the partition.
-    pub fn scan(
-        &self,
-        _projection: HashSet<ColumnId>,
-        _filters: Vec<SimpleFilterEvaluator>,
-    ) -> Result<PartitionReader> {
+    pub fn read(&self, request: ReadPartitionRequest) -> Result<PartitionReader> {
         unimplemented!()
     }
 
@@ -179,7 +176,102 @@ impl Partition {
 /// Reader to scan rows in a partition.
 ///
 /// It can merge rows from multiple shards.
-pub struct PartitionReader {}
+pub struct PartitionReader {
+    projection: HashSet<ColumnId>,
+    filters: Vec<SimpleFilterEvaluator>,
+    pk_weights: Vec<u16>,
+}
+
+impl PartitionReader {
+    pub fn is_valid(&self) -> bool {
+        unimplemented!()
+    }
+
+    pub fn next(&mut self) {
+        unimplemented!()
+    }
+
+    fn current_key(&self) -> Option<&[u8]> {
+        unimplemented!()
+    }
+
+    pub fn current_batch(&self) -> Batch {
+        unimplemented!()
+    }
+
+    pub(crate) fn into_request(self) -> ReadPartitionRequest {
+        ReadPartitionRequest {
+            projection: self.projection,
+            filters: self.filters,
+            pk_weights: self.pk_weights,
+        }
+    }
+}
+
+/// Structs to reuse across readers to avoid allocating for each reader.
+pub(crate) struct ReadPartitionRequest {
+    projection: HashSet<ColumnId>,
+    filters: Vec<SimpleFilterEvaluator>,
+    /// Buffer to store pk weights.
+    pk_weights: Vec<u16>,
+}
+
+impl ReadPartitionRequest {
+    pub(crate) fn new(
+        projection: HashSet<ColumnId>,
+        filters: Vec<SimpleFilterEvaluator>,
+    ) -> ReadPartitionRequest {
+        ReadPartitionRequest {
+            projection,
+            filters,
+            pk_weights: Vec::new(),
+        }
+    }
+}
+
+// TODO(yingwen): Pushdown projection to shard readers.
+/// Converts a [DataBatch] to a [Batch].
+fn convert_batch(
+    metadata: &RegionMetadataRef,
+    projection: &HashSet<ColumnId>,
+    key: Option<&[u8]>,
+    data_batch: &DataBatch,
+) -> Result<Batch> {
+    let record_batch = data_batch.record_batch();
+    let primary_key = key.map(|k| k.to_vec()).unwrap_or_default();
+    let mut builder = BatchBuilder::new(primary_key);
+    builder
+        .timestamps_array(record_batch.column(1).clone())?
+        .sequences_array(record_batch.column(2).clone())?
+        .op_types_array(record_batch.column(3).clone())?;
+
+    if record_batch.num_columns() <= 4 {
+        // No fields.
+        return builder.build();
+    }
+
+    // Iterate all field columns.
+    for (array, field) in record_batch
+        .columns()
+        .iter()
+        .zip(record_batch.schema().fields().iter())
+        .skip(4)
+    {
+        // Safety: metadata should contain all fields.
+        let column_id = metadata.column_by_name(field.name()).unwrap().column_id;
+        if !projection.contains(&column_id) {
+            continue;
+        }
+        builder.push_field_array(column_id, array.clone())?;
+    }
+
+    builder.build()
+}
+
+enum ShardSource {
+    Builder(ShardBuilderReader),
+    Shard(ShardReader),
+}
 
 pub type PartitionRef = Arc<Partition>;
 
