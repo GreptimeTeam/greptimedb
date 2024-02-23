@@ -689,6 +689,7 @@ impl DataParts {
     /// Reads data from all parts including active and frozen parts.
     /// The returned iterator yields a record batch of one primary key at a time.
     /// The order of yielding primary keys is determined by provided weights.
+    /// todo(hl): read may not take any pk weights if is read by `Shard`.
     pub fn read(&mut self, pk_weights: &[u16]) -> Result<DataPartsReader> {
         let mut nodes = Vec::with_capacity(self.frozen.len() + 1);
         nodes.push(DataNode::new(DataSource::Buffer(

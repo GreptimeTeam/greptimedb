@@ -622,4 +622,23 @@ mod tests {
             ],
         );
     }
+
+    #[test]
+    fn test_merger_overlapping_3() {
+        let metadata = metadata_for_test();
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let weight = &[0, 1, 2];
+        let mut seq = 0;
+        write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![0, 1], &mut seq);
+        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![1], &mut seq);
+        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+
+        check_merger_read(
+            vec![node1, node2],
+            &[(0, vec![(0, 0)]), (0, vec![(1, 2)]), (0, vec![(1, 1)])],
+        );
+    }
 }
