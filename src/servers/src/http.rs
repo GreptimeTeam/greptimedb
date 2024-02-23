@@ -51,7 +51,7 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use crate::configurator::ConfiguratorRef;
-use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSnafu};
+use crate::error::{AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
 use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
@@ -797,9 +797,15 @@ impl Server for HttpServer {
         let listening = server.local_addr();
         info!("HTTP server is bound to {}", listening);
 
-        let graceful = server.with_graceful_shutdown(rx.map(drop));
-        graceful.await.context(StartHttpSnafu)?;
-
+        common_runtime::spawn_bg(async move {
+            if let Err(e) = server
+                .with_graceful_shutdown(rx.map(drop))
+                .await
+                .context(HyperSnafu)
+            {
+                error!(e; "Failed to shutdown http server");
+            }
+        });
         Ok(listening)
     }
 
