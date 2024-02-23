@@ -26,7 +26,7 @@ use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataBuffer, DataParts, DATA_INIT_CAP};
+use crate::memtable::merge_tree::data::{DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::shard::Shard;
 use crate::memtable::merge_tree::shard_builder::ShardBuilder;
@@ -207,10 +207,7 @@ impl Inner {
         };
 
         if inner.metadata.primary_key.is_empty() {
-            let data_parts = DataParts::new(
-                DataBuffer::with_capacity(inner.metadata.clone(), DATA_INIT_CAP),
-                Vec::new(),
-            );
+            let data_parts = DataParts::new(inner.metadata.clone(), DATA_INIT_CAP);
             inner.shards.push(Shard::new(0, None, data_parts));
             inner.active_shard_id = 1;
         }

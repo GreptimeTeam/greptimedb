@@ -678,6 +678,11 @@ impl DataParts {
         }
     }
 
+    pub(crate) fn with_frozen(mut self, frozen: Vec<DataPart>) -> Self {
+        self.frozen = frozen;
+        self
+    }
+
     /// Writes a row into parts.
     pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
         self.active.write_row(pk_index, kv)

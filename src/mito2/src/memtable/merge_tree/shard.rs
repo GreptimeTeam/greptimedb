@@ -17,7 +17,7 @@
 use store_api::metadata::RegionMetadataRef;
 
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataBuffer, DataParts, DATA_INIT_CAP};
+use crate::memtable::merge_tree::data::{DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::dict::KeyDictRef;
 use crate::memtable::merge_tree::{PkId, ShardId};
 
@@ -77,10 +77,7 @@ impl Shard {
         Shard {
             shard_id: self.shard_id,
             key_dict: self.key_dict.clone(),
-            data_parts: DataParts::new(
-                DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
-                Vec::new(),
-            ),
+            data_parts: DataParts::new(metadata, DATA_INIT_CAP),
         }
     }
 }
@@ -147,7 +144,7 @@ mod tests {
         }
 
         let dict = dict_builder.finish().unwrap();
-        let data_parts = DataParts::new(DataBuffer::with_capacity(metadata, DATA_INIT_CAP), vec![]);
+        let data_parts = DataParts::new(metadata, DATA_INIT_CAP);
 
         Shard::new(shard_id, Some(Arc::new(dict)), data_parts)
     }
