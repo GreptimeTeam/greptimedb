@@ -111,7 +111,6 @@ pub struct ShardBuilderReader {
     data_reader: DataBufferReader,
 }
 
-// TODO(yingwen): Can we use generic for data reader?
 impl ShardBuilderReader {
     fn is_valid(&self) -> bool {
         self.data_reader.is_valid()
@@ -126,7 +125,7 @@ impl ShardBuilderReader {
         Some(self.dict_reader.key_by_pk_index(pk_index))
     }
 
-    fn current_batch(&self) -> DataBatch {
+    fn current_batch(&self) -> &DataBatch {
         self.data_reader.current_data_batch()
     }
 }

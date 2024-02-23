@@ -16,8 +16,9 @@
 
 use store_api::metadata::RegionMetadataRef;
 
+use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataParts, DATA_INIT_CAP};
+use crate::memtable::merge_tree::data::{DataBatch, DataParts, DataPartsReader, DATA_INIT_CAP};
 use crate::memtable::merge_tree::dict::KeyDictRef;
 use crate::memtable::merge_tree::{PkId, ShardId};
 
@@ -83,7 +84,31 @@ impl Shard {
 }
 
 /// Reader to read rows in a shard.
-pub struct ShardReader {}
+pub struct ShardReader {
+    key_dict: Option<KeyDictRef>,
+    parts_reader: DataPartsReader,
+}
+
+impl ShardReader {
+    fn is_valid(&self) -> bool {
+        self.parts_reader.is_valid()
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.parts_reader.next()
+    }
+
+    fn current_key(&self) -> Option<&[u8]> {
+        let pk_index = self.parts_reader.current_data_batch().pk_index;
+        self.key_dict
+            .as_ref()
+            .map(|dict| dict.key_by_pk_index(pk_index))
+    }
+
+    fn current_batch(&self) -> &DataBatch {
+        self.parts_reader.current_data_batch()
+    }
+}
 
 #[cfg(test)]
 mod tests {
