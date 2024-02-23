@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod show_create_table;
+pub mod show_create_table;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -258,14 +258,7 @@ pub fn show_create_table(
     let table_info = table.table_info();
     let table_name = &table_info.name;
 
-    // Default to double quote and fallback to back quote
-    let quote_style = if query_ctx.sql_dialect().is_delimited_identifier_start('"') {
-        '"'
-    } else if query_ctx.sql_dialect().is_delimited_identifier_start('\'') {
-        '\''
-    } else {
-        '`'
-    };
+    let quote_style = query_ctx.quote_style();
 
     let mut stmt = show_create_table::create_table_stmt(&table_info, quote_style)?;
     stmt.partitions = partitions.map(|mut p| {

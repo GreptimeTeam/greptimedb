@@ -219,6 +219,13 @@ pub struct CreateExternalTable {
     pub engine: String,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+pub struct CreateTableLike {
+    /// Table name
+    pub name: ObjectName,
+    pub target: ObjectName,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::dialect::GreptimeDbDialect;

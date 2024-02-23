@@ -153,6 +153,10 @@ impl StatementExecutor {
                 let _ = self.create_table(stmt, query_ctx).await?;
                 Ok(Output::AffectedRows(0))
             }
+            Statement::CreateTableLike(stmt) => {
+                let _ = self.create_table_like(stmt, query_ctx).await?;
+                Ok(Output::AffectedRows(0))
+            }
             Statement::CreateExternalTable(stmt) => {
                 let _ = self.create_external_table(stmt, query_ctx).await?;
                 Ok(Output::AffectedRows(0))
@@ -174,7 +178,6 @@ impl StatementExecutor {
                 let table_name = TableName::new(catalog, schema, table);
                 self.truncate_table(table_name).await
             }
-
             Statement::CreateDatabase(stmt) => {
                 self.create_database(
                     query_ctx.current_catalog(),
@@ -183,7 +186,6 @@ impl StatementExecutor {
                 )
                 .await
             }
-
             Statement::ShowCreateTable(show) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(&show.table_name, &query_ctx)

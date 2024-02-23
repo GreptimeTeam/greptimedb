@@ -76,7 +76,7 @@ impl StatementExecutor {
     }
 }
 
-fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {
+pub(crate) fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {
     if partitions.is_empty() {
         return Ok(None);
     }

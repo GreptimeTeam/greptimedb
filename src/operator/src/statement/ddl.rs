@@ -21,6 +21,7 @@ use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
+use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
@@ -34,6 +35,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use lazy_static::lazy_static;
 use partition::partition::{PartitionBound, PartitionDef};
+use query::sql::show_create_table;
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
@@ -54,6 +56,8 @@ use crate::error::{
     UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
+use crate::statement::show::create_partitions_stmt;
+use crate::table::table_idents_to_full_name;
 
 lazy_static! {
     static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();
@@ -69,6 +73,47 @@ impl StatementExecutor {
         let create_expr = &mut expr_factory::create_to_expr(&stmt, ctx.clone())?;
         self.create_table_inner(create_expr, stmt.partitions, &ctx)
             .await
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn create_table_like(
+        &self,
+        stmt: CreateTableLike,
+        ctx: QueryContextRef,
+    ) -> Result<TableRef> {
+        let (catalog, schema, table) = table_idents_to_full_name(&stmt.target, &ctx)
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+        let table_ref = self
+            .catalog_manager
+            .table(&catalog, &schema, &table)
+            .await
+            .context(error::CatalogSnafu)?
+            .context(error::TableNotFoundSnafu { table_name: &table })?;
+        let partitions = self
+            .partition_manager
+            .find_table_partitions(table_ref.table_info().table_id())
+            .await
+            .context(error::FindTablePartitionRuleSnafu { table_name: table })?;
+
+        let quote_style = ctx.quote_style();
+        let mut create_stmt =
+            show_create_table::create_table_stmt(&table_ref.table_info(), quote_style)
+                .context(error::ParseQuerySnafu)?;
+        create_stmt.name = stmt.name;
+        create_stmt.if_not_exists = false;
+
+        let partitions = create_partitions_stmt(partitions)?.and_then(|mut partitions| {
+            if !partitions.column_list.is_empty() {
+                partitions.set_quote(quote_style);
+                Some(partitions)
+            } else {
+                None
+            }
+        });
+
+        let create_expr = &mut expr_factory::create_to_expr(&create_stmt, ctx.clone())?;
+        self.create_table_inner(create_expr, partitions, &ctx).await
     }
 
     #[tracing::instrument(skip_all)]
