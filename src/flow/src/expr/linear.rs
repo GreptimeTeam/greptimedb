@@ -48,8 +48,10 @@ pub struct MapFilterProject {
     /// Each entry is prepended with a column identifier indicating
     /// the column *before* which the predicate should first be applied.
     /// Most commonly this would be one plus the largest column identifier
-    /// in the predicate's support, but it could be larger to implement
+    /// in the predicate's referred columns, but it could be larger to implement
     /// guarded evaluation of predicates.
+    /// Put it in another word, the first element of the tuple means
+    /// the predicates can't be evaluated until that number of columns is formed.
     ///
     /// This list should be sorted by the first field.
     pub predicates: Vec<(usize, ScalarExpr)>,
@@ -372,6 +374,7 @@ impl MfpPlan {
                 true
             }
         });
+
         for predicate in temporal {
             let (lower, upper) = predicate.extract_bound()?;
             lower_bounds.extend(lower);
@@ -484,42 +487,107 @@ impl MfpPlan {
     }
 }
 
-#[test]
-fn test_mfp() {
-    use crate::expr::func::BinaryFunc;
-    let mfp = MapFilterProject::new(3)
-        .map(vec![
-            ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
-            ScalarExpr::Column(1).call_binary(ScalarExpr::Column(2), BinaryFunc::Lt),
-        ])
-        .project(vec![3, 4]);
-    assert!(!mfp.is_identity());
-    let mfp = MapFilterProject::compose(mfp, MapFilterProject::new(2));
-    {
-        let mfp_0 = mfp.as_map_filter_project();
-        let same = MapFilterProject::new(3)
-            .map(mfp_0.0)
-            .filter(mfp_0.1)
-            .project(mfp_0.2);
-        assert_eq!(mfp, same);
-    }
-    assert_eq!(mfp.demand().len(), 3);
-    let mut mfp = mfp;
-    mfp.permute(BTreeMap::from([(0, 2), (2, 0), (1, 1)]), 3);
-    assert_eq!(
-        mfp,
-        MapFilterProject::new(3)
-            .map(vec![
-                ScalarExpr::Column(2).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
-                ScalarExpr::Column(1).call_binary(ScalarExpr::Column(0), BinaryFunc::Lt),
+#[cfg(test)]
+mod test {
+    use datatypes::data_type::ConcreteDataType;
+    use itertools::Itertools;
+
+    use super::*;
+    use crate::expr::UnmaterializableFunc;
+    #[test]
+    fn test_mfp_with_time() {
+        use crate::expr::func::BinaryFunc;
+        let lte_now = ScalarExpr::Column(0).call_binary(
+            ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now),
+            BinaryFunc::Lte,
+        );
+        assert!(lte_now.contains_temporal());
+
+        let gt_now_minus_two = ScalarExpr::Column(0)
+            .call_binary(
+                ScalarExpr::Literal(Value::from(2i64), ConcreteDataType::int64_datatype()),
+                BinaryFunc::AddInt64,
+            )
+            .call_binary(
+                ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now),
+                BinaryFunc::Gt,
+            );
+        assert!(gt_now_minus_two.contains_temporal());
+
+        let mfp = MapFilterProject::new(3)
+            .filter(vec![
+                // col(0) <= now()
+                lte_now,
+                // col(0) + 2 > now()
+                gt_now_minus_two,
             ])
-            .project(vec![3, 4])
-    );
-    let safe_mfp = SafeMfpPlan { mfp };
-    let mut values = vec![Value::from(4), Value::from(2), Value::from(3)];
-    let ret = safe_mfp
-        .evaluate_into(&mut values, &mut Row::empty())
-        .unwrap()
-        .unwrap();
-    assert_eq!(ret, Row::pack(vec![Value::from(false), Value::from(true)]));
+            .project(vec![0]);
+
+        let mfp = MfpPlan::create_from(mfp).unwrap();
+        let expected = vec![
+            (
+                0,
+                vec![
+                    (Row::new(vec![Value::from(4i64)]), 4, 1),
+                    (Row::new(vec![Value::from(4i64)]), 6, -1),
+                ],
+            ),
+            (
+                5,
+                vec![
+                    (Row::new(vec![Value::from(4i64)]), 5, 1),
+                    (Row::new(vec![Value::from(4i64)]), 6, -1),
+                ],
+            ),
+            (10, vec![]),
+        ];
+        for (sys_time, expected) in expected {
+            let mut values = vec![Value::from(4i64), Value::from(2i64), Value::from(3i64)];
+            let ret = mfp
+                .evaluate::<EvalError>(&mut values, sys_time, 1)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(ret, expected);
+        }
+    }
+
+    #[test]
+    fn test_mfp() {
+        use crate::expr::func::BinaryFunc;
+        let mfp = MapFilterProject::new(3)
+            .map(vec![
+                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
+                ScalarExpr::Column(1).call_binary(ScalarExpr::Column(2), BinaryFunc::Lt),
+            ])
+            .project(vec![3, 4]);
+        assert!(!mfp.is_identity());
+        let mfp = MapFilterProject::compose(mfp, MapFilterProject::new(2));
+        {
+            let mfp_0 = mfp.as_map_filter_project();
+            let same = MapFilterProject::new(3)
+                .map(mfp_0.0)
+                .filter(mfp_0.1)
+                .project(mfp_0.2);
+            assert_eq!(mfp, same);
+        }
+        assert_eq!(mfp.demand().len(), 3);
+        let mut mfp = mfp;
+        mfp.permute(BTreeMap::from([(0, 2), (2, 0), (1, 1)]), 3);
+        assert_eq!(
+            mfp,
+            MapFilterProject::new(3)
+                .map(vec![
+                    ScalarExpr::Column(2).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
+                    ScalarExpr::Column(1).call_binary(ScalarExpr::Column(0), BinaryFunc::Lt),
+                ])
+                .project(vec![3, 4])
+        );
+        let safe_mfp = SafeMfpPlan { mfp };
+        let mut values = vec![Value::from(4), Value::from(2), Value::from(3)];
+        let ret = safe_mfp
+            .evaluate_into(&mut values, &mut Row::empty())
+            .unwrap()
+            .unwrap();
+        assert_eq!(ret, Row::pack(vec![Value::from(false), Value::from(true)]));
+    }
 }
