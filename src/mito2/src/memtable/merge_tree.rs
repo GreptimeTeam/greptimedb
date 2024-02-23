@@ -16,6 +16,7 @@
 
 mod data;
 mod dict;
+mod merger;
 mod metrics;
 mod partition;
 mod shard;
@@ -43,6 +44,7 @@ use crate::memtable::{
 type ShardId = u32;
 /// Index of a primary key in a shard.
 type PkIndex = u16;
+
 /// Id of a primary key inside a tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PkId {
