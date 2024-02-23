@@ -241,12 +241,13 @@ pub struct DataNode {
     current_data_batch: Option<DataBatch>,
 }
 
+// TODO(yingwen): Avoid clone.
 impl DataNode {
     pub(crate) fn new(source: DataSource) -> Self {
-        let current_data_batch = source.current_data_batch();
+        let current_data_batch = source.current_data_batch().clone();
         Self {
             source,
-            current_data_batch: Some(current_data_batch),
+            current_data_batch: Some(current_data_batch.clone()),
         }
     }
 
@@ -266,7 +267,7 @@ pub enum DataSource {
 }
 
 impl DataSource {
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> &DataBatch {
         match self {
             DataSource::Buffer(buffer) => buffer.current_data_batch(),
             DataSource::Part(p) => p.current_data_batch(),
@@ -278,7 +279,7 @@ impl DataSource {
             DataSource::Buffer(b) => {
                 b.next()?;
                 if b.is_valid() {
-                    Some(b.current_data_batch())
+                    Some(b.current_data_batch().clone())
                 } else {
                     None
                 }
@@ -286,7 +287,7 @@ impl DataSource {
             DataSource::Part(p) => {
                 p.next()?;
                 if p.is_valid() {
-                    Some(p.current_data_batch())
+                    Some(p.current_data_batch().clone())
                 } else {
                     None
                 }

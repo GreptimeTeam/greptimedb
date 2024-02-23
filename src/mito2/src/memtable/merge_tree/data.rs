@@ -311,7 +311,7 @@ fn data_buffer_to_record_batches(
 pub(crate) struct DataBufferReader {
     batch: RecordBatch,
     offset: usize,
-    current_batch: Option<(PkIndex, Range<usize>)>,
+    current_batch: Option<DataBatch>,
 }
 
 impl DataBufferReader {
@@ -329,24 +329,17 @@ impl DataBufferReader {
         self.current_batch.is_some()
     }
 
+    /// Returns current data batch.
     /// # Panics
     /// If Current reader is exhausted.
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
-        let (pk_index, range) = self.current_batch.as_ref().unwrap();
-        let rb = self.batch.slice(range.start, range.len());
-        let range = 0..rb.num_rows();
-        DataBatch {
-            pk_index: *pk_index,
-            rb,
-            range,
-        }
+    pub(crate) fn current_data_batch(&self) -> &DataBatch {
+        self.current_batch.as_ref().unwrap()
     }
 
     /// # Panics
     /// If Current reader is exhausted.
     pub(crate) fn current_pk_index(&self) -> PkIndex {
-        let (pk_index, _) = self.current_batch.as_ref().unwrap();
-        *pk_index
+        self.current_batch.as_ref().unwrap().pk_index
     }
 
     /// Advances reader to next data batch.
@@ -358,7 +351,12 @@ impl DataBufferReader {
         let pk_index_array = pk_index_array(&self.batch);
         if let Some((next_pk, range)) = search_next_pk_range(pk_index_array, self.offset) {
             self.offset = range.end;
-            self.current_batch = Some((next_pk, range))
+            let rb = self.batch.slice(range.start, range.len());
+            self.current_batch = Some(DataBatch {
+                pk_index: next_pk,
+                rb,
+                range,
+            });
         } else {
             self.current_batch = None;
         }
@@ -579,17 +577,13 @@ impl DataPart {
 
 pub struct DataPartReader {
     inner: ParquetRecordBatchReader,
-    current_range: Range<usize>,
-    current_pk_index: Option<PkIndex>,
     current_batch: Option<RecordBatch>,
+    current_data_batch: Option<DataBatch>,
 }
 
 impl Debug for DataPartReader {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DataPartReader")
-            .field("current_range", &self.current_range)
-            .field("current_pk_index", &self.current_pk_index)
-            .finish()
+        f.debug_struct("DataPartReader").finish()
     }
 }
 
@@ -603,9 +597,8 @@ impl DataPartReader {
         let parquet_reader = builder.build().context(error::ReadDataPartSnafu)?;
         let mut reader = Self {
             inner: parquet_reader,
-            current_pk_index: None,
-            current_range: 0..0,
             current_batch: None,
+            current_data_batch: None,
         };
         reader.next()?;
         Ok(reader)
@@ -613,7 +606,7 @@ impl DataPartReader {
 
     /// Returns false if current reader is exhausted.
     pub(crate) fn is_valid(&self) -> bool {
-        self.current_pk_index.is_some()
+        self.current_data_batch.is_some()
     }
 
     /// Returns current pk index.
@@ -621,45 +614,40 @@ impl DataPartReader {
     /// # Panics
     /// If reader is exhausted.
     pub(crate) fn current_pk_index(&self) -> PkIndex {
-        self.current_pk_index.expect("DataPartReader is exhausted")
+        self.current_data_batch.as_ref().unwrap().pk_index
     }
 
     /// Returns current data batch of reader.
     /// # Panics
     /// If reader is exhausted.
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
-        let pk_index = self.current_pk_index.unwrap();
-        let range = self.current_range.clone();
-        let rb = self
-            .current_batch
-            .as_ref()
-            .unwrap()
-            .slice(range.start, range.len());
-
-        let range = 0..rb.num_rows();
-        DataBatch {
-            pk_index,
-            rb,
-            range,
-        }
+    pub(crate) fn current_data_batch(&self) -> &DataBatch {
+        self.current_data_batch.as_ref().unwrap()
     }
 
     pub(crate) fn next(&mut self) -> Result<()> {
         if let Some((next_pk, range)) = self.search_next_pk_range() {
             // first try to search next pk in current record batch.
-            self.current_pk_index = Some(next_pk);
-            self.current_range = range;
+            let rb = self
+                .current_batch
+                .as_ref()
+                .unwrap()
+                .slice(range.start, range.len());
+            self.current_data_batch = Some(DataBatch {
+                pk_index: next_pk,
+                rb,
+                range,
+            });
         } else {
             // current record batch reaches eof, fetch next record batch from parquet reader.
             if let Some(rb) = self.inner.next() {
                 let rb = rb.context(error::ComputeArrowSnafu)?;
-                self.current_range = 0..0;
                 self.current_batch = Some(rb);
+                self.current_data_batch = None;
                 return self.next();
             } else {
                 // parquet is also exhausted
-                self.current_pk_index = None;
                 self.current_batch = None;
+                self.current_data_batch = None;
             }
         }
 
@@ -671,7 +659,12 @@ impl DataPartReader {
         self.current_batch.as_ref().and_then(|b| {
             // safety: PK_INDEX_COLUMN_NAME must present in record batch yielded by data part.
             let pk_array = pk_index_array(b);
-            search_next_pk_range(pk_array, self.current_range.end)
+            let start = self
+                .current_data_batch
+                .as_ref()
+                .map(|batch| batch.range.end)
+                .unwrap_or(0);
+            search_next_pk_range(pk_array, start)
         })
     }
 }
