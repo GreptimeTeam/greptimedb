@@ -178,7 +178,7 @@ macro_rules! parse_number_to_value {
                     "0" => Ok(Value::Boolean(false)),
                     "1" => Ok(Value::Boolean(true)),
                     _ => ParseSqlValueSnafu {
-                        msg: format!("Failed to parse number '{}' to boolean column type!", $n)}.fail(),
+                        msg: format!("Failed to parse number '{}' to boolean column type", $n)}.fail(),
                 }
             }
             _ => ParseSqlValueSnafu {
