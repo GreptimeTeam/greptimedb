@@ -15,6 +15,7 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::fmt::Debug;
+use std::ops::Range;
 
 use datatypes::arrow::array::{
     ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
@@ -23,9 +24,7 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::{DataType, TimeUnit};
 
 use crate::error::Result;
-use crate::memtable::merge_tree::data::{
-    DataBatch, DataBatchRange, DataBufferReader, DataPartReader,
-};
+use crate::memtable::merge_tree::data::{DataBatch, DataBufferReader, DataPartReader};
 use crate::memtable::merge_tree::PkIndex;
 
 /// Nodes of merger's heap.
@@ -139,8 +138,11 @@ impl<T: Node> Merger<T> {
                     }
                 }
             }
-            self.current_node = Some(top_node);
+        } else {
+            // Top is the only node left. We can read all rows in it.
+            self.current_rows = top_node.current_item_len();
         }
+        self.current_node = Some(top_node);
 
         Ok(())
     }
@@ -175,13 +177,13 @@ pub(crate) struct DataBatchKey {
     pub(crate) timestamp: i64,
 }
 
-pub enum DataSource {
+pub(crate) enum DataSource {
     Buffer(DataBufferReader),
     Part(DataPartReader),
 }
 
 impl DataSource {
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch {
         match self {
             DataSource::Buffer(buffer) => buffer.current_data_batch(),
             DataSource::Part(p) => p.current_data_batch(),
@@ -203,16 +205,17 @@ impl DataSource {
     }
 }
 
-pub struct DataNode {
+pub(crate) struct DataNode {
     source: DataSource,
-    current_range: Option<DataBatchRange>,
+    /// Current range of the batch in the source.
+    current_range: Option<Range<usize>>,
 }
 
 impl DataNode {
     pub(crate) fn new(source: DataSource) -> Self {
         let current_range = source
             .is_valid()
-            .then(|| source.current_data_batch().range());
+            .then(|| 0..source.current_data_batch().range().len());
 
         Self {
             source,
@@ -221,11 +224,13 @@ impl DataNode {
     }
 
     pub(crate) fn current_data_batch(&self) -> DataBatch {
-        self.source.current_data_batch()
+        let range = self.current_range();
+        let batch = self.source.current_data_batch();
+        batch.slice(range.start, range.len())
     }
 
-    fn current_range(&self) -> DataBatchRange {
-        self.current_range.unwrap()
+    fn current_range(&self) -> Range<usize> {
+        self.current_range.clone().unwrap()
     }
 }
 
@@ -278,7 +283,12 @@ impl Node for DataNode {
         if remaining == 0 {
             // Nothing remains, we need to fetch next batch to ensure the current batch is not empty.
             self.source.next()?;
-            self.current_range = Some(self.source.current_data_batch().range());
+            if self.source.is_valid() {
+                self.current_range = Some(0..self.source.current_data_batch().range().len());
+            } else {
+                // The node is exhausted.
+                self.current_range = None;
+            }
         } else {
             range.start += len;
             self.current_range = Some(range);
@@ -288,7 +298,7 @@ impl Node for DataNode {
     }
 
     fn current_item_len(&self) -> usize {
-        self.current_range.unwrap().len()
+        self.current_range.clone().unwrap().len()
     }
 
     fn search_key_in_current_item(&self, other: &Self) -> Result<usize, usize> {
