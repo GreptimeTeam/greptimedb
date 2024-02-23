@@ -50,6 +50,15 @@ const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
 /// Initial capacity for the data buffer.
 pub(crate) const DATA_INIT_CAP: usize = 8;
 
+/// Range of a data batch.
+#[derive(Debug, Clone)]
+pub struct DataBatchRange {
+    /// Primary key index of this batch.
+    pub(crate) pk_index: PkIndex,
+    /// Range of current primary key inside record batch
+    pub(crate) range: Range<usize>,
+}
+
 /// Data part batches returns by `DataParts::read`.
 #[derive(Debug, Clone)]
 pub struct DataBatch {
@@ -735,7 +744,8 @@ pub struct DataPartsReader {
 
 impl DataPartsReader {
     pub(crate) fn current_data_batch(&self) -> &DataBatch {
-        self.merger.current_item()
+        // FIXME(yingwen): Get range.
+        self.merger.current_node().current_data_batch()
     }
 
     pub(crate) fn next(&mut self) -> Result<()> {

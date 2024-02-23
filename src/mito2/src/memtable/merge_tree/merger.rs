@@ -24,48 +24,47 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::{DataType, TimeUnit};
 
 use crate::error::Result;
-use crate::memtable::merge_tree::data::{DataBatch, DataBufferReader, DataPartReader};
+use crate::memtable::merge_tree::data::{
+    DataBatch, DataBatchRange, DataBufferReader, DataPartReader,
+};
 use crate::memtable::merge_tree::PkIndex;
 
 /// Nodes of merger's heap.
 pub trait Node: Ord {
-    type Item;
-
-    /// Returns current item of node and fetch next.
-    fn fetch_next(&mut self) -> Result<Self::Item>;
-
     /// Returns true if current node is not exhausted.
     fn is_valid(&self) -> bool;
-
-    /// Current item of node.
-    fn current_item(&self) -> &Self::Item;
 
     /// Whether the other node is behind (exclusive) current node.
     fn is_behind(&self, other: &Self) -> bool;
 
-    /// Skips first `num_to_skip` rows from node's current batch. If current batch is empty it fetches
+    /// Advances `len` rows from current batch. If current batch is empty it fetches
     /// next batch from the node.
     ///
     /// # Panics
-    /// If the node is EOF.
-    fn skip(&mut self, offset_to_skip: usize) -> Result<()>;
+    /// If the node is invalid.
+    fn advance(&mut self, len: usize) -> Result<()>;
 
-    /// Searches given item in node's current item and returns the index.
-    fn search_key_in_current_item(&self, key: &Self::Item) -> std::result::Result<usize, usize>;
+    /// Length of current item.
+    fn current_item_len(&self) -> usize;
 
-    /// Slice current item.
-    fn slice_current_item(&self, range: Range<usize>) -> Self::Item;
+    /// Searches first key of `other` in current item and returns the index.
+    fn search_key_in_current_item(&self, other: &Self) -> Result<usize, usize>;
 }
 
 pub struct Merger<T: Node> {
+    /// Heap to find node to read.
+    ///
+    /// Nodes in the heap are always valid.
     heap: BinaryHeap<T>,
-    current_item: Option<T::Item>,
+    /// Current node to read.
+    ///
+    /// The node is always empty if it is not None.
+    current_node: Option<T>,
+    /// The number of rows in current node that are valid to read.
+    current_rows: usize,
 }
 
-impl<T> Merger<T>
-where
-    T: Node,
-{
+impl<T: Node> Merger<T> {
     pub(crate) fn try_new(nodes: Vec<T>) -> Result<Self> {
         let mut heap = BinaryHeap::with_capacity(nodes.len());
         for node in nodes {
@@ -75,7 +74,8 @@ where
         }
         let mut merger = Merger {
             heap,
-            current_item: None,
+            current_node: None,
+            current_rows: 0,
         };
         merger.next()?;
         Ok(merger)
@@ -83,58 +83,90 @@ where
 
     /// Returns true if current merger is still valid.
     pub(crate) fn is_valid(&self) -> bool {
-        self.current_item.is_some()
+        self.current_node.is_some()
     }
 
-    /// Advances current merger to next item.
+    /// Returns current node to read. Only [Self::current_rows] rows in current node
+    /// are valid to read.
+    ///
+    /// # Panics
+    /// Panics if the merger is invalid.
+    pub(crate) fn current_node(&self) -> &T {
+        self.current_node.as_ref().unwrap()
+    }
+
+    /// Returns rows of current node to read.
+    pub(crate) fn current_rows(&self) -> usize {
+        self.current_rows
+    }
+
+    /// Advances the merger to the next item.
     pub(crate) fn next(&mut self) -> Result<()> {
-        let Some(mut top_node) = self.heap.pop() else {
-            // heap is empty
-            self.current_item = None;
+        self.maybe_advance_current_node()?;
+        if self.current_node.is_some() {
+            // Current node is still valid.
+            debug_assert!(self.heap.is_empty());
+            return Ok(());
+        }
+
+        // Finds node and range to read from the heap.
+        let Some(top_node) = self.heap.pop() else {
+            // Heap is empty.
             return Ok(());
         };
         if let Some(next_node) = self.heap.peek() {
             if next_node.is_behind(&top_node) {
-                // does not overlap
-                self.current_item = Some(top_node.fetch_next()?);
+                // Does not overlap.
+                self.current_rows = top_node.current_item_len();
             } else {
-                let res = match top_node.search_key_in_current_item(next_node.current_item()) {
+                // Note that the heap ensures the top node always has the minimal row.
+                match top_node.search_key_in_current_item(next_node) {
                     Ok(pos) => {
                         if pos == 0 {
-                            // if the first item of top node has duplicate ts with next node,
-                            // we can simply return the first row in that it must be the one
+                            // If the first item of top node has duplicate key with the next node,
+                            // we can simply return the first row in the top node as it must be the one
                             // with max sequence.
-                            let to_yield = top_node.slice_current_item(0..1);
-                            top_node.skip(1)?;
-                            to_yield
+                            self.current_rows = 1;
                         } else {
-                            let to_yield = top_node.slice_current_item(0..pos);
-                            top_node.skip(pos)?;
-                            to_yield
+                            // We don't know which one has the larger sequence so we use the range before
+                            // the duplicate pos.
+                            self.current_rows = pos;
                         }
                     }
                     Err(pos) => {
-                        // no duplicated timestamp
-                        let to_yield = top_node.slice_current_item(0..pos);
-                        top_node.skip(pos)?;
-                        to_yield
+                        // No duplication. Output rows before pos.
+                        debug_assert!(pos > 0);
+                        self.current_rows = pos;
                     }
-                };
-                self.current_item = Some(res);
+                }
             }
-        } else {
-            // top is the only node left.
-            self.current_item = Some(top_node.fetch_next()?);
+            self.current_node = Some(top_node);
         }
-        if top_node.is_valid() {
-            self.heap.push(top_node);
-        }
+
         Ok(())
     }
 
-    /// Returns current item held by merger.
-    pub(crate) fn current_item(&self) -> &T::Item {
-        self.current_item.as_ref().unwrap()
+    fn maybe_advance_current_node(&mut self) -> Result<()> {
+        let Some(mut node) = self.current_node.take() else {
+            return Ok(());
+        };
+
+        // Advances current node.
+        node.advance(self.current_rows)?;
+        self.current_rows = 0;
+        if !node.is_valid() {
+            return Ok(());
+        }
+
+        if self.heap.is_empty() {
+            // No other nodes in the heap, we can still put it into current node.
+            self.current_node = Some(node);
+        } else {
+            // Puts the node into the heap.
+            self.heap.push(node);
+        }
+
+        Ok(())
     }
 }
 
@@ -196,10 +228,6 @@ impl DataBatch {
 }
 
 impl DataBatch {
-    fn remaining(&self) -> usize {
-        self.range().len()
-    }
-
     fn first_key(&self) -> DataBatchKey {
         let range = self.range();
         let batch = self.record_batch();
@@ -215,7 +243,7 @@ impl DataBatch {
         }
     }
 
-    fn search_key(&self, key: &DataBatchKey) -> std::result::Result<usize, usize> {
+    fn search_key(&self, key: &DataBatchKey) -> Result<usize, usize> {
         let DataBatchKey {
             pk_index,
             timestamp,
@@ -236,31 +264,6 @@ impl DataBatch {
     }
 }
 
-pub struct DataNode {
-    source: DataSource,
-    current_data_batch: Option<DataBatch>,
-}
-
-// TODO(yingwen): Avoid clone.
-impl DataNode {
-    pub(crate) fn new(source: DataSource) -> Self {
-        let current_data_batch = source.current_data_batch().clone();
-        Self {
-            source,
-            current_data_batch: Some(current_data_batch.clone()),
-        }
-    }
-
-    fn next(&mut self) -> Result<()> {
-        self.current_data_batch = self.source.fetch_next()?;
-        Ok(())
-    }
-
-    fn current_data_batch(&self) -> &DataBatch {
-        self.current_data_batch.as_ref().unwrap()
-    }
-}
-
 pub enum DataSource {
     Buffer(DataBufferReader),
     Part(DataPartReader),
@@ -274,26 +277,46 @@ impl DataSource {
         }
     }
 
-    fn fetch_next(&mut self) -> Result<Option<DataBatch>> {
-        let res = match self {
-            DataSource::Buffer(b) => {
-                b.next()?;
-                if b.is_valid() {
-                    Some(b.current_data_batch().clone())
-                } else {
-                    None
-                }
-            }
-            DataSource::Part(p) => {
-                p.next()?;
-                if p.is_valid() {
-                    Some(p.current_data_batch().clone())
-                } else {
-                    None
-                }
-            }
-        };
-        Ok(res)
+    fn is_valid(&self) -> bool {
+        match self {
+            DataSource::Buffer(b) => b.is_valid(),
+            DataSource::Part(p) => p.is_valid(),
+        }
+    }
+
+    fn next(&mut self) -> Result<()> {
+        match self {
+            DataSource::Buffer(b) => b.next(),
+            DataSource::Part(p) => p.next(),
+        }
+    }
+}
+
+pub struct DataNode {
+    source: DataSource,
+    current_range: Option<DataBatchRange>,
+}
+
+impl DataNode {
+    /// Returns a new [DataNode].
+    pub(crate) fn new(source: DataSource) -> Self {
+        let current_range = source.is_valid().then(|| DataBatchRange {
+            pk_index: source.current_data_batch().pk_index,
+            range: source.current_data_batch().range.clone(),
+        });
+
+        Self {
+            source,
+            current_range,
+        }
+    }
+
+    pub(crate) fn current_data_batch(&self) -> &DataBatch {
+        self.source.current_data_batch()
+    }
+
+    fn current_range(&self) -> DataBatchRange {
+        self.current_range.clone().unwrap()
     }
 }
 
@@ -326,20 +349,8 @@ impl PartialOrd<Self> for DataNode {
 }
 
 impl Node for DataNode {
-    type Item = DataBatch;
-
-    fn fetch_next(&mut self) -> Result<Self::Item> {
-        let current = self.current_data_batch.take();
-        self.next()?;
-        Ok(current.unwrap())
-    }
-
     fn is_valid(&self) -> bool {
-        self.current_data_batch.is_some()
-    }
-
-    fn current_item(&self) -> &Self::Item {
-        self.current_data_batch()
+        self.current_range.is_some()
     }
 
     fn is_behind(&self, other: &Self) -> bool {
@@ -350,26 +361,33 @@ impl Node for DataNode {
         (pk_weight, start, Reverse(seq)) > (other_pk_weight, other_end, Reverse(other_seq))
     }
 
-    fn skip(&mut self, offset_to_skip: usize) -> Result<()> {
-        let current = self.current_item();
-        let remaining = current.remaining() - offset_to_skip;
+    fn advance(&mut self, len: usize) -> Result<()> {
+        let mut range = self.current_range();
+        debug_assert!(range.range.len() >= len);
+
+        let remaining = range.range.len() - len;
         if remaining == 0 {
-            self.next()?;
+            // Nothing remains, we need to fetch next batch to ensure the current batch is not empty.
+            self.source.next()?;
+            self.current_range = Some(DataBatchRange {
+                pk_index: self.source.current_data_batch().pk_index,
+                range: self.source.current_data_batch().range.clone(),
+            });
         } else {
-            let end = current.remaining();
-            self.current_data_batch = Some(current.slice(offset_to_skip..end));
+            range.range.start += len;
+            self.current_range = Some(range);
         }
 
         Ok(())
     }
 
-    fn search_key_in_current_item(&self, key: &Self::Item) -> std::result::Result<usize, usize> {
-        let key = key.first_key();
-        self.current_data_batch.as_ref().unwrap().search_key(&key)
+    fn current_item_len(&self) -> usize {
+        self.current_range.clone().unwrap().range.len()
     }
 
-    fn slice_current_item(&self, range: Range<usize>) -> Self::Item {
-        self.current_data_batch.as_ref().unwrap().slice(range)
+    fn search_key_in_current_item(&self, other: &Self) -> Result<usize, usize> {
+        let key = other.current_data_batch().first_key();
+        self.current_data_batch().search_key(&key)
     }
 }
 
@@ -440,7 +458,8 @@ mod tests {
 
         let mut res = vec![];
         while merger.is_valid() {
-            let data_batch = merger.current_item();
+            // FIXME(yingwen): Consider range.
+            let data_batch = merger.current_node().current_data_batch();
             let batch = data_batch.slice_record_batch();
             let ts_array = batch.column(1);
             let ts_values: Vec<_> = timestamp_array_to_i64_slice(ts_array).to_vec();
