@@ -78,11 +78,11 @@ impl ShardBuilder {
         let data_part = match &key_dict {
             Some(dict) => {
                 let pk_weights = dict.pk_weights_to_sort_data();
-                self.data_buffer.freeze(&pk_weights)?
+                self.data_buffer.freeze(Some(&pk_weights), true)?
             }
             None => {
                 let pk_weights = [0];
-                self.data_buffer.freeze(&pk_weights)?
+                self.data_buffer.freeze(Some(&pk_weights), true)?
             }
         };
 
