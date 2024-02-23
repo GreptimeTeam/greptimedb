@@ -33,9 +33,6 @@ pub trait Item: Clone {
     /// Remaining rows in item.
     fn remaining(&self) -> usize;
 
-    /// Whether current item is exhausted.
-    fn is_empty(&self) -> bool;
-
     /// The key range of item.
     fn current_range(&self) -> Range<Self::Key>;
 
@@ -101,45 +98,45 @@ where
 
     /// Advances current merger to next item.
     pub(crate) fn next(&mut self) -> Result<()> {
-        if let Some(mut top_node) = self.heap.pop() {
-            if let Some(next_node) = self.heap.peek() {
-                if next_node.is_behind(&top_node) {
-                    // does not overlap
-                    self.current_item = Some(top_node.fetch_next()?);
-                } else {
-                    let next_start = next_node.current_item().current_range().start;
-                    let res = match top_node.current_item().search_key(&next_start) {
-                        Ok(pos) => {
-                            // duplicate timestamp found, yield duplicated row in this item
-                            if pos == 0 {
-                                let to_yield = top_node.current_item().slice(0..1);
-                                top_node.skip(1)?;
-                                to_yield
-                            } else {
-                                let to_yield = top_node.current_item().slice(0..pos);
-                                top_node.skip(pos)?;
-                                to_yield
-                            }
-                        }
-                        Err(pos) => {
-                            // no duplicated timestamp
+        let Some(mut top_node) = self.heap.pop() else {
+            // heap is empty
+            self.current_item = None;
+            return Ok(());
+        };
+        if let Some(next_node) = self.heap.peek() {
+            if next_node.is_behind(&top_node) {
+                // does not overlap
+                self.current_item = Some(top_node.fetch_next()?);
+            } else {
+                let next_start = next_node.current_item().current_range().start;
+                let res = match top_node.current_item().search_key(&next_start) {
+                    Ok(pos) => {
+                        // duplicate timestamp found, yield duplicated row in this item
+                        if pos == 0 {
+                            let to_yield = top_node.current_item().slice(0..1);
+                            top_node.skip(1)?;
+                            to_yield
+                        } else {
                             let to_yield = top_node.current_item().slice(0..pos);
                             top_node.skip(pos)?;
                             to_yield
                         }
-                    };
-                    self.current_item = Some(res);
-                }
-            } else {
-                // top is the only node left.
-                self.current_item = Some(top_node.fetch_next()?);
-            }
-            if top_node.is_valid() {
-                self.heap.push(top_node);
+                    }
+                    Err(pos) => {
+                        // no duplicated timestamp
+                        let to_yield = top_node.current_item().slice(0..pos);
+                        top_node.skip(pos)?;
+                        to_yield
+                    }
+                };
+                self.current_item = Some(res);
             }
         } else {
-            // heap is empty
-            self.current_item = None;
+            // top is the only node left.
+            self.current_item = Some(top_node.fetch_next()?);
+        }
+        if top_node.is_valid() {
+            self.heap.push(top_node);
         }
         Ok(())
     }
@@ -212,10 +209,6 @@ impl Item for DataBatch {
 
     fn remaining(&self) -> usize {
         self.range().len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
     }
 
     fn current_range(&self) -> Range<Self::Key> {
@@ -337,7 +330,6 @@ impl PartialEq<Self> for DataNode {
     }
 }
 
-#[allow(clippy::non_canonical_partial_ord_impl)]
 impl PartialOrd<Self> for DataNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))

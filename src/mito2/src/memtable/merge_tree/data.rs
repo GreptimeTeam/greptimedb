@@ -689,11 +689,10 @@ impl DataParts {
     /// Reads data from all parts including active and frozen parts.
     /// The returned iterator yields a record batch of one primary key at a time.
     /// The order of yielding primary keys is determined by provided weights.
-    pub fn read(&mut self, pk_weights: Vec<u16>) -> Result<DataPartsReader> {
-        let weights = Arc::new(pk_weights);
+    pub fn read(&mut self, pk_weights: &[u16]) -> Result<DataPartsReader> {
         let mut nodes = Vec::with_capacity(self.frozen.len() + 1);
         nodes.push(DataNode::new(DataSource::Buffer(
-            self.active.read(&weights)?,
+            self.active.read(pk_weights)?,
         )));
         for p in &self.frozen {
             nodes.push(DataNode::new(DataSource::Part(p.read()?)));
