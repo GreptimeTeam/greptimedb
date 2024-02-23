@@ -17,12 +17,6 @@ use std::collections::BinaryHeap;
 use std::fmt::Debug;
 use std::ops::Range;
 
-use datatypes::arrow::array::{
-    ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
-};
-use datatypes::arrow::datatypes::{DataType, TimeUnit};
-
 use crate::error::Result;
 use crate::memtable::merge_tree::data::{DataBatch, DataBufferReader, DataPartReader};
 use crate::memtable::merge_tree::PkIndex;
@@ -307,42 +301,13 @@ impl Node for DataNode {
     }
 }
 
-// TODO(yingwen): Move to data mod.
-pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
-    match arr.data_type() {
-        DataType::Timestamp(t, _) => match t {
-            TimeUnit::Second => arr
-                .as_any()
-                .downcast_ref::<TimestampSecondArray>()
-                .unwrap()
-                .values(),
-            TimeUnit::Millisecond => arr
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .values(),
-            TimeUnit::Microsecond => arr
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .unwrap()
-                .values(),
-            TimeUnit::Nanosecond => arr
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .unwrap()
-                .values(),
-        },
-        _ => unreachable!(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use datatypes::arrow::array::UInt64Array;
     use store_api::metadata::RegionMetadataRef;
 
     use super::*;
-    use crate::memtable::merge_tree::data::DataBuffer;
+    use crate::memtable::merge_tree::data::{timestamp_array_to_i64_slice, DataBuffer};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     fn write_rows_to_buffer(

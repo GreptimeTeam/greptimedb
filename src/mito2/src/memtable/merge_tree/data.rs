@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use datatypes::arrow;
-use datatypes::arrow::array::{RecordBatch, UInt16Array, UInt32Array, UInt64Array};
+use datatypes::arrow::array::{ArrayRef, RecordBatch, UInt16Array, UInt32Array, UInt64Array};
 use datatypes::arrow::datatypes::{Field, Schema, SchemaRef};
 use datatypes::data_type::DataType;
 use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder, Vector, VectorRef};
@@ -42,9 +42,7 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use crate::error;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::merger::{
-    timestamp_array_to_i64_slice, DataBatchKey, DataNode, DataSource, Merger,
-};
+use crate::memtable::merge_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
 use crate::memtable::merge_tree::PkIndex;
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
@@ -389,6 +387,40 @@ fn data_buffer_to_record_batches(
     }
 
     RecordBatch::try_new(schema, columns).context(error::NewRecordBatchSnafu)
+}
+
+pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
+    use datatypes::arrow::array::{
+        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
+    };
+    use datatypes::arrow::datatypes::{DataType, TimeUnit};
+
+    match arr.data_type() {
+        DataType::Timestamp(t, _) => match t {
+            TimeUnit::Second => arr
+                .as_any()
+                .downcast_ref::<TimestampSecondArray>()
+                .unwrap()
+                .values(),
+            TimeUnit::Millisecond => arr
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .values(),
+            TimeUnit::Microsecond => arr
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap()
+                .values(),
+            TimeUnit::Nanosecond => arr
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap()
+                .values(),
+        },
+        _ => unreachable!(),
+    }
 }
 
 #[derive(Debug)]
@@ -844,7 +876,6 @@ mod tests {
     use parquet::data_type::AsBytes;
 
     use super::*;
-    use crate::memtable::merge_tree::merger::timestamp_array_to_i64_slice;
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     #[test]
