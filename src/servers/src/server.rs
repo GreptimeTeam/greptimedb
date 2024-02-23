@@ -62,8 +62,8 @@ impl ServerHandlers {
         handlers.get(name).map(|x| x.1)
     }
 
-    /// Starts all the managed services. It will block until all the services are started. And it will
-    /// set the actual bound address to the service.
+    /// Starts all the managed services. It will block until all the services are started. 
+    /// And it will set the actual bound address to the service.
     pub async fn start_all(&self) -> Result<()> {
         let mut handlers = self.handlers.write().await;
         try_join_all(handlers.values_mut().map(|(server, addr)| async move {
