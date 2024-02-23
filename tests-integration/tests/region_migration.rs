@@ -868,6 +868,8 @@ async fn find_region_distribution_by_sql(cluster: &GreptimeDbCluster) -> RegionD
 
     let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
 
+    info!("SQL result:\n {}", recordbatches.pretty_print().unwrap());
+
     let mut distribution = RegionDistribution::new();
 
     for batch in recordbatches.take() {
@@ -911,6 +913,8 @@ async fn trigger_migration_by_sql(
 
     let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
 
+    info!("SQL result:\n {}", recordbatches.pretty_print().unwrap());
+
     let Value::String(procedure_id) = recordbatches.take()[0].column(0).get(0) else {
         unreachable!();
     };
@@ -931,6 +935,8 @@ async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
     };
 
     let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+
+    info!("SQL result:\n {}", recordbatches.pretty_print().unwrap());
 
     let Value::String(state) = recordbatches.take()[0].column(0).get(0) else {
         unreachable!();
