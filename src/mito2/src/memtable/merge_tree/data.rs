@@ -449,7 +449,7 @@ impl DataBufferReader {
     /// # Panics
     /// If Current reader is exhausted.
     pub(crate) fn current_data_batch(&self) -> DataBatch {
-        let range = self.current_range.clone().unwrap();
+        let range = self.current_range.unwrap();
         DataBatch {
             rb: &self.batch,
             range,
@@ -742,7 +742,7 @@ impl DataPartReader {
     /// # Panics
     /// If reader is exhausted.
     pub(crate) fn current_data_batch(&self) -> DataBatch {
-        let range = self.current_range.clone().unwrap();
+        let range = self.current_range.unwrap();
         DataBatch {
             rb: self.current_batch.as_ref().unwrap(),
             range,
