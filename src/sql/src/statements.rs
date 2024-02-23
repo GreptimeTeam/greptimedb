@@ -685,7 +685,7 @@ mod tests {
         let sql_val = SqlValue::Number("3.0".to_string(), false);
         let v = sql_value_to_value("a", &ConcreteDataType::boolean_datatype(), &sql_val, None);
         assert!(v.is_err());
-        assert!(format!("{v:?}").contains("Failed to parse number '3.0' to boolean column type!"));
+        assert!(format!("{v:?}").contains("Failed to parse number '3.0' to boolean column type"));
 
         let sql_val = SqlValue::Boolean(true);
         let v = sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val, None);
