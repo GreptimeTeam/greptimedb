@@ -287,7 +287,7 @@ fn convert_batch(
     key: Option<&[u8]>,
     data_batch: &DataBatch,
 ) -> Result<Batch> {
-    let record_batch = data_batch.record_batch();
+    let record_batch = data_batch.slice_record_batch();
     let primary_key = key.map(|k| k.to_vec()).unwrap_or_default();
     let mut builder = BatchBuilder::new(primary_key);
     builder

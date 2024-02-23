@@ -96,7 +96,7 @@ impl ShardBuilder {
     pub fn scan(&mut self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReader> {
         let dict_reader = self.dict_builder.read();
         dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
-        let data_reader = self.data_buffer.read(&pk_weights_buffer)?;
+        let data_reader = self.data_buffer.read(Some(&pk_weights_buffer))?;
 
         Ok(ShardBuilderReader {
             dict_reader,
@@ -125,7 +125,7 @@ impl ShardBuilderReader {
         Some(self.dict_reader.key_by_pk_index(pk_index))
     }
 
-    fn current_batch(&self) -> &DataBatch {
+    fn current_batch(&self) -> DataBatch {
         self.data_reader.current_data_batch()
     }
 }

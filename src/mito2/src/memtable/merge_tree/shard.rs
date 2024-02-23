@@ -99,13 +99,13 @@ impl ShardReader {
     }
 
     fn current_key(&self) -> Option<&[u8]> {
-        let pk_index = self.parts_reader.current_data_batch().pk_index;
+        let pk_index = self.parts_reader.current_data_batch().pk_index();
         self.key_dict
             .as_ref()
             .map(|dict| dict.key_by_pk_index(pk_index))
     }
 
-    fn current_batch(&self) -> &DataBatch {
+    fn current_batch(&self) -> DataBatch {
         self.parts_reader.current_data_batch()
     }
 }
