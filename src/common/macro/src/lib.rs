@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod admin_fn;
 mod aggr_func;
 mod print_caller;
 mod range_fn;
 mod stack_trace_debug;
-
+mod utils;
 use aggr_func::{impl_aggr_func_type_store, impl_as_aggr_func_creator};
 use print_caller::process_print_caller;
 use proc_macro::TokenStream;
 use range_fn::process_range_fn;
 use syn::{parse_macro_input, DeriveInput};
+
+use crate::admin_fn::process_admin_fn;
 
 /// Make struct implemented trait [AggrFuncTypeStore], which is necessary when writing UDAF.
 /// This derive macro is expect to be used along with attribute macro [macro@as_aggr_func_creator].
@@ -66,6 +69,11 @@ pub fn as_aggr_func_creator(args: TokenStream, input: TokenStream) -> TokenStrea
 #[proc_macro_attribute]
 pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
     process_range_fn(args, input)
+}
+
+#[proc_macro_attribute]
+pub fn admin_fn(args: TokenStream, input: TokenStream) -> TokenStream {
+    process_admin_fn(args, input)
 }
 
 /// Attribute macro to print the caller to the annotated function.

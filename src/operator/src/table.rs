@@ -21,6 +21,7 @@ use common_query::error::Result as QueryResult;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sqlparser::ast::ObjectName;
+use store_api::storage::RegionId;
 use table::requests::{
     CompactTableRequest, DeleteRequest as TableDeleteRequest, FlushTableRequest,
     InsertRequest as TableInsertRequest,
@@ -123,6 +124,30 @@ impl TableMutationHandler for TableMutationOperator {
     ) -> QueryResult<AffectedRows> {
         self.requester
             .handle_table_compaction(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn flush_region(
+        &self,
+        region_id: RegionId,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_region_flush(region_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn compact_region(
+        &self,
+        region_id: RegionId,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_region_compaction(region_id, ctx)
             .await
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)
