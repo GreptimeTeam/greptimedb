@@ -15,7 +15,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -52,7 +52,6 @@ const INITIAL_BUILDER_CAPACITY: usize = 0;
 /// Builder to build [TimeSeriesMemtable].
 #[derive(Debug, Default)]
 pub struct TimeSeriesMemtableBuilder {
-    id: AtomicU32,
     write_buffer_manager: Option<WriteBufferManagerRef>,
 }
 
@@ -60,15 +59,13 @@ impl TimeSeriesMemtableBuilder {
     /// Creates a new builder with specific `write_buffer_manager`.
     pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>) -> Self {
         Self {
-            id: AtomicU32::new(0),
             write_buffer_manager,
         }
     }
 }
 
 impl MemtableBuilder for TimeSeriesMemtableBuilder {
-    fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef {
-        let id = self.id.fetch_add(1, Ordering::Relaxed);
+    fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         Arc::new(TimeSeriesMemtable::new(
             metadata.clone(),
             id,
@@ -211,7 +208,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         filters: Option<Predicate>,
-    ) -> BoxedBatchIterator {
+    ) -> Result<BoxedBatchIterator> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -221,15 +218,18 @@ impl Memtable for TimeSeriesMemtable {
                 .collect()
         };
 
-        Box::new(self.series_set.iter_series(projection, filters))
+        let iter = self.series_set.iter_series(projection, filters);
+        Ok(Box::new(iter))
     }
 
     fn is_empty(&self) -> bool {
         self.series_set.series.read().unwrap().is_empty()
     }
 
-    fn mark_immutable(&self) {
+    fn freeze(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
+
+        Ok(())
     }
 
     fn stats(&self) -> MemtableStats {
@@ -256,6 +256,14 @@ impl Memtable for TimeSeriesMemtable {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
         }
+    }
+
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+        Arc::new(TimeSeriesMemtable::new(
+            metadata.clone(),
+            id,
+            self.alloc_tracker.write_buffer_manager(),
+        ))
     }
 }
 
@@ -1119,7 +1127,7 @@ mod tests {
             .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
             .collect::<HashSet<_>>();
 
-        let iter = memtable.iter(None, None);
+        let iter = memtable.iter(None, None).unwrap();
         let read = iter
             .flat_map(|batch| {
                 batch
@@ -1155,7 +1163,7 @@ mod tests {
         let memtable = TimeSeriesMemtable::new(schema, 42, None);
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(Some(&[3]), None);
+        let iter = memtable.iter(Some(&[3]), None).unwrap();
 
         let mut v0_all = vec![];
 

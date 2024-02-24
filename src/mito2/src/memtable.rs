@@ -60,7 +60,7 @@ impl MemtableStats {
     }
 }
 
-pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send + Sync>;
+pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
 
 /// In memory write buffer.
 pub trait Memtable: Send + Sync + fmt::Debug {
@@ -77,16 +77,21 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> BoxedBatchIterator;
+    ) -> Result<BoxedBatchIterator>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
 
-    /// Mark the memtable as immutable.
-    fn mark_immutable(&self);
+    /// Turns a mutable memtable into an immutable memtable.
+    fn freeze(&self) -> Result<()>;
 
     /// Returns the [MemtableStats] info of Memtable.
     fn stats(&self) -> MemtableStats;
+
+    /// Forks this (immutable) memtable and returns a new mutable memtable with specific memtable `id`.
+    ///
+    /// A region must freeze the memtable before invoking this method.
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -94,7 +99,7 @@ pub type MemtableRef = Arc<dyn Memtable>;
 /// Builder to build a new [Memtable].
 pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     /// Builds a new memtable instance.
-    fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef;
+    fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
@@ -157,6 +162,11 @@ impl AllocTracker {
     /// Returns bytes allocated.
     pub(crate) fn bytes_allocated(&self) -> usize {
         self.bytes_allocated.load(Ordering::Relaxed)
+    }
+
+    /// Returns the write buffer manager.
+    pub(crate) fn write_buffer_manager(&self) -> Option<WriteBufferManagerRef> {
+        self.write_buffer_manager.clone()
     }
 }
 

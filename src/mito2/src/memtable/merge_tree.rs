@@ -24,7 +24,7 @@ mod shard_builder;
 mod tree;
 
 use std::fmt;
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use store_api::metadata::RegionMetadataRef;
@@ -108,8 +108,7 @@ impl Memtable for MergeTreeMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
-    ) -> BoxedBatchIterator {
-        // FIXME(yingwen): Change return value to `Result<BoxedBatchIterator>`.
+    ) -> Result<BoxedBatchIterator> {
         todo!()
     }
 
@@ -117,8 +116,10 @@ impl Memtable for MergeTreeMemtable {
         self.tree.is_empty()
     }
 
-    fn mark_immutable(&self) {
+    fn freeze(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
+
+        self.tree.freeze()
     }
 
     fn stats(&self) -> MemtableStats {
@@ -147,6 +148,14 @@ impl Memtable for MergeTreeMemtable {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
         }
+    }
+
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+        let tree = self.tree.fork(metadata.clone());
+
+        let memtable =
+            MergeTreeMemtable::with_tree(id, tree, self.alloc_tracker.write_buffer_manager());
+        Arc::new(memtable)
     }
 }
 
@@ -235,7 +244,6 @@ impl MergeTreeMemtable {
 /// Builder to build a [MergeTreeMemtable].
 #[derive(Debug, Default)]
 pub struct MergeTreeMemtableBuilder {
-    id: AtomicU32,
     write_buffer_manager: Option<WriteBufferManagerRef>,
     config: MergeTreeConfig,
 }
@@ -244,7 +252,6 @@ impl MergeTreeMemtableBuilder {
     /// Creates a new builder with specific `write_buffer_manager`.
     pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>) -> Self {
         Self {
-            id: AtomicU32::new(0),
             write_buffer_manager,
             config: MergeTreeConfig::default(),
         }
@@ -252,8 +259,7 @@ impl MergeTreeMemtableBuilder {
 }
 
 impl MemtableBuilder for MergeTreeMemtableBuilder {
-    fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef {
-        let id = self.id.fetch_add(1, Ordering::Relaxed);
+    fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         Arc::new(MergeTreeMemtable::new(
             id,
             metadata.clone(),

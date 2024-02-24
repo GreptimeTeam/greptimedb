@@ -168,7 +168,8 @@ impl RegionOpener {
         let manifest_manager =
             RegionManifestManager::new(metadata.clone(), region_manifest_options).await?;
 
-        let mutable = self.memtable_builder.build(&metadata);
+        // Initial memtable id is 0.
+        let mutable = self.memtable_builder.build(0, &metadata);
 
         let version = VersionBuilder::new(metadata, mutable)
             .options(options)
@@ -258,7 +259,8 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
         ));
-        let mutable = self.memtable_builder.build(&metadata);
+        // Initial memtable id is 0.
+        let mutable = self.memtable_builder.build(0, &metadata);
         let version = VersionBuilder::new(metadata, mutable)
             .add_files(file_purger.clone(), manifest.files.values().cloned())
             .flushed_entry_id(manifest.flushed_entry_id)

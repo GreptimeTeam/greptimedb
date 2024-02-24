@@ -105,7 +105,7 @@ impl VersionControlBuilder {
 
     pub(crate) fn build_version(&self) -> Version {
         let metadata = Arc::new(self.metadata.clone());
-        let mutable = self.memtable_builder.build(&metadata);
+        let mutable = self.memtable_builder.build(0, &metadata);
         VersionBuilder::new(metadata, mutable)
             .add_files(self.file_purger.clone(), self.files.values().cloned())
             .build()
