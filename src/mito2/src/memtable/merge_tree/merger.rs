@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn test_merger() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[2, 1, 0];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 1, vec![2, 3], &mut seq);
@@ -366,7 +366,7 @@ mod tests {
             buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![3], &mut seq);
         write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![1], &mut seq);
         let node2 = DataNode::new(DataSource::Part(
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn test_merger2() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[2, 1, 0];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 1, vec![2, 3], &mut seq);
@@ -397,13 +397,13 @@ mod tests {
             buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![3], &mut seq);
         let node2 = DataNode::new(DataSource::Part(
             buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
         let node3 = DataNode::new(DataSource::Part(
             buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn test_merger_overlapping() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 3], &mut seq);
@@ -434,13 +434,13 @@ mod tests {
             buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
         let node2 = DataNode::new(DataSource::Part(
             buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
         let node3 = DataNode::new(DataSource::Part(
             buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
@@ -462,19 +462,19 @@ mod tests {
     #[test]
     fn test_merger_parts_and_buffer() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 3], &mut seq);
         let node1 = DataNode::new(DataSource::Buffer(buffer1.read(Some(weight)).unwrap()));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
         let node2 = DataNode::new(DataSource::Part(
             buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
         let node3 = DataNode::new(DataSource::Part(
             buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn test_merger_overlapping_2() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 2], &mut seq);
@@ -504,13 +504,13 @@ mod tests {
             buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![2], &mut seq);
         let node2 = DataNode::new(DataSource::Part(
             buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2], &mut seq);
         let node3 = DataNode::new(DataSource::Part(
             buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn test_merger_overlapping_3() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![0, 1], &mut seq);
@@ -538,7 +538,7 @@ mod tests {
             buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![1], &mut seq);
         let node2 = DataNode::new(DataSource::Part(
             buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
