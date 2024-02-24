@@ -29,7 +29,7 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::shard::Shard;
+use crate::memtable::merge_tree::shard::{Shard, ShardMerger};
 use crate::memtable::merge_tree::shard_builder::ShardBuilder;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
 use crate::read::{Batch, BatchBuilder};
@@ -42,6 +42,8 @@ pub type PartitionKey = u32;
 pub struct Partition {
     inner: RwLock<Inner>,
 }
+
+pub type PartitionRef = Arc<Partition>;
 
 impl Partition {
     /// Creates a new partition.
@@ -97,6 +99,8 @@ impl Partition {
 
     /// Scans data in the partition.
     pub fn read(&self, _context: ReadPartitionContext) -> Result<PartitionReader> {
+        //
+
         unimplemented!()
     }
 
@@ -183,26 +187,49 @@ impl Partition {
 ///
 /// It can merge rows from multiple shards.
 pub struct PartitionReader {
+    metadata: RegionMetadataRef,
+    row_codec: Arc<McmpRowCodec>,
     projection: HashSet<ColumnId>,
     filters: Vec<SimpleFilterEvaluator>,
     pk_weights: Vec<u16>,
+    shard_merger: ShardMerger,
 }
 
 impl PartitionReader {
     pub fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.shard_merger.is_valid()
     }
 
-    pub fn next(&mut self) {
-        unimplemented!()
+    pub fn next(&mut self) -> Result<()> {
+        self.shard_merger.next()?;
+
+        if self.metadata.primary_key.is_empty() {
+            // Nothing to prune.
+            return Ok(());
+        }
+
+        while self.shard_merger.is_valid() {
+            let key = self.shard_merger.current_key().unwrap();
+            // Prune batch by primary key.
+            // TODO(yingwen): Store last pk id to avoid re-prune.
+            if prune_primary_key(&self.metadata, &self.filters, &self.row_codec, key) {
+                break;
+            } else {
+                self.shard_merger.next()?;
+            }
+        }
+
+        Ok(())
     }
 
-    fn current_key(&self) -> Option<&[u8]> {
-        unimplemented!()
-    }
-
-    pub fn current_batch(&self) -> Batch {
-        unimplemented!()
+    pub fn convert_current_batch(&self) -> Result<Batch> {
+        let data_batch = self.shard_merger.current_data_batch();
+        data_batch_to_batch(
+            &self.metadata,
+            &self.projection,
+            self.shard_merger.current_key(),
+            data_batch,
+        )
     }
 
     pub(crate) fn into_context(self) -> ReadPartitionContext {
@@ -218,11 +245,11 @@ impl PartitionReader {
 // then decode and convert each value.
 fn prune_primary_key(
     metadata: &RegionMetadataRef,
-    predicates: &[SimpleFilterEvaluator],
+    filters: &[SimpleFilterEvaluator],
     codec: &McmpRowCodec,
     pk: &[u8],
 ) -> bool {
-    if predicates.is_empty() {
+    if filters.is_empty() {
         return true;
     }
 
@@ -239,13 +266,13 @@ fn prune_primary_key(
         }
     };
 
-    // evaluate predicates against primary key values
+    // evaluate filters against primary key values
     let mut result = true;
-    for predicate in predicates {
-        let Some(column) = metadata.column_by_name(predicate.column_name()) else {
+    for filter in filters {
+        let Some(column) = metadata.column_by_name(filter.column_name()) else {
             continue;
         };
-        // ignore predicates that are not referencing primary key columns
+        // ignore filters that are not referencing primary key columns
         if column.semantic_type != SemanticType::Tag {
             continue;
         }
@@ -256,7 +283,7 @@ fn prune_primary_key(
         let scalar_value = pk_values[index]
             .try_to_scalar_value(&column.column_schema.data_type)
             .unwrap();
-        result &= predicate.evaluate_scalar(&scalar_value).unwrap_or(true);
+        result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
     }
 
     result
@@ -264,6 +291,7 @@ fn prune_primary_key(
 
 /// Structs to reuse across readers to avoid allocating for each reader.
 pub(crate) struct ReadPartitionContext {
+    // TODO(yingwen): codec
     projection: HashSet<ColumnId>,
     filters: Vec<SimpleFilterEvaluator>,
     /// Buffer to store pk weights.
@@ -285,11 +313,11 @@ impl ReadPartitionContext {
 
 // TODO(yingwen): Pushdown projection to shard readers.
 /// Converts a [DataBatch] to a [Batch].
-fn convert_batch(
+fn data_batch_to_batch(
     metadata: &RegionMetadataRef,
     projection: &HashSet<ColumnId>,
     key: Option<&[u8]>,
-    data_batch: &DataBatch,
+    data_batch: DataBatch,
 ) -> Result<Batch> {
     let record_batch = data_batch.slice_record_batch();
     let primary_key = key.map(|k| k.to_vec()).unwrap_or_default();
@@ -311,6 +339,7 @@ fn convert_batch(
         .zip(record_batch.schema().fields().iter())
         .skip(4)
     {
+        // TODO(yingwen): Avoid finding column by name. We know the schema of a DataBatch.
         // Safety: metadata should contain all fields.
         let column_id = metadata.column_by_name(field.name()).unwrap().column_id;
         if !projection.contains(&column_id) {
@@ -321,8 +350,6 @@ fn convert_batch(
 
     builder.build()
 }
-
-pub type PartitionRef = Arc<Partition>;
 
 /// Inner struct of the partition.
 ///

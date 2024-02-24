@@ -317,8 +317,8 @@ impl TreeIter {
         };
 
         debug_assert!(part_reader.is_valid());
-        let batch = part_reader.current_batch();
-        part_reader.next();
+        let batch = part_reader.convert_current_batch()?;
+        part_reader.next()?;
         if part_reader.is_valid() {
             return Ok(Some(batch));
         }

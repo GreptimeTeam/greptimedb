@@ -132,6 +132,10 @@ impl ShardMerger {
         self.merger.next()
     }
 
+    pub(crate) fn current_key(&self) -> Option<&[u8]> {
+        self.merger.current_node().current_key()
+    }
+
     pub(crate) fn current_data_batch(&self) -> DataBatch {
         let batch = self.merger.current_node().current_data_batch();
         batch.slice(0, self.merger.current_rows())
@@ -181,6 +185,10 @@ struct ShardNode {
 impl ShardNode {
     fn new(source: ShardSource) -> Self {
         Self { source }
+    }
+
+    fn current_key(&self) -> Option<&[u8]> {
+        self.source.current_key()
     }
 
     fn current_data_batch(&self) -> DataBatch {
