@@ -52,15 +52,15 @@ struct DedupReader<T> {
 }
 
 impl<T: DedupSource> DedupReader<T> {
-    fn new(inner: T) -> Self {
+    fn try_new(inner: T) -> Result<Self> {
         let mut res = Self {
             prev_batch_last_row: None,
             current_batch_range: None,
             current_key: None,
             inner,
         };
-        res.next().unwrap();
-        res
+        res.next()?;
+        Ok(res)
     }
 
     fn is_valid(&self) -> bool {
@@ -201,7 +201,7 @@ mod tests {
         let mut parts = DataParts::new(meta, 10, true).with_frozen(frozens);
 
         let mut res = Vec::with_capacity(expected.len());
-        let mut reader = DedupReader::new(parts.read().unwrap());
+        let mut reader = DedupReader::try_new(parts.read().unwrap()).unwrap();
         while reader.is_valid() {
             let batch = reader.current_data_batch();
             res.push(extract_data_batch(&batch));
