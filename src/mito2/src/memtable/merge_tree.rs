@@ -108,7 +108,7 @@ impl Memtable for MergeTreeMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
-    ) -> BoxedBatchIterator {
+    ) -> Result<BoxedBatchIterator> {
         // FIXME(yingwen): Change return value to `Result<BoxedBatchIterator>`.
         todo!()
     }

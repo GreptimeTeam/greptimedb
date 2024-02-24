@@ -62,8 +62,8 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _filters: Option<Predicate>,
-    ) -> BoxedBatchIterator {
-        Box::new(std::iter::empty())
+    ) -> Result<BoxedBatchIterator> {
+        Ok(Box::new(std::iter::empty()))
     }
 
     fn is_empty(&self) -> bool {

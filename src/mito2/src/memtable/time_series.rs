@@ -211,7 +211,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         filters: Option<Predicate>,
-    ) -> BoxedBatchIterator {
+    ) -> Result<BoxedBatchIterator> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -221,7 +221,8 @@ impl Memtable for TimeSeriesMemtable {
                 .collect()
         };
 
-        Box::new(self.series_set.iter_series(projection, filters))
+        let iter = self.series_set.iter_series(projection, filters);
+        Ok(Box::new(iter))
     }
 
     fn is_empty(&self) -> bool {
@@ -1129,7 +1130,7 @@ mod tests {
             .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
             .collect::<HashSet<_>>();
 
-        let iter = memtable.iter(None, None);
+        let iter = memtable.iter(None, None).unwrap();
         let read = iter
             .flat_map(|batch| {
                 batch
@@ -1165,7 +1166,7 @@ mod tests {
         let memtable = TimeSeriesMemtable::new(schema, 42, None);
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(Some(&[3]), None);
+        let iter = memtable.iter(Some(&[3]), None).unwrap();
 
         let mut v0_all = vec![];
 

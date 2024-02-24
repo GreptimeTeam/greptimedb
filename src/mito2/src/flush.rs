@@ -315,7 +315,7 @@ impl RegionFlushTask {
             }
 
             let file_id = FileId::random();
-            let iter = mem.iter(None, None);
+            let iter = mem.iter(None, None)?;
             let source = Source::Iter(iter);
             let create_inverted_index = self.engine_config.inverted_index.create_on_flush.auto();
             let mem_threshold_index_create = self

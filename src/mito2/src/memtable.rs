@@ -77,7 +77,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> BoxedBatchIterator;
+    ) -> Result<BoxedBatchIterator>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
