@@ -16,12 +16,9 @@ use std::ops::Range;
 
 use crate::error::Result;
 use crate::memtable::merge_tree::data::DataBatch;
-use crate::memtable::merge_tree::{PkId, ShardId};
+use crate::memtable::merge_tree::PkId;
 
 pub trait DedupSource {
-    /// Returns the shard id of source.
-    fn shard_id(&self) -> ShardId;
-
     /// Returns whether current source is still valid.
     fn is_valid(&self) -> bool;
 
@@ -84,10 +81,7 @@ impl<T: DedupSource> DedupReader<T> {
                 None => {
                     // First shot, fill prev_batch_last_row and current_batch_range with first batch.
                     let current_batch = self.inner.current_data_batch();
-                    let pk_id = PkId {
-                        shard_id: self.inner.shard_id(),
-                        pk_index: current_batch.pk_index(),
-                    };
+                    let pk_id = self.inner.current_pk_id();
                     let (last_ts, _) = current_batch.last_row();
                     self.prev_batch_last_row = Some((pk_id, last_ts));
                     self.current_batch_range = Some(0..current_batch.num_rows());
@@ -101,30 +95,26 @@ impl<T: DedupSource> DedupReader<T> {
                         break;
                     }
                     let current_batch = self.inner.current_data_batch();
-                    let current_pk_idx = PkId {
-                        shard_id: self.inner.shard_id(),
-                        pk_index: current_batch.pk_index(),
-                    };
+                    let current_pk_id = self.inner.current_pk_id();
                     let (first_ts, _) = current_batch.first_row();
                     let rows_in_batch = current_batch.num_rows();
 
-                    let (start, end) =
-                        if current_pk_idx == prev_last_row.0 && first_ts == prev_last_row.1 {
-                            // First row in this batch duplicated with the last row in previous batch
-                            if rows_in_batch == 1 {
-                                // If batch is exhausted, move to next batch.
-                                continue;
-                            } else {
-                                // Skip the first row, start from offset 1.
-                                (1, rows_in_batch)
-                            }
+                    let (start, end) = if &(current_pk_id, first_ts) == prev_last_row {
+                        // First row in this batch duplicated with the last row in previous batch
+                        if rows_in_batch == 1 {
+                            // If batch is exhausted, move to next batch.
+                            continue;
                         } else {
-                            // No duplicates found, yield whole batch.
-                            (0, rows_in_batch)
-                        };
+                            // Skip the first row, start from offset 1.
+                            (1, rows_in_batch)
+                        }
+                    } else {
+                        // No duplicates found, yield whole batch.
+                        (0, rows_in_batch)
+                    };
 
                     let (last_ts, _) = current_batch.last_row();
-                    *prev_last_row = (current_pk_idx, last_ts);
+                    *prev_last_row = (current_pk_id, last_ts);
                     self.current_batch_range = Some(start..end);
                     break;
                 }
@@ -145,10 +135,6 @@ mod tests {
     use crate::test_util::memtable_util::{extract_data_batch, metadata_for_test};
 
     impl DedupSource for DataPartsReader {
-        fn shard_id(&self) -> ShardId {
-            0
-        }
-
         fn is_valid(&self) -> bool {
             self.is_valid()
         }
