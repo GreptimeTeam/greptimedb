@@ -89,6 +89,8 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     fn stats(&self) -> MemtableStats;
 
     /// Forks this memtable and returns a new mutable memtable with specific memtable `id`.
+    ///
+    /// A region must freeze the memtable before invoking this method.
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
 }
 
