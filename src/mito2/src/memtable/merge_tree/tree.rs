@@ -122,7 +122,7 @@ impl MergeTree {
     }
 
     /// Scans the tree.
-    pub fn scan(
+    pub fn read(
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
