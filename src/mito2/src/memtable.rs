@@ -82,13 +82,13 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
 
-    /// Marks the memtable as immutable.
+    /// Turns a mutable memtable into an immutable memtable.
     fn freeze(&self) -> Result<()>;
 
     /// Returns the [MemtableStats] info of Memtable.
     fn stats(&self) -> MemtableStats;
 
-    /// Forks this memtable and returns a new mutable memtable with specific memtable `id`.
+    /// Forks this (immutable) memtable and returns a new mutable memtable with specific memtable `id`.
     ///
     /// A region must freeze the memtable before invoking this method.
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
