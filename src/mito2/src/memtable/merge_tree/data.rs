@@ -55,9 +55,9 @@ pub(crate) const DATA_INIT_CAP: usize = 8;
 pub(crate) struct DataBatchRange {
     /// Primary key index of this batch.
     pub(crate) pk_index: PkIndex,
-    /// Start of current primary key inside record batch
+    /// Start of current primary key inside record batch.
     pub(crate) start: usize,
-    /// End of current primary key inside record batch
+    /// End of current primary key inside record batch.
     pub(crate) end: usize,
 }
 
@@ -72,7 +72,7 @@ impl DataBatchRange {
 }
 
 /// Data part batches returns by `DataParts::read`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DataBatch<'a> {
     /// Record batch of data.
     rb: &'a RecordBatch,
