@@ -109,7 +109,6 @@ impl Memtable for MergeTreeMemtable {
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
-        // FIXME(yingwen): Change return value to `Result<BoxedBatchIterator>`.
         todo!()
     }
 
@@ -120,8 +119,7 @@ impl Memtable for MergeTreeMemtable {
     fn freeze(&self) -> Result<()> {
         self.alloc_tracker.done_allocating();
 
-        // TODO(yingwen): Freeze the tree.
-        Ok(())
+        self.tree.freeze()
     }
 
     fn stats(&self) -> MemtableStats {
@@ -152,8 +150,12 @@ impl Memtable for MergeTreeMemtable {
         }
     }
 
-    fn fork(&self, _id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
-        unimplemented!()
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+        let tree = self.tree.fork(metadata.clone());
+
+        let memtable =
+            MergeTreeMemtable::with_tree(id, tree, self.alloc_tracker.write_buffer_manager());
+        Arc::new(memtable)
     }
 }
 
