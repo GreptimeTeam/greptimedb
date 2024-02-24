@@ -27,6 +27,7 @@ use common_telemetry::error;
 use datatypes::prelude::*;
 use datatypes::vectors::VectorRef;
 use serde::Serialize;
+use session::context::QueryContextRef;
 use snafu::{ensure, Location, OptionExt};
 
 use crate::ensure_greptime;
@@ -50,6 +51,7 @@ struct ProcedureStateJson {
 )]
 pub(crate) async fn procedure_state(
     procedure_service_handler: &ProcedureServiceHandlerRef,
+    _ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
     ensure!(

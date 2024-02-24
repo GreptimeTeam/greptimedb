@@ -32,11 +32,19 @@ impl FunctionState {
 
         use api::v1::meta::ProcedureStatus;
         use async_trait::async_trait;
+        use common_base::AffectedRows;
         use common_meta::rpc::procedure::{MigrateRegionRequest, ProcedureStateResponse};
         use common_query::error::Result;
+        use session::context::QueryContextRef;
+        use store_api::storage::RegionId;
+        use table::requests::{
+            CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest,
+        };
 
-        use crate::handlers::ProcedureServiceHandler;
+        use crate::handlers::{ProcedureServiceHandler, TableMutationHandler};
         struct MockProcedureServiceHandler;
+        struct MockTableMutationHandler;
+        const ROWS: usize = 42;
 
         #[async_trait]
         impl ProcedureServiceHandler for MockProcedureServiceHandler {
@@ -56,8 +64,59 @@ impl FunctionState {
             }
         }
 
+        #[async_trait]
+        impl TableMutationHandler for MockTableMutationHandler {
+            async fn insert(
+                &self,
+                _request: InsertRequest,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
+            async fn delete(
+                &self,
+                _request: DeleteRequest,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
+            async fn flush(
+                &self,
+                _request: FlushTableRequest,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
+            async fn compact(
+                &self,
+                _request: CompactTableRequest,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
+            async fn flush_region(
+                &self,
+                _region_id: RegionId,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
+            async fn compact_region(
+                &self,
+                _region_id: RegionId,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+        }
+
         Self {
-            table_mutation_handler: None,
+            table_mutation_handler: Some(Arc::new(MockTableMutationHandler)),
             procedure_service_handler: Some(Arc::new(MockProcedureServiceHandler)),
         }
     }

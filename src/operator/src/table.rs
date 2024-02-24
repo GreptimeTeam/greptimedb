@@ -20,7 +20,6 @@ use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use sqlparser::ast::ObjectName;
 use store_api::storage::RegionId;
 use table::requests::{
     CompactTableRequest, DeleteRequest as TableDeleteRequest, FlushTableRequest,
@@ -28,40 +27,8 @@ use table::requests::{
 };
 
 use crate::delete::DeleterRef;
-use crate::error::{InvalidSqlSnafu, Result};
 use crate::insert::InserterRef;
 use crate::request::RequesterRef;
-
-// TODO(LFC): Refactor consideration: move this function to some helper mod,
-// could be done together or after `TableReference`'s refactoring, when issue #559 is resolved.
-/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
-pub fn table_idents_to_full_name(
-    obj_name: &ObjectName,
-    query_ctx: &QueryContextRef,
-) -> Result<(String, String, String)> {
-    match &obj_name.0[..] {
-        [table] => Ok((
-            query_ctx.current_catalog().to_string(),
-            query_ctx.current_schema().to_string(),
-            table.value.clone(),
-        )),
-        [schema, table] => Ok((
-            query_ctx.current_catalog().to_string(),
-            schema.value.clone(),
-            table.value.clone(),
-        )),
-        [catalog, schema, table] => Ok((
-            catalog.value.clone(),
-            schema.value.clone(),
-            table.value.clone(),
-        )),
-        _ => InvalidSqlSnafu {
-            err_msg: format!(
-                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
-            ),
-        }.fail(),
-    }
-}
 
 pub struct TableMutationOperator {
     inserter: InserterRef,

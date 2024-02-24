@@ -18,34 +18,22 @@ use std::time::Duration;
 use common_macro::admin_fn;
 use common_meta::rpc::procedure::MigrateRegionRequest;
 use common_query::error::Error::ThreadJoin;
-use common_query::error::{
-    InvalidFuncArgsSnafu, InvalidInputTypeSnafu, MissingProcedureServiceHandlerSnafu, Result,
-};
+use common_query::error::{InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result};
 use common_query::prelude::{Signature, TypeSignature, Volatility};
 use common_telemetry::logging::error;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::types::cast::cast;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::VectorRef;
-use snafu::{Location, OptionExt, ResultExt};
+use session::context::QueryContextRef;
+use snafu::{Location, OptionExt};
 
 use crate::ensure_greptime;
 use crate::function::{Function, FunctionContext};
 use crate::handlers::ProcedureServiceHandlerRef;
+use crate::helper::cast_u64;
 
 const DEFAULT_REPLAY_TIMEOUT_SECS: u64 = 10;
-
-fn cast_u64(value: &ValueRef) -> Result<Option<u64>> {
-    cast((*value).into(), &ConcreteDataType::uint64_datatype())
-        .context(InvalidInputTypeSnafu {
-            err_msg: format!(
-                "Failed to cast input into uint64, actual type: {:#?}",
-                value.data_type(),
-            ),
-        })
-        .map(|v| v.as_u64())
-}
 
 /// A function to migrate a region from source peer to target peer.
 /// Returns the submitted procedure id if success. Only available in cluster mode.
@@ -65,6 +53,7 @@ fn cast_u64(value: &ValueRef) -> Result<Option<u64>> {
 )]
 pub(crate) async fn migrate_region(
     procedure_service_handler: &ProcedureServiceHandlerRef,
+    _ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
     let (region_id, from_peer, to_peer, replay_timeout) = match params.len() {

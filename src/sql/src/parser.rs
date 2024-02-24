@@ -74,6 +74,22 @@ impl<'a> ParserContext<'a> {
         Ok(stmts)
     }
 
+    pub fn parse_table_name(sql: &'a str, dialect: &dyn Dialect) -> Result<ObjectName> {
+        let mut parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
+            .try_with_sql(sql)
+            .context(SyntaxSnafu)?;
+
+        let raw_table_name = parser.parse_object_name().context(error::UnexpectedSnafu {
+            sql,
+            expected: "a table name",
+            actual: parser.peek_token().to_string(),
+        })?;
+        let table_name = Self::canonicalize_object_name(raw_table_name);
+
+        Ok(table_name)
+    }
+
     pub fn parse_function(sql: &'a str, dialect: &dyn Dialect) -> Result<Expr> {
         let mut parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
@@ -266,5 +282,40 @@ mod tests {
             "create table demo (ts timestamp(1) time index, cnt int);",
             ConcreteDataType::timestamp_millisecond_datatype(),
         );
+    }
+
+    #[test]
+    pub fn test_parse_table_name() {
+        let table_name = "a.b.c";
+
+        let object_name =
+            ParserContext::parse_table_name(table_name, &GreptimeDbDialect {}).unwrap();
+
+        assert_eq!(object_name.0.len(), 3);
+        assert_eq!(object_name.to_string(), table_name);
+
+        let table_name = "a.b";
+
+        let object_name =
+            ParserContext::parse_table_name(table_name, &GreptimeDbDialect {}).unwrap();
+
+        assert_eq!(object_name.0.len(), 2);
+        assert_eq!(object_name.to_string(), table_name);
+
+        let table_name = "Test.\"public-test\"";
+
+        let object_name =
+            ParserContext::parse_table_name(table_name, &GreptimeDbDialect {}).unwrap();
+
+        assert_eq!(object_name.0.len(), 2);
+        assert_eq!(object_name.to_string(), table_name.to_ascii_lowercase());
+
+        let table_name = "HelloWorld";
+
+        let object_name =
+            ParserContext::parse_table_name(table_name, &GreptimeDbDialect {}).unwrap();
+
+        assert_eq!(object_name.0.len(), 1);
+        assert_eq!(object_name.to_string(), table_name.to_ascii_lowercase());
     }
 }

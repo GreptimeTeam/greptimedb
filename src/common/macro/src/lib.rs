@@ -71,6 +71,14 @@ pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
     process_range_fn(args, input)
 }
 
+/// Attribute macro to convert a normal function to SQL administration function. The annotated function
+/// should accept:
+///    - `&ProcedureServiceHandlerRef` or `&TableMutationHandlerRef` as the first argument,
+///    - `&QueryContextRef` as the second argument, and
+///    - `&[ValueRef<'_>]` as the third argument which is SQL function input values in each row.
+/// Return type must be `common_query::error::Result<Value>`.
+///
+/// # Example see `common/function/src/system/procedure_state.rs`.
 #[proc_macro_attribute]
 pub fn admin_fn(args: TokenStream, input: TokenStream) -> TokenStream {
     process_admin_fn(args, input)

@@ -64,10 +64,10 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
     } = &sig;
 
     let arg_types = ok!(extract_input_types(inputs));
-    if arg_types.is_empty() {
+    if arg_types.len() < 2 {
         ok!(error!(
             sig.span(),
-            "Expect at least one argument for admin fn"
+            "Expect at least two argument for admin fn: (handler, query_ctx)"
         ));
     }
     let handler_type = ok!(extract_handler_type(&arg_types));
@@ -186,7 +186,9 @@ fn build_struct(
                 };
                 let columns = Vec::from(columns);
 
+
                 std::thread::spawn(move || {
+                    let query_ctx = &func_ctx.query_ctx;
                     let handler = func_ctx
                         .state
                         .#handler
@@ -198,7 +200,7 @@ fn build_struct(
 
                     if columns_num == 0 {
                         let result = common_runtime::block_on_read(async move {
-                            #fn_name(handler, &[]).await
+                            #fn_name(handler, query_ctx, &[]).await
                         })?;
 
                         builder.push_value_ref(result.as_value_ref());
@@ -209,7 +211,7 @@ fn build_struct(
                                 .collect();
 
                             let result = common_runtime::block_on_read(async move {
-                                #fn_name(handler, &args).await
+                                #fn_name(handler, query_ctx, &args).await
                             })?;
 
                             builder.push_value_ref(result.as_value_ref());

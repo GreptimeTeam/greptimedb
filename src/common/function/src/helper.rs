@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::error::Result;
+use common_query::error::{InvalidInputTypeSnafu, Result};
 use common_query::prelude::{Signature, TypeSignature, Volatility};
 use datatypes::prelude::ConcreteDataType;
-use session::context::QueryContextRef;
+use datatypes::types::cast::cast;
+use datatypes::value::ValueRef;
+use snafu::ResultExt;
 
 /// Create a function signature with oneof signatures of interleaving two arguments.
 pub fn one_of_sigs2(args1: Vec<ConcreteDataType>, args2: Vec<ConcreteDataType>) -> Signature {
@@ -30,9 +32,14 @@ pub fn one_of_sigs2(args1: Vec<ConcreteDataType>, args2: Vec<ConcreteDataType>) 
     Signature::one_of(sigs, Volatility::Immutable)
 }
 
-pub fn table_idents_to_full_name(
-    _name: &str,
-    _query_ctx: &QueryContextRef,
-) -> Result<(String, String, String)> {
-    todo!()
+/// Cast a [`ValueRef`] to u64, returns `None` if fails
+pub fn cast_u64(value: &ValueRef) -> Result<Option<u64>> {
+    cast((*value).into(), &ConcreteDataType::uint64_datatype())
+        .context(InvalidInputTypeSnafu {
+            err_msg: format!(
+                "Failed to cast input into uint64, actual type: {:#?}",
+                value.data_type(),
+            ),
+        })
+        .map(|v| v.as_u64())
 }
