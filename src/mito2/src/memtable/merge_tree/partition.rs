@@ -29,8 +29,8 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::shard::{Shard, ShardReader};
-use crate::memtable::merge_tree::shard_builder::{ShardBuilder, ShardBuilderReader};
+use crate::memtable::merge_tree::shard::Shard;
+use crate::memtable::merge_tree::shard_builder::ShardBuilder;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
 use crate::read::{Batch, BatchBuilder};
 use crate::row_converter::{McmpRowCodec, RowCodec};
@@ -316,11 +316,6 @@ fn convert_batch(
     }
 
     builder.build()
-}
-
-enum ShardSource {
-    Builder(ShardBuilderReader),
-    Shard(ShardReader),
 }
 
 pub type PartitionRef = Arc<Partition>;

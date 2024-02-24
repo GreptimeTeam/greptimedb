@@ -89,6 +89,10 @@ impl<'a> DataBatch<'a> {
         self.range
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.range.len()
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.range.is_empty()
     }

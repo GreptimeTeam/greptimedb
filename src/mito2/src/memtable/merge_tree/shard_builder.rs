@@ -112,20 +112,20 @@ pub struct ShardBuilderReader {
 }
 
 impl ShardBuilderReader {
-    fn is_valid(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.data_reader.is_valid()
     }
 
-    fn next(&mut self) -> Result<()> {
+    pub fn next(&mut self) -> Result<()> {
         self.data_reader.next()
     }
 
-    fn current_key(&self) -> Option<&[u8]> {
+    pub fn current_key(&self) -> Option<&[u8]> {
         let pk_index = self.data_reader.current_data_batch().pk_index();
         Some(self.dict_reader.key_by_pk_index(pk_index))
     }
 
-    fn current_batch(&self) -> DataBatch {
+    pub fn current_data_batch(&self) -> DataBatch {
         self.data_reader.current_data_batch()
     }
 }
