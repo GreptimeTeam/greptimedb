@@ -106,7 +106,7 @@ impl ShardBuilder {
     pub fn read(&mut self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReader> {
         let dict_reader = self.dict_builder.read();
         dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
-        let data_reader = self.data_buffer.read(Some(&pk_weights_buffer))?;
+        let data_reader = self.data_buffer.read(Some(pk_weights_buffer))?;
 
         Ok(ShardBuilderReader {
             shard_id: self.current_shard_id,
