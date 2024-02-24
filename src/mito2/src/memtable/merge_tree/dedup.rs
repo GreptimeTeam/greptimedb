@@ -47,7 +47,6 @@ pub trait DedupSource {
 struct DedupReader<T> {
     prev_batch_last_row: Option<(u16, i64)>,
     current_batch_range: Option<Range<usize>>,
-    current_key: Option<Vec<u8>>,
     inner: T,
 }
 
@@ -56,7 +55,6 @@ impl<T: DedupSource> DedupReader<T> {
         let mut res = Self {
             prev_batch_last_row: None,
             current_batch_range: None,
-            current_key: None,
             inner,
         };
         res.next()?;
@@ -67,8 +65,11 @@ impl<T: DedupSource> DedupReader<T> {
         self.current_batch_range.is_some()
     }
 
-    fn current_key(&self) -> Option<&[u8]> {
-        self.current_key.as_deref()
+    /// Returns current encoded primary key.
+    /// # Panics
+    /// If inner reader is exhausted.
+    fn current_key(&self) -> &[u8] {
+        self.inner.current_key()
     }
 
     fn current_data_batch(&self) -> DataBatch {
@@ -87,7 +88,6 @@ impl<T: DedupSource> DedupReader<T> {
                     let (last_ts, _) = current_batch.last_row();
                     self.prev_batch_last_row = Some((pk_index, last_ts));
                     self.current_batch_range = Some(0..current_batch.num_rows());
-                    self.current_key = Some(self.inner.current_key().to_vec());
                     break;
                 }
                 Some(prev_last_row) => {
@@ -95,7 +95,6 @@ impl<T: DedupSource> DedupReader<T> {
                     if !self.inner.is_valid() {
                         // Resets current_batch_range if inner reader is exhausted.
                         self.current_batch_range = None;
-                        self.current_key = None;
                         break;
                     }
                     let current_batch = self.inner.current_data_batch();
@@ -121,7 +120,6 @@ impl<T: DedupSource> DedupReader<T> {
                     let (last_ts, _) = current_batch.last_row();
                     *prev_last_row = (pk_index, last_ts);
                     self.current_batch_range = Some(start..end);
-                    self.current_key = Some(self.inner.current_key().to_vec());
                     break;
                 }
             }

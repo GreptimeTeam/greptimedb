@@ -67,7 +67,7 @@ impl DataBatchRange {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        (self.start..self.end).is_empty()
+        self.len() == 0
     }
 }
 
