@@ -953,7 +953,7 @@ mod tests {
             true,
             true,
         )
-            .unwrap();
+        .unwrap();
 
         assert_eq!(
             vec![1, 2, 1, 2],
