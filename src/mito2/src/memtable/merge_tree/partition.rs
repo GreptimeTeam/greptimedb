@@ -121,6 +121,7 @@ impl Partition {
             filters: context.filters,
             pk_weights: context.pk_weights,
             shard_merger,
+            last_yield_pk_id: None,
         })
     }
 
@@ -213,6 +214,7 @@ pub struct PartitionReader {
     filters: Vec<SimpleFilterEvaluator>,
     pk_weights: Vec<u16>,
     shard_merger: ShardMerger,
+    last_yield_pk_id: Option<PkId>,
 }
 
 impl PartitionReader {
@@ -229,14 +231,22 @@ impl PartitionReader {
         }
 
         while self.shard_merger.is_valid() {
+            let pk_id = self.shard_merger.current_pk_id();
+            if let Some(yield_pk_id) = self.last_yield_pk_id {
+                if pk_id == yield_pk_id {
+                    // If this batch has the same key as last returned batch.
+                    // We can return it without evaluating filters.
+                    break;
+                }
+            }
             let key = self.shard_merger.current_key().unwrap();
             // Prune batch by primary key.
-            // TODO(yingwen): Store last pk id to avoid re-prune.
             if prune_primary_key(&self.metadata, &self.filters, &self.row_codec, key) {
+                // We need this key.
+                self.last_yield_pk_id = Some(pk_id);
                 break;
-            } else {
-                self.shard_merger.next()?;
             }
+            self.shard_merger.next()?;
         }
 
         Ok(())
@@ -265,6 +275,7 @@ impl PartitionReader {
 
 // TODO(yingwen): Improve performance of key prunning. Now we need to find index and
 // then decode and convert each value.
+/// Returns true if the `pk` is still needed.
 fn prune_primary_key(
     metadata: &RegionMetadataRef,
     filters: &[SimpleFilterEvaluator],

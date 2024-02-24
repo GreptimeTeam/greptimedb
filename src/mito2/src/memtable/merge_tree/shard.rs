@@ -120,6 +120,14 @@ impl ShardReaderImpl {
             .map(|dict| dict.key_by_pk_index(pk_index))
     }
 
+    fn current_pk_id(&self) -> PkId {
+        let pk_index = self.parts_reader.current_data_batch().pk_index();
+        PkId {
+            shard_id: self.shard_id,
+            pk_index,
+        }
+    }
+
     fn current_data_batch(&self) -> DataBatch {
         self.parts_reader.current_data_batch()
     }
@@ -141,6 +149,10 @@ impl ShardMerger {
 
     pub(crate) fn next(&mut self) -> Result<()> {
         self.merger.next()
+    }
+
+    pub(crate) fn current_pk_id(&self) -> PkId {
+        self.merger.current_node().current_pk_id()
     }
 
     pub(crate) fn current_key(&self) -> Option<&[u8]> {
@@ -173,6 +185,13 @@ impl ShardSource {
         }
     }
 
+    fn current_pk_id(&self) -> PkId {
+        match self {
+            ShardSource::Builder(r) => r.current_pk_id(),
+            ShardSource::Shard(r) => r.current_pk_id(),
+        }
+    }
+
     fn current_key(&self) -> Option<&[u8]> {
         match self {
             ShardSource::Builder(r) => r.current_key(),
@@ -196,6 +215,10 @@ pub(crate) struct ShardNode {
 impl ShardNode {
     pub(crate) fn new(source: ShardSource) -> Self {
         Self { source }
+    }
+
+    fn current_pk_id(&self) -> PkId {
+        self.source.current_pk_id()
     }
 
     fn current_key(&self) -> Option<&[u8]> {

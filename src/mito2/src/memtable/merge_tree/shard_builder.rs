@@ -26,7 +26,7 @@ use crate::memtable::merge_tree::data::{
 use crate::memtable::merge_tree::dict::{DictBuilderReader, KeyDictBuilder};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::shard::Shard;
-use crate::memtable::merge_tree::{MergeTreeConfig, ShardId};
+use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
@@ -144,6 +144,14 @@ impl ShardBuilderReader {
     pub fn current_key(&self) -> Option<&[u8]> {
         let pk_index = self.data_reader.current_data_batch().pk_index();
         Some(self.dict_reader.key_by_pk_index(pk_index))
+    }
+
+    pub fn current_pk_id(&self) -> PkId {
+        let pk_index = self.data_reader.current_data_batch().pk_index();
+        PkId {
+            shard_id: self.shard_id,
+            pk_index,
+        }
     }
 
     pub fn current_data_batch(&self) -> DataBatch {
