@@ -79,6 +79,12 @@ pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
 /// Return type must be `common_query::error::Result<Value>`.
 ///
 /// # Example see `common/function/src/system/procedure_state.rs`.
+///
+/// # Arguments
+/// - `name`: The name of the generated `Function` implementation.
+/// - `ret`: The return type of the generated SQL function, it will be transformed into `ConcreteDataType::{ret}_datatype()` result.
+/// - `display_name`: The display name of the generated SQL function.
+/// - `sig_fn`: the function to returns `Signature` of generated `Function`.
 #[proc_macro_attribute]
 pub fn admin_fn(args: TokenStream, input: TokenStream) -> TokenStream {
     process_admin_fn(args, input)
