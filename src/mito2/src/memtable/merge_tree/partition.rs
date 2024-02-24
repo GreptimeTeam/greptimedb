@@ -31,7 +31,7 @@ use crate::memtable::merge_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::shard::Shard;
 use crate::memtable::merge_tree::shard_builder::ShardBuilder;
-use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
+use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
 use crate::read::{Batch, BatchBuilder};
 use crate::row_converter::{McmpRowCodec, RowCodec};
 
@@ -46,10 +46,8 @@ pub struct Partition {
 impl Partition {
     /// Creates a new partition.
     pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
-        let shard_builder = ShardBuilder::new(metadata.clone(), config);
-
         Partition {
-            inner: RwLock::new(Inner::new(metadata, shard_builder)),
+            inner: RwLock::new(Inner::new(metadata, config)),
         }
     }
 
@@ -86,7 +84,7 @@ impl Partition {
         let mut inner = self.inner.write().unwrap();
         // If no primary key, always write to the first shard.
         debug_assert!(!inner.shards.is_empty());
-        debug_assert_eq!(1, inner.active_shard_id);
+        debug_assert_eq!(1, inner.shard_builder.current_shard_id());
 
         // A dummy pk id.
         let pk_id = PkId {
@@ -110,10 +108,17 @@ impl Partition {
     }
 
     /// Forks the partition.
+    ///
+    /// Must freeze the partition before fork.
     pub fn fork(&self, metadata: &RegionMetadataRef, config: &MergeTreeConfig) -> Partition {
         let inner = self.inner.read().unwrap();
+        debug_assert!(inner.shard_builder.is_empty());
         // TODO(yingwen): TTL or evict shards.
-        let shard_builder = ShardBuilder::new(metadata.clone(), config);
+        let shard_builder = ShardBuilder::new(
+            metadata.clone(),
+            config,
+            inner.shard_builder.current_shard_id(),
+        );
         let shards = inner
             .shards
             .iter()
@@ -124,7 +129,6 @@ impl Partition {
             inner: RwLock::new(Inner {
                 metadata: metadata.clone(),
                 shard_builder,
-                active_shard_id: inner.active_shard_id,
                 shards,
                 num_rows: 0,
             }),
@@ -327,29 +331,26 @@ struct Inner {
     metadata: RegionMetadataRef,
     /// Shard whose dictionary is active.
     shard_builder: ShardBuilder,
-    active_shard_id: ShardId,
     /// Shards with frozen dictionary.
     shards: Vec<Shard>,
     num_rows: usize,
 }
 
 impl Inner {
-    fn new(metadata: RegionMetadataRef, shard_builder: ShardBuilder) -> Self {
-        let mut inner = Self {
+    fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+        let (shards, current_shard_id) = if metadata.primary_key.is_empty() {
+            let data_parts = DataParts::new(metadata.clone(), DATA_INIT_CAP);
+            (vec![Shard::new(0, None, data_parts)], 1)
+        } else {
+            (Vec::new(), 0)
+        };
+        let shard_builder = ShardBuilder::new(metadata.clone(), config, current_shard_id);
+        Self {
             metadata,
             shard_builder,
-            active_shard_id: 0,
-            shards: Vec::new(),
+            shards,
             num_rows: 0,
-        };
-
-        if inner.metadata.primary_key.is_empty() {
-            let data_parts = DataParts::new(inner.metadata.clone(), DATA_INIT_CAP);
-            inner.shards.push(Shard::new(0, None, data_parts));
-            inner.active_shard_id = 1;
         }
-
-        inner
     }
 
     fn find_key_in_shards(&self, primary_key: &[u8]) -> Option<PkId> {
@@ -373,11 +374,7 @@ impl Inner {
     }
 
     fn freeze_active_shard(&mut self) -> Result<()> {
-        if let Some(shard) = self
-            .shard_builder
-            .finish(self.active_shard_id, self.metadata.clone())?
-        {
-            self.active_shard_id += 1;
+        if let Some(shard) = self.shard_builder.finish(self.metadata.clone())? {
             self.shards.push(shard);
         }
         Ok(())
