@@ -50,7 +50,7 @@ pub struct Merger<T: Node> {
     heap: BinaryHeap<T>,
     /// Current node to read.
     ///
-    /// The node is always empty if it is not None.
+    /// The node is always valid if it is not None.
     current_node: Option<T>,
     /// The number of rows in current node that are valid to read.
     current_rows: usize,
@@ -95,11 +95,7 @@ impl<T: Node> Merger<T> {
     /// Advances the merger to the next item.
     pub(crate) fn next(&mut self) -> Result<()> {
         self.maybe_advance_current_node()?;
-        if self.current_node.is_some() {
-            // Current node is still valid.
-            debug_assert!(self.heap.is_empty());
-            return Ok(());
-        }
+        debug_assert!(self.current_node.is_none());
 
         // Finds node and range to read from the heap.
         let Some(top_node) = self.heap.pop() else {
@@ -153,14 +149,8 @@ impl<T: Node> Merger<T> {
             return Ok(());
         }
 
-        if self.heap.is_empty() {
-            // No other nodes in the heap, we can still put it into current node.
-            self.current_node = Some(node);
-        } else {
-            // Puts the node into the heap.
-            self.heap.push(node);
-        }
-
+        // Puts the node into the heap.
+        self.heap.push(node);
         Ok(())
     }
 }
