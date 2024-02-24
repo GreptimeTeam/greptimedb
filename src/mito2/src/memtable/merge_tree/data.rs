@@ -907,24 +907,6 @@ pub(crate) fn write_rows_to_buffer(
 }
 
 #[cfg(test)]
-pub(crate) fn extract_data_batch(batch: &DataBatch) -> (u16, Vec<(i64, u64)>) {
-    let rb = batch.slice_record_batch();
-    let ts = timestamp_array_to_i64_slice(rb.column(1));
-    let seq = rb
-        .column(2)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .unwrap()
-        .values();
-    let ts_and_seq = ts
-        .iter()
-        .zip(seq.iter())
-        .map(|(ts, seq)| (*ts, *seq))
-        .collect::<Vec<_>>();
-    (batch.pk_index(), ts_and_seq)
-}
-
-#[cfg(test)]
 mod tests {
     use datafusion::arrow::array::Float64Array;
     use datatypes::arrow::array::{TimestampMillisecondArray, UInt16Array, UInt64Array};
@@ -932,7 +914,7 @@ mod tests {
     use parquet::data_type::AsBytes;
 
     use super::*;
-    use crate::test_util::memtable_util::metadata_for_test;
+    use crate::test_util::memtable_util::{extract_data_batch, metadata_for_test};
 
     #[test]
     fn test_lazy_mutable_vector_builder() {
@@ -971,7 +953,7 @@ mod tests {
             true,
             true,
         )
-        .unwrap();
+            .unwrap();
 
         assert_eq!(
             vec![1, 2, 1, 2],

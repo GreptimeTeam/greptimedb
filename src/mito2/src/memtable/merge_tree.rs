@@ -14,7 +14,7 @@
 
 //! Memtable implementation based on a merge tree.
 
-mod data;
+pub(crate) mod data;
 mod dedup;
 mod dict;
 mod merger;

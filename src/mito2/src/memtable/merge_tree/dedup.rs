@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use crate::error::Result;
 use crate::memtable::merge_tree::data::DataBatch;
-use crate::memtable::merge_tree::{PkIndex, ShardId};
+use crate::memtable::merge_tree::{PkId, ShardId};
 
 pub trait DedupSource {
     /// Returns the shard id of source.
@@ -28,10 +28,10 @@ pub trait DedupSource {
     /// Advances source to next data batch.
     fn next(&mut self) -> Result<()>;
 
-    /// Returns current pk index.
+    /// Returns current pk id.
     /// # Panics
     /// If source is not valid.
-    fn current_pk_id(&self) -> PkIndex;
+    fn current_pk_id(&self) -> PkId;
 
     /// Returns the current primary key bytes.
     /// # Panics
@@ -45,7 +45,7 @@ pub trait DedupSource {
 }
 
 struct DedupReader<T> {
-    prev_batch_last_row: Option<(u16, i64)>,
+    prev_batch_last_row: Option<(PkId, i64)>,
     current_batch_range: Option<Range<usize>>,
     inner: T,
 }
@@ -84,9 +84,12 @@ impl<T: DedupSource> DedupReader<T> {
                 None => {
                     // First shot, fill prev_batch_last_row and current_batch_range with first batch.
                     let current_batch = self.inner.current_data_batch();
-                    let pk_index = current_batch.pk_index();
+                    let pk_id = PkId {
+                        shard_id: self.inner.shard_id(),
+                        pk_index: current_batch.pk_index(),
+                    };
                     let (last_ts, _) = current_batch.last_row();
-                    self.prev_batch_last_row = Some((pk_index, last_ts));
+                    self.prev_batch_last_row = Some((pk_id, last_ts));
                     self.current_batch_range = Some(0..current_batch.num_rows());
                     break;
                 }
@@ -98,27 +101,30 @@ impl<T: DedupSource> DedupReader<T> {
                         break;
                     }
                     let current_batch = self.inner.current_data_batch();
-                    let pk_index = current_batch.pk_index();
+                    let current_pk_idx = PkId {
+                        shard_id: self.inner.shard_id(),
+                        pk_index: current_batch.pk_index(),
+                    };
                     let (first_ts, _) = current_batch.first_row();
                     let rows_in_batch = current_batch.num_rows();
 
-                    let (start, end) = if pk_index == prev_last_row.0 && first_ts == prev_last_row.1
-                    {
-                        // First row in this batch duplicated with the last row in previous batch
-                        if rows_in_batch == 1 {
-                            // If batch is exhausted, move to next batch.
-                            continue;
+                    let (start, end) =
+                        if current_pk_idx == prev_last_row.0 && first_ts == prev_last_row.1 {
+                            // First row in this batch duplicated with the last row in previous batch
+                            if rows_in_batch == 1 {
+                                // If batch is exhausted, move to next batch.
+                                continue;
+                            } else {
+                                // Skip the first row, start from offset 1.
+                                (1, rows_in_batch)
+                            }
                         } else {
-                            // Skip the first row, start from offset 1.
-                            (1, rows_in_batch)
-                        }
-                    } else {
-                        // No duplicates found, yield whole batch.
-                        (0, rows_in_batch)
-                    };
+                            // No duplicates found, yield whole batch.
+                            (0, rows_in_batch)
+                        };
 
                     let (last_ts, _) = current_batch.last_row();
-                    *prev_last_row = (pk_index, last_ts);
+                    *prev_last_row = (current_pk_idx, last_ts);
                     self.current_batch_range = Some(start..end);
                     break;
                 }
@@ -134,9 +140,9 @@ mod tests {
 
     use super::*;
     use crate::memtable::merge_tree::data::{
-        extract_data_batch, write_rows_to_buffer, DataBuffer, DataParts, DataPartsReader,
+        write_rows_to_buffer, DataBuffer, DataParts, DataPartsReader,
     };
-    use crate::test_util::memtable_util::metadata_for_test;
+    use crate::test_util::memtable_util::{extract_data_batch, metadata_for_test};
 
     impl DedupSource for DataPartsReader {
         fn shard_id(&self) -> ShardId {
@@ -151,8 +157,11 @@ mod tests {
             self.next()
         }
 
-        fn current_pk_id(&self) -> PkIndex {
-            self.current_data_batch().pk_index()
+        fn current_pk_id(&self) -> PkId {
+            PkId {
+                shard_id: 0,
+                pk_index: self.current_data_batch().pk_index(),
+            }
         }
 
         fn current_key(&self) -> &[u8] {
