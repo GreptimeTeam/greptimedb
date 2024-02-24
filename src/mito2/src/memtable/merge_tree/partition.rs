@@ -46,7 +46,7 @@ impl Partition {
         let shard_builder = ShardBuilder::new(metadata.clone(), config);
 
         Partition {
-            inner: RwLock::new(Inner::new(metadata, shard_builder)),
+            inner: RwLock::new(Inner::new(metadata, shard_builder, config.dedup)),
         }
     }
 
@@ -128,6 +128,7 @@ impl Partition {
                 active_shard_id: inner.active_shard_id,
                 shards,
                 num_rows: 0,
+                dedup: config.dedup,
             }),
         }
     }
@@ -194,21 +195,23 @@ struct Inner {
     /// Shards with frozen dictionary.
     shards: Vec<Shard>,
     num_rows: usize,
+    dedup: bool,
 }
 
 impl Inner {
-    fn new(metadata: RegionMetadataRef, shard_builder: ShardBuilder) -> Self {
+    fn new(metadata: RegionMetadataRef, shard_builder: ShardBuilder, dedup: bool) -> Self {
         let mut inner = Self {
             metadata,
             shard_builder,
             active_shard_id: 0,
             shards: Vec::new(),
             num_rows: 0,
+            dedup,
         };
 
         if inner.metadata.primary_key.is_empty() {
-            let data_parts = DataParts::new(inner.metadata.clone(), DATA_INIT_CAP);
-            inner.shards.push(Shard::new(0, None, data_parts));
+            let data_parts = DataParts::new(inner.metadata.clone(), DATA_INIT_CAP, dedup);
+            inner.shards.push(Shard::new(0, None, data_parts, dedup));
             inner.active_shard_id = 1;
         }
 
