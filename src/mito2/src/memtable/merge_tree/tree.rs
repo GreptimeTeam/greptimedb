@@ -159,7 +159,12 @@ impl MergeTree {
             partitions,
             current_reader: None,
         };
-        let context = ReadPartitionContext::new(projection, filters);
+        let context = ReadPartitionContext::new(
+            self.metadata.clone(),
+            self.row_codec.clone(),
+            projection,
+            filters,
+        );
         iter.fetch_next_partition(context)?;
 
         Ok(Box::new(iter))

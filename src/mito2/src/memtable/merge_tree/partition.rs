@@ -29,7 +29,7 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::shard::{Shard, ShardMerger};
+use crate::memtable::merge_tree::shard::{Shard, ShardMerger, ShardNode, ShardSource};
 use crate::memtable::merge_tree::shard_builder::ShardBuilder;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
 use crate::read::{Batch, BatchBuilder};
@@ -98,10 +98,30 @@ impl Partition {
     }
 
     /// Scans data in the partition.
-    pub fn read(&self, _context: ReadPartitionContext) -> Result<PartitionReader> {
-        //
+    pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
+        // TODO(yingwen): Change to acquire read lock if `read()` takes `&self`.
+        let nodes = {
+            let mut inner = self.inner.write().unwrap();
+            let mut nodes = Vec::with_capacity(inner.shards.len() + 1);
+            let bulder_reader = inner.shard_builder.read(&mut context.pk_weights)?;
+            nodes.push(ShardNode::new(ShardSource::Builder(bulder_reader)));
+            for shard in &mut inner.shards {
+                let shard_reader = shard.read()?;
+                nodes.push(ShardNode::new(ShardSource::Shard(shard_reader)));
+            }
+            nodes
+        };
 
-        unimplemented!()
+        // Creating a shard merger will invoke next so we do it outside of the lock.
+        let shard_merger = ShardMerger::try_new(nodes)?;
+        Ok(PartitionReader {
+            metadata: context.metadata,
+            row_codec: context.row_codec,
+            projection: context.projection,
+            filters: context.filters,
+            pk_weights: context.pk_weights,
+            shard_merger,
+        })
     }
 
     /// Freezes the partition.
@@ -234,6 +254,8 @@ impl PartitionReader {
 
     pub(crate) fn into_context(self) -> ReadPartitionContext {
         ReadPartitionContext {
+            metadata: self.metadata,
+            row_codec: self.row_codec,
             projection: self.projection,
             filters: self.filters,
             pk_weights: self.pk_weights,
@@ -291,7 +313,8 @@ fn prune_primary_key(
 
 /// Structs to reuse across readers to avoid allocating for each reader.
 pub(crate) struct ReadPartitionContext {
-    // TODO(yingwen): codec
+    metadata: RegionMetadataRef,
+    row_codec: Arc<McmpRowCodec>,
     projection: HashSet<ColumnId>,
     filters: Vec<SimpleFilterEvaluator>,
     /// Buffer to store pk weights.
@@ -300,10 +323,14 @@ pub(crate) struct ReadPartitionContext {
 
 impl ReadPartitionContext {
     pub(crate) fn new(
+        metadata: RegionMetadataRef,
+        row_codec: Arc<McmpRowCodec>,
         projection: HashSet<ColumnId>,
         filters: Vec<SimpleFilterEvaluator>,
     ) -> ReadPartitionContext {
         ReadPartitionContext {
+            metadata,
+            row_codec,
             projection,
             filters,
             pk_weights: Vec::new(),

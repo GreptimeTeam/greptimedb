@@ -65,8 +65,14 @@ impl Shard {
 
     /// Scans the shard.
     // TODO(yingwen): Push down projection to data parts.
-    pub fn scan(&self) -> ShardReaderImpl {
-        unimplemented!()
+    pub fn read(&mut self) -> Result<ShardReaderImpl> {
+        let parts_reader = self.data_parts.read()?;
+
+        Ok(ShardReaderImpl {
+            shard_id: self.shard_id,
+            key_dict: self.key_dict.clone(),
+            parts_reader,
+        })
     }
 
     /// Returns the memory size of the shard part.
@@ -124,6 +130,11 @@ pub(crate) struct ShardMerger {
 }
 
 impl ShardMerger {
+    pub(crate) fn try_new(nodes: Vec<ShardNode>) -> Result<Self> {
+        let merger = Merger::try_new(nodes)?;
+        Ok(ShardMerger { merger })
+    }
+
     pub(crate) fn is_valid(&self) -> bool {
         self.merger.is_valid()
     }
@@ -142,7 +153,7 @@ impl ShardMerger {
     }
 }
 
-enum ShardSource {
+pub(crate) enum ShardSource {
     Builder(ShardBuilderReader),
     Shard(ShardReaderImpl),
 }
@@ -178,12 +189,12 @@ impl ShardSource {
 }
 
 /// Node for the merger to get items.
-struct ShardNode {
+pub(crate) struct ShardNode {
     source: ShardSource,
 }
 
 impl ShardNode {
-    fn new(source: ShardSource) -> Self {
+    pub(crate) fn new(source: ShardSource) -> Self {
         Self { source }
     }
 
