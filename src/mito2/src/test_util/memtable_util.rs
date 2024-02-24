@@ -85,16 +85,11 @@ impl Memtable for EmptyMemtable {
 
 /// Empty memtable builder.
 #[derive(Debug, Default)]
-pub(crate) struct EmptyMemtableBuilder {
-    /// Next memtable id.
-    next_id: AtomicU32,
-}
+pub(crate) struct EmptyMemtableBuilder {}
 
 impl MemtableBuilder for EmptyMemtableBuilder {
-    fn build(&self, _metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(EmptyMemtable::new(
-            self.next_id.fetch_add(1, Ordering::Relaxed),
-        ))
+    fn build(&self, id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
+        Arc::new(EmptyMemtable::new(id))
     }
 }
 

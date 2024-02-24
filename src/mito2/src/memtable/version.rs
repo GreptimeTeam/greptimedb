@@ -76,7 +76,7 @@ impl MemtableVersion {
         // soft limit.
         self.mutable.freeze()?;
         // Fork the memtable.
-        let mutable = self.mutable.fork(self.mutable.id() + 1, metadata);
+        let mutable = self.mutable.fork(self.next_memtable_id(), metadata);
 
         // Pushes the mutable memtable to immutable list.
         let immutables = self
@@ -120,5 +120,10 @@ impl MemtableVersion {
     /// immutable memtables.
     pub(crate) fn is_empty(&self) -> bool {
         self.mutable.is_empty() && self.immutables.is_empty()
+    }
+
+    /// Returns the next memtable id.
+    pub(crate) fn next_memtable_id(&self) -> MemtableId {
+        self.mutable.id() + 1
     }
 }

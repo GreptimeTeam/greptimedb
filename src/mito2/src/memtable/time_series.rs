@@ -15,7 +15,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -52,7 +52,6 @@ const INITIAL_BUILDER_CAPACITY: usize = 0;
 /// Builder to build [TimeSeriesMemtable].
 #[derive(Debug, Default)]
 pub struct TimeSeriesMemtableBuilder {
-    id: AtomicU32,
     write_buffer_manager: Option<WriteBufferManagerRef>,
 }
 
@@ -60,15 +59,13 @@ impl TimeSeriesMemtableBuilder {
     /// Creates a new builder with specific `write_buffer_manager`.
     pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>) -> Self {
         Self {
-            id: AtomicU32::new(0),
             write_buffer_manager,
         }
     }
 }
 
 impl MemtableBuilder for TimeSeriesMemtableBuilder {
-    fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef {
-        let id = self.id.fetch_add(1, Ordering::Relaxed);
+    fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         Arc::new(TimeSeriesMemtable::new(
             metadata.clone(),
             id,

@@ -122,7 +122,8 @@ impl VersionControl {
     /// Mark all opened files as deleted and set the delete marker in [VersionControlData]
     pub(crate) fn mark_dropped(&self, memtable_builder: &MemtableBuilderRef) {
         let version = self.current().version;
-        let new_mutable = memtable_builder.build(&version.metadata);
+        let new_mutable =
+            memtable_builder.build(version.memtables.next_memtable_id(), &version.metadata);
 
         let mut data = self.data.write().unwrap();
         data.is_dropped = true;
@@ -138,8 +139,8 @@ impl VersionControl {
     /// It replaces existing mutable memtable with a memtable that uses the
     /// new schema. Memtables of the version must be empty.
     pub(crate) fn alter_schema(&self, metadata: RegionMetadataRef, builder: &MemtableBuilderRef) {
-        let new_mutable = builder.build(&metadata);
         let version = self.current().version;
+        let new_mutable = builder.build(version.memtables.next_memtable_id(), &metadata);
         debug_assert!(version.memtables.mutable.is_empty());
         debug_assert!(version.memtables.immutables().is_empty());
         let new_version = Arc::new(
@@ -162,7 +163,8 @@ impl VersionControl {
     ) {
         let version = self.current().version;
 
-        let new_mutable = memtable_builder.build(&version.metadata);
+        let new_mutable =
+            memtable_builder.build(version.memtables.next_memtable_id(), &version.metadata);
         let new_version = Arc::new(
             VersionBuilder::new(version.metadata.clone(), new_mutable)
                 .flushed_entry_id(truncated_entry_id)

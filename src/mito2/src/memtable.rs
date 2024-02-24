@@ -97,7 +97,7 @@ pub type MemtableRef = Arc<dyn Memtable>;
 /// Builder to build a new [Memtable].
 pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     /// Builds a new memtable instance.
-    fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef;
+    fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
