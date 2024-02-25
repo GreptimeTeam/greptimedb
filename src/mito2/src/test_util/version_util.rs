@@ -25,7 +25,7 @@ use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder}
 use store_api::storage::RegionId;
 
 use crate::manifest::action::RegionEdit;
-use crate::memtable::{MemtableBuilder, MemtableBuilderRef};
+use crate::memtable::MemtableBuilder;
 use crate::region::version::{Version, VersionBuilder, VersionControl};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
@@ -77,10 +77,6 @@ impl VersionControlBuilder {
 
     pub(crate) fn file_purger(&self) -> FilePurgerRef {
         self.file_purger.clone()
-    }
-
-    pub(crate) fn memtable_builder(&self) -> MemtableBuilderRef {
-        self.memtable_builder.clone()
     }
 
     pub(crate) fn push_l0_file(&mut self, start_ms: i64, end_ms: i64) -> &mut Self {
