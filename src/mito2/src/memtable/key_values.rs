@@ -124,7 +124,7 @@ impl<'a> KeyValue<'a> {
 
     /// Get number of field columns.
     pub fn num_fields(&self) -> usize {
-        self.row.values.len() - self.helper.num_primary_key_column - 1
+        self.helper.indices.len() - self.helper.num_primary_key_column - 1
     }
 
     /// Get sequence.
@@ -261,7 +261,13 @@ mod tests {
         }
     }
 
-    fn check_key_values(kvs: &KeyValues, num_rows: usize, keys: &[i64], ts: i64, values: &[i64]) {
+    fn check_key_values(
+        kvs: &KeyValues,
+        num_rows: usize,
+        keys: &[Option<i64>],
+        ts: i64,
+        values: &[Option<i64>],
+    ) {
         assert_eq!(num_rows, kvs.num_rows());
         let mut expect_seq = START_SEQ;
         let expect_ts = ValueRef::Int64(ts);
@@ -273,10 +279,10 @@ mod tests {
             assert_eq!(values.len(), kv.num_fields());
 
             assert_eq!(expect_ts, kv.timestamp());
-            let expect_keys: Vec<_> = keys.iter().map(|k| ValueRef::Int64(*k)).collect();
+            let expect_keys: Vec<_> = keys.iter().map(|k| ValueRef::from(*k)).collect();
             let actual_keys: Vec<_> = kv.primary_keys().collect();
             assert_eq!(expect_keys, actual_keys);
-            let expect_values: Vec<_> = values.iter().map(|v| ValueRef::Int64(*v)).collect();
+            let expect_values: Vec<_> = values.iter().map(|v| ValueRef::from(*v)).collect();
             let actual_values: Vec<_> = kv.fields().collect();
             assert_eq!(expect_values, actual_values);
         }
@@ -312,7 +318,7 @@ mod tests {
         // KeyValues
         // keys: [k0=2, k1=0]
         // ts: 1,
-        check_key_values(&kvs, 3, &[2, 0], 1, &[]);
+        check_key_values(&kvs, 3, &[Some(2), Some(0)], 1, &[]);
     }
 
     #[test]
@@ -325,7 +331,7 @@ mod tests {
         // KeyValues (note that v0 is in front of v1 in region schema)
         // ts: 2,
         // fields: [v0=1, v1=0]
-        check_key_values(&kvs, 3, &[], 2, &[1, 0]);
+        check_key_values(&kvs, 3, &[], 2, &[Some(1), Some(0)]);
     }
 
     #[test]
@@ -339,6 +345,34 @@ mod tests {
         // keys: [k0=0, k1=3]
         // ts: 2,
         // fields: [v0=1, v1=4]
-        check_key_values(&kvs, 3, &[0, 3], 2, &[1, 4]);
+        check_key_values(&kvs, 3, &[Some(0), Some(3)], 2, &[Some(1), Some(4)]);
+    }
+
+    #[test]
+    fn test_sparse_field() {
+        let meta = new_region_metadata(2, 2);
+        // The value of each row:
+        // k0=0, v0=1, ts=2, k1=3, (v1 will be null)
+        let mutation = new_mutation(&["k0", "v0", "ts", "k1"], 3);
+        let kvs = KeyValues::new(&meta, mutation).unwrap();
+        // KeyValues
+        // keys: [k0=0, k1=3]
+        // ts: 2,
+        // fields: [v0=1, v1=null]
+        check_key_values(&kvs, 3, &[Some(0), Some(3)], 2, &[Some(1), None]);
+    }
+
+    #[test]
+    fn test_sparse_tag_field() {
+        let meta = new_region_metadata(2, 2);
+        // The value of each row:
+        // k0 = 0, v0=1, ts=2, (k1, v1 will be null)
+        let mutation = new_mutation(&["k0", "v0", "ts"], 3);
+        let kvs = KeyValues::new(&meta, mutation).unwrap();
+        // KeyValues
+        // keys: [k0=0, k1=null]
+        // ts: 2,
+        // fields: [v0=1, v1=null]
+        check_key_values(&kvs, 3, &[Some(0), None], 2, &[Some(1), None]);
     }
 }
