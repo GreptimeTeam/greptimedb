@@ -14,24 +14,25 @@
 
 //! Builder of a shard.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_recordbatch::filter::SimpleFilterEvaluator;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataBuffer, DataParts, DATA_INIT_CAP};
-use crate::memtable::merge_tree::dict::KeyDictBuilder;
+use crate::memtable::merge_tree::data::{
+    DataBatch, DataBuffer, DataBufferReader, DataParts, DATA_INIT_CAP,
+};
+use crate::memtable::merge_tree::dict::{DictBuilderReader, KeyDictBuilder};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::shard::Shard;
-use crate::memtable::merge_tree::{MergeTreeConfig, ShardId};
+use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
 pub struct ShardBuilder {
+    /// Id of the current shard to build.
+    current_shard_id: ShardId,
     /// Builder for the key dictionary.
     dict_builder: KeyDictBuilder,
     /// Buffer to store data.
@@ -43,13 +44,17 @@ pub struct ShardBuilder {
 
 impl ShardBuilder {
     /// Returns a new builder.
-    pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> ShardBuilder {
-        let dedup = config.dedup;
+    pub fn new(
+        metadata: RegionMetadataRef,
+        config: &MergeTreeConfig,
+        shard_id: ShardId,
+    ) -> ShardBuilder {
         ShardBuilder {
+            current_shard_id: shard_id,
             dict_builder: KeyDictBuilder::new(config.index_max_keys_per_shard),
-            data_buffer: DataBuffer::with_capacity(metadata, DATA_INIT_CAP, dedup),
+            data_buffer: DataBuffer::with_capacity(metadata, DATA_INIT_CAP, config.dedup),
             data_freeze_threshold: config.data_freeze_threshold,
-            dedup,
+            dedup: config.dedup,
         }
     }
 
@@ -65,15 +70,16 @@ impl ShardBuilder {
         self.dict_builder.is_full() || self.data_buffer.num_rows() == self.data_freeze_threshold
     }
 
+    /// Returns the current shard id of the builder.
+    pub fn current_shard_id(&self) -> ShardId {
+        self.current_shard_id
+    }
+
     /// Builds a new shard and resets the builder.
     ///
     /// Returns `None` if the builder is empty.
-    pub fn finish(
-        &mut self,
-        shard_id: ShardId,
-        metadata: RegionMetadataRef,
-    ) -> Result<Option<Shard>> {
-        if self.data_buffer.is_empty() {
+    pub fn finish(&mut self, metadata: RegionMetadataRef) -> Result<Option<Shard>> {
+        if self.is_empty() {
             return Ok(None);
         }
 
@@ -93,24 +99,68 @@ impl ShardBuilder {
         let data_parts =
             DataParts::new(metadata, DATA_INIT_CAP, self.dedup).with_frozen(vec![data_part]);
         let key_dict = key_dict.map(Arc::new);
+        let shard_id = self.current_shard_id;
+        self.current_shard_id += 1;
 
         Ok(Some(Shard::new(shard_id, key_dict, data_parts, self.dedup)))
     }
 
     /// Scans the shard builder.
-    pub fn scan(
-        &mut self,
-        _projection: &HashSet<ColumnId>,
-        _filters: &[SimpleFilterEvaluator],
-    ) -> Result<ShardBuilderReader> {
-        unimplemented!()
+    pub fn read(&mut self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReader> {
+        let dict_reader = self.dict_builder.read();
+        dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
+        let data_reader = self.data_buffer.read(Some(pk_weights_buffer))?;
+
+        Ok(ShardBuilderReader {
+            shard_id: self.current_shard_id,
+            dict_reader,
+            data_reader,
+        })
+    }
+
+    /// Returns true if the builder is empty.
+    pub fn is_empty(&self) -> bool {
+        self.data_buffer.is_empty()
     }
 }
 
 /// Reader to scan a shard builder.
-pub struct ShardBuilderReader {}
+pub struct ShardBuilderReader {
+    shard_id: ShardId,
+    dict_reader: DictBuilderReader,
+    data_reader: DataBufferReader,
+}
 
-// TODO(yingwen): Can we use generic for data reader?
+impl ShardBuilderReader {
+    pub fn shard_id(&self) -> ShardId {
+        self.shard_id
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.data_reader.is_valid()
+    }
+
+    pub fn next(&mut self) -> Result<()> {
+        self.data_reader.next()
+    }
+
+    pub fn current_key(&self) -> Option<&[u8]> {
+        let pk_index = self.data_reader.current_data_batch().pk_index();
+        Some(self.dict_reader.key_by_pk_index(pk_index))
+    }
+
+    pub fn current_pk_id(&self) -> PkId {
+        let pk_index = self.data_reader.current_data_batch().pk_index();
+        PkId {
+            shard_id: self.shard_id,
+            pk_index,
+        }
+    }
+
+    pub fn current_data_batch(&self) -> DataBatch {
+        self.data_reader.current_data_batch()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -179,9 +229,10 @@ mod tests {
         let metadata = metadata_for_test();
         let input = input_with_key(&metadata);
         let config = MergeTreeConfig::default();
-        let mut shard_builder = ShardBuilder::new(metadata.clone(), &config);
+        let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
         let mut metrics = WriteMetrics::default();
-        assert!(shard_builder.finish(1, metadata.clone()).unwrap().is_none());
+        assert!(shard_builder.finish(metadata.clone()).unwrap().is_none());
+        assert_eq!(1, shard_builder.current_shard_id);
 
         for key_values in &input {
             for kv in key_values.iter() {
@@ -189,6 +240,8 @@ mod tests {
                 shard_builder.write_with_key(&key, kv, &mut metrics);
             }
         }
-        shard_builder.finish(1, metadata).unwrap().unwrap();
+        let shard = shard_builder.finish(metadata).unwrap().unwrap();
+        assert_eq!(1, shard.shard_id);
+        assert_eq!(2, shard_builder.current_shard_id);
     }
 }

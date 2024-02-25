@@ -14,11 +14,16 @@
 
 //! Shard in a partition.
 
+use std::cmp::Ordering;
+
 use store_api::metadata::RegionMetadataRef;
 
+use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataParts, DATA_INIT_CAP};
+use crate::memtable::merge_tree::data::{DataBatch, DataParts, DataPartsReader, DATA_INIT_CAP};
 use crate::memtable::merge_tree::dict::KeyDictRef;
+use crate::memtable::merge_tree::merger::{Merger, Node};
+use crate::memtable::merge_tree::shard_builder::ShardBuilderReader;
 use crate::memtable::merge_tree::{PkId, ShardId};
 
 /// Shard stores data related to the same key dictionary.
@@ -67,8 +72,14 @@ impl Shard {
 
     /// Scans the shard.
     // TODO(yingwen): Push down projection to data parts.
-    pub fn scan(&self) -> ShardReader {
-        unimplemented!()
+    pub fn read(&mut self) -> Result<ShardReader> {
+        let parts_reader = self.data_parts.read()?;
+
+        Ok(ShardReader {
+            shard_id: self.shard_id,
+            key_dict: self.key_dict.clone(),
+            parts_reader,
+        })
     }
 
     /// Returns the memory size of the shard part.
@@ -91,7 +102,189 @@ impl Shard {
 }
 
 /// Reader to read rows in a shard.
-pub struct ShardReader {}
+pub struct ShardReader {
+    shard_id: ShardId,
+    key_dict: Option<KeyDictRef>,
+    parts_reader: DataPartsReader,
+}
+
+impl ShardReader {
+    fn shard_id(&self) -> ShardId {
+        self.shard_id
+    }
+
+    fn is_valid(&self) -> bool {
+        self.parts_reader.is_valid()
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.parts_reader.next()
+    }
+
+    fn current_key(&self) -> Option<&[u8]> {
+        let pk_index = self.parts_reader.current_data_batch().pk_index();
+        self.key_dict
+            .as_ref()
+            .map(|dict| dict.key_by_pk_index(pk_index))
+    }
+
+    fn current_pk_id(&self) -> PkId {
+        let pk_index = self.parts_reader.current_data_batch().pk_index();
+        PkId {
+            shard_id: self.shard_id,
+            pk_index,
+        }
+    }
+
+    fn current_data_batch(&self) -> DataBatch {
+        self.parts_reader.current_data_batch()
+    }
+}
+
+pub(crate) struct ShardMerger {
+    merger: Merger<ShardNode>,
+}
+
+impl ShardMerger {
+    pub(crate) fn try_new(nodes: Vec<ShardNode>) -> Result<Self> {
+        let merger = Merger::try_new(nodes)?;
+        Ok(ShardMerger { merger })
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        self.merger.is_valid()
+    }
+
+    pub(crate) fn next(&mut self) -> Result<()> {
+        self.merger.next()
+    }
+
+    pub(crate) fn current_pk_id(&self) -> PkId {
+        self.merger.current_node().current_pk_id()
+    }
+
+    pub(crate) fn current_key(&self) -> Option<&[u8]> {
+        self.merger.current_node().current_key()
+    }
+
+    pub(crate) fn current_data_batch(&self) -> DataBatch {
+        let batch = self.merger.current_node().current_data_batch();
+        batch.slice(0, self.merger.current_rows())
+    }
+}
+
+pub(crate) enum ShardSource {
+    Builder(ShardBuilderReader),
+    Shard(ShardReader),
+}
+
+impl ShardSource {
+    fn is_valid(&self) -> bool {
+        match self {
+            ShardSource::Builder(r) => r.is_valid(),
+            ShardSource::Shard(r) => r.is_valid(),
+        }
+    }
+
+    fn next(&mut self) -> Result<()> {
+        match self {
+            ShardSource::Builder(r) => r.next(),
+            ShardSource::Shard(r) => r.next(),
+        }
+    }
+
+    fn current_pk_id(&self) -> PkId {
+        match self {
+            ShardSource::Builder(r) => r.current_pk_id(),
+            ShardSource::Shard(r) => r.current_pk_id(),
+        }
+    }
+
+    fn current_key(&self) -> Option<&[u8]> {
+        match self {
+            ShardSource::Builder(r) => r.current_key(),
+            ShardSource::Shard(r) => r.current_key(),
+        }
+    }
+
+    fn current_data_batch(&self) -> DataBatch {
+        match self {
+            ShardSource::Builder(r) => r.current_data_batch(),
+            ShardSource::Shard(r) => r.current_data_batch(),
+        }
+    }
+}
+
+/// Node for the merger to get items.
+pub(crate) struct ShardNode {
+    source: ShardSource,
+}
+
+impl ShardNode {
+    pub(crate) fn new(source: ShardSource) -> Self {
+        Self { source }
+    }
+
+    fn current_pk_id(&self) -> PkId {
+        self.source.current_pk_id()
+    }
+
+    fn current_key(&self) -> Option<&[u8]> {
+        self.source.current_key()
+    }
+
+    fn current_data_batch(&self) -> DataBatch {
+        self.source.current_data_batch()
+    }
+}
+
+impl PartialEq for ShardNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.source.current_key() == other.source.current_key()
+    }
+}
+
+impl Eq for ShardNode {}
+
+impl Ord for ShardNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.source
+            .current_key()
+            .cmp(&other.source.current_key())
+            .reverse()
+    }
+}
+
+impl PartialOrd for ShardNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Node for ShardNode {
+    fn is_valid(&self) -> bool {
+        self.source.is_valid()
+    }
+
+    fn is_behind(&self, other: &Self) -> bool {
+        // We expect a key only belongs to one shard.
+        debug_assert_ne!(self.source.current_key(), other.source.current_key());
+        self.source.current_key() < other.source.current_key()
+    }
+
+    fn advance(&mut self, len: usize) -> Result<()> {
+        debug_assert_eq!(self.source.current_data_batch().num_rows(), len);
+        self.source.next()
+    }
+
+    fn current_item_len(&self) -> usize {
+        self.current_data_batch().num_rows()
+    }
+
+    fn search_key_in_current_item(&self, _other: &Self) -> Result<usize, usize> {
+        Err(self.source.current_data_batch().num_rows())
+    }
+}
 
 #[cfg(test)]
 mod tests {
