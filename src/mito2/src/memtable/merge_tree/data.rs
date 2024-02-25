@@ -884,29 +884,6 @@ impl DataPartsReader {
 }
 
 #[cfg(test)]
-pub(crate) fn write_rows_to_buffer(
-    buffer: &mut DataBuffer,
-    schema: &RegionMetadataRef,
-    pk_index: u16,
-    ts: Vec<i64>,
-    v0: Vec<Option<f64>>,
-    sequence: u64,
-) {
-    let kvs = crate::test_util::memtable_util::build_key_values_with_ts_seq_values(
-        schema,
-        "whatever".to_string(),
-        1,
-        ts.into_iter(),
-        v0.into_iter(),
-        sequence,
-    );
-
-    for kv in kvs.iter() {
-        buffer.write_row(pk_index, kv);
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use datafusion::arrow::array::Float64Array;
     use datatypes::arrow::array::{TimestampMillisecondArray, UInt16Array, UInt64Array};
@@ -914,7 +891,9 @@ mod tests {
     use parquet::data_type::AsBytes;
 
     use super::*;
-    use crate::test_util::memtable_util::{extract_data_batch, metadata_for_test};
+    use crate::test_util::memtable_util::{
+        extract_data_batch, metadata_for_test, write_rows_to_buffer,
+    };
 
     #[test]
     fn test_lazy_mutable_vector_builder() {

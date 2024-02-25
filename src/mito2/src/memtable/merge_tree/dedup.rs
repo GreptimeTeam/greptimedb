@@ -16,39 +16,19 @@ use std::ops::Range;
 
 use crate::error::Result;
 use crate::memtable::merge_tree::data::DataBatch;
+use crate::memtable::merge_tree::shard::DataBatchSource;
 use crate::memtable::merge_tree::PkId;
 
-pub trait DedupSource {
-    /// Returns whether current source is still valid.
-    fn is_valid(&self) -> bool;
-
-    /// Advances source to next data batch.
-    fn next(&mut self) -> Result<()>;
-
-    /// Returns current pk id.
-    /// # Panics
-    /// If source is not valid.
-    fn current_pk_id(&self) -> PkId;
-
-    /// Returns the current primary key bytes.
-    /// # Panics
-    /// If source is not valid.
-    fn current_key(&self) -> &[u8];
-
-    /// Returns the data part.
-    /// # Panics
-    /// If source is not valid.
-    fn current_data_batch(&self) -> DataBatch;
-}
-
-struct DedupReader<T> {
+/// A reader that dedup sorted batches from a merger.
+pub struct DedupReader<T> {
     prev_batch_last_row: Option<(PkId, i64)>,
     current_batch_range: Option<Range<usize>>,
     inner: T,
 }
 
-impl<T: DedupSource> DedupReader<T> {
-    fn try_new(inner: T) -> Result<Self> {
+impl<T: DataBatchSource> DedupReader<T> {
+    /// Creates a new dedup reader.
+    pub fn try_new(inner: T) -> Result<Self> {
         let mut res = Self {
             prev_batch_last_row: None,
             current_batch_range: None,
@@ -57,22 +37,11 @@ impl<T: DedupSource> DedupReader<T> {
         res.next()?;
         Ok(res)
     }
+}
 
+impl<T: DataBatchSource> DataBatchSource for DedupReader<T> {
     fn is_valid(&self) -> bool {
         self.current_batch_range.is_some()
-    }
-
-    /// Returns current encoded primary key.
-    /// # Panics
-    /// If inner reader is exhausted.
-    fn current_key(&self) -> &[u8] {
-        self.inner.current_key()
-    }
-
-    fn current_data_batch(&self) -> DataBatch {
-        let range = self.current_batch_range.as_ref().unwrap();
-        let data_batch = self.inner.current_data_batch();
-        data_batch.slice(range.start, range.len())
     }
 
     fn next(&mut self) -> Result<()> {
@@ -122,6 +91,20 @@ impl<T: DedupSource> DedupReader<T> {
         }
         Ok(())
     }
+
+    fn current_pk_id(&self) -> PkId {
+        self.inner.current_pk_id()
+    }
+
+    fn current_key(&self) -> Option<&[u8]> {
+        self.inner.current_key()
+    }
+
+    fn current_data_batch(&self) -> DataBatch {
+        let range = self.current_batch_range.as_ref().unwrap();
+        let data_batch = self.inner.current_data_batch();
+        data_batch.slice(range.start, range.len())
+    }
 }
 
 #[cfg(test)]
@@ -129,33 +112,35 @@ mod tests {
     use store_api::metadata::RegionMetadataRef;
 
     use super::*;
-    use crate::memtable::merge_tree::data::{
-        write_rows_to_buffer, DataBuffer, DataParts, DataPartsReader,
+    use crate::memtable::merge_tree::data::{DataBuffer, DataParts, DataPartsReader};
+    use crate::test_util::memtable_util::{
+        extract_data_batch, metadata_for_test, write_rows_to_buffer,
     };
-    use crate::test_util::memtable_util::{extract_data_batch, metadata_for_test};
 
-    impl DedupSource for DataPartsReader {
+    struct MockSource(DataPartsReader);
+
+    impl DataBatchSource for MockSource {
         fn is_valid(&self) -> bool {
-            self.is_valid()
+            self.0.is_valid()
         }
 
         fn next(&mut self) -> Result<()> {
-            self.next()
+            self.0.next()
         }
 
         fn current_pk_id(&self) -> PkId {
             PkId {
                 shard_id: 0,
-                pk_index: self.current_data_batch().pk_index(),
+                pk_index: self.0.current_data_batch().pk_index(),
             }
         }
 
-        fn current_key(&self) -> &[u8] {
-            b"abcf"
+        fn current_key(&self) -> Option<&[u8]> {
+            None
         }
 
         fn current_data_batch(&self) -> DataBatch {
-            self.current_data_batch()
+            self.0.current_data_batch()
         }
     }
 
@@ -194,7 +179,7 @@ mod tests {
         let mut parts = DataParts::new(meta, 10, true).with_frozen(frozens);
 
         let mut res = Vec::with_capacity(expected.len());
-        let mut reader = DedupReader::try_new(parts.read().unwrap()).unwrap();
+        let mut reader = DedupReader::try_new(MockSource(parts.read().unwrap())).unwrap();
         while reader.is_valid() {
             let batch = reader.current_data_batch();
             res.push(extract_data_batch(&batch));
