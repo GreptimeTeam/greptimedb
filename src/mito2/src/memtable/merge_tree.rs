@@ -56,6 +56,7 @@ struct PkId {
 
 /// Config for the merge tree memtable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct MergeTreeConfig {
     /// Max keys in an index shard.
     pub index_max_keys_per_shard: usize,
