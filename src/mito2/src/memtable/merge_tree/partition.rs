@@ -28,8 +28,11 @@ use store_api::storage::ColumnId;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
+use crate::memtable::merge_tree::dedup::DedupReader;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::shard::{Shard, ShardMerger, ShardNode, ShardSource};
+use crate::memtable::merge_tree::shard::{
+    BoxedDataBatchSource, Shard, ShardMerger, ShardNode, ShardSource,
+};
 use crate::memtable::merge_tree::shard_builder::ShardBuilder;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
 use crate::read::{Batch, BatchBuilder};
@@ -41,6 +44,8 @@ pub type PartitionKey = u32;
 /// A tree partition.
 pub struct Partition {
     inner: RwLock<Inner>,
+    /// Whether to dedup batches.
+    dedup: bool,
 }
 
 pub type PartitionRef = Arc<Partition>;
@@ -50,6 +55,7 @@ impl Partition {
     pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
         Partition {
             inner: RwLock::new(Inner::new(metadata, config)),
+            dedup: config.dedup,
         }
     }
 
@@ -113,16 +119,13 @@ impl Partition {
         };
 
         // Creating a shard merger will invoke next so we do it outside of the lock.
-        let shard_merger = ShardMerger::try_new(nodes)?;
-        Ok(PartitionReader {
-            metadata: context.metadata,
-            row_codec: context.row_codec,
-            projection: context.projection,
-            filters: context.filters,
-            pk_weights: context.pk_weights,
-            shard_merger,
-            last_yield_pk_id: None,
-        })
+        let merger = ShardMerger::try_new(nodes)?;
+        if self.dedup {
+            let source = DedupReader::try_new(merger)?;
+            PartitionReader::new(context, Box::new(source))
+        } else {
+            PartitionReader::new(context, Box::new(merger))
+        }
     }
 
     /// Freezes the partition.
@@ -156,8 +159,8 @@ impl Partition {
                 shard_builder,
                 shards,
                 num_rows: 0,
-                dedup: config.dedup,
             }),
+            dedup: self.dedup,
         }
     }
 
@@ -214,51 +217,52 @@ pub struct PartitionReader {
     projection: HashSet<ColumnId>,
     filters: Vec<SimpleFilterEvaluator>,
     pk_weights: Vec<u16>,
-    shard_merger: ShardMerger,
+    source: BoxedDataBatchSource,
     last_yield_pk_id: Option<PkId>,
 }
 
 impl PartitionReader {
+    fn new(context: ReadPartitionContext, source: BoxedDataBatchSource) -> Result<Self> {
+        let mut reader = Self {
+            metadata: context.metadata,
+            row_codec: context.row_codec,
+            projection: context.projection,
+            filters: context.filters,
+            pk_weights: context.pk_weights,
+            source,
+            last_yield_pk_id: None,
+        };
+        // Find next valid batch.
+        reader.prune_batch_by_key()?;
+
+        Ok(reader)
+    }
+
+    /// Returns true if the reader is valid.
     pub fn is_valid(&self) -> bool {
-        self.shard_merger.is_valid()
+        self.source.is_valid()
     }
 
+    /// Advances the reader.
+    ///
+    /// # Panics
+    /// Panics if the reader is invalid.
     pub fn next(&mut self) -> Result<()> {
-        self.shard_merger.next()?;
+        self.source.next()?;
 
-        if self.metadata.primary_key.is_empty() {
-            // Nothing to prune.
-            return Ok(());
-        }
-
-        while self.shard_merger.is_valid() {
-            let pk_id = self.shard_merger.current_pk_id();
-            if let Some(yield_pk_id) = self.last_yield_pk_id {
-                if pk_id == yield_pk_id {
-                    // If this batch has the same key as last returned batch.
-                    // We can return it without evaluating filters.
-                    break;
-                }
-            }
-            let key = self.shard_merger.current_key().unwrap();
-            // Prune batch by primary key.
-            if prune_primary_key(&self.metadata, &self.filters, &self.row_codec, key) {
-                // We need this key.
-                self.last_yield_pk_id = Some(pk_id);
-                break;
-            }
-            self.shard_merger.next()?;
-        }
-
-        Ok(())
+        self.prune_batch_by_key()
     }
 
+    /// Converts current data batch into a [Batch].
+    ///
+    /// # Panics
+    /// Panics if the reader is invalid.
     pub fn convert_current_batch(&self) -> Result<Batch> {
-        let data_batch = self.shard_merger.current_data_batch();
+        let data_batch = self.source.current_data_batch();
         data_batch_to_batch(
             &self.metadata,
             &self.projection,
-            self.shard_merger.current_key(),
+            self.source.current_key(),
             data_batch,
         )
     }
@@ -271,6 +275,34 @@ impl PartitionReader {
             filters: self.filters,
             pk_weights: self.pk_weights,
         }
+    }
+
+    fn prune_batch_by_key(&mut self) -> Result<()> {
+        if self.metadata.primary_key.is_empty() {
+            // Nothing to prune.
+            return Ok(());
+        }
+
+        while self.source.is_valid() {
+            let pk_id = self.source.current_pk_id();
+            if let Some(yield_pk_id) = self.last_yield_pk_id {
+                if pk_id == yield_pk_id {
+                    // If this batch has the same key as last returned batch.
+                    // We can return it without evaluating filters.
+                    break;
+                }
+            }
+            let key = self.source.current_key().unwrap();
+            // Prune batch by primary key.
+            if prune_primary_key(&self.metadata, &self.filters, &self.row_codec, key) {
+                // We need this key.
+                self.last_yield_pk_id = Some(pk_id);
+                break;
+            }
+            self.source.next()?;
+        }
+
+        Ok(())
     }
 }
 
@@ -400,7 +432,6 @@ struct Inner {
     /// Shards with frozen dictionary.
     shards: Vec<Shard>,
     num_rows: usize,
-    dedup: bool,
 }
 
 impl Inner {
@@ -417,7 +448,6 @@ impl Inner {
             shard_builder,
             shards,
             num_rows: 0,
-            dedup: config.dedup,
         }
     }
 

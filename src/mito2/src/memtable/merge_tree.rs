@@ -28,6 +28,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
@@ -54,7 +55,8 @@ struct PkId {
 }
 
 /// Config for the merge tree memtable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct MergeTreeConfig {
     /// Max keys in an index shard.
     pub index_max_keys_per_shard: usize,
@@ -248,16 +250,19 @@ impl MergeTreeMemtable {
 /// Builder to build a [MergeTreeMemtable].
 #[derive(Debug, Default)]
 pub struct MergeTreeMemtableBuilder {
-    write_buffer_manager: Option<WriteBufferManagerRef>,
     config: MergeTreeConfig,
+    write_buffer_manager: Option<WriteBufferManagerRef>,
 }
 
 impl MergeTreeMemtableBuilder {
     /// Creates a new builder with specific `write_buffer_manager`.
-    pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>) -> Self {
+    pub fn new(
+        config: MergeTreeConfig,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+    ) -> Self {
         Self {
+            config,
             write_buffer_manager,
-            config: MergeTreeConfig::default(),
         }
     }
 }
@@ -420,7 +425,8 @@ mod tests {
             memtable_util::metadata_with_primary_key(vec![], false)
         };
         // Try to build a memtable via the builder.
-        let memtable = MergeTreeMemtableBuilder::new(None).build(1, &metadata);
+        let memtable =
+            MergeTreeMemtableBuilder::new(MergeTreeConfig::default(), None).build(1, &metadata);
 
         let expect = (0..100).collect::<Vec<_>>();
         let kvs = memtable_util::build_key_values(&metadata, "hello".to_string(), 10, &expect, 1);

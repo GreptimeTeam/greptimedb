@@ -101,6 +101,33 @@ impl Shard {
     }
 }
 
+/// Source that returns [DataBatch].
+pub trait DataBatchSource {
+    /// Returns whether current source is still valid.
+    fn is_valid(&self) -> bool;
+
+    /// Advances source to next data batch.
+    fn next(&mut self) -> Result<()>;
+
+    /// Returns current pk id.
+    /// # Panics
+    /// If source is not valid.
+    fn current_pk_id(&self) -> PkId;
+
+    /// Returns the current primary key bytes or None if it doesn't have primary key.
+    ///
+    /// # Panics
+    /// If source is not valid.
+    fn current_key(&self) -> Option<&[u8]>;
+
+    /// Returns the data part.
+    /// # Panics
+    /// If source is not valid.
+    fn current_data_batch(&self) -> DataBatch;
+}
+
+pub type BoxedDataBatchSource = Box<dyn DataBatchSource + Send>;
+
 /// Reader to read rows in a shard.
 pub struct ShardReader {
     shard_id: ShardId,
@@ -141,6 +168,7 @@ impl ShardReader {
     }
 }
 
+/// A merger that merges batches from multiple shards.
 pub(crate) struct ShardMerger {
     merger: Merger<ShardNode>,
 }
@@ -150,24 +178,26 @@ impl ShardMerger {
         let merger = Merger::try_new(nodes)?;
         Ok(ShardMerger { merger })
     }
+}
 
-    pub(crate) fn is_valid(&self) -> bool {
+impl DataBatchSource for ShardMerger {
+    fn is_valid(&self) -> bool {
         self.merger.is_valid()
     }
 
-    pub(crate) fn next(&mut self) -> Result<()> {
+    fn next(&mut self) -> Result<()> {
         self.merger.next()
     }
 
-    pub(crate) fn current_pk_id(&self) -> PkId {
+    fn current_pk_id(&self) -> PkId {
         self.merger.current_node().current_pk_id()
     }
 
-    pub(crate) fn current_key(&self) -> Option<&[u8]> {
+    fn current_key(&self) -> Option<&[u8]> {
         self.merger.current_node().current_key()
     }
 
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch {
         let batch = self.merger.current_node().current_data_batch();
         batch.slice(0, self.merger.current_rows())
     }
