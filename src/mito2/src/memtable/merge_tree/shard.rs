@@ -273,16 +273,16 @@ impl Node for ShardNode {
     }
 
     fn advance(&mut self, len: usize) -> Result<()> {
-        debug_assert_eq!(self.source.current_data_batch().len(), len);
+        debug_assert_eq!(self.source.current_data_batch().num_rows(), len);
         self.source.next()
     }
 
     fn current_item_len(&self) -> usize {
-        self.current_data_batch().len()
+        self.current_data_batch().num_rows()
     }
 
     fn search_key_in_current_item(&self, _other: &Self) -> Result<usize, usize> {
-        Err(self.source.current_data_batch().len())
+        Err(self.source.current_data_batch().num_rows())
     }
 }
 
