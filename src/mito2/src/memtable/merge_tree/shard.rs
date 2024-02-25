@@ -72,10 +72,10 @@ impl Shard {
 
     /// Scans the shard.
     // TODO(yingwen): Push down projection to data parts.
-    pub fn read(&mut self) -> Result<ShardReaderImpl> {
+    pub fn read(&mut self) -> Result<ShardReader> {
         let parts_reader = self.data_parts.read()?;
 
-        Ok(ShardReaderImpl {
+        Ok(ShardReader {
             shard_id: self.shard_id,
             key_dict: self.key_dict.clone(),
             parts_reader,
@@ -102,13 +102,13 @@ impl Shard {
 }
 
 /// Reader to read rows in a shard.
-pub struct ShardReaderImpl {
+pub struct ShardReader {
     shard_id: ShardId,
     key_dict: Option<KeyDictRef>,
     parts_reader: DataPartsReader,
 }
 
-impl ShardReaderImpl {
+impl ShardReader {
     fn shard_id(&self) -> ShardId {
         self.shard_id
     }
@@ -175,7 +175,7 @@ impl ShardMerger {
 
 pub(crate) enum ShardSource {
     Builder(ShardBuilderReader),
-    Shard(ShardReaderImpl),
+    Shard(ShardReader),
 }
 
 impl ShardSource {
