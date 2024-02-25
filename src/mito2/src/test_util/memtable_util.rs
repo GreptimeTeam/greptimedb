@@ -14,7 +14,6 @@
 
 //! Memtable test utilities.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
