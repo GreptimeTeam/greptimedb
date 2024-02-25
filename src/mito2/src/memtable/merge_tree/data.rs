@@ -34,7 +34,8 @@ use datatypes::vectors::{
 };
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
@@ -705,16 +706,21 @@ impl<'a> DataPartEncoder<'a> {
         }
     }
 
-    fn writer_props(&self) -> Option<WriterProperties> {
-        self.row_group_size.map(|size| {
-            WriterProperties::builder()
-                .set_max_row_group_size(size)
-                .build()
-        })
+    // todo(hl): more customized config according to region options.
+    fn writer_props(&self) -> WriterProperties {
+        let mut builder = WriterProperties::builder();
+        if let Some(row_group_size) = self.row_group_size {
+            builder = builder.set_max_row_group_size(row_group_size)
+        }
+        builder = builder
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_statistics_enabled(EnabledStatistics::None);
+        builder.build()
     }
+
     pub fn write(&self, source: &mut DataBuffer) -> Result<DataPart> {
         let mut bytes = Vec::with_capacity(1024);
-        let mut writer = ArrowWriter::try_new(&mut bytes, self.schema.clone(), self.writer_props())
+        let mut writer = ArrowWriter::try_new(&mut bytes, self.schema.clone(), Some(self.writer_props()))
             .context(error::EncodeMemtableSnafu)?;
         let rb = drain_data_buffer_to_record_batches(
             self.schema.clone(),
