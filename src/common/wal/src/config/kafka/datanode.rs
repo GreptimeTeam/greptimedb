@@ -26,6 +26,7 @@ use crate::BROKER_ENDPOINT;
 #[serde(default)]
 pub struct DatanodeKafkaConfig {
     /// The broker endpoints of the Kafka cluster.
+    #[serde(deserialize_with = "super::common::deserialize_broker_endpoints")]
     pub broker_endpoints: Vec<String>,
     /// The compression algorithm used to compress kafka records.
     #[serde(skip)]

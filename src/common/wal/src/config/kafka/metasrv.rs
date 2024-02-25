@@ -24,6 +24,7 @@ use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
 #[serde(default)]
 pub struct MetaSrvKafkaConfig {
     /// The broker endpoints of the Kafka cluster.
+    #[serde(deserialize_with = "super::common::deserialize_broker_endpoints")]
     pub broker_endpoints: Vec<String>,
     /// The number of topics to be created upon start.
     pub num_topics: usize,

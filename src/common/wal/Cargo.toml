@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 common-base.workspace = true
 common-telemetry.workspace = true
+dns-lookup.workspace = true
 futures-util.workspace = true
 humantime-serde.workspace = true
 rskafka.workspace = true

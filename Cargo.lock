@@ -2106,6 +2106,7 @@ version = "0.6.0"
 dependencies = [
  "common-base",
  "common-telemetry",
+ "dns-lookup 2.0.4",
  "futures-util",
  "humantime-serde",
  "rskafka",
@@ -3071,6 +3072,18 @@ dependencies = [
  "libc",
  "socket2 0.4.10",
  "winapi",
+]
+
+[[package]]
+name = "dns-lookup"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5766087c2235fec47fafa4cfecc81e494ee679d0fd4a59887ea0919bfb0e4fc"
+dependencies = [
+ "cfg-if 1.0.0",
+ "libc",
+ "socket2 0.5.5",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -8370,7 +8383,7 @@ dependencies = [
  "crossbeam-utils",
  "csv-core",
  "digest",
- "dns-lookup",
+ "dns-lookup 1.0.8",
  "dyn-clone",
  "flate2",
  "gethostname",
