@@ -33,15 +33,22 @@ pub struct Shard {
     key_dict: Option<KeyDictRef>,
     /// Data in the shard.
     data_parts: DataParts,
+    dedup: bool,
 }
 
 impl Shard {
     /// Returns a new shard.
-    pub fn new(shard_id: ShardId, key_dict: Option<KeyDictRef>, data_parts: DataParts) -> Shard {
+    pub fn new(
+        shard_id: ShardId,
+        key_dict: Option<KeyDictRef>,
+        data_parts: DataParts,
+        dedup: bool,
+    ) -> Shard {
         Shard {
             shard_id,
             key_dict,
             data_parts,
+            dedup,
         }
     }
 
@@ -88,7 +95,8 @@ impl Shard {
         Shard {
             shard_id: self.shard_id,
             key_dict: self.key_dict.clone(),
-            data_parts: DataParts::new(metadata, DATA_INIT_CAP),
+            data_parts: DataParts::new(metadata, DATA_INIT_CAP, self.dedup),
+            dedup: self.dedup,
         }
     }
 }
@@ -337,9 +345,9 @@ mod tests {
         }
 
         let dict = dict_builder.finish().unwrap();
-        let data_parts = DataParts::new(metadata, DATA_INIT_CAP);
+        let data_parts = DataParts::new(metadata, DATA_INIT_CAP, true);
 
-        Shard::new(shard_id, Some(Arc::new(dict)), data_parts)
+        Shard::new(shard_id, Some(Arc::new(dict)), data_parts, true)
     }
 
     #[test]

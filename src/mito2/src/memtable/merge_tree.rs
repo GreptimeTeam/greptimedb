@@ -14,7 +14,8 @@
 
 //! Memtable implementation based on a merge tree.
 
-mod data;
+pub(crate) mod data;
+mod dedup;
 mod dict;
 mod merger;
 mod metrics;
@@ -59,6 +60,8 @@ pub struct MergeTreeConfig {
     pub index_max_keys_per_shard: usize,
     /// Number of rows to freeze a data part.
     pub data_freeze_threshold: usize,
+    /// Whether to delete duplicates rows.
+    pub dedup: bool,
 }
 
 impl Default for MergeTreeConfig {
@@ -66,6 +69,7 @@ impl Default for MergeTreeConfig {
         Self {
             index_max_keys_per_shard: 8192,
             data_freeze_threshold: 102400,
+            dedup: true,
         }
     }
 }

@@ -156,6 +156,7 @@ impl Partition {
                 shard_builder,
                 shards,
                 num_rows: 0,
+                dedup: config.dedup,
             }),
         }
     }
@@ -399,13 +400,14 @@ struct Inner {
     /// Shards with frozen dictionary.
     shards: Vec<Shard>,
     num_rows: usize,
+    dedup: bool,
 }
 
 impl Inner {
     fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
         let (shards, current_shard_id) = if metadata.primary_key.is_empty() {
-            let data_parts = DataParts::new(metadata.clone(), DATA_INIT_CAP);
-            (vec![Shard::new(0, None, data_parts)], 1)
+            let data_parts = DataParts::new(metadata.clone(), DATA_INIT_CAP, config.dedup);
+            (vec![Shard::new(0, None, data_parts, config.dedup)], 1)
         } else {
             (Vec::new(), 0)
         };
@@ -415,6 +417,7 @@ impl Inner {
             shard_builder,
             shards,
             num_rows: 0,
+            dedup: config.dedup,
         }
     }
 

@@ -39,6 +39,7 @@ pub struct ShardBuilder {
     data_buffer: DataBuffer,
     /// Number of rows to freeze a data part.
     data_freeze_threshold: usize,
+    dedup: bool,
 }
 
 impl ShardBuilder {
@@ -51,8 +52,9 @@ impl ShardBuilder {
         ShardBuilder {
             current_shard_id: shard_id,
             dict_builder: KeyDictBuilder::new(config.index_max_keys_per_shard),
-            data_buffer: DataBuffer::with_capacity(metadata, DATA_INIT_CAP),
+            data_buffer: DataBuffer::with_capacity(metadata, DATA_INIT_CAP, config.dedup),
             data_freeze_threshold: config.data_freeze_threshold,
+            dedup: config.dedup,
         }
     }
 
@@ -94,12 +96,13 @@ impl ShardBuilder {
         };
 
         // build data parts.
-        let data_parts = DataParts::new(metadata, DATA_INIT_CAP).with_frozen(vec![data_part]);
+        let data_parts =
+            DataParts::new(metadata, DATA_INIT_CAP, self.dedup).with_frozen(vec![data_part]);
         let key_dict = key_dict.map(Arc::new);
         let shard_id = self.current_shard_id;
         self.current_shard_id += 1;
 
-        Ok(Some(Shard::new(shard_id, key_dict, data_parts)))
+        Ok(Some(Shard::new(shard_id, key_dict, data_parts, self.dedup)))
     }
 
     /// Scans the shard builder.
@@ -216,9 +219,9 @@ mod tests {
         }
 
         let dict = dict_builder.finish().unwrap();
-        let data_parts = DataParts::new(metadata, DATA_INIT_CAP);
+        let data_parts = DataParts::new(metadata, DATA_INIT_CAP, true);
 
-        Shard::new(shard_id, Some(Arc::new(dict)), data_parts)
+        Shard::new(shard_id, Some(Arc::new(dict)), data_parts, true)
     }
 
     #[test]
