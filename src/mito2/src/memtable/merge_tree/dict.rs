@@ -80,7 +80,7 @@ impl KeyDictBuilder {
 
         if self.key_buffer.len() >= MAX_KEYS_PER_BLOCK.into() {
             // The write buffer is full. Freeze a dict block.
-            let dict_block = self.key_buffer.finish();
+            let dict_block = self.key_buffer.finish(false);
             self.dict_blocks.push(dict_block);
         }
 
@@ -113,8 +113,8 @@ impl KeyDictBuilder {
             return None;
         }
 
-        // Finishes current dict block.
-        let dict_block = self.key_buffer.finish();
+        // Finishes current dict block and resets the pk index.
+        let dict_block = self.key_buffer.finish(true);
         self.dict_blocks.push(dict_block);
         // Takes the pk to index map.
         let mut pk_to_index = std::mem::take(&mut self.pk_to_index);
@@ -317,12 +317,15 @@ impl KeyBuffer {
                 .unwrap_or(0)
     }
 
-    fn finish(&mut self) -> DictBlock {
+    fn finish(&mut self, reset_index: bool) -> DictBlock {
         let primary_key = self.key_builder.finish();
         // Reserve capacity for the new builder. `finish()` the builder will leave the builder
         // empty with capacity 0.
         // TODO(yingwen): Do we need to reserve capacity for data?
         self.key_builder = BinaryBuilder::with_capacity(primary_key.len(), 0);
+        if reset_index {
+            self.next_pk_index = 0;
+        }
 
         DictBlock::new(primary_key)
     }
