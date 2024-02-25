@@ -176,7 +176,7 @@ mod tests {
             frozens.push(part1);
         }
 
-        let mut parts = DataParts::new(meta, 10, true).with_frozen(frozens);
+        let parts = DataParts::new(meta, 10, true).with_frozen(frozens);
 
         let mut res = Vec::with_capacity(expected.len());
         let mut reader = DedupReader::try_new(MockSource(parts.read().unwrap())).unwrap();
