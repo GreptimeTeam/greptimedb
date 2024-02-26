@@ -221,6 +221,8 @@ jobs:
             arch: x86_64-apple-darwin
             artifacts-dir-prefix: greptime-darwin-amd64-pyo3
     runs-on: ${{ matrix.os }}
+    outputs:
+      build-macos-result: ${{ steps.set-build-macos-result.outputs.build-macos-result }}
     needs: [
       allocate-runners,
     ]
@@ -260,6 +262,8 @@ jobs:
             features: pyo3_backend,servers/dashboard
             artifacts-dir-prefix: greptime-windows-amd64-pyo3
     runs-on: ${{ matrix.os }}
+    outputs:
+      build-windows-result: ${{ steps.set-build-windows-result.outputs.build-windows-result }}
     needs: [
       allocate-runners,
     ]
@@ -295,6 +299,8 @@ jobs:
       build-linux-arm64-artifacts,
     ]
     runs-on: ubuntu-2004-16-cores
+    outputs:
+      build-image-result: ${{ steps.set-build-image-result.outputs.build-image-result }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -310,7 +316,7 @@ jobs:
           version: ${{ needs.allocate-runners.outputs.version }}
 
       - name: Set build image result
-        id: set-image-build-result
+        id: set-build-image-result
         run: |
           echo "build-image-result=success" >> $GITHUB_OUTPUT    
 
