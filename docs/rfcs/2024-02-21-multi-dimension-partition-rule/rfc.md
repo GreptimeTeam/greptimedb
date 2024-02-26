@@ -42,7 +42,7 @@ An advantage of this scheme is that it is easy to understand how the data get pa
 
 Here each expression draws a line in the 2D space. Managing data partitioning becomes a matter of drawing lines in the key space.
 
-To make it easy to use, there is a "default region" which catches all the data that doesn't match any of previous expressions. The default region exist by default and do not need to speficy. It is also possible to remove this default region if the DB finds it is not necessary.
+To make it easy to use, there is a "default region" which catches all the data that doesn't match any of previous expressions. The default region exist by default and do not need to specify. It is also possible to remove this default region if the DB finds it is not necessary.
 
 ## SQL interface
 
