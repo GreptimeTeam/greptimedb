@@ -43,6 +43,7 @@ pub struct KeyDictBuilder {
     dict_blocks: Vec<DictBlock>,
     /// Write buffer manager.
     write_buffer_manager: Option<WriteBufferManagerRef>,
+    // TODO(yingwen): Use a tracker that takes `&mut self`.
     /// Tracker to report bytes used by the dictionary.
     tracker: AllocTracker,
 }
@@ -137,7 +138,7 @@ impl KeyDictBuilder {
             pk_to_index,
             dict_blocks: std::mem::take(&mut self.dict_blocks),
             key_positions,
-            _tracker: std::mem::replace(
+            tracker: std::mem::replace(
                 &mut self.tracker,
                 AllocTracker::new(self.write_buffer_manager.clone()),
             ),
@@ -220,7 +221,7 @@ pub struct KeyDict {
     dict_blocks: Vec<DictBlock>,
     /// Maps pk index to position of the key in [Self::dict_blocks].
     key_positions: Vec<PkIndex>,
-    _tracker: AllocTracker,
+    tracker: AllocTracker,
 }
 
 pub type KeyDictRef = Arc<KeyDict>;
@@ -246,6 +247,11 @@ impl KeyDict {
         let mut pk_weights = Vec::with_capacity(self.key_positions.len());
         compute_pk_weights(&self.key_positions, &mut pk_weights);
         pk_weights
+    }
+
+    /// Returns the shared memory size.
+    pub(crate) fn shared_memory_size(&self) -> usize {
+        self.tracker.bytes_allocated()
     }
 }
 

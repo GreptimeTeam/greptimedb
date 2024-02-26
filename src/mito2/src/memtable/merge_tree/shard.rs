@@ -96,6 +96,14 @@ impl Shard {
     pub fn is_empty(&self) -> bool {
         self.data_parts.is_empty()
     }
+
+    /// Returns the memory size of the shard part.
+    pub(crate) fn shared_memory_size(&self) -> usize {
+        self.key_dict
+            .as_ref()
+            .map(|dict| dict.shared_memory_size())
+            .unwrap_or(0)
+    }
 }
 
 /// Source that returns [DataBatch].

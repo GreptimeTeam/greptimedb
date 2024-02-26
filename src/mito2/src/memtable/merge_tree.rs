@@ -28,6 +28,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -64,6 +65,8 @@ pub struct MergeTreeConfig {
     pub data_freeze_threshold: usize,
     /// Whether to delete duplicates rows.
     pub dedup: bool,
+    /// Total bytes of dictionary to keep in fork.
+    pub fork_dictionary_bytes: ReadableSize,
 }
 
 impl Default for MergeTreeConfig {
@@ -72,6 +75,7 @@ impl Default for MergeTreeConfig {
             index_max_keys_per_shard: 8192,
             data_freeze_threshold: 102400,
             dedup: true,
+            fork_dictionary_bytes: ReadableSize::mb(384),
         }
     }
 }

@@ -194,16 +194,49 @@ impl MergeTree {
             return MergeTree::new(metadata, &self.config, self.write_buffer_manager.clone());
         }
 
-        let mut forked = BTreeMap::new();
-        let partitions = self.partitions.read().unwrap();
-        for (part_key, part) in partitions.iter() {
-            if !part.has_data() {
-                continue;
-            }
+        let mut total_shared_size = 0;
+        let mut part_infos = {
+            let partitions = self.partitions.read().unwrap();
+            partitions
+                .iter()
+                .filter_map(|(part_key, part)| {
+                    let stats = part.stats();
+                    if stats.num_rows > 0 {
+                        // Only fork partitions that have data.
+                        total_shared_size += stats.shared_memory_size;
+                        Some((*part_key, part.clone(), stats))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
 
-            // Only fork partitions that have data.
+        // TODO(yingwen): Optimize eviction strategy.
+        let fork_size = self.config.fork_dictionary_bytes.as_bytes() as usize;
+        if total_shared_size > fork_size {
+            // Sort partitions by memory size desc.
+            part_infos.sort_unstable_by_key(|info| info.2.shared_memory_size);
+            while total_shared_size > fork_size {
+                let Some(info) = part_infos.pop() else {
+                    break;
+                };
+
+                common_telemetry::debug!(
+                    "Evict partition {} with memory size {}, {} shards",
+                    info.0,
+                    info.2.shared_memory_size,
+                    info.2.shard_num,
+                );
+
+                total_shared_size -= info.2.shared_memory_size;
+            }
+        }
+
+        let mut forked = BTreeMap::new();
+        for (part_key, part, _) in part_infos {
             let forked_part = part.fork(&metadata, &self.config, self.write_buffer_manager.clone());
-            forked.insert(*part_key, Arc::new(forked_part));
+            forked.insert(part_key, Arc::new(forked_part));
         }
 
         MergeTree {
