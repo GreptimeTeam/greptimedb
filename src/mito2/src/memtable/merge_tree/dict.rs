@@ -51,7 +51,7 @@ pub struct KeyDictBuilder {
 impl KeyDictBuilder {
     /// Creates a new builder that can hold up to `capacity` keys.
     pub fn new(capacity: usize, write_buffer_manager: Option<WriteBufferManagerRef>) -> Self {
-        let tracker = AllocTracker::new(write_buffer_manager.clone());
+        let tracker = AllocTracker::new(None);
         Self {
             capacity,
             num_keys: 0,
