@@ -21,8 +21,6 @@ use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
-use datatypes::arrow;
-use datatypes::data_type::ConcreteDataType;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -35,7 +33,6 @@ use crate::memtable::merge_tree::partition::{
     Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
 };
 use crate::memtable::merge_tree::MergeTreeConfig;
-use crate::memtable::time_series::primary_key_schema;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -144,18 +141,8 @@ impl MergeTree {
             .unwrap_or_default();
 
         let partitions = self.prune_partitions(&filters);
-        let pk_schema = primary_key_schema(&self.metadata);
-        let pk_datatypes = self
-            .metadata
-            .primary_key_columns()
-            .map(|pk| pk.column_schema.data_type.clone())
-            .collect();
 
         let mut iter = TreeIter {
-            metadata: self.metadata.clone(),
-            pk_schema,
-            pk_datatypes,
-            row_codec: self.row_codec.clone(),
             partitions,
             current_reader: None,
         };
@@ -283,10 +270,6 @@ impl MergeTree {
 }
 
 struct TreeIter {
-    metadata: RegionMetadataRef,
-    pk_schema: arrow::datatypes::SchemaRef,
-    pk_datatypes: Vec<ConcreteDataType>,
-    row_codec: Arc<McmpRowCodec>,
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
 }

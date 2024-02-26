@@ -72,7 +72,7 @@ impl Shard {
 
     /// Scans the shard.
     // TODO(yingwen): Push down projection to data parts.
-    pub fn read(&mut self) -> Result<ShardReader> {
+    pub fn read(&self) -> Result<ShardReader> {
         let parts_reader = self.data_parts.read()?;
 
         Ok(ShardReader {
@@ -136,10 +136,6 @@ pub struct ShardReader {
 }
 
 impl ShardReader {
-    fn shard_id(&self) -> ShardId {
-        self.shard_id
-    }
-
     fn is_valid(&self) -> bool {
         self.parts_reader.is_valid()
     }

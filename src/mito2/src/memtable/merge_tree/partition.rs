@@ -105,13 +105,12 @@ impl Partition {
 
     /// Scans data in the partition.
     pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
-        // TODO(yingwen): Change to acquire read lock if `read()` takes `&self`.
         let nodes = {
-            let mut inner = self.inner.write().unwrap();
+            let inner = self.inner.read().unwrap();
             let mut nodes = Vec::with_capacity(inner.shards.len() + 1);
             let bulder_reader = inner.shard_builder.read(&mut context.pk_weights)?;
             nodes.push(ShardNode::new(ShardSource::Builder(bulder_reader)));
-            for shard in &mut inner.shards {
+            for shard in &inner.shards {
                 let shard_reader = shard.read()?;
                 nodes.push(ShardNode::new(ShardSource::Shard(shard_reader)));
             }

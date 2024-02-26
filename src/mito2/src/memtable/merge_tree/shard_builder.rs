@@ -106,7 +106,7 @@ impl ShardBuilder {
     }
 
     /// Scans the shard builder.
-    pub fn read(&mut self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReader> {
+    pub fn read(&self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReader> {
         let dict_reader = self.dict_builder.read();
         dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
         let data_reader = self.data_buffer.read(Some(pk_weights_buffer))?;
@@ -132,10 +132,6 @@ pub struct ShardBuilderReader {
 }
 
 impl ShardBuilderReader {
-    pub fn shard_id(&self) -> ShardId {
-        self.shard_id
-    }
-
     pub fn is_valid(&self) -> bool {
         self.data_reader.is_valid()
     }
@@ -164,14 +160,12 @@ impl ShardBuilderReader {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use super::*;
-    use crate::memtable::merge_tree::dict::KeyDictBuilder;
     use crate::memtable::merge_tree::metrics::WriteMetrics;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
-        build_key_values_with_ts_seq_values, encode_key_by_kv, encode_keys, metadata_for_test,
+        build_key_values_with_ts_seq_values, encode_key_by_kv, metadata_for_test,
     };
 
     fn input_with_key(metadata: &RegionMetadataRef) -> Vec<KeyValues> {
@@ -201,27 +195,6 @@ mod tests {
                 2,
             ),
         ]
-    }
-
-    fn new_shard_builder(
-        shard_id: ShardId,
-        metadata: RegionMetadataRef,
-        input: &[KeyValues],
-    ) -> Shard {
-        let mut dict_builder = KeyDictBuilder::new(1024);
-        let mut metrics = WriteMetrics::default();
-        let mut keys = Vec::with_capacity(input.len());
-        for kvs in input {
-            encode_keys(&metadata, kvs, &mut keys);
-        }
-        for key in &keys {
-            dict_builder.insert_key(key, &mut metrics);
-        }
-
-        let dict = dict_builder.finish().unwrap();
-        let data_parts = DataParts::new(metadata, DATA_INIT_CAP, true);
-
-        Shard::new(shard_id, Some(Arc::new(dict)), data_parts, true)
     }
 
     #[test]
