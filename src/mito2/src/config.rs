@@ -282,7 +282,7 @@ impl Default for InvertedIndexConfig {
             create_on_compaction: Mode::Auto,
             apply_on_query: Mode::Auto,
             write_buffer_size: ReadableSize::mb(8),
-            mem_threshold_on_create: Some(ReadableSize::mb(64)),
+            mem_threshold_on_create: Some(ReadableSize::mb(512)),
             intermediate_path: String::new(),
         }
     }

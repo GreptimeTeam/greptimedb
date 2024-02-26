@@ -26,6 +26,7 @@ use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
+use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
 use crate::sst::file::FileId;
@@ -33,19 +34,13 @@ use crate::sst::index::intermediate::IntermediateManager;
 
 const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
 
-// TODO(zhongzc): how to determine this value?
-/// The minimum memory usage threshold for a column to qualify for external sorting during index creation.
-const MIN_MEMORY_USAGE_THRESHOLD: usize = 8192;
-
-/// The buffer size for the pipe used to send index data to the puffin blob.
-const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
-
 /// The index creator that hides the error handling details.
 #[derive(Default)]
 pub struct Indexer {
     file_id: FileId,
     region_id: RegionId,
     inner: Option<SstIndexCreator>,
+    last_memory_usage: usize,
 }
 
 impl Indexer {
@@ -69,6 +64,15 @@ impl Indexer {
                 self.inner = None;
             }
         }
+
+        if let Some(creator) = self.inner.as_ref() {
+            let memory_usage = creator.memory_usage();
+            INDEX_CREATE_MEMORY_USAGE.add(memory_usage as i64 - self.last_memory_usage as i64);
+            self.last_memory_usage = memory_usage;
+        } else {
+            INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
+            self.last_memory_usage = 0;
+        }
     }
 
     /// Finish the index creation.
@@ -81,6 +85,9 @@ impl Indexer {
                         "Create index successfully, region_id: {}, file_id: {}, bytes: {}, rows: {}",
                         self.region_id, self.file_id, byte_count, row_count
                     );
+
+                    INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
+                    self.last_memory_usage = 0;
                     return Some(byte_count);
                 }
                 Err(err) => {
@@ -99,6 +106,8 @@ impl Indexer {
             }
         }
 
+        INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
+        self.last_memory_usage = 0;
         None
     }
 
@@ -119,6 +128,8 @@ impl Indexer {
                 }
             }
         }
+        INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
+        self.last_memory_usage = 0;
     }
 }
 
@@ -201,6 +212,7 @@ impl<'a> IndexerBuilder<'a> {
             file_id: self.file_id,
             region_id: self.metadata.region_id,
             inner: Some(creator),
+            last_memory_usage: 0,
         }
     }
 }
