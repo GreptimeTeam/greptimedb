@@ -274,7 +274,7 @@ mod tests {
                 assert_eq!(explain.start, "0");
                 assert_eq!(explain.end, "0");
                 assert_eq!(explain.step, "5m");
-                assert_eq!(explain.is_verbose, false);
+                assert!(!explain.is_verbose);
             }
             _ => unreachable!(),
         }
@@ -293,7 +293,7 @@ mod tests {
                 assert_eq!(explain.start, "0");
                 assert_eq!(explain.end, "0");
                 assert_eq!(explain.step, "5m");
-                assert_eq!(explain.is_verbose, true);
+                assert!(explain.is_verbose);
             }
             _ => unreachable!(),
         }
@@ -312,7 +312,7 @@ mod tests {
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
-                assert_eq!(explain.is_verbose, false);
+                assert!(!explain.is_verbose);
             }
             _ => unreachable!(),
         }
@@ -331,7 +331,7 @@ mod tests {
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
-                assert_eq!(explain.is_verbose, true);
+                assert!(explain.is_verbose);
             }
             _ => unreachable!(),
         }
@@ -351,7 +351,7 @@ mod tests {
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
                 assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
-                assert_eq!(analyze.is_verbose, false);
+                assert!(!analyze.is_verbose);
             }
             _ => unreachable!(),
         }
@@ -368,7 +368,7 @@ mod tests {
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
                 assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
-                assert_eq!(analyze.is_verbose, true);
+                assert!(analyze.is_verbose);
             }
             _ => unreachable!(),
         }
