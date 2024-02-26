@@ -273,7 +273,8 @@ impl WorkerGroup {
 }
 
 fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
-    (id.table_id() as usize % num_workers) + (id.region_number() as usize % num_workers)
+    ((id.table_id() as usize % num_workers) + (id.region_number() as usize % num_workers))
+        % num_workers
 }
 
 async fn write_cache_from_config(
@@ -757,10 +758,15 @@ mod tests {
 
     #[test]
     fn test_region_id_to_index() {
-        let region_id = RegionId::new(1, 2);
         let num_workers = 4;
+
+        let region_id = RegionId::new(1, 2);
         let index = region_id_to_index(region_id, num_workers);
         assert_eq!(index, 3);
+
+        let region_id = RegionId::new(2, 3);
+        let index = region_id_to_index(region_id, num_workers);
+        assert_eq!(index, 1);
     }
 
     #[tokio::test]
