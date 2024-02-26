@@ -122,6 +122,7 @@ impl KeyDictBuilder {
             // Overwrites the pk index.
             *pk_index = i as PkIndex;
         }
+        self.num_keys = 0;
 
         Some(KeyDict {
             pk_to_index,
@@ -406,5 +407,21 @@ mod tests {
         // num_keys * 5 * 2
         assert_eq!(5130, metrics.key_bytes);
         assert_eq!(8850, builder.memory_size());
+    }
+
+    #[test]
+    fn test_builder_finish() {
+        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 2).into());
+        let mut metrics = WriteMetrics::default();
+        for i in 0..MAX_KEYS_PER_BLOCK * 2 {
+            let key = format!("{i:010}");
+            assert!(!builder.is_full());
+            builder.insert_key(key.as_bytes(), &mut metrics);
+        }
+        assert!(builder.is_full());
+        builder.finish();
+
+        assert!(!builder.is_full());
+        assert_eq!(0, builder.insert_key(b"a0", &mut metrics));
     }
 }
