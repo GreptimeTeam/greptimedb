@@ -84,7 +84,11 @@ impl ClientManager {
             base: config.backoff.base as f64,
             deadline: config.backoff.deadline,
         };
-        let client = ClientBuilder::new(config.broker_endpoints.clone())
+        let mut broker_endpoints = Vec::with_capacity(config.broker_endpoints.len());
+        for endpoint in &config.broker_endpoints {
+            broker_endpoints.push(Self::resolve_broker_endpoint(endpoint).await?);
+        }
+        let client = ClientBuilder::new(broker_endpoints)
             .backoff_config(backoff_config)
             .build()
             .await
