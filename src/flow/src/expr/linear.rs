@@ -267,16 +267,63 @@ impl MapFilterProject {
         mut shuffle: BTreeMap<usize, usize>,
         new_input_arity: usize,
     ) -> Result<(), EvalError> {
+        // check shuffle is valid
+        let demand = self.demand();
+        for d in demand {
+            ensure!(
+                shuffle.contains_key(&d),
+                InvalidArgumentSnafu {
+                    reason: format!(
+                        "Demanded column {} is not in shuffle's keys: {:?}",
+                        d,
+                        shuffle.keys()
+                    )
+                }
+            );
+        }
+        if shuffle.len() > new_input_arity {
+            return InvalidArgumentSnafu {
+                reason: format!(
+                    "shuffle's length {} is greater than new_input_arity {}",
+                    shuffle.len(),
+                    new_input_arity
+                ),
+            }
+            .fail();
+        }
+
         // decompose self into map, filter, project for ease of manipulation
         let (mut map, mut filter, mut project) = self.as_map_filter_project();
         for index in 0..map.len() {
             // Intermediate columns are just shifted.
             shuffle.insert(self.input_arity + index, new_input_arity + index);
         }
+
+        let shuffle_keys = shuffle.keys().cloned().collect::<BTreeSet<_>>();
         for expr in map.iter_mut() {
+            if !expr.get_all_ref_columns().is_subset(&shuffle_keys) {
+                return InvalidArgumentSnafu {
+                    reason: format!(
+                        "Expression's referred columns {:?} is not a subset of shuffle's keys {:?}",
+                        expr.get_all_ref_columns(),
+                        shuffle.keys()
+                    ),
+                }
+                .fail();
+            }
             expr.permute_map(&shuffle);
         }
         for pred in filter.iter_mut() {
+            if !pred.get_all_ref_columns().is_subset(&shuffle_keys) {
+                return InvalidArgumentSnafu {
+                    reason: format!(
+                        "Predicate's referred columns {:?} is not a subset of shuffle's keys {:?}",
+                        pred.get_all_ref_columns(),
+                        shuffle.keys()
+                    ),
+                }
+                .fail();
+            }
             pred.permute_map(&shuffle);
         }
         let new_row_len = new_input_arity + map.len();
@@ -637,7 +684,8 @@ mod test {
         }
         assert_eq!(mfp.demand().len(), 3);
         let mut mfp = mfp;
-        mfp.permute(BTreeMap::from([(0, 2), (2, 0), (1, 1)]), 3);
+        mfp.permute(BTreeMap::from([(0, 2), (2, 0), (1, 1)]), 3)
+            .unwrap();
         assert_eq!(
             mfp,
             MapFilterProject::new(3)
@@ -698,5 +746,27 @@ mod test {
             .evaluate_into(&mut input2, &mut Row::empty())
             .unwrap();
         assert_eq!(ret, Some(Row::pack(vec![Value::from(11)])));
+    }
+
+    #[test]
+    fn test_permute() {
+        let mfp = MapFilterProject::new(3)
+            .map(vec![
+                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt)
+            ])
+            .unwrap()
+            .filter(vec![
+                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Gt)
+            ])
+            .unwrap()
+            .project(vec![0, 1])
+            .unwrap();
+        assert_eq!(mfp.demand(), BTreeSet::from([0, 1]));
+        let mut less = mfp.clone();
+        less.permute(BTreeMap::from([(1, 0), (0, 1)]), 2).unwrap();
+
+        let mut more = mfp.clone();
+        more.permute(BTreeMap::from([(0, 1), (1, 2), (2, 0)]), 4)
+            .unwrap();
     }
 }
