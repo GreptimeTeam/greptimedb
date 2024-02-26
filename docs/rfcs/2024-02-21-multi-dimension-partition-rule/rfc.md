@@ -11,9 +11,9 @@ A new region partition scheme that runs on multiple dimensions of the key space.
 
 # Motivation
 
-The current partition rule is based on a single dimension. It is sort of a [Hilbert Curve](https://en.wikipedia.org/wiki/Hilbert_curve) and pick several point on the curve to divide the space. It is neither easy to understand how the data get partitioned nor flexible enough to handle complex partitioning requirements.
+The current partition rule is from MySQL's [`RANGE Partition`](https://dev.mysql.com/doc/refman/8.0/en/partitioning-range.html), which is based on a single dimension. It is sort of a [Hilbert Curve](https://en.wikipedia.org/wiki/Hilbert_curve) and pick several point on the curve to divide the space. It is neither easy to understand how the data get partitioned nor flexible enough to handle complex partitioning requirements.
 
-Considering the future requirements like region repartitioning or autonomous rebalancing, here we propose a new region partition scheme that uses a set of simple expressions on the partition key columns to divide the key space.
+Considering the future requirements like region repartitioning or autonomous rebalancing, where both workload and partition may change frequently. Here proposes a new region partition scheme that uses a set of simple expressions on the partition key columns to divide the key space.
 
 # Details
 
@@ -41,6 +41,8 @@ An advantage of this scheme is that it is easy to understand how the data get pa
 ![example](2d-example.png)
 
 Here each expression draws a line in the 2D space. Managing data partitioning becomes a matter of drawing lines in the key space.
+
+To make it easy to use, there is a "default region" which catches all the data that doesn't match any of previous expressions. The default region exist by default and do not need to speficy. It is also possible to remove this default region if the DB finds it is not necessary.
 
 ## SQL interface
 
