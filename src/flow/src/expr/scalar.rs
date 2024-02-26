@@ -105,12 +105,26 @@ impl ScalarExpr {
     /// This method is applicable even when `permutation` is not a
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
-    pub fn permute(&mut self, permutation: &[usize]) {
+    pub fn permute(&mut self, permutation: &[usize]) -> Result<(), EvalError> {
+        if self
+            .get_all_ref_columns()
+            .into_iter()
+            .any(|i| i >= permutation.len())
+        {
+            return InvalidArgumentSnafu {
+                reason: format!(
+                    "permutation {:?} is not a valid permutation for expression {:?}",
+                    permutation, self
+                ),
+            }
+            .fail();
+        }
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
                 *old_i = permutation[*old_i];
             }
         });
+        Ok(())
     }
 
     /// Rewrites column indices with their value in `permutation`.
@@ -118,12 +132,25 @@ impl ScalarExpr {
     /// This method is applicable even when `permutation` is not a
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
-    pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) {
+    pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) -> Result<(), EvalError> {
+        if !self
+            .get_all_ref_columns()
+            .is_subset(&permutation.keys().cloned().collect())
+        {
+            return InvalidArgumentSnafu {
+                reason: format!(
+                    "permutation {:?} is not a valid permutation for expression {:?}",
+                    permutation, self
+                ),
+            }
+            .fail();
+        }
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
                 *old_i = permutation[old_i];
             }
         });
+        Ok(())
     }
 
     /// Returns the set of columns that are referenced by `self`.

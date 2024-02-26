@@ -28,7 +28,7 @@ use crate::repr::{self, value_to_internal_ts, Diff, Row};
 /// It applies a sequences of map expressions, which are allowed to
 /// refer to previous expressions, interleaved with predicates which
 /// must be satisfied for an output to be produced. If all predicates
-/// evaluate to `Datum::True` the data at the identified columns are
+/// evaluate to `Value::Boolean(True)` the data at the identified columns are
 /// collected and produced as output in a packed `Row`.
 ///
 /// This operator is a "builder" and its contents may contain expressions
@@ -95,11 +95,32 @@ impl MapFilterProject {
     }
 
     /// Retain only the indicated columns in the presented order.
+    ///
+    /// i.e. before: `self.projection = [2, 1, 0], columns = [0, 1]`
+    /// ```mermaid
+    /// flowchart TD
+    /// col-0
+    /// col-1
+    /// col-2
+    /// projection --> |2|col-0
+    /// projection --> |1|col-1
+    /// projection --> |0|col-2
+    /// ```
+    ///
+    /// after: `self.projection = [2, 1]`
+    /// ```mermaid
+    /// flowchart TD
+    /// col-0
+    /// col-1
+    /// col-2
+    /// projection --> |2|col-0
+    /// projection --> |1|col-1
+    /// projection -.-> col-2
+    /// ```
     pub fn project<I>(mut self, columns: I) -> Result<Self, EvalError>
     where
         I: IntoIterator<Item = usize> + std::fmt::Debug,
     {
-        //
         self.projection = columns
             .into_iter()
             .map(|c| self.projection.get(c).cloned().ok_or(c))
@@ -122,13 +143,42 @@ impl MapFilterProject {
     /// This method introduces predicates as eagerly as they can be evaluated,
     /// which may not be desired for predicates that may cause exceptions.
     /// If fine manipulation is required, the predicates can be added manually.
+    ///
+    /// simply added to the end of the predicates list
+    ///
+    /// while paying attention to column references maintained by `self.projection`
+    ///
+    /// so, before `self.projection = [2, 1, 0], filter = [0]+[1]`:
+    /// ```mermaid
+    /// flowchart TD
+    /// col-0
+    /// col-1
+    /// col-2
+    /// projection --> |2|col-0
+    /// projection --> |1|col-1
+    /// projection --> |0| col-2
+    /// filter("filter:[0]+[1]")
+    /// ```
+    /// becomes:
+    /// ```mermaid
+    /// flowchart TD
+    /// col-0
+    /// col-1
+    /// col-2
+    /// projection --> |2|col-0
+    /// projection --> |1|col-1
+    /// projection --> |0| col-2
+    /// filter("filter:[0]+[1]")
+    /// filter -->|0|col-2
+    /// filter -->|1|col-1
+    /// ```
     pub fn filter<I>(mut self, predicates: I) -> Result<Self, EvalError>
     where
         I: IntoIterator<Item = ScalarExpr>,
     {
         for mut predicate in predicates {
             // Correct column references.
-            predicate.permute(&self.projection[..]);
+            predicate.permute(&self.projection[..])?;
 
             // Validate column references.
             let referred_columns = predicate.get_all_ref_columns();
@@ -162,13 +212,43 @@ impl MapFilterProject {
     }
 
     /// Append the result of evaluating expressions to each row.
+    ///
+    /// simply append `expressions` to `self.expressions`
+    ///
+    /// while paying attention to column references maintained by `self.projection`
+    ///
+    /// hence, before apply map with a previously non-trivial projection would be like:
+    /// before:
+    /// ```mermaid
+    /// flowchart TD
+    /// col-0
+    /// col-1
+    /// col-2
+    /// projection --> |2|col-0
+    /// projection --> |1|col-1
+    /// projection --> |0| col-2
+    /// map("map:[0]+[1]")
+    /// ```
+    /// after apply map:
+    /// ```mermaid
+    /// flowchart TD
+    /// col-0
+    /// col-1
+    /// col-2
+    /// projection --> |2|col-0
+    /// projection --> |1|col-1
+    /// projection --> |0| col-2
+    /// map("map:[0]+[1]")
+    /// map -->|0|col-2
+    /// map -->|1|col-1
+    /// ```
     pub fn map<I>(mut self, expressions: I) -> Result<Self, EvalError>
     where
         I: IntoIterator<Item = ScalarExpr>,
     {
         for mut expression in expressions {
             // Correct column references.
-            expression.permute(&self.projection[..]);
+            expression.permute(&self.projection[..])?;
 
             // Validate column references.
             for c in expression.get_all_ref_columns().into_iter() {
@@ -311,7 +391,7 @@ impl MapFilterProject {
                 }
                 .fail();
             }
-            expr.permute_map(&shuffle);
+            expr.permute_map(&shuffle)?;
         }
         for pred in filter.iter_mut() {
             if !pred.get_all_ref_columns().is_subset(&shuffle_keys) {
@@ -324,7 +404,7 @@ impl MapFilterProject {
                 }
                 .fail();
             }
-            pred.permute_map(&shuffle);
+            pred.permute_map(&shuffle)?;
         }
         let new_row_len = new_input_arity + map.len();
         for proj in project.iter_mut() {
@@ -355,8 +435,12 @@ pub struct SafeMfpPlan {
 
 impl SafeMfpPlan {
     /// See [`MapFilterProject::permute`].
-    pub fn permute(&mut self, map: BTreeMap<usize, usize>, new_arity: usize) {
-        self.mfp.permute(map, new_arity);
+    pub fn permute(
+        &mut self,
+        map: BTreeMap<usize, usize>,
+        new_arity: usize,
+    ) -> Result<(), EvalError> {
+        self.mfp.permute(map, new_arity)
     }
 
     /// Evaluates the linear operator on a supplied list of datums.
@@ -815,5 +899,26 @@ mod test {
             .evaluate_into(&mut input3, &mut Row::empty())
             .unwrap();
         assert_eq!(ret, None);
+    }
+
+    #[test]
+    fn test_mfp_out_of_order() {
+        let mfp = MapFilterProject::new(3)
+            .project(vec![2, 1, 0])
+            .unwrap()
+            .filter(vec![
+                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Gt)
+            ])
+            .unwrap()
+            .map(vec![
+                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt)
+            ])
+            .unwrap()
+            .project(vec![3])
+            .unwrap();
+        let mut input1 = vec![Value::from(2), Value::from(3), Value::from(4)];
+        let safe_mfp = SafeMfpPlan { mfp };
+        let ret = safe_mfp.evaluate_into(&mut input1, &mut Row::empty());
+        assert_eq!(ret.unwrap(), Some(Row::new(vec![Value::from(false)])));
     }
 }
