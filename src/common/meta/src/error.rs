@@ -340,6 +340,16 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
+    #[snafu(display("Failed to resolve Kafka broker endpoint {:?}", broker_endpoint))]
+    ResolveKafkaEndpoint {
+        broker_endpoint: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
+
+    #[snafu(display("Endpoint ip not found for broker endpoint: {:?}", broker_endpoint))]
+    EndpointIpNotFound { broker_endpoint: String },
+
     #[snafu(display("Failed to build a Kafka controller client"))]
     BuildKafkaCtrlClient {
         location: Location,
@@ -425,6 +435,8 @@ impl ErrorExt for Error {
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
             | BuildKafkaPartitionClient { .. }
+            | ResolveKafkaEndpoint { .. }
+            | EndpointIpNotFound { .. }
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. }

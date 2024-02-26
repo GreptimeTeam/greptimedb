@@ -26,11 +26,12 @@ use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rskafka::BackoffConfig;
 use snafu::{ensure, ResultExt};
+use tokio::net;
 
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, BuildKafkaPartitionClientSnafu,
-    CreateKafkaWalTopicSnafu, DecodeJsonSnafu, EncodeJsonSnafu, InvalidNumTopicsSnafu,
-    ProduceRecordSnafu, Result,
+    CreateKafkaWalTopicSnafu, DecodeJsonSnafu, EncodeJsonSnafu, EndpointIpNotFoundSnafu,
+    InvalidNumTopicsSnafu, ProduceRecordSnafu, ResolveKafkaEndpointSnafu, Result,
 };
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::PutRequest;
@@ -108,6 +109,26 @@ impl TopicManager {
         Ok(())
     }
 
+    async fn resolve_broker_endpoint(broker_endpoint: &str) -> Result<String> {
+        let ips: Vec<_> = net::lookup_host(broker_endpoint)
+            .await
+            .with_context(|_| ResolveKafkaEndpointSnafu {
+                broker_endpoint: broker_endpoint.to_string(),
+            })?
+            .into_iter()
+            // Not sure if we should filter out ipv6 addresses
+            .filter(|addr| addr.is_ipv4())
+            .collect();
+        if ips.is_empty() {
+            return (|| {
+                EndpointIpNotFoundSnafu {
+                    broker_endpoint: broker_endpoint.to_string(),
+                }
+                .fail()
+            })();
+        }
+        Ok(ips[0].to_string())
+    }
     /// Tries to create topics specified by indexes in `to_be_created`.
     async fn try_create_topics(&self, topics: &[String], to_be_created: &[usize]) -> Result<()> {
         // Builds an kafka controller client for creating topics.
@@ -117,7 +138,11 @@ impl TopicManager {
             base: self.config.backoff.base as f64,
             deadline: self.config.backoff.deadline,
         };
-        let client = ClientBuilder::new(self.config.broker_endpoints.clone())
+        let mut broker_endpoints = Vec::with_capacity(self.config.broker_endpoints.len());
+        for endpoint in &self.config.broker_endpoints {
+            broker_endpoints.push(Self::resolve_broker_endpoint(endpoint).await?);
+        }
+        let client = ClientBuilder::new(broker_endpoints)
             .backoff_config(backoff_config)
             .build()
             .await
