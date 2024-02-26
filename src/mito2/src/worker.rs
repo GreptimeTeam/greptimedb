@@ -25,8 +25,6 @@ mod handle_open;
 mod handle_truncate;
 mod handle_write;
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -207,10 +205,7 @@ impl WorkerGroup {
 
     /// Get worker for specific `region_id`.
     fn worker(&self, region_id: RegionId) -> &RegionWorker {
-        let mut hasher = DefaultHasher::new();
-        region_id.hash(&mut hasher);
-        let value = hasher.finish() as usize;
-        let index = value_to_index(value, self.workers.len());
+        let index = region_id_to_index(region_id, self.workers.len());
 
         &self.workers[index]
     }
@@ -278,8 +273,9 @@ impl WorkerGroup {
     }
 }
 
-fn value_to_index(value: usize, num_workers: usize) -> usize {
-    value % num_workers
+fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
+    ((id.table_id() as usize % num_workers) + (id.region_number() as usize % num_workers))
+        % num_workers
 }
 
 async fn write_cache_from_config(
@@ -770,16 +766,16 @@ mod tests {
     use crate::test_util::TestEnv;
 
     #[test]
-    fn test_value_to_index() {
-        let num_workers = 1;
-        for i in 0..10 {
-            assert_eq!(0, value_to_index(i, num_workers));
-        }
-
+    fn test_region_id_to_index() {
         let num_workers = 4;
-        for i in 0..10 {
-            assert_eq!(i % 4, value_to_index(i, num_workers));
-        }
+
+        let region_id = RegionId::new(1, 2);
+        let index = region_id_to_index(region_id, num_workers);
+        assert_eq!(index, 3);
+
+        let region_id = RegionId::new(2, 3);
+        let index = region_id_to_index(region_id, num_workers);
+        assert_eq!(index, 1);
     }
 
     #[tokio::test]
