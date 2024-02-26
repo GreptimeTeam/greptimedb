@@ -99,7 +99,6 @@ datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.g
 datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 derive_builder = "0.12"
-dns-lookup = "2.0"
 etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"

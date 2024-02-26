@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 
 with_prefix!(pub backoff_prefix "backoff_");
@@ -45,37 +45,4 @@ impl Default for BackoffConfig {
             deadline: Some(Duration::from_secs(60 * 5)), // 5 mins
         }
     }
-}
-fn lookup_endpoint<'de, D>(endpoint: &str) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let mut iter = endpoint.split(':');
-    let ip_or_domain: &str = iter.next().unwrap();
-    let port: &str = iter.next().unwrap();
-    if ip_or_domain.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(endpoint.to_string());
-    }
-    let ips: Vec<_> = dns_lookup::lookup_host(ip_or_domain)
-        .map_err(de::Error::custom)?
-        .into_iter()
-        .filter(|addr| addr.is_ipv4())
-        .collect();
-    if ips.is_empty() {
-        return Err(de::Error::custom(format!(
-            "failed to resolve the domain name: {}",
-            ip_or_domain
-        )));
-    }
-    Ok(format!("{}:{}", ips[0], port))
-}
-pub fn deserialize_broker_endpoints<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let mut broker_endpoints: Vec<String> = Vec::deserialize(deserializer)?;
-    for endpoint in &mut broker_endpoints {
-        *endpoint = lookup_endpoint::<D>(endpoint)?;
-    }
-    Ok(broker_endpoints)
 }
