@@ -26,6 +26,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
 
 use crate::error::Result;
+use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
 use crate::memtable::merge_tree::dedup::DedupReader;
@@ -52,9 +53,13 @@ pub type PartitionRef = Arc<Partition>;
 
 impl Partition {
     /// Creates a new partition.
-    pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+    pub fn new(
+        metadata: RegionMetadataRef,
+        config: &MergeTreeConfig,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+    ) -> Self {
         Partition {
-            inner: RwLock::new(Inner::new(metadata, config)),
+            inner: RwLock::new(Inner::new(metadata, config, write_buffer_manager)),
             dedup: config.dedup,
         }
     }
@@ -141,7 +146,12 @@ impl Partition {
     /// Forks the partition.
     ///
     /// Must freeze the partition before fork.
-    pub fn fork(&self, metadata: &RegionMetadataRef, config: &MergeTreeConfig) -> Partition {
+    pub fn fork(
+        &self,
+        metadata: &RegionMetadataRef,
+        config: &MergeTreeConfig,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+    ) -> Partition {
         let inner = self.inner.read().unwrap();
         debug_assert!(inner.shard_builder.is_empty());
         // TODO(yingwen): TTL or evict shards.
@@ -149,6 +159,7 @@ impl Partition {
             metadata.clone(),
             config,
             inner.shard_builder.current_shard_id(),
+            write_buffer_manager,
         );
         let shards = inner
             .shards
@@ -171,16 +182,6 @@ impl Partition {
     pub fn has_data(&self) -> bool {
         let inner = self.inner.read().unwrap();
         inner.num_rows > 0
-    }
-
-    /// Returns shared memory size of the partition.
-    pub fn shared_memory_size(&self) -> usize {
-        let inner = self.inner.read().unwrap();
-        inner
-            .shards
-            .iter()
-            .map(|shard| shard.shared_memory_size())
-            .sum()
     }
 
     /// Get partition key from the key value.
@@ -456,14 +457,23 @@ struct Inner {
 }
 
 impl Inner {
-    fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+    fn new(
+        metadata: RegionMetadataRef,
+        config: &MergeTreeConfig,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+    ) -> Self {
         let (shards, current_shard_id) = if metadata.primary_key.is_empty() {
             let data_parts = DataParts::new(metadata.clone(), DATA_INIT_CAP, config.dedup);
             (vec![Shard::new(0, None, data_parts, config.dedup)], 1)
         } else {
             (Vec::new(), 0)
         };
-        let shard_builder = ShardBuilder::new(metadata.clone(), config, current_shard_id);
+        let shard_builder = ShardBuilder::new(
+            metadata.clone(),
+            config,
+            current_shard_id,
+            write_buffer_manager,
+        );
         Self {
             metadata,
             shard_builder,

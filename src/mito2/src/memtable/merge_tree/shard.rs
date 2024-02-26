@@ -82,14 +82,6 @@ impl Shard {
         })
     }
 
-    /// Returns the memory size of the shard part.
-    pub fn shared_memory_size(&self) -> usize {
-        self.key_dict
-            .as_ref()
-            .map(|dict| dict.shared_memory_size())
-            .unwrap_or(0)
-    }
-
     /// Forks a shard.
     pub fn fork(&self, metadata: RegionMetadataRef) -> Shard {
         Shard {
@@ -365,7 +357,7 @@ mod tests {
         metadata: RegionMetadataRef,
         input: &[KeyValues],
     ) -> Shard {
-        let mut dict_builder = KeyDictBuilder::new(1024);
+        let mut dict_builder = KeyDictBuilder::new(1024, None);
         let mut metrics = WriteMetrics::default();
         let mut keys = Vec::with_capacity(input.len());
         for kvs in input {

@@ -103,6 +103,7 @@ impl Memtable for MergeTreeMemtable {
 
         let mut metrics = WriteMetrics::default();
         let mut pk_buffer = Vec::new();
+        // Ensures the memtable always updates stats.
         let res = self.tree.write(kvs, &mut pk_buffer, &mut metrics);
 
         self.update_stats(&metrics);
@@ -159,8 +160,7 @@ impl Memtable for MergeTreeMemtable {
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         let tree = self.tree.fork(metadata.clone());
 
-        let memtable =
-            MergeTreeMemtable::with_tree(id, tree, self.alloc_tracker.write_buffer_manager());
+        let memtable = MergeTreeMemtable::with_tree(id, tree);
         Arc::new(memtable)
     }
 }
@@ -173,23 +173,17 @@ impl MergeTreeMemtable {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: &MergeTreeConfig,
     ) -> Self {
-        Self::with_tree(id, MergeTree::new(metadata, config), write_buffer_manager)
+        Self::with_tree(
+            id,
+            MergeTree::new(metadata, config, write_buffer_manager.clone()),
+        )
     }
 
     /// Creates a mutable memtable from the tree.
     ///
     /// It also adds the bytes used by shared parts (e.g. index) to the memory usage.
-    fn with_tree(
-        id: MemtableId,
-        tree: MergeTree,
-        write_buffer_manager: Option<WriteBufferManagerRef>,
-    ) -> Self {
-        let alloc_tracker = AllocTracker::new(write_buffer_manager);
-        // Track space allocated by the tree.
-        let allocated = tree.shared_memory_size();
-        // Here we still add the bytes of shared parts to the tracker as the old memtable
-        // will release its tracker soon.
-        alloc_tracker.on_allocation(allocated);
+    fn with_tree(id: MemtableId, tree: MergeTree) -> Self {
+        let alloc_tracker = AllocTracker::new(tree.write_buffer_manager());
 
         Self {
             id,
@@ -202,8 +196,8 @@ impl MergeTreeMemtable {
 
     /// Updates stats of the memtable.
     fn update_stats(&self, metrics: &WriteMetrics) {
-        self.alloc_tracker
-            .on_allocation(metrics.key_bytes + metrics.value_bytes);
+        // Only let the tracker tracks value bytes.
+        self.alloc_tracker.on_allocation(metrics.value_bytes);
 
         loop {
             let current_min = self.min_timestamp.load(Ordering::Relaxed);

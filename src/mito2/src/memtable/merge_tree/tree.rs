@@ -27,6 +27,7 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
+use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::partition::{
@@ -49,11 +50,17 @@ pub struct MergeTree {
     partitions: RwLock<BTreeMap<PartitionKey, PartitionRef>>,
     /// Whether the tree has multiple partitions.
     is_partitioned: bool,
+    /// Manager to report size of the tree.
+    write_buffer_manager: Option<WriteBufferManagerRef>,
 }
 
 impl MergeTree {
     /// Creates a new merge tree.
-    pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> MergeTree {
+    pub fn new(
+        metadata: RegionMetadataRef,
+        config: &MergeTreeConfig,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+    ) -> MergeTree {
         let row_codec = McmpRowCodec::new(
             metadata
                 .primary_key_columns()
@@ -68,6 +75,7 @@ impl MergeTree {
             row_codec: Arc::new(row_codec),
             partitions: Default::default(),
             is_partitioned,
+            write_buffer_manager,
         }
     }
 
@@ -183,7 +191,7 @@ impl MergeTree {
             || self.metadata.column_metadatas != metadata.column_metadatas
         {
             // The schema has changed, we can't reuse the tree.
-            return MergeTree::new(metadata, &self.config);
+            return MergeTree::new(metadata, &self.config, self.write_buffer_manager.clone());
         }
 
         let mut forked = BTreeMap::new();
@@ -194,7 +202,7 @@ impl MergeTree {
             }
 
             // Only fork partitions that have data.
-            let forked_part = part.fork(&metadata, &self.config);
+            let forked_part = part.fork(&metadata, &self.config, self.write_buffer_manager.clone());
             forked.insert(*part_key, Arc::new(forked_part));
         }
 
@@ -204,16 +212,13 @@ impl MergeTree {
             row_codec: self.row_codec.clone(),
             partitions: RwLock::new(forked),
             is_partitioned: self.is_partitioned,
+            write_buffer_manager: self.write_buffer_manager.clone(),
         }
     }
 
-    /// Returns the memory size shared by forked trees.
-    pub fn shared_memory_size(&self) -> usize {
-        let partitions = self.partitions.read().unwrap();
-        partitions
-            .values()
-            .map(|part| part.shared_memory_size())
-            .sum()
+    /// Returns the write buffer manager.
+    pub(crate) fn write_buffer_manager(&self) -> Option<WriteBufferManagerRef> {
+        self.write_buffer_manager.clone()
     }
 
     fn write_with_key(
@@ -239,7 +244,13 @@ impl MergeTree {
         let mut partitions = self.partitions.write().unwrap();
         partitions
             .entry(partition_key)
-            .or_insert_with(|| Arc::new(Partition::new(self.metadata.clone(), &self.config)))
+            .or_insert_with(|| {
+                Arc::new(Partition::new(
+                    self.metadata.clone(),
+                    &self.config,
+                    self.write_buffer_manager.clone(),
+                ))
+            })
             .clone()
     }
 
