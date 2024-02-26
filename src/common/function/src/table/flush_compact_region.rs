@@ -35,11 +35,7 @@ use crate::helper::cast_u64;
 macro_rules! define_region_function {
     ($name: expr, $display_name_str: expr, $display_name: ident) => {
         /// A function to $display_name
-        #[admin_fn(
-                                                            name = $name,
-                                                            display_name = $display_name_str,
-                                                            sig_fn = "signature",
-                                                            ret = "uint64")]
+        #[admin_fn(name = $name, display_name = $display_name_str, sig_fn = "signature", ret = "uint64")]
         pub(crate) async fn $display_name(
             table_mutation_handler: &TableMutationHandlerRef,
             query_ctx: &QueryContextRef,
