@@ -25,7 +25,7 @@ use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rskafka::BackoffConfig;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net;
 
 use crate::error::{
@@ -110,21 +110,17 @@ impl TopicManager {
     }
 
     async fn resolve_broker_endpoint(broker_endpoint: &str) -> Result<String> {
-        let ips: Vec<_> = net::lookup_host(broker_endpoint)
+        let ip = net::lookup_host(broker_endpoint)
             .await
             .with_context(|_| ResolveKafkaEndpointSnafu {
                 broker_endpoint: broker_endpoint.to_string(),
             })?
             // Not sure if we should filter out ipv6 addresses
-            .filter(|addr| addr.is_ipv4())
-            .collect();
-        if ips.is_empty() {
-            return EndpointIpNotFoundSnafu {
+            .find(|addr| addr.is_ipv4())
+            .with_context(|| EndpointIpNotFoundSnafu {
                 broker_endpoint: broker_endpoint.to_string(),
-            }
-            .fail();
-        }
-        Ok(ips[0].to_string())
+            })?;
+        Ok(ip.to_string())
     }
     /// Tries to create topics specified by indexes in `to_be_created`.
     async fn try_create_topics(&self, topics: &[String], to_be_created: &[usize]) -> Result<()> {

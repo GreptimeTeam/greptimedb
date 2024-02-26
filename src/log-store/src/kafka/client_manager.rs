@@ -21,7 +21,7 @@ use rskafka::client::producer::aggregator::RecordAggregator;
 use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
 use rskafka::client::{Client as RsKafkaClient, ClientBuilder};
 use rskafka::BackoffConfig;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::net;
 use tokio::sync::RwLock;
 
@@ -103,21 +103,17 @@ impl ClientManager {
         })
     }
     async fn resolve_broker_endpoint(broker_endpoint: &str) -> Result<String> {
-        let ips: Vec<_> = net::lookup_host(broker_endpoint)
+        let ip = net::lookup_host(broker_endpoint)
             .await
             .with_context(|_| ResolveKafkaEndpointSnafu {
                 broker_endpoint: broker_endpoint.to_string(),
             })?
             // Not sure if we should filter out ipv6 addresses
-            .filter(|addr| addr.is_ipv4())
-            .collect();
-        if ips.is_empty() {
-            return EndpointIpNotFoundSnafu {
+            .find(|addr| addr.is_ipv4())
+            .with_context(|| EndpointIpNotFoundSnafu {
                 broker_endpoint: broker_endpoint.to_string(),
-            }
-            .fail();
-        }
-        Ok(ips[0].to_string())
+            })?;
+        Ok(ip.to_string())
     }
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will
