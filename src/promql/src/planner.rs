@@ -530,8 +530,18 @@ impl PromPlanner {
                         .unwrap()
                         .build()
                         .context(DataFusionPlanningSnafu)?,
+                    "ANALYZE VERBOSE" => LogicalPlanBuilder::from(plan)
+                        .explain(true, true)
+                        .unwrap()
+                        .build()
+                        .context(DataFusionPlanningSnafu)?,
                     "EXPLAIN" => LogicalPlanBuilder::from(plan)
                         .explain(false, false)
+                        .unwrap()
+                        .build()
+                        .context(DataFusionPlanningSnafu)?,
+                    "EXPLAIN VERBOSE" => LogicalPlanBuilder::from(plan)
+                        .explain(true, false)
                         .unwrap()
                         .build()
                         .context(DataFusionPlanningSnafu)?,
@@ -545,14 +555,14 @@ impl PromPlanner {
     }
 
     /// Extract metric name from `__name__` matcher and set it into [PromPlannerContext].
-    /// Returns a new [Matchers] that doesn't contains metric name matcher.
+    /// Returns a new [Matchers] that doesn't contain metric name matcher.
     ///
-    /// Each call to this function means new selector is started. Thus the context will be reset
+    /// Each call to this function means new selector is started. Thus, the context will be reset
     /// at first.
     ///
     /// Name rule:
-    /// - if `name` is some, then the matchers MUST NOT contains `__name__` matcher.
-    /// - if `name` is none, then the matchers MAY contains NONE OR MULTIPLE `__name__` matchers.
+    /// - if `name` is some, then the matchers MUST NOT contain `__name__` matcher.
+    /// - if `name` is none, then the matchers MAY contain NONE OR MULTIPLE `__name__` matchers.
     fn preprocess_label_matchers(
         &mut self,
         label_matchers: &Matchers,
