@@ -67,6 +67,15 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to send request to region"))]
+    RequestRegion {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Unsupported region request"))]
+    UnsupportedRegionRequest { location: Location },
+
     #[snafu(display("Failed to parse SQL"))]
     ParseSql {
         location: Location,
@@ -538,6 +547,7 @@ impl ErrorExt for Error {
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
             | Error::SchemaIncompatible { .. }
+            | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
@@ -565,6 +575,7 @@ impl ErrorExt for Error {
             | Error::IntoVectors { source, .. } => source.status_code(),
 
             Error::RequestInserts { source, .. } => source.status_code(),
+            Error::RequestRegion { source, .. } => source.status_code(),
             Error::RequestDeletes { source, .. } => source.status_code(),
 
             Error::ColumnDataType { source, .. } | Error::InvalidColumnDef { source, .. } => {

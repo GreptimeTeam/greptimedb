@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::region::region_request::Body as RegionRequestBody;
@@ -21,6 +20,7 @@ use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
 use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
 use common_meta::peer::Peer;
+use common_telemetry::logging::{error, info};
 use common_telemetry::tracing_context::TracingContext;
 use futures_util::future;
 use partition::manager::{PartitionInfo, PartitionRuleManagerRef};
@@ -31,7 +31,7 @@ use table::requests::{CompactTableRequest, FlushTableRequest};
 
 use crate::error::{
     CatalogSnafu, FindRegionLeaderSnafu, FindTablePartitionRuleSnafu, JoinTaskSnafu,
-    RequestInsertsSnafu, Result, TableNotFoundSnafu,
+    RequestRegionSnafu, Result, TableNotFoundSnafu, UnsupportedRegionRequestSnafu,
 };
 use crate::region_req_factory::RegionRequestFactory;
 
@@ -80,6 +80,8 @@ impl Requester {
             })
             .collect();
 
+        info!("Handle table manual flush request: {:?}", request);
+
         self.do_request(
             requests,
             Some(build_db_string(&request.catalog_name, &request.schema_name)),
@@ -111,6 +113,8 @@ impl Requester {
             })
             .collect();
 
+        info!("Handle table manual compaction request: {:?}", request);
+
         self.do_request(
             requests,
             Some(build_db_string(&request.catalog_name, &request.schema_name)),
@@ -129,6 +133,7 @@ impl Requester {
             region_id: region_id.into(),
         });
 
+        info!("Handle region manual flush request: {region_id}");
         self.do_request(vec![request], None, &ctx).await
     }
 
@@ -142,6 +147,7 @@ impl Requester {
             region_id: region_id.into(),
         });
 
+        info!("Handle region manual compaction request: {region_id}");
         self.do_request(vec![request], None, &ctx).await
     }
 }
@@ -158,22 +164,21 @@ impl Requester {
             dbname: db_string.unwrap_or_else(|| ctx.get_db_string()),
         });
 
-        let tasks = self
-            .group_requests_by_peer(requests)
-            .await?
-            .into_iter()
-            .map(|(peer, body)| {
-                let request = request_factory.build_request(body);
-                let datanode_manager = self.datanode_manager.clone();
-                common_runtime::spawn_write(async move {
-                    datanode_manager
-                        .datanode(&peer)
-                        .await
-                        .handle(request)
-                        .await
-                        .context(RequestInsertsSnafu)
-                })
-            });
+        let tasks = requests.into_iter().map(|req_body| {
+            let request = request_factory.build_request(req_body.clone());
+            let partition_manager = self.partition_manager.clone();
+            let datanode_manager = self.datanode_manager.clone();
+            common_runtime::spawn_write(async move {
+                let peer =
+                    Self::find_region_leader_by_request(partition_manager, &req_body).await?;
+                datanode_manager
+                    .datanode(&peer)
+                    .await
+                    .handle(request)
+                    .await
+                    .context(RequestRegionSnafu)
+            })
+        });
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
         let affected_rows = results.into_iter().sum::<Result<AffectedRows>>()?;
@@ -181,29 +186,23 @@ impl Requester {
         Ok(affected_rows)
     }
 
-    async fn group_requests_by_peer(
-        &self,
-        requests: Vec<RegionRequestBody>,
-    ) -> Result<HashMap<Peer, RegionRequestBody>> {
-        let mut inserts: HashMap<Peer, RegionRequestBody> = HashMap::new();
+    async fn find_region_leader_by_request(
+        partition_manager: PartitionRuleManagerRef,
+        req: &RegionRequestBody,
+    ) -> Result<Peer> {
+        let region_id = match req {
+            RegionRequestBody::Flush(req) => req.region_id,
+            RegionRequestBody::Compact(req) => req.region_id,
+            _ => {
+                error!("Unsupported region request: {:?}", req);
+                return UnsupportedRegionRequestSnafu {}.fail();
+            }
+        };
 
-        for req in requests {
-            let region_id = match &req {
-                RegionRequestBody::Flush(req) => req.region_id,
-                RegionRequestBody::Compact(req) => req.region_id,
-                _ => todo!(),
-            };
-
-            let peer = self
-                .partition_manager
-                .find_region_leader(region_id.into())
-                .await
-                .context(FindRegionLeaderSnafu)?;
-
-            inserts.insert(peer, req);
-        }
-
-        Ok(inserts)
+        partition_manager
+            .find_region_leader(region_id.into())
+            .await
+            .context(FindRegionLeaderSnafu)
     }
 
     async fn get_table_partitions(
