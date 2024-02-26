@@ -115,17 +115,14 @@ impl TopicManager {
             .with_context(|_| ResolveKafkaEndpointSnafu {
                 broker_endpoint: broker_endpoint.to_string(),
             })?
-            .into_iter()
             // Not sure if we should filter out ipv6 addresses
             .filter(|addr| addr.is_ipv4())
             .collect();
         if ips.is_empty() {
-            return (|| {
-                EndpointIpNotFoundSnafu {
-                    broker_endpoint: broker_endpoint.to_string(),
-                }
-                .fail()
-            })();
+            return EndpointIpNotFoundSnafu {
+                broker_endpoint: broker_endpoint.to_string(),
+            }
+            .fail();
         }
         Ok(ips[0].to_string())
     }
