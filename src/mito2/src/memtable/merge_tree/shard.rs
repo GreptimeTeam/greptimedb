@@ -99,6 +99,11 @@ impl Shard {
             dedup: self.dedup,
         }
     }
+
+    /// Returns true if the shard is empty (No data).
+    pub fn is_empty(&self) -> bool {
+        self.data_parts.is_empty()
+    }
 }
 
 /// Source that returns [DataBatch].
@@ -399,6 +404,7 @@ mod tests {
         let metadata = metadata_for_test();
         let input = input_with_key(&metadata);
         let mut shard = new_shard_with_dict(8, metadata, &input);
+        assert!(shard.is_empty());
         for key_values in &input {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
@@ -406,5 +412,6 @@ mod tests {
                 shard.write_with_pk_id(pk_id, kv);
             }
         }
+        assert!(!shard.is_empty());
     }
 }

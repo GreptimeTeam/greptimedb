@@ -245,27 +245,33 @@ impl MergeTree {
 
     fn prune_partitions(&self, filters: &[SimpleFilterEvaluator]) -> VecDeque<PartitionRef> {
         let partitions = self.partitions.read().unwrap();
-        if self.is_partitioned {
-            // Prune partition keys.
-            for filter in filters {
-                // Only the first filter takes effect.
-                if Partition::is_partition_column(filter.column_name()) {
-                    let mut pruned = VecDeque::new();
-                    for (key, partition) in partitions.iter() {
-                        if filter
-                            .evaluate_scalar(&ScalarValue::UInt32(Some(*key)))
-                            .unwrap_or(true)
-                        {
-                            pruned.push_back(partition.clone());
-                        }
-                    }
+        if !self.is_partitioned {
+            return partitions.values().cloned().collect();
+        }
 
-                    return pruned;
+        let mut pruned = VecDeque::new();
+        // Prune partition keys.
+        for (key, partition) in partitions.iter() {
+            let mut is_needed = true;
+            for filter in filters {
+                if !Partition::is_partition_column(filter.column_name()) {
+                    continue;
                 }
+
+                if !filter
+                    .evaluate_scalar(&ScalarValue::UInt32(Some(*key)))
+                    .unwrap_or(true)
+                {
+                    is_needed = false;
+                }
+            }
+
+            if is_needed {
+                pruned.push_back(partition.clone());
             }
         }
 
-        partitions.values().cloned().collect()
+        pruned
     }
 }
 
