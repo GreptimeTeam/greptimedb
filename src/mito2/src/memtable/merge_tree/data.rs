@@ -743,6 +743,12 @@ impl DataPart {
             DataPart::Parquet(data_bytes) => DataPartReader::new(data_bytes.data.clone(), None),
         }
     }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            DataPart::Parquet(p) => p.data.is_empty(),
+        }
+    }
 }
 
 pub struct DataPartReader {
@@ -878,6 +884,10 @@ impl DataParts {
         }
         let merger = Merger::try_new(nodes)?;
         Ok(DataPartsReader { merger })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.active.is_empty() && self.frozen.iter().all(|part| part.is_empty())
     }
 }
 

@@ -108,11 +108,15 @@ impl Partition {
         let nodes = {
             let inner = self.inner.read().unwrap();
             let mut nodes = Vec::with_capacity(inner.shards.len() + 1);
-            let bulder_reader = inner.shard_builder.read(&mut context.pk_weights)?;
-            nodes.push(ShardNode::new(ShardSource::Builder(bulder_reader)));
+            if !inner.shard_builder.is_empty() {
+                let bulder_reader = inner.shard_builder.read(&mut context.pk_weights)?;
+                nodes.push(ShardNode::new(ShardSource::Builder(bulder_reader)));
+            }
             for shard in &inner.shards {
-                let shard_reader = shard.read()?;
-                nodes.push(ShardNode::new(ShardSource::Shard(shard_reader)));
+                if !shard.is_empty() {
+                    let shard_reader = shard.read()?;
+                    nodes.push(ShardNode::new(ShardSource::Shard(shard_reader)));
+                }
             }
             nodes
         };
