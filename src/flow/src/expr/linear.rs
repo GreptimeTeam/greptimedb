@@ -16,9 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
+use snafu::{ensure, OptionExt};
 
 use crate::expr::error::EvalError;
-use crate::expr::{Id, LocalId, ScalarExpr};
+use crate::expr::{Id, InvalidArgumentSnafu, LocalId, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};
 
 /// A compound operator that can be applied row-by-row.
@@ -79,26 +80,41 @@ impl MapFilterProject {
     /// followed by the other.
     /// Note that the arguments are in the opposite order
     /// from how function composition is usually written in mathematics.
-    pub fn compose(before: Self, after: Self) -> Self {
+    pub fn compose(before: Self, after: Self) -> Result<Self, EvalError> {
         let (m, f, p) = after.into_map_filter_project();
-        before.map(m).filter(f).project(p)
+        before.map(m)?.filter(f)?.project(p)
     }
 
     /// True if the operator describes the identity transformation.
     pub fn is_identity(&self) -> bool {
         self.expressions.is_empty()
             && self.predicates.is_empty()
+            // identity if projection is the identity permutation
             && self.projection.len() == self.input_arity
             && self.projection.iter().enumerate().all(|(i, p)| i == *p)
     }
 
     /// Retain only the indicated columns in the presented order.
-    pub fn project<I>(mut self, columns: I) -> Self
+    pub fn project<I>(mut self, columns: I) -> Result<Self, EvalError>
     where
         I: IntoIterator<Item = usize> + std::fmt::Debug,
     {
-        self.projection = columns.into_iter().map(|c| self.projection[c]).collect();
-        self
+        //
+        self.projection = columns
+            .into_iter()
+            .map(|c| self.projection.get(c).cloned().ok_or(c))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|c| {
+                InvalidArgumentSnafu {
+                    reason: format!(
+                        "column index {} out of range, expected at most {} columns",
+                        c,
+                        self.projection.len()
+                    ),
+                }
+                .build()
+            })?;
+        Ok(self)
     }
 
     /// Retain only rows satisfying these predicates.
@@ -106,7 +122,7 @@ impl MapFilterProject {
     /// This method introduces predicates as eagerly as they can be evaluated,
     /// which may not be desired for predicates that may cause exceptions.
     /// If fine manipulation is required, the predicates can be added manually.
-    pub fn filter<I>(mut self, predicates: I) -> Self
+    pub fn filter<I>(mut self, predicates: I) -> Result<Self, EvalError>
     where
         I: IntoIterator<Item = ScalarExpr>,
     {
@@ -115,15 +131,24 @@ impl MapFilterProject {
             predicate.permute(&self.projection[..]);
 
             // Validate column references.
-            assert!(predicate
-                .get_all_ref_columns()
-                .into_iter()
-                .all(|c| c < self.input_arity + self.expressions.len()));
+            let referred_columns = predicate.get_all_ref_columns();
+            for c in referred_columns.iter() {
+                // current row len include input columns and previous number of expressions
+                let cur_row_len = self.input_arity + self.expressions.len();
+                ensure!(
+                    *c < cur_row_len,
+                    InvalidArgumentSnafu {
+                        reason: format!(
+                            "column index {} out of range, expected at most {} columns",
+                            c, cur_row_len
+                        )
+                    }
+                );
+            }
 
             // Insert predicate as eagerly as it can be evaluated:
             // just after the largest column in its support is formed.
-            let max_support = predicate
-                .get_all_ref_columns()
+            let max_support = referred_columns
                 .into_iter()
                 .max()
                 .map(|c| c + 1)
@@ -133,11 +158,11 @@ impl MapFilterProject {
         // Stable sort predicates by position at which they take effect.
         self.predicates
             .sort_by_key(|(position, predicate)| *position);
-        self
+        Ok(self)
     }
 
     /// Append the result of evaluating expressions to each row.
-    pub fn map<I>(mut self, expressions: I) -> Self
+    pub fn map<I>(mut self, expressions: I) -> Result<Self, EvalError>
     where
         I: IntoIterator<Item = ScalarExpr>,
     {
@@ -146,18 +171,28 @@ impl MapFilterProject {
             expression.permute(&self.projection[..]);
 
             // Validate column references.
-            assert!(expression
-                .get_all_ref_columns()
-                .into_iter()
-                .all(|c| c < self.input_arity + self.expressions.len()));
+            for c in expression.get_all_ref_columns().into_iter() {
+                // current row len include input columns and previous number of expressions
+                let current_row_len = self.input_arity + self.expressions.len();
+                ensure!(
+                    c < current_row_len,
+                    InvalidArgumentSnafu {
+                        reason: format!(
+                            "column index {} out of range, expected at most {} columns",
+                            c, current_row_len
+                        )
+                    }
+                );
+            }
 
             // Introduce expression and produce as output.
             self.expressions.push(expression);
-            self.projection
-                .push(self.input_arity + self.expressions.len() - 1);
+            // Expression by default is projected to output.
+            let cur_expr_col_num = self.input_arity + self.expressions.len() - 1;
+            self.projection.push(cur_expr_col_num);
         }
 
-        self
+        Ok(self)
     }
 
     /// Like [`MapFilterProject::as_map_filter_project`], but consumes `self` rather than cloning.
@@ -199,15 +234,21 @@ impl MapFilterProject {
     /// `self.permute` this instance.
     pub fn demand(&self) -> BTreeSet<usize> {
         let mut demanded = BTreeSet::new();
+        // first, get all columns referenced by predicates
         for (_index, pred) in self.predicates.iter() {
             demanded.extend(pred.get_all_ref_columns());
         }
+        // then, get columns referenced by projection which is direct output
         demanded.extend(self.projection.iter().cloned());
+
+        // check every expressions, if a expression is contained in demanded, then all columns it referenced should be added to demanded
         for index in (0..self.expressions.len()).rev() {
             if demanded.contains(&(self.input_arity + index)) {
                 demanded.extend(self.expressions[index].get_all_ref_columns());
             }
         }
+
+        // only keep demanded columns that are in input
         demanded.retain(|col| col < &self.input_arity);
         demanded
     }
@@ -221,7 +262,12 @@ impl MapFilterProject {
     /// The supplied `shuffle` may not list columns that are not "demanded" by the
     /// instance, and so we should ensure that `self` is optimized to not reference
     /// columns that are not demanded.
-    pub fn permute(&mut self, mut shuffle: BTreeMap<usize, usize>, new_input_arity: usize) {
+    pub fn permute(
+        &mut self,
+        mut shuffle: BTreeMap<usize, usize>,
+        new_input_arity: usize,
+    ) -> Result<(), EvalError> {
+        // decompose self into map, filter, project for ease of manipulation
         let (mut map, mut filter, mut project) = self.as_map_filter_project();
         for index in 0..map.len() {
             // Intermediate columns are just shifted.
@@ -233,14 +279,24 @@ impl MapFilterProject {
         for pred in filter.iter_mut() {
             pred.permute_map(&shuffle);
         }
+        let new_row_len = new_input_arity + map.len();
         for proj in project.iter_mut() {
-            assert!(shuffle[proj] < new_input_arity + map.len());
+            ensure!(
+                shuffle[proj] < new_row_len,
+                InvalidArgumentSnafu {
+                    reason: format!(
+                        "shuffled column index {} out of range, expected at most {} columns",
+                        shuffle[proj], new_row_len
+                    )
+                }
+            );
             *proj = shuffle[proj];
         }
         *self = Self::new(new_input_arity)
-            .map(map)
-            .filter(filter)
-            .project(project)
+            .map(map)?
+            .filter(filter)?
+            .project(project)?;
+        Ok(())
     }
 }
 
@@ -251,6 +307,7 @@ pub struct SafeMfpPlan {
 }
 
 impl SafeMfpPlan {
+    /// See [`MapFilterProject::permute`].
     pub fn permute(&mut self, map: BTreeMap<usize, usize>, new_arity: usize) {
         self.mfp.permute(map, new_arity);
     }
@@ -320,6 +377,7 @@ impl SafeMfpPlan {
                 return Ok(false);
             }
         }
+        // while evaluated expressions are less than total expressions, keep evaluating
         while expression < self.mfp.expressions.len() {
             values.push(self.mfp.expressions[expression].eval(&values[..])?);
             expression += 1;
@@ -493,7 +551,7 @@ mod test {
     use itertools::Itertools;
 
     use super::*;
-    use crate::expr::UnmaterializableFunc;
+    use crate::expr::{BinaryFunc, UnmaterializableFunc};
     #[test]
     fn test_mfp_with_time() {
         use crate::expr::func::BinaryFunc;
@@ -521,7 +579,9 @@ mod test {
                 // col(0) + 2 > now()
                 gt_now_minus_two,
             ])
-            .project(vec![0]);
+            .unwrap()
+            .project(vec![0])
+            .unwrap();
 
         let mfp = MfpPlan::create_from(mfp).unwrap();
         let expected = vec![
@@ -559,15 +619,20 @@ mod test {
                 ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
                 ScalarExpr::Column(1).call_binary(ScalarExpr::Column(2), BinaryFunc::Lt),
             ])
-            .project(vec![3, 4]);
+            .unwrap()
+            .project(vec![3, 4])
+            .unwrap();
         assert!(!mfp.is_identity());
-        let mfp = MapFilterProject::compose(mfp, MapFilterProject::new(2));
+        let mfp = MapFilterProject::compose(mfp, MapFilterProject::new(2)).unwrap();
         {
             let mfp_0 = mfp.as_map_filter_project();
             let same = MapFilterProject::new(3)
                 .map(mfp_0.0)
+                .unwrap()
                 .filter(mfp_0.1)
-                .project(mfp_0.2);
+                .unwrap()
+                .project(mfp_0.2)
+                .unwrap();
             assert_eq!(mfp, same);
         }
         assert_eq!(mfp.demand().len(), 3);
@@ -580,7 +645,9 @@ mod test {
                     ScalarExpr::Column(2).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
                     ScalarExpr::Column(1).call_binary(ScalarExpr::Column(0), BinaryFunc::Lt),
                 ])
+                .unwrap()
                 .project(vec![3, 4])
+                .unwrap()
         );
         let safe_mfp = SafeMfpPlan { mfp };
         let mut values = vec![Value::from(4), Value::from(2), Value::from(3)];
@@ -589,5 +656,47 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(ret, Row::pack(vec![Value::from(false), Value::from(true)]));
+    }
+
+    #[test]
+    fn manipulation_mfp() {
+        // give a input of 4 columns
+        let mfp = MapFilterProject::new(4);
+        // append a expression to the mfp'input row that get the sum of the first 3 columns
+        let mfp = mfp
+            .map(vec![ScalarExpr::Column(0)
+                .call_binary(ScalarExpr::Column(1), BinaryFunc::AddInt32)
+                .call_binary(ScalarExpr::Column(2), BinaryFunc::AddInt32)])
+            .unwrap();
+        // only retain sum result
+        let mfp = mfp.project(vec![4]).unwrap();
+        // accept only if if the sum is greater than 10
+        let mfp = mfp
+            .filter(vec![ScalarExpr::Column(0).call_binary(
+                ScalarExpr::Literal(Value::from(10i32), ConcreteDataType::int32_datatype()),
+                BinaryFunc::Gt,
+            )])
+            .unwrap();
+        let mut input1 = vec![
+            Value::from(4),
+            Value::from(2),
+            Value::from(3),
+            Value::from("abc"),
+        ];
+        let safe_mfp = SafeMfpPlan { mfp };
+        let ret = safe_mfp
+            .evaluate_into(&mut input1, &mut Row::empty())
+            .unwrap();
+        assert_eq!(ret, None);
+        let mut input2 = vec![
+            Value::from(5),
+            Value::from(2),
+            Value::from(4),
+            Value::from("abc"),
+        ];
+        let ret = safe_mfp
+            .evaluate_into(&mut input2, &mut Row::empty())
+            .unwrap();
+        assert_eq!(ret, Some(Row::pack(vec![Value::from(11)])));
     }
 }
