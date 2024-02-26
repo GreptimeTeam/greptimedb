@@ -37,11 +37,7 @@ use crate::handlers::TableMutationHandlerRef;
 macro_rules! define_table_function {
     ($name: expr, $display_name_str: expr, $display_name: ident, $func: ident, $request: ident) => {
         /// A function to $func table, such as `$display_name(table_name)`.
-        #[admin_fn(
-                                                            name = $name,
-                                                            display_name = $display_name_str,
-                                                            sig_fn = "signature",
-                                                            ret = "uint64")]
+        #[admin_fn(name = $name, display_name = $display_name_str, sig_fn = "signature", ret = "uint64")]
         pub(crate) async fn $display_name(
             table_mutation_handler: &TableMutationHandlerRef,
             query_ctx: &QueryContextRef,
