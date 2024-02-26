@@ -215,11 +215,7 @@ impl Partition {
 ///
 /// It can merge rows from multiple shards.
 pub struct PartitionReader {
-    metadata: RegionMetadataRef,
-    row_codec: Arc<McmpRowCodec>,
-    projection: HashSet<ColumnId>,
-    filters: Vec<SimpleFilterEvaluator>,
-    pk_weights: Vec<u16>,
+    context: ReadPartitionContext,
     source: BoxedDataBatchSource,
     last_yield_pk_id: Option<PkId>,
 }
@@ -227,11 +223,7 @@ pub struct PartitionReader {
 impl PartitionReader {
     fn new(context: ReadPartitionContext, source: BoxedDataBatchSource) -> Result<Self> {
         let mut reader = Self {
-            metadata: context.metadata,
-            row_codec: context.row_codec,
-            projection: context.projection,
-            filters: context.filters,
-            pk_weights: context.pk_weights,
+            context,
             source,
             last_yield_pk_id: None,
         };
@@ -263,25 +255,19 @@ impl PartitionReader {
     pub fn convert_current_batch(&self) -> Result<Batch> {
         let data_batch = self.source.current_data_batch();
         data_batch_to_batch(
-            &self.metadata,
-            &self.projection,
+            &self.context.metadata,
+            &self.context.projection,
             self.source.current_key(),
             data_batch,
         )
     }
 
     pub(crate) fn into_context(self) -> ReadPartitionContext {
-        ReadPartitionContext {
-            metadata: self.metadata,
-            row_codec: self.row_codec,
-            projection: self.projection,
-            filters: self.filters,
-            pk_weights: self.pk_weights,
-        }
+        self.context
     }
 
     fn prune_batch_by_key(&mut self) -> Result<()> {
-        if self.metadata.primary_key.is_empty() {
+        if self.context.metadata.primary_key.is_empty() || !self.context.need_prune_key {
             // Nothing to prune.
             return Ok(());
         }
@@ -297,7 +283,12 @@ impl PartitionReader {
             }
             let key = self.source.current_key().unwrap();
             // Prune batch by primary key.
-            if prune_primary_key(&self.metadata, &self.filters, &self.row_codec, key) {
+            if prune_primary_key(
+                &self.context.metadata,
+                &self.context.filters,
+                &self.context.row_codec,
+                key,
+            ) {
                 // We need this key.
                 self.last_yield_pk_id = Some(pk_id);
                 break;
@@ -338,6 +329,9 @@ fn prune_primary_key(
     // evaluate filters against primary key values
     let mut result = true;
     for filter in filters {
+        if Partition::is_partition_column(filter.column_name()) {
+            continue;
+        }
         let Some(column) = metadata.column_by_name(filter.column_name()) else {
             continue;
         };
@@ -366,6 +360,7 @@ pub(crate) struct ReadPartitionContext {
     filters: Vec<SimpleFilterEvaluator>,
     /// Buffer to store pk weights.
     pk_weights: Vec<u16>,
+    need_prune_key: bool,
 }
 
 impl ReadPartitionContext {
@@ -375,13 +370,36 @@ impl ReadPartitionContext {
         projection: HashSet<ColumnId>,
         filters: Vec<SimpleFilterEvaluator>,
     ) -> ReadPartitionContext {
+        let need_prune_key = Self::need_prune_key(&metadata, &filters);
         ReadPartitionContext {
             metadata,
             row_codec,
             projection,
             filters,
             pk_weights: Vec::new(),
+            need_prune_key,
         }
+    }
+
+    /// Does filters contains predicate on primary key columns after pruning the
+    /// partition column.
+    fn need_prune_key(metadata: &RegionMetadataRef, filters: &[SimpleFilterEvaluator]) -> bool {
+        for filter in filters {
+            // We already pruned partitions before so we skip the partition column.
+            if Partition::is_partition_column(filter.column_name()) {
+                continue;
+            }
+            let Some(column) = metadata.column_by_name(filter.column_name()) else {
+                continue;
+            };
+            if column.semantic_type != SemanticType::Tag {
+                continue;
+            }
+
+            return true;
+        }
+
+        false
     }
 }
 
