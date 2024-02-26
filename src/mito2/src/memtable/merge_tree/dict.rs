@@ -130,6 +130,8 @@ impl KeyDictBuilder {
             *pk_index = i as PkIndex;
         }
         self.num_keys = 0;
+        // Done allocating for current tracker.
+        self.tracker.done_allocating();
 
         Some(KeyDict {
             pk_to_index,
