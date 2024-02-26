@@ -476,9 +476,64 @@ impl TableRouteManager {
     }
 }
 
+/// Low-level operations of [TableRouteValue].
+pub struct TableRouteStorage {
+    kv_backend: KvBackendRef,
+}
+
+impl TableRouteStorage {
+    pub fn new(kv_backend: KvBackendRef) -> Self {
+        Self { kv_backend }
+    }
+
+    /// Returns the [`TableRouteValue`] wrapped with [`DeserializedValueWithBytes`].
+    pub async fn get_raw(
+        &self,
+        table_id: TableId,
+    ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>> {
+        let key = TableRouteKey::new(table_id);
+        self.kv_backend
+            .get(&key.as_raw_key())
+            .await?
+            .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
+            .transpose()
+    }
+
+    /// Returns batch of [`TableRouteValue`] that respects the order of `table_ids`.
+    pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
+        let keys = table_ids
+            .iter()
+            .map(|id| TableRouteKey::new(*id).as_raw_key())
+            .collect::<Vec<_>>();
+        let resp = self
+            .kv_backend
+            .batch_get(BatchGetRequest { keys: keys.clone() })
+            .await?;
+
+        let kvs = resp
+            .kvs
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<HashMap<_, _>>();
+        keys.into_iter()
+            .map(|key| {
+                if let Some(value) = kvs.get(&key) {
+                    Ok(Some(TableRouteValue::try_from_raw_value(value)?))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::kv_backend::TxnService;
 
     #[test]
     fn test_table_route_compatibility() {
@@ -490,5 +545,78 @@ mod tests {
             new_raw_v,
             r#"Physical(PhysicalTableRouteValue { region_routes: [RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }, RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }], version: 0 })"#
         );
+    }
+
+    #[tokio::test]
+    async fn test_table_route_storage_get_raw_empty() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let table_route_storage = TableRouteStorage::new(kv);
+        let table_route = table_route_storage.get_raw(1024).await.unwrap();
+        assert!(table_route.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_table_route_storage_get_raw() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let table_route_storage = TableRouteStorage::new(kv.clone());
+        let table_route_manager = TableRouteManager::new(kv.clone());
+        let table_route_value = TableRouteValue::Logical(LogicalTableRouteValue {
+            physical_table_id: 1023,
+            region_ids: vec![RegionId::new(1023, 1)],
+        });
+        let (txn, _) = table_route_manager
+            .build_create_txn(1024, &table_route_value)
+            .unwrap();
+        let r = kv.txn(txn).await.unwrap();
+        assert!(r.succeeded);
+        let table_route = table_route_storage.get_raw(1024).await.unwrap();
+        assert!(table_route.is_some());
+        let got = table_route.unwrap().inner;
+        assert_eq!(got, table_route_value);
+    }
+
+    #[tokio::test]
+    async fn test_table_route_batch_get() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let table_route_storage = TableRouteStorage::new(kv.clone());
+        let routes = table_route_storage
+            .batch_get(&[1023, 1024, 1025])
+            .await
+            .unwrap();
+
+        assert!(routes.iter().all(Option::is_none));
+        let table_route_manager = TableRouteManager::new(kv.clone());
+        let routes = [
+            (
+                1024,
+                TableRouteValue::Logical(LogicalTableRouteValue {
+                    physical_table_id: 1023,
+                    region_ids: vec![RegionId::new(1023, 1)],
+                }),
+            ),
+            (
+                1025,
+                TableRouteValue::Logical(LogicalTableRouteValue {
+                    physical_table_id: 1023,
+                    region_ids: vec![RegionId::new(1023, 2)],
+                }),
+            ),
+        ];
+        for (table_id, route) in &routes {
+            let (txn, _) = table_route_manager
+                .build_create_txn(*table_id, route)
+                .unwrap();
+            let r = kv.txn(txn).await.unwrap();
+            assert!(r.succeeded);
+        }
+
+        let results = table_route_storage
+            .batch_get(&[9999, 1025, 8888, 1024])
+            .await
+            .unwrap();
+        assert!(results[0].is_none());
+        assert_eq!(results[1].as_ref().unwrap(), &routes[1].1);
+        assert!(results[2].is_none());
+        assert_eq!(results[3].as_ref().unwrap(), &routes[0].1);
     }
 }
