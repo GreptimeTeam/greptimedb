@@ -136,10 +136,6 @@ pub struct ShardReader {
 }
 
 impl ShardReader {
-    fn shard_id(&self) -> ShardId {
-        self.shard_id
-    }
-
     fn is_valid(&self) -> bool {
         self.parts_reader.is_valid()
     }

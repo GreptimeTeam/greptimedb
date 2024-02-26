@@ -56,11 +56,6 @@ impl KeyDictBuilder {
         }
     }
 
-    /// Gets the pk index by the key.
-    pub fn get_pk_index(&self, key: &[u8]) -> Option<PkIndex> {
-        self.pk_to_index.get(key).copied()
-    }
-
     /// Returns true if the builder is full.
     pub fn is_full(&self) -> bool {
         self.num_keys >= self.capacity
@@ -97,6 +92,7 @@ impl KeyDictBuilder {
     }
 
     /// Memory size of the builder.
+    #[cfg(test)]
     pub fn memory_size(&self) -> usize {
         self.key_bytes_in_index
             + self.key_buffer.buffer_memory_size()
@@ -152,8 +148,6 @@ impl KeyDictBuilder {
 pub struct DictBuilderReader {
     blocks: Vec<DictBlock>,
     sorted_pk_indices: Vec<PkIndex>,
-    /// Current offset in the `sorted_pk_indices`.
-    offset: usize,
 }
 
 impl DictBuilderReader {
@@ -161,21 +155,23 @@ impl DictBuilderReader {
         Self {
             blocks,
             sorted_pk_indices,
-            offset: 0,
         }
     }
 
     /// Returns the number of keys.
+    #[cfg(test)]
     pub fn num_keys(&self) -> usize {
         self.sorted_pk_indices.len()
     }
 
     /// Gets the i-th pk index.
+    #[cfg(test)]
     pub fn pk_index(&self, offset: usize) -> PkIndex {
         self.sorted_pk_indices[offset]
     }
 
     /// Gets the i-th key.
+    #[cfg(test)]
     pub fn key(&self, offset: usize) -> &[u8] {
         let pk_index = self.pk_index(offset);
         self.key_by_pk_index(pk_index)
@@ -190,11 +186,6 @@ impl DictBuilderReader {
     /// Returns pk weights to sort a data part and replaces pk indices.
     pub(crate) fn pk_weights_to_sort_data(&self, pk_weights: &mut Vec<u16>) {
         compute_pk_weights(&self.sorted_pk_indices, pk_weights)
-    }
-
-    /// Returns pk indices sorted by keys.
-    pub(crate) fn sorted_pk_index(&self) -> &[PkIndex] {
-        &self.sorted_pk_indices
     }
 }
 
@@ -290,23 +281,8 @@ impl KeyBuffer {
         self.key_builder.is_empty()
     }
 
-    /// Gets the primary key by its index.
-    ///
-    /// # Panics
-    /// Panics if the index is invalid.
-    fn get_key(&self, index: PkIndex) -> &[u8] {
-        let values = self.key_builder.values_slice();
-        let offsets = self.key_builder.offsets_slice();
-        // Casting index to usize is safe.
-        let start = offsets[index as usize];
-        let end = offsets[index as usize + 1];
-
-        // We ensure no null in the builder so we don't check validity.
-        // The builder offset should be positive.
-        &values[start as usize..end as usize]
-    }
-
     /// Returns the buffer size of the builder.
+    #[cfg(test)]
     fn buffer_memory_size(&self) -> usize {
         self.key_builder.values_slice().len()
             + std::mem::size_of_val(self.key_builder.offsets_slice())
@@ -351,15 +327,12 @@ impl DictBlock {
         Self { keys }
     }
 
-    fn len(&self) -> usize {
-        self.keys.len()
-    }
-
     fn key_by_pk_index(&self, index: PkIndex) -> &[u8] {
         let pos = index % MAX_KEYS_PER_BLOCK;
         self.keys.value(pos as usize)
     }
 
+    #[cfg(test)]
     fn buffer_memory_size(&self) -> usize {
         self.keys.get_buffer_memory_size()
     }

@@ -65,10 +65,6 @@ impl DataBatchRange {
     pub(crate) fn len(&self) -> usize {
         self.end - self.start
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 /// Data part batches returns by `DataParts::read`.
@@ -87,10 +83,6 @@ impl<'a> DataBatch<'a> {
 
     pub(crate) fn range(&self) -> DataBatchRange {
         self.range
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.range.is_empty()
     }
 
     pub(crate) fn slice_record_batch(&self) -> RecordBatch {
@@ -525,12 +517,6 @@ impl DataBufferReader {
         }
     }
 
-    /// # Panics
-    /// If Current reader is exhausted.
-    pub(crate) fn current_pk_index(&self) -> PkIndex {
-        self.current_range.as_ref().unwrap().pk_index
-    }
-
     /// Advances reader to next data batch.
     pub(crate) fn next(&mut self) -> Result<()> {
         if self.offset >= self.batch.num_rows() {
@@ -751,12 +737,6 @@ pub enum DataPart {
 }
 
 impl DataPart {
-    fn is_empty(&self) -> bool {
-        match self {
-            DataPart::Parquet(p) => p.data.is_empty(),
-        }
-    }
-
     /// Reads frozen data part and yields [DataBatch]es.
     pub fn read(&self) -> Result<DataPartReader> {
         match self {
@@ -799,14 +779,6 @@ impl DataPartReader {
     /// Returns false if current reader is exhausted.
     pub(crate) fn is_valid(&self) -> bool {
         self.current_range.is_some()
-    }
-
-    /// Returns current pk index.
-    ///
-    /// # Panics
-    /// If reader is exhausted.
-    pub(crate) fn current_pk_index(&self) -> PkIndex {
-        self.current_range.as_ref().unwrap().pk_index
     }
 
     /// Returns current data batch of reader.
@@ -891,12 +863,6 @@ impl DataParts {
         self.active.write_row(pk_index, kv)
     }
 
-    /// Freezes the active data buffer into frozen data parts.
-    pub fn freeze(&mut self) -> Result<()> {
-        self.frozen.push(self.active.freeze(None, false)?);
-        Ok(())
-    }
-
     /// Reads data from all parts including active and frozen parts.
     /// The returned iterator yields a record batch of one primary key at a time.
     /// The order of yielding primary keys is determined by provided weights.
@@ -912,10 +878,6 @@ impl DataParts {
         }
         let merger = Merger::try_new(nodes)?;
         Ok(DataPartsReader { merger })
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.active.is_empty() && self.frozen.iter().all(|part| part.is_empty())
     }
 }
 
