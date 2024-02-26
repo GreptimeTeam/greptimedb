@@ -380,7 +380,18 @@ impl SafeMfpPlan {
         values: &mut Vec<Value>,
         row_buf: &mut Row,
     ) -> Result<Option<Row>, EvalError> {
+        if values.len() != self.mfp.input_arity {
+            return InvalidArgumentSnafu {
+                reason: format!(
+                    "values length {} is not equal to input_arity {}",
+                    values.len(),
+                    self.mfp.input_arity
+                ),
+            }
+            .fail();
+        }
         let passed_predicates = self.evaluate_inner(values)?;
+
         if !passed_predicates {
             Ok(None)
         } else {
@@ -598,7 +609,7 @@ mod test {
     use itertools::Itertools;
 
     use super::*;
-    use crate::expr::{BinaryFunc, UnmaterializableFunc};
+    use crate::expr::{BinaryFunc, UnaryFunc, UnmaterializableFunc};
     #[test]
     fn test_mfp_with_time() {
         use crate::expr::func::BinaryFunc;
@@ -768,5 +779,41 @@ mod test {
         let mut more = mfp.clone();
         more.permute(BTreeMap::from([(0, 1), (1, 2), (2, 0)]), 4)
             .unwrap();
+    }
+
+    #[test]
+    fn mfp_test_cast_and_filter() {
+        let mfp = MapFilterProject::new(3)
+            .map(vec![ScalarExpr::Column(0).call_unary(UnaryFunc::Cast(
+                ConcreteDataType::int32_datatype(),
+            ))])
+            .unwrap()
+            .filter(vec![
+                ScalarExpr::Column(3).call_binary(ScalarExpr::Column(1), BinaryFunc::Gt)
+            ])
+            .unwrap()
+            .project([0, 1, 2])
+            .unwrap();
+        let mut input1 = vec![
+            Value::from(4i64),
+            Value::from(2),
+            Value::from(3),
+            Value::from(53),
+        ];
+        let safe_mfp = SafeMfpPlan { mfp };
+        let ret = safe_mfp.evaluate_into(&mut input1, &mut Row::empty());
+        assert!(matches!(ret, Err(EvalError::InvalidArgument { .. })));
+
+        let mut input2 = vec![Value::from(4i64), Value::from(2), Value::from(3)];
+        let ret = safe_mfp
+            .evaluate_into(&mut input2.clone(), &mut Row::empty())
+            .unwrap();
+        assert_eq!(ret, Some(Row::new(input2)));
+
+        let mut input3 = vec![Value::from(4i64), Value::from(5), Value::from(2)];
+        let ret = safe_mfp
+            .evaluate_into(&mut input3, &mut Row::empty())
+            .unwrap();
+        assert_eq!(ret, None);
     }
 }
