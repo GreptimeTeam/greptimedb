@@ -19,7 +19,6 @@ use std::sync::Arc;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
-use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::{
     DataBatch, DataBuffer, DataBufferReader, DataParts, DATA_INIT_CAP,
@@ -49,14 +48,10 @@ impl ShardBuilder {
         metadata: RegionMetadataRef,
         config: &MergeTreeConfig,
         shard_id: ShardId,
-        write_buffer_manager: Option<WriteBufferManagerRef>,
     ) -> ShardBuilder {
         ShardBuilder {
             current_shard_id: shard_id,
-            dict_builder: KeyDictBuilder::new(
-                config.index_max_keys_per_shard,
-                write_buffer_manager,
-            ),
+            dict_builder: KeyDictBuilder::new(config.index_max_keys_per_shard),
             data_buffer: DataBuffer::with_capacity(metadata, DATA_INIT_CAP, config.dedup),
             data_freeze_threshold: config.data_freeze_threshold,
             dedup: config.dedup,
@@ -207,7 +202,7 @@ mod tests {
         let metadata = metadata_for_test();
         let input = input_with_key(&metadata);
         let config = MergeTreeConfig::default();
-        let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1, None);
+        let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
         let mut metrics = WriteMetrics::default();
         assert!(shard_builder.finish(metadata.clone()).unwrap().is_none());
         assert_eq!(1, shard_builder.current_shard_id);

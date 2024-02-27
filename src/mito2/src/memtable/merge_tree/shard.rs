@@ -365,7 +365,7 @@ mod tests {
         metadata: RegionMetadataRef,
         input: &[KeyValues],
     ) -> Shard {
-        let mut dict_builder = KeyDictBuilder::new(1024, None);
+        let mut dict_builder = KeyDictBuilder::new(1024);
         let mut metrics = WriteMetrics::default();
         let mut keys = Vec::with_capacity(input.len());
         for kvs in input {

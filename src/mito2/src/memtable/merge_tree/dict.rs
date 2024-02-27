@@ -19,10 +19,9 @@ use std::sync::Arc;
 
 use datatypes::arrow::array::{Array, ArrayBuilder, BinaryArray, BinaryBuilder};
 
-use crate::flush::WriteBufferManagerRef;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::PkIndex;
-use crate::metrics::DICT_BUFFER_BYTES;
+use crate::metrics::MEMTABLE_DICT_BYTES;
 
 /// Maximum keys in a [DictBlock].
 const MAX_KEYS_PER_BLOCK: u16 = 256;
@@ -47,7 +46,7 @@ pub struct KeyDictBuilder {
 
 impl KeyDictBuilder {
     /// Creates a new builder that can hold up to `capacity` keys.
-    pub fn new(capacity: usize, _tracker: Option<WriteBufferManagerRef>) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
             num_keys: 0,
@@ -89,8 +88,9 @@ impl KeyDictBuilder {
         // Since we store the key twice so the bytes usage doubled.
         let key_size = key.len() * 2;
         metrics.key_bytes += key_size;
+        // TODO(yingwen): Maybe use `key.len() + memory size of the key array`.
         self.key_bytes += key_size;
-        DICT_BUFFER_BYTES.add(key_size as i64);
+        MEMTABLE_DICT_BYTES.add(key_size as i64);
 
         pk_index
     }
@@ -249,7 +249,7 @@ impl KeyDict {
 
 impl Drop for KeyDict {
     fn drop(&mut self) {
-        DICT_BUFFER_BYTES.sub(self.key_bytes as i64);
+        MEMTABLE_DICT_BYTES.sub(self.key_bytes as i64);
     }
 }
 
@@ -376,7 +376,7 @@ mod tests {
         let num_keys = MAX_KEYS_PER_BLOCK * 2 + MAX_KEYS_PER_BLOCK / 2;
         let keys = prepare_input_keys(num_keys.into());
 
-        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 3).into(), None);
+        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 3).into());
         let mut last_pk_index = None;
         let mut metrics = WriteMetrics::default();
         for key in &keys {
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_builder_memory_size() {
-        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 3).into(), None);
+        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 3).into());
         let mut metrics = WriteMetrics::default();
         // 513 keys
         let num_keys = MAX_KEYS_PER_BLOCK * 2 + 1;
@@ -417,12 +417,17 @@ mod tests {
         }
         // num_keys * 5 * 2
         assert_eq!(5130, metrics.key_bytes);
+        assert_eq!(metrics.key_bytes, builder.key_bytes);
         assert_eq!(11415, builder.memory_size());
+
+        let dict = builder.finish().unwrap();
+        assert_eq!(0, builder.key_bytes);
+        assert_eq!(metrics.key_bytes, dict.key_bytes);
     }
 
     #[test]
     fn test_builder_finish() {
-        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 2).into(), None);
+        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 2).into());
         let mut metrics = WriteMetrics::default();
         for i in 0..MAX_KEYS_PER_BLOCK * 2 {
             let key = format!("{i:010}");

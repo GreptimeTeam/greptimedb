@@ -212,7 +212,7 @@ impl MergeTree {
                 .collect::<Vec<_>>()
         };
 
-        // TODO(yingwen): Optimize eviction strategy.
+        // TODO(yingwen): Optimize eviction strategy. Now we evict the whole partition.
         let fork_size = self.config.fork_dictionary_bytes.as_bytes() as usize;
         if total_shared_size > fork_size {
             // Sort partitions by memory size desc.
@@ -235,7 +235,7 @@ impl MergeTree {
 
         let mut forked = BTreeMap::new();
         for (part_key, part, _) in part_infos {
-            let forked_part = part.fork(&metadata, &self.config, self.write_buffer_manager.clone());
+            let forked_part = part.fork(&metadata, &self.config);
             forked.insert(part_key, Arc::new(forked_part));
         }
 
@@ -277,13 +277,7 @@ impl MergeTree {
         let mut partitions = self.partitions.write().unwrap();
         partitions
             .entry(partition_key)
-            .or_insert_with(|| {
-                Arc::new(Partition::new(
-                    self.metadata.clone(),
-                    &self.config,
-                    self.write_buffer_manager.clone(),
-                ))
-            })
+            .or_insert_with(|| Arc::new(Partition::new(self.metadata.clone(), &self.config)))
             .clone()
     }
 
