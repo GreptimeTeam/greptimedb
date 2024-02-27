@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 
 use crate::expr::error::{
     EvalError, InvalidArgumentSnafu, OptimizeSnafu, UnsupportedTemporalFilterSnafu,
@@ -107,19 +108,18 @@ impl ScalarExpr {
     /// each column referenced in `self`.
     pub fn permute(&mut self, permutation: &[usize]) -> Result<(), EvalError> {
         // check first so that we don't end up with a partially permuted expression
-        if self
-            .get_all_ref_columns()
-            .into_iter()
-            .any(|i| i >= permutation.len())
-        {
-            return InvalidArgumentSnafu {
+        ensure!(
+            self.get_all_ref_columns()
+                .into_iter()
+                .all(|i| i < permutation.len()),
+            InvalidArgumentSnafu {
                 reason: format!(
                     "permutation {:?} is not a valid permutation for expression {:?}",
                     permutation, self
                 ),
             }
-            .fail();
-        }
+        );
+
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
                 *old_i = permutation[*old_i];
@@ -136,18 +136,17 @@ impl ScalarExpr {
     /// each column referenced in `self`.
     pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) -> Result<(), EvalError> {
         // check first so that we don't end up with a partially permuted expression
-        if !self
-            .get_all_ref_columns()
-            .is_subset(&permutation.keys().cloned().collect())
-        {
-            return InvalidArgumentSnafu {
+        ensure!(
+            self.get_all_ref_columns()
+                .is_subset(&permutation.keys().cloned().collect()),
+            InvalidArgumentSnafu {
                 reason: format!(
                     "permutation {:?} is not a valid permutation for expression {:?}",
                     permutation, self
                 ),
             }
-            .fail();
-        }
+        );
+
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
                 *old_i = permutation[old_i];

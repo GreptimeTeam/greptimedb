@@ -369,16 +369,16 @@ impl MapFilterProject {
                 }
             );
         }
-        if shuffle.len() > new_input_arity {
-            return InvalidArgumentSnafu {
+        ensure!(
+            shuffle.len() <= new_input_arity,
+            InvalidArgumentSnafu {
                 reason: format!(
                     "shuffle's length {} is greater than new_input_arity {}",
                     shuffle.len(),
-                    new_input_arity
-                ),
+                    self.input_arity
+                )
             }
-            .fail();
-        }
+        );
 
         // decompose self into map, filter, project for ease of manipulation
         let (mut map, mut filter, mut project) = self.as_map_filter_project();
@@ -451,16 +451,16 @@ impl SafeMfpPlan {
         values: &mut Vec<Value>,
         row_buf: &mut Row,
     ) -> Result<Option<Row>, EvalError> {
-        if values.len() != self.mfp.input_arity {
-            return InvalidArgumentSnafu {
+        ensure!(
+            values.len() == self.mfp.input_arity,
+            InvalidArgumentSnafu {
                 reason: format!(
                     "values length {} is not equal to input_arity {}",
                     values.len(),
                     self.mfp.input_arity
                 ),
             }
-            .fail();
-        }
+        );
         let passed_predicates = self.evaluate_inner(values)?;
 
         if !passed_predicates {
