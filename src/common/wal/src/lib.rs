@@ -57,7 +57,7 @@ async fn resolve_broker_endpoint_inner<R: DNSResolver>(
     broker_endpoint: &str,
     resolver: R,
 ) -> Result<String> {
-    let ip = resolver
+    resolver
         .resolve_broker_endpoint(broker_endpoint)
         .await
         .with_context(|_| ResolveEndpointSnafu {
@@ -66,10 +66,10 @@ async fn resolve_broker_endpoint_inner<R: DNSResolver>(
         .into_iter()
         // only IPv4 addresses are valid
         .find(|addr| addr.is_ipv4())
+        .map(|addr| addr.to_string())
         .with_context(|| EndpointIpNotFoundSnafu {
             broker_endpoint: broker_endpoint.to_string(),
-        })?;
-    Ok(ip.to_string())
+        })
 }
 pub async fn resolve_broker_endpoint(broker_endpoint: &str) -> Result<String> {
     resolve_broker_endpoint_inner(broker_endpoint, TokioDnsResolver).await
