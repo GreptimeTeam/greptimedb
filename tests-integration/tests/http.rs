@@ -685,6 +685,7 @@ runtime_size = 2
 mode = "disable"
 cert_path = ""
 key_path = ""
+watch = false
 
 [frontend.postgres]
 enable = true
@@ -695,6 +696,7 @@ runtime_size = 2
 mode = "disable"
 cert_path = ""
 key_path = ""
+watch = false
 
 [frontend.opentsdb]
 enable = true
