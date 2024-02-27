@@ -459,4 +459,80 @@ mod tests {
         }
         assert_eq!(expect, v0_all);
     }
+
+    #[test]
+    fn write_iter_multi_keys() {
+        let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
+        let memtable =
+            MergeTreeMemtable::new(1, metadata.clone(), None, &MergeTreeConfig::default());
+
+        let mut data = Vec::new();
+        for i in 0..4 {
+            // key: i, a
+            let offset = 100 * (i as i64 + 1);
+            let timestamps = [1 + offset, 7 + offset, 5 + offset, 6 + offset];
+            let kvs = memtable_util::build_key_values(
+                &metadata,
+                "a".to_string(),
+                i,
+                &timestamps,
+                0, // sequence 0, 1, 2, 3
+            );
+            memtable.write(&kvs).unwrap();
+            for ts in timestamps {
+                data.push((i, "a", ts));
+            }
+        }
+        for i in 0..4 {
+            // key: i, b
+            let offset = 10 * (i as i64 + 1);
+            let timestamps = [3 + offset, 2 + offset];
+            let kvs = memtable_util::build_key_values(
+                &metadata,
+                "b".to_string(),
+                i,
+                &timestamps,
+                4, // sequence 4, 5
+            );
+            memtable.write(&kvs).unwrap();
+            for ts in timestamps {
+                data.push((i, "b", ts));
+            }
+        }
+        for i in 0..4 {
+            // key: i, a
+            let offset = 100 * (i as i64 + 1);
+            let timestamps = [8 + offset, 3 + offset, 4 + offset];
+            let kvs = memtable_util::build_key_values(
+                &metadata,
+                "a".to_string(),
+                i,
+                &timestamps,
+                6, // sequence 6, 7, 8
+            );
+            memtable.write(&kvs).unwrap();
+            for ts in timestamps {
+                data.push((i, "a", ts));
+            }
+        }
+        data.sort_unstable_by_key(|x| (x.0, x.1, x.2));
+
+        let expect = data.into_iter().map(|x| x.2).collect::<Vec<_>>();
+        let iter = memtable.iter(None, None).unwrap();
+        let read = iter
+            .flat_map(|batch| {
+                batch
+                    .unwrap()
+                    .timestamps()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondVector>()
+                    .unwrap()
+                    .iter_data()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            })
+            .map(|v| v.unwrap().0.value())
+            .collect::<Vec<_>>();
+        assert_eq!(expect, read);
+    }
 }
