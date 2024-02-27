@@ -96,15 +96,15 @@ impl MapFilterProject {
 
     /// Retain only the indicated columns in the presented order.
     ///
-    /// i.e. before: `self.projection = [2, 1, 0], columns = [0, 1]`
+    /// i.e. before: `self.projection = [1, 2, 0], columns = [1, 0]`
     /// ```mermaid
     /// flowchart TD
     /// col-0
     /// col-1
     /// col-2
+    /// projection --> |0|col-1
+    /// projection --> |1|col-2
     /// projection --> |2|col-0
-    /// projection --> |1|col-1
-    /// projection --> |0|col-2
     /// ```
     ///
     /// after: `self.projection = [2, 1]`
@@ -113,9 +113,14 @@ impl MapFilterProject {
     /// col-0
     /// col-1
     /// col-2
-    /// projection --> |2|col-0
-    /// projection --> |1|col-1
-    /// projection -.-> col-2
+    /// project("project:[1,2,0]")
+    /// project
+    /// project -->|0| col-1
+    /// project -->|1| col-2
+    /// project -->|2| col-0
+    /// new_project("apply new project:[1,0]")
+    /// new_project -->|0| col-2
+    /// new_project -->|1| col-1
     /// ```
     pub fn project<I>(mut self, columns: I) -> Result<Self, EvalError>
     where
@@ -148,29 +153,21 @@ impl MapFilterProject {
     ///
     /// while paying attention to column references maintained by `self.projection`
     ///
-    /// so, before `self.projection = [2, 1, 0], filter = [0]+[1]`:
-    /// ```mermaid
-    /// flowchart TD
-    /// col-0
-    /// col-1
-    /// col-2
-    /// projection --> |2|col-0
-    /// projection --> |1|col-1
-    /// projection --> |0| col-2
-    /// filter("filter:[0]+[1]")
-    /// ```
+    /// so `self.projection = [1, 2, 0], filter = [0]+[1]>0`:
     /// becomes:
     /// ```mermaid
     /// flowchart TD
     /// col-0
     /// col-1
     /// col-2
-    /// projection --> |2|col-0
-    /// projection --> |1|col-1
-    /// projection --> |0| col-2
-    /// filter("filter:[0]+[1]")
-    /// filter -->|0|col-2
-    /// filter -->|1|col-1
+    /// project("first project:[1,2,0]")
+    /// project
+    /// project -->|0| col-1
+    /// project -->|1| col-2
+    /// project -->|2| col-0
+    /// filter("then filter:[0]+[1]>0")
+    /// filter -->|0| col-1
+    /// filter --> |1| col-2
     /// ```
     pub fn filter<I>(mut self, predicates: I) -> Result<Self, EvalError>
     where
@@ -224,10 +221,9 @@ impl MapFilterProject {
     /// col-0
     /// col-1
     /// col-2
+    /// projection --> |0|col-1
+    /// projection --> |1|col-2
     /// projection --> |2|col-0
-    /// projection --> |1|col-1
-    /// projection --> |0| col-2
-    /// map("map:[0]+[1]")
     /// ```
     /// after apply map:
     /// ```mermaid
@@ -235,12 +231,15 @@ impl MapFilterProject {
     /// col-0
     /// col-1
     /// col-2
-    /// projection --> |2|col-0
-    /// projection --> |1|col-1
-    /// projection --> |0| col-2
-    /// map("map:[0]+[1]")
-    /// map -->|0|col-2
-    /// map -->|1|col-1
+    /// project("project:[1,2,0]")
+    /// project
+    /// project -->|0| col-1
+    /// project -->|1| col-2
+    /// project -->|2| col-0
+    /// map("map:[0]/[1]/[2]")
+    /// map -->|0|col-1
+    /// map -->|1|col-2
+    /// map -->|2|col-0
     /// ```
     pub fn map<I>(mut self, expressions: I) -> Result<Self, EvalError>
     where
