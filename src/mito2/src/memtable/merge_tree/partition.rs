@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_telemetry::tracing::log;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
@@ -231,6 +232,8 @@ struct PartitionReaderMetrics {
     prune_pk: Duration,
     read_source: Duration,
     data_batch_to_batch: Duration,
+    keys_before_pruning: usize,
+    keys_after_pruning: usize,
 }
 
 /// Reader to scan rows in a partition.
@@ -309,6 +312,7 @@ impl PartitionReader {
                 }
             }
             let key = self.source.current_key().unwrap();
+            self.context.metrics.keys_before_pruning += 1;
             // Prune batch by primary key.
             if prune_primary_key(
                 &self.context.metadata,
@@ -318,6 +322,7 @@ impl PartitionReader {
             ) {
                 // We need this key.
                 self.last_yield_pk_id = Some(pk_id);
+                self.context.metrics.keys_after_pruning += 1;
                 break;
             }
             self.source.next()?;
@@ -402,6 +407,11 @@ impl Drop for ReadPartitionContext {
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_data_batch_to_batch"])
             .observe(self.metrics.data_batch_to_batch.as_secs_f64());
+        log::debug!(
+            "TreeIter pruning, before: {}, after: {}",
+            self.metrics.keys_before_pruning,
+            self.metrics.keys_before_pruning
+        );
     }
 }
 

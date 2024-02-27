@@ -259,7 +259,7 @@ impl DataBuffer {
     pub fn read(&self, pk_weights: Option<&[u16]>) -> Result<DataBufferReader> {
         let batch = {
             let _timer = MERGE_TREE_READ_STAGE_ELAPSED
-                .with_label_values(&["data_buffer_to_batch"])
+                .with_label_values(&["read_data_buffer_to_batch"])
                 .start_timer();
             read_data_buffer_to_record_batches(
                 self.data_part_schema.clone(),
@@ -540,11 +540,11 @@ impl DataBufferReader {
 
     /// Advances reader to next data batch.
     pub(crate) fn next(&mut self) -> Result<()> {
-        let start = Instant::now();
         if self.offset >= self.batch.num_rows() {
             self.current_range = None;
             return Ok(());
         }
+        let start = Instant::now();
         let pk_index_array = pk_index_array(&self.batch);
         if let Some((next_pk, range)) = search_next_pk_range(pk_index_array, self.offset) {
             self.offset = range.end;
@@ -763,7 +763,7 @@ impl<'a> DataPartEncoder<'a> {
 
         let rb = {
             let _timer = MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED
-                .with_label_values(&["buffer_to_batch"])
+                .with_label_values(&["drain_data_buffer_to_batch"])
                 .start_timer();
             drain_data_buffer_to_record_batches(
                 self.schema.clone(),
@@ -943,6 +943,10 @@ impl DataParts {
     /// The returned iterator yields a record batch of one primary key at a time.
     /// The order of yielding primary keys is determined by provided weights.
     pub fn read(&self) -> Result<DataPartsReader> {
+        let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["build_data_parts_reader"])
+            .start_timer();
+
         let mut nodes = Vec::with_capacity(self.frozen.len() + 1);
         nodes.push(DataNode::new(DataSource::Buffer(
             // `DataPars::read` ensures that all pk_index inside `DataBuffer` are replaced by weights.

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_telemetry::tracing::log;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use snafu::ensure;
@@ -155,7 +156,7 @@ impl MergeTree {
         let mut iter = TreeIter {
             partitions,
             current_reader: None,
-            fetch_partition_elapsed: Default::default(),
+            metrics: Default::default(),
         };
         let context = ReadPartitionContext::new(
             self.metadata.clone(),
@@ -316,17 +317,29 @@ impl MergeTree {
     }
 }
 
+#[derive(Default)]
+struct TreeIterMetrics {
+    fetch_partition_elapsed: Duration,
+    rows_fetched: usize,
+    batches_fetched: usize,
+}
+
 struct TreeIter {
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
-    fetch_partition_elapsed: Duration,
+    metrics: TreeIterMetrics,
 }
 
 impl Drop for TreeIter {
     fn drop(&mut self) {
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["fetch_next_partition"])
-            .observe(self.fetch_partition_elapsed.as_secs_f64())
+            .observe(self.metrics.fetch_partition_elapsed.as_secs_f64());
+        log::debug!(
+            "TreeIter rows fetched: {}, batches fetched: {}",
+            self.metrics.rows_fetched,
+            self.metrics.batches_fetched
+        );
     }
 }
 
@@ -351,7 +364,7 @@ impl TreeIter {
             self.current_reader = Some(part_reader);
             break;
         }
-        self.fetch_partition_elapsed += start.elapsed();
+        self.metrics.fetch_partition_elapsed += start.elapsed();
         Ok(())
     }
 
@@ -373,6 +386,8 @@ impl TreeIter {
         let context = part_reader.into_context();
         self.fetch_next_partition(context)?;
 
+        self.metrics.rows_fetched += batch.num_rows();
+        self.metrics.batches_fetched += 1;
         Ok(Some(batch))
     }
 }
