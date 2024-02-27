@@ -218,7 +218,8 @@ impl Context {
             let table_route = self
                 .table_metadata_manager
                 .table_route_manager()
-                .get(table_id)
+                .table_route_storage()
+                .get_raw(table_id)
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)
@@ -803,6 +804,7 @@ mod tests {
             .env()
             .table_metadata_manager()
             .table_route_manager()
+            .table_route_storage()
             .get(region_id.table_id())
             .await
             .unwrap()

@@ -54,6 +54,7 @@ impl HttpHandler for RouteHandler {
         let table_route_value = self
             .table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .context(TableMetadataManagerSnafu)?

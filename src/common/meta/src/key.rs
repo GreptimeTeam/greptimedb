@@ -1096,6 +1096,7 @@ mod tests {
 
         assert!(table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()
@@ -1120,7 +1121,8 @@ mod tests {
 
         let removed_table_route = table_metadata_manager
             .table_route_manager()
-            .get_removed(table_id)
+            .table_route_storage()
+            .get_raw_removed(table_id)
             .await
             .unwrap()
             .unwrap()
@@ -1316,6 +1318,7 @@ mod tests {
 
         let updated_route_value = table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()

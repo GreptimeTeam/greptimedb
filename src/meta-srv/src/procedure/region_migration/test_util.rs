@@ -416,11 +416,11 @@ impl ProcedureMigrationTestSuite {
             .env
             .table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(region_id.table_id())
             .await
             .unwrap()
-            .unwrap()
-            .into_inner();
+            .unwrap();
         let region_routes = table_route.region_routes().unwrap();
 
         let expected_leader_id = self.context.persistent_ctx.to_peer.id;

@@ -194,12 +194,12 @@ impl CreateTableProcedure {
                     .context
                     .table_metadata_manager
                     .table_route_manager()
-                    .get(physical_table_id)
+                    .get_first_physical_table_route(physical_table_id)
                     .await?
                     .context(TableRouteNotFoundSnafu {
                         table_id: physical_table_id,
                     })?;
-                let region_routes = physical_table_route.region_routes()?;
+                let region_routes = &physical_table_route.region_routes;
 
                 let request_builder = self.new_region_request_builder(Some(physical_table_id))?;
 
