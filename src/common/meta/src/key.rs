@@ -363,8 +363,10 @@ impl TableMetadataManager {
         Option<DeserializedValueWithBytes<TableInfoValue>>,
         Option<DeserializedValueWithBytes<TableRouteValue>>,
     )> {
-        let (get_table_route_txn, table_route_decoder) =
-            self.table_route_manager.build_get_txn(table_id);
+        let (get_table_route_txn, table_route_decoder) = self
+            .table_route_manager
+            .table_route_storage()
+            .build_get_txn(table_id);
 
         let (get_table_info_txn, table_info_decoder) =
             self.table_info_manager.build_get_txn(table_id);
@@ -414,6 +416,7 @@ impl TableMetadataManager {
 
         let (create_table_route_txn, on_create_table_route_failure) = self
             .table_route_manager()
+            .table_route_storage()
             .build_create_txn(table_id, &table_route_value)?;
 
         let mut txn = Txn::merge_all(vec![
@@ -506,6 +509,7 @@ impl TableMetadataManager {
 
             let (create_table_route_txn, on_create_table_route_failure) = self
                 .table_route_manager()
+                .table_route_storage()
                 .build_create_txn(table_id, &table_route_value)?;
             txns.push(create_table_route_txn);
 
@@ -579,6 +583,7 @@ impl TableMetadataManager {
         // Deletes table route.
         let delete_table_route_txn = self
             .table_route_manager()
+            .table_route_storage()
             .build_delete_txn(table_id, table_route_value)?;
 
         let txn = Txn::merge_all(vec![
@@ -713,6 +718,7 @@ impl TableMetadataManager {
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
+            .table_route_storage()
             .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
         let txn = Txn::merge_all(vec![update_datanode_table_txn, update_table_route_txn]);
@@ -765,6 +771,7 @@ impl TableMetadataManager {
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
+            .table_route_storage()
             .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
         let r = self.kv_backend.txn(update_table_route_txn).await?;

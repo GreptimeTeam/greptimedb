@@ -261,6 +261,7 @@ async fn test_on_datanode_create_logical_regions() {
     let physical_route_txn = ctx
         .table_metadata_manager
         .table_route_manager()
+        .table_route_storage()
         .build_create_txn(physical_table_id, &physical_table_route)
         .unwrap()
         .0;

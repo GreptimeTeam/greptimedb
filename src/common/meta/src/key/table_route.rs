@@ -238,80 +238,6 @@ impl TableRouteManager {
         }
     }
 
-    pub(crate) fn build_get_txn(
-        &self,
-        table_id: TableId,
-    ) -> (
-        Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
-    ) {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-        let txn = Txn::new().and_then(vec![TxnOp::Get(raw_key.clone())]);
-
-        (txn, txn_helper::build_txn_response_decoder_fn(raw_key))
-    }
-
-    /// Builds a create table route transaction. it expected the `__table_route/{table_id}` wasn't occupied.
-    pub fn build_create_txn(
-        &self,
-        table_id: TableId,
-        table_route_value: &TableRouteValue,
-    ) -> Result<(
-        Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
-    )> {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-
-        let txn = txn_helper::build_put_if_absent_txn(
-            raw_key.clone(),
-            table_route_value.try_as_raw_value()?,
-        );
-
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
-    }
-
-    /// Builds a update table route transaction, it expected the remote value equals the `current_table_route_value`.
-    /// It retrieves the latest value if the comparing failed.
-    pub(crate) fn build_update_txn(
-        &self,
-        table_id: TableId,
-        current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
-        new_table_route_value: &TableRouteValue,
-    ) -> Result<(
-        Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
-    )> {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-        let raw_value = current_table_route_value.get_raw_bytes();
-        let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
-
-        let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
-
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
-    }
-
-    /// Builds a delete table route transaction, it expected the remote value equals the `table_route_value`.
-    pub(crate) fn build_delete_txn(
-        &self,
-        table_id: TableId,
-        table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
-    ) -> Result<Txn> {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-        let raw_value = table_route_value.get_raw_bytes();
-        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
-
-        let txn = Txn::new().and_then(vec![
-            TxnOp::Delete(raw_key),
-            TxnOp::Put(removed_key.into_bytes(), raw_value),
-        ]);
-
-        Ok(txn)
-    }
-
     /// Returns the [`PhysicalTableRouteValue`] in the first level,
     /// It won't follow the [`LogicalTableRouteValue`] to find the next level [`PhysicalTableRouteValue`].
     ///
@@ -499,6 +425,84 @@ impl TableRouteStorage {
         Self { kv_backend }
     }
 
+    /// Builds a get table route transaction(readonly).
+    pub(crate) fn build_get_txn(
+        &self,
+        table_id: TableId,
+    ) -> (
+        Txn,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+    ) {
+        let key = TableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        let txn = Txn::new().and_then(vec![TxnOp::Get(raw_key.clone())]);
+
+        (txn, txn_helper::build_txn_response_decoder_fn(raw_key))
+    }
+
+    /// Builds a create table route transaction,
+    /// it expected the `__table_route/{table_id}` wasn't occupied.
+    pub fn build_create_txn(
+        &self,
+        table_id: TableId,
+        table_route_value: &TableRouteValue,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+    )> {
+        let key = TableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+
+        let txn = txn_helper::build_put_if_absent_txn(
+            raw_key.clone(),
+            table_route_value.try_as_raw_value()?,
+        );
+
+        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
+    }
+
+    /// Builds a update table route transaction,
+    /// it expected the remote value equals the `current_table_route_value`.
+    /// It retrieves the latest value if the comparing failed.
+    pub(crate) fn build_update_txn(
+        &self,
+        table_id: TableId,
+        current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
+        new_table_route_value: &TableRouteValue,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+    )> {
+        let key = TableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        let raw_value = current_table_route_value.get_raw_bytes();
+        let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
+
+        let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
+
+        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
+    }
+
+    /// Builds a delete table route transaction,
+    /// it expected the remote value equals the `table_route_value`.
+    pub(crate) fn build_delete_txn(
+        &self,
+        table_id: TableId,
+        table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
+    ) -> Result<Txn> {
+        let key = TableRouteKey::new(table_id);
+        let raw_key = key.as_raw_key();
+        let raw_value = table_route_value.get_raw_bytes();
+        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
+
+        let txn = Txn::new().and_then(vec![
+            TxnOp::Delete(raw_key),
+            TxnOp::Put(removed_key.into_bytes(), raw_value),
+        ]);
+
+        Ok(txn)
+    }
+
     #[cfg(test)]
     pub async fn get_raw_removed(
         &self,
@@ -604,6 +608,7 @@ mod tests {
             region_ids: vec![RegionId::new(1023, 1)],
         });
         let (txn, _) = table_route_manager
+            .table_route_storage()
             .build_create_txn(1024, &table_route_value)
             .unwrap();
         let r = kv.txn(txn).await.unwrap();
@@ -643,6 +648,7 @@ mod tests {
         ];
         for (table_id, route) in &routes {
             let (txn, _) = table_route_manager
+                .table_route_storage()
                 .build_create_txn(*table_id, route)
                 .unwrap();
             let r = kv.txn(txn).await.unwrap();
