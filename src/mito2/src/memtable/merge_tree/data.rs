@@ -18,6 +18,7 @@ use std::cmp::{Ordering, Reverse};
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use datatypes::arrow;
@@ -46,6 +47,7 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
 use crate::memtable::merge_tree::PkIndex;
+use crate::metrics::{MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED, MERGE_TREE_READ_STAGE_ELAPSED};
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
 
@@ -255,16 +257,21 @@ impl DataBuffer {
     /// If pk_weights is present, yielded rows are sorted according to weights,
     /// otherwise rows are sorted by "pk_weights" values as they are actually weights.
     pub fn read(&self, pk_weights: Option<&[u16]>) -> Result<DataBufferReader> {
-        let batch = read_data_buffer_to_record_batches(
-            self.data_part_schema.clone(),
-            self,
-            pk_weights,
-            self.dedup,
-            // replace_pk_index is always set to false since:
-            // - for DataBuffer in ShardBuilder, pk dict is not frozen
-            // - for DataBuffer in Shard, values in pk_index column has already been replaced during `freeze`.
-            false,
-        )?;
+        let batch = {
+            let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+                .with_label_values(&["data_buffer_to_batch"])
+                .start_timer();
+            read_data_buffer_to_record_batches(
+                self.data_part_schema.clone(),
+                self,
+                pk_weights,
+                self.dedup,
+                // replace_pk_index is always set to false since:
+                // - for DataBuffer in ShardBuilder, pk dict is not frozen
+                // - for DataBuffer in Shard, values in pk_index column has already been replaced during `freeze`.
+                false,
+            )?
+        };
         DataBufferReader::new(batch)
     }
 
@@ -493,6 +500,15 @@ pub(crate) struct DataBufferReader {
     batch: RecordBatch,
     offset: usize,
     current_range: Option<DataBatchRange>,
+    elapsed_time: Duration,
+}
+
+impl Drop for DataBufferReader {
+    fn drop(&mut self) {
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["read_data_buffer"])
+            .observe(self.elapsed_time.as_secs_f64())
+    }
 }
 
 impl DataBufferReader {
@@ -501,6 +517,7 @@ impl DataBufferReader {
             batch,
             offset: 0,
             current_range: None,
+            elapsed_time: Duration::default(),
         };
         reader.next()?; // fill data batch for comparison and merge.
         Ok(reader)
@@ -523,6 +540,7 @@ impl DataBufferReader {
 
     /// Advances reader to next data batch.
     pub(crate) fn next(&mut self) -> Result<()> {
+        let start = Instant::now();
         if self.offset >= self.batch.num_rows() {
             self.current_range = None;
             return Ok(());
@@ -538,6 +556,7 @@ impl DataBufferReader {
         } else {
             self.current_range = None;
         }
+        self.elapsed_time += start.elapsed();
         Ok(())
     }
 }
@@ -741,18 +760,30 @@ impl<'a> DataPartEncoder<'a> {
 
     pub fn write(self, source: &mut DataBuffer) -> Result<DataPart> {
         let mut bytes = Vec::with_capacity(1024);
-        let rb = drain_data_buffer_to_record_batches(
-            self.schema.clone(),
-            source,
-            self.pk_weights,
-            self.dedup,
-            self.replace_pk_index,
-        )?;
-        let mut writer =
-            ArrowWriter::try_new(&mut bytes, self.schema.clone(), Some(self.writer_props()))
-                .context(error::EncodeMemtableSnafu)?;
-        writer.write(&rb).context(error::EncodeMemtableSnafu)?;
-        let _metadata = writer.close().context(error::EncodeMemtableSnafu)?;
+
+        let rb = {
+            let _timer = MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED
+                .with_label_values(&["buffer_to_batch"])
+                .start_timer();
+            drain_data_buffer_to_record_batches(
+                self.schema.clone(),
+                source,
+                self.pk_weights,
+                self.dedup,
+                self.replace_pk_index,
+            )?
+        };
+
+        {
+            let _timer = MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED
+                .with_label_values(&["encode"])
+                .start_timer();
+            let mut writer =
+                ArrowWriter::try_new(&mut bytes, self.schema.clone(), Some(self.writer_props()))
+                    .context(error::EncodeMemtableSnafu)?;
+            writer.write(&rb).context(error::EncodeMemtableSnafu)?;
+            let _metadata = writer.close().context(error::EncodeMemtableSnafu)?;
+        }
         Ok(DataPart::Parquet(ParquetPart {
             data: Bytes::from(bytes),
         }))
@@ -783,6 +814,15 @@ pub struct DataPartReader {
     inner: ParquetRecordBatchReader,
     current_batch: Option<RecordBatch>,
     current_range: Option<DataBatchRange>,
+    elapsed: Duration,
+}
+
+impl Drop for DataPartReader {
+    fn drop(&mut self) {
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["read_data_part"])
+            .observe(self.elapsed.as_secs_f64());
+    }
 }
 
 impl Debug for DataPartReader {
@@ -805,6 +845,7 @@ impl DataPartReader {
             inner: parquet_reader,
             current_batch: None,
             current_range: None,
+            elapsed: Default::default(),
         };
         reader.next()?;
         Ok(reader)
@@ -827,6 +868,7 @@ impl DataPartReader {
     }
 
     pub(crate) fn next(&mut self) -> Result<()> {
+        let start = Instant::now();
         if let Some((next_pk, range)) = self.search_next_pk_range() {
             // first try to search next pk in current record batch.
             self.current_range = Some(DataBatchRange {
@@ -847,7 +889,7 @@ impl DataPartReader {
                 self.current_range = None;
             }
         }
-
+        self.elapsed += start.elapsed();
         Ok(())
     }
 
@@ -911,7 +953,10 @@ impl DataParts {
             nodes.push(DataNode::new(DataSource::Part(p.read()?)));
         }
         let merger = Merger::try_new(nodes)?;
-        Ok(DataPartsReader { merger })
+        Ok(DataPartsReader {
+            merger,
+            elapsed: Default::default(),
+        })
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -922,6 +967,15 @@ impl DataParts {
 /// Reader for all parts inside a `DataParts`.
 pub struct DataPartsReader {
     merger: Merger<DataNode>,
+    elapsed: Duration,
+}
+
+impl Drop for DataPartsReader {
+    fn drop(&mut self) {
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["read_data_parts"])
+            .observe(self.elapsed.as_secs_f64())
+    }
 }
 
 impl DataPartsReader {
@@ -931,7 +985,10 @@ impl DataPartsReader {
     }
 
     pub(crate) fn next(&mut self) -> Result<()> {
-        self.merger.next()
+        let start = Instant::now();
+        let result = self.merger.next();
+        self.elapsed += start.elapsed();
+        result
     }
 
     pub(crate) fn is_valid(&self) -> bool {

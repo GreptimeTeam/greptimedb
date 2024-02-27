@@ -254,4 +254,24 @@ lazy_static! {
     pub static ref INDEX_INTERMEDIATE_FLUSH_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
         .with_label_values(&["flush", "intermediate"]);
     // ------- End of index metrics.
+
+    /// Merge tree memtable data buffer freeze metrics
+    pub static ref MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_merge_tree_buffer_freeze_stage_elapsed",
+        "mito merge tree data buffer freeze stage elapsed",
+        &[STAGE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+    )
+    .unwrap();
+
+    /// Merge tree memtable read path metrics
+    pub static ref MERGE_TREE_READ_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_merge_tree_read_stage_elapsed",
+        "mito merge tree read stage elapsed",
+        &[STAGE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+    )
+    .unwrap();
+
+    // ------- End of merge tree memtable metrics.
 }

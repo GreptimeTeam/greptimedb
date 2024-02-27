@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
@@ -35,6 +36,7 @@ use crate::memtable::merge_tree::partition::{
 };
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
+use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
@@ -153,6 +155,7 @@ impl MergeTree {
         let mut iter = TreeIter {
             partitions,
             current_reader: None,
+            fetch_partition_elapsed: Default::default(),
         };
         let context = ReadPartitionContext::new(
             self.metadata.clone(),
@@ -316,6 +319,15 @@ impl MergeTree {
 struct TreeIter {
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
+    fetch_partition_elapsed: Duration,
+}
+
+impl Drop for TreeIter {
+    fn drop(&mut self) {
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["fetch_next_partition"])
+            .observe(self.fetch_partition_elapsed.as_secs_f64())
+    }
 }
 
 impl Iterator for TreeIter {
@@ -329,6 +341,7 @@ impl Iterator for TreeIter {
 impl TreeIter {
     /// Fetch next partition.
     fn fetch_next_partition(&mut self, mut context: ReadPartitionContext) -> Result<()> {
+        let start = Instant::now();
         while let Some(partition) = self.partitions.pop_front() {
             let part_reader = partition.read(context)?;
             if !part_reader.is_valid() {
@@ -338,7 +351,7 @@ impl TreeIter {
             self.current_reader = Some(part_reader);
             break;
         }
-
+        self.fetch_partition_elapsed += start.elapsed();
         Ok(())
     }
 
