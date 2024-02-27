@@ -14,7 +14,7 @@
 
 //! Accumulators for aggregate functions that's is accumulatable. i.e. sum/count
 //!
-//! Currently support sum, count, any, all
+//! Currently support sum, count, any, all and min/max(with one caveat that min/max can't support delete with aggregate).
 
 use std::fmt::Display;
 
@@ -87,7 +87,7 @@ impl Accumulator for Bool {
 
     fn update(
         &mut self,
-        aggr_fn: &AggregateFunc,
+        _aggr_fn: &AggregateFunc,
         value: Value,
         diff: Diff,
     ) -> Result<(), EvalError> {
@@ -435,7 +435,7 @@ impl Accumulator for OrdValue {
         Ok(())
     }
 
-    fn eval(&self, aggr_fn: &AggregateFunc) -> Result<Value, EvalError> {
+    fn eval(&self, _aggr_fn: &AggregateFunc) -> Result<Value, EvalError> {
         Ok(self.val.clone().unwrap_or(Value::Null))
     }
 }
@@ -490,7 +490,6 @@ impl Accum {
             | AggregateFunc::MaxUInt64
             | AggregateFunc::MaxFloat32
             | AggregateFunc::MaxFloat64
-            | AggregateFunc::MaxBool
             | AggregateFunc::MaxString
             | AggregateFunc::MaxDate
             | AggregateFunc::MaxDateTime
@@ -506,7 +505,6 @@ impl Accum {
             | AggregateFunc::MinUInt64
             | AggregateFunc::MinFloat32
             | AggregateFunc::MinFloat64
-            | AggregateFunc::MinBool
             | AggregateFunc::MinString
             | AggregateFunc::MinDate
             | AggregateFunc::MinDateTime
@@ -524,12 +522,6 @@ impl Accum {
                 nans: 0,
                 non_nulls: 0,
             }),
-            _ => {
-                return Err(InternalSnafu {
-                    reason: format!("Aggregation function: {:?} is not accumulable.", aggr_fn),
-                }
-                .build())
-            }
         })
     }
     pub fn try_into_accum(aggr_fn: &AggregateFunc, state: Vec<Value>) -> Result<Self, EvalError> {
@@ -554,7 +546,6 @@ impl Accum {
             | AggregateFunc::MaxUInt64
             | AggregateFunc::MaxFloat32
             | AggregateFunc::MaxFloat64
-            | AggregateFunc::MaxBool
             | AggregateFunc::MaxString
             | AggregateFunc::MaxDate
             | AggregateFunc::MaxDateTime
@@ -570,7 +561,6 @@ impl Accum {
             | AggregateFunc::MinUInt64
             | AggregateFunc::MinFloat32
             | AggregateFunc::MinFloat64
-            | AggregateFunc::MinBool
             | AggregateFunc::MinString
             | AggregateFunc::MinDate
             | AggregateFunc::MinDateTime
@@ -581,10 +571,6 @@ impl Accum {
             AggregateFunc::SumFloat32 | AggregateFunc::SumFloat64 => {
                 Ok(Self::from(Float::try_from(state)?))
             }
-            _ => Err(InternalSnafu {
-                reason: format!("Aggregation function: {:?} is not accumulable.", aggr_fn),
-            }
-            .build()),
         }
     }
 }
@@ -596,105 +582,112 @@ fn err_try_from_val<T: Display>(reason: T) -> EvalError {
     .build()
 }
 
-#[test]
-fn test_accum() {
-    // sum i32
-    let mut acc = Accum::new_accum(&AggregateFunc::SumInt32).unwrap();
-    acc.update(&AggregateFunc::SumInt32, Value::Int32(1), 1)
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn test_accum() {
+        // sum i32
+        let mut acc = Accum::new_accum(&AggregateFunc::SumInt32).unwrap();
+        acc.update(&AggregateFunc::SumInt32, Value::Int32(1), 1)
+            .unwrap();
+
+        assert_eq!(acc.eval(&AggregateFunc::SumInt32).unwrap(), Value::Int64(1));
+        assert_eq!(
+            acc.into_state(),
+            vec![Value::Decimal128(Decimal128::new(1, 38, 0)), 1i64.into()]
+        );
+
+        // sum f32
+        let mut acc = Accum::new_accum(&AggregateFunc::SumFloat32).unwrap();
+        acc.update(
+            &AggregateFunc::SumFloat32,
+            Value::Float32(OrderedF32::from(1.0)),
+            1,
+        )
         .unwrap();
 
-    assert_eq!(acc.eval(&AggregateFunc::SumInt32).unwrap(), Value::Int64(1));
-    assert_eq!(
-        acc.into_state(),
-        vec![Value::Decimal128(Decimal128::new(1, 38, 0)), 1i64.into()]
-    );
+        assert_eq!(
+            acc.eval(&AggregateFunc::SumFloat32).unwrap(),
+            Value::Float32(OrderedF32::from(1.0))
+        );
+        assert_eq!(
+            acc.into_state(),
+            vec![
+                Value::Float64(OrderedF64::from(1.0)),
+                0i64.into(),
+                0i64.into(),
+                0i64.into(),
+                1i64.into()
+            ]
+        );
 
-    // sum f32
-    let mut acc = Accum::new_accum(&AggregateFunc::SumFloat32).unwrap();
-    acc.update(
-        &AggregateFunc::SumFloat32,
-        Value::Float32(OrderedF32::from(1.0)),
-        1,
-    )
-    .unwrap();
+        // max i32
+        let mut acc = Accum::new_accum(&AggregateFunc::MaxInt32).unwrap();
+        acc.update(&AggregateFunc::MaxInt32, Value::Int32(1), 1)
+            .unwrap();
+        acc.update(&AggregateFunc::MaxInt32, Value::Int32(2), 1)
+            .unwrap();
 
-    assert_eq!(
-        acc.eval(&AggregateFunc::SumFloat32).unwrap(),
-        Value::Float32(OrderedF32::from(1.0))
-    );
-    assert_eq!(
-        acc.into_state(),
-        vec![
-            Value::Float64(OrderedF64::from(1.0)),
-            0i64.into(),
-            0i64.into(),
-            0i64.into(),
-            1i64.into()
-        ]
-    );
+        assert_eq!(acc.eval(&AggregateFunc::MaxInt32).unwrap(), Value::Int32(2));
+        assert_eq!(acc.into_state(), vec![Value::Int32(2), 2i64.into()]);
 
-    // max i32
-    let mut acc = Accum::new_accum(&AggregateFunc::MaxInt32).unwrap();
-    acc.update(&AggregateFunc::MaxInt32, Value::Int32(1), 1)
+        // min i32
+        let mut acc = Accum::new_accum(&AggregateFunc::MinInt32).unwrap();
+        acc.update(&AggregateFunc::MinInt32, Value::Int32(2), 1)
+            .unwrap();
+        acc.update(&AggregateFunc::MinInt32, Value::Int32(1), 1)
+            .unwrap();
+
+        assert_eq!(acc.eval(&AggregateFunc::MinInt32).unwrap(), Value::Int32(1));
+        assert_eq!(acc.into_state(), vec![Value::Int32(1), 2i64.into()]);
+
+        // max f32
+        let mut acc = Accum::new_accum(&AggregateFunc::MaxFloat32).unwrap();
+        acc.update(
+            &AggregateFunc::MaxFloat32,
+            Value::Float32(OrderedF32::from(1.0)),
+            1,
+        )
         .unwrap();
-    acc.update(&AggregateFunc::MaxInt32, Value::Int32(2), 1)
+        acc.update(
+            &AggregateFunc::MaxFloat32,
+            Value::Float32(OrderedF32::from(2.0)),
+            1,
+        )
         .unwrap();
 
-    assert_eq!(acc.eval(&AggregateFunc::MaxInt32).unwrap(), Value::Int32(2));
-    assert_eq!(acc.into_state(), vec![Value::Int32(2), 2i64.into()]);
+        assert_eq!(
+            acc.eval(&AggregateFunc::MaxFloat32).unwrap(),
+            Value::Float32(OrderedF32::from(2.0))
+        );
+        assert_eq!(
+            acc.into_state(),
+            vec![Value::Float32(OrderedF32::from(2.0)), 2i64.into(),]
+        );
 
-    // min i32
-    let mut acc = Accum::new_accum(&AggregateFunc::MinInt32).unwrap();
-    acc.update(&AggregateFunc::MinInt32, Value::Int32(2), 1)
+        // max DateTime
+        let mut acc = Accum::new_accum(&AggregateFunc::MaxDateTime).unwrap();
+        acc.update(
+            &AggregateFunc::MaxDateTime,
+            Value::DateTime(DateTime::from(0)),
+            1,
+        )
         .unwrap();
-    acc.update(&AggregateFunc::MinInt32, Value::Int32(1), 1)
+        acc.update(
+            &AggregateFunc::MaxDateTime,
+            Value::DateTime(DateTime::from(1)),
+            1,
+        )
         .unwrap();
 
-    assert_eq!(acc.eval(&AggregateFunc::MinInt32).unwrap(), Value::Int32(1));
-    assert_eq!(acc.into_state(), vec![Value::Int32(1), 2i64.into()]);
-
-    // max f32
-    let mut acc = Accum::new_accum(&AggregateFunc::MaxFloat32).unwrap();
-    acc.update(
-        &AggregateFunc::MaxFloat32,
-        Value::Float32(OrderedF32::from(1.0)),
-        1,
-    )
-    .unwrap();
-    acc.update(
-        &AggregateFunc::MaxFloat32,
-        Value::Float32(OrderedF32::from(2.0)),
-        1,
-    );
-
-    assert_eq!(
-        acc.eval(&AggregateFunc::MaxFloat32).unwrap(),
-        Value::Float32(OrderedF32::from(2.0))
-    );
-    assert_eq!(
-        acc.into_state(),
-        vec![Value::Float32(OrderedF32::from(2.0)), 2i64.into(),]
-    );
-
-    // max DateTime
-    let mut acc = Accum::new_accum(&AggregateFunc::MaxDateTime).unwrap();
-    acc.update(
-        &AggregateFunc::MaxDateTime,
-        Value::DateTime(DateTime::from(0)),
-        1,
-    );
-    acc.update(
-        &AggregateFunc::MaxDateTime,
-        Value::DateTime(DateTime::from(1)),
-        1,
-    );
-
-    assert_eq!(
-        acc.eval(&AggregateFunc::MaxDateTime).unwrap(),
-        Value::DateTime(DateTime::from(1))
-    );
-    assert_eq!(
-        acc.into_state(),
-        vec![Value::DateTime(DateTime::from(1)), 2i64.into(),]
-    );
+        assert_eq!(
+            acc.eval(&AggregateFunc::MaxDateTime).unwrap(),
+            Value::DateTime(DateTime::from(1))
+        );
+        assert_eq!(
+            acc.into_state(),
+            vec![Value::DateTime(DateTime::from(1)), 2i64.into(),]
+        );
+    }
 }
