@@ -378,31 +378,10 @@ impl MapFilterProject {
             shuffle.insert(self.input_arity + index, new_input_arity + index);
         }
 
-        let shuffle_keys = shuffle.keys().cloned().collect::<BTreeSet<_>>();
         for expr in map.iter_mut() {
-            if !expr.get_all_ref_columns().is_subset(&shuffle_keys) {
-                return InvalidArgumentSnafu {
-                    reason: format!(
-                        "Expression's referred columns {:?} is not a subset of shuffle's keys {:?}",
-                        expr.get_all_ref_columns(),
-                        shuffle.keys()
-                    ),
-                }
-                .fail();
-            }
             expr.permute_map(&shuffle)?;
         }
         for pred in filter.iter_mut() {
-            if !pred.get_all_ref_columns().is_subset(&shuffle_keys) {
-                return InvalidArgumentSnafu {
-                    reason: format!(
-                        "Predicate's referred columns {:?} is not a subset of shuffle's keys {:?}",
-                        pred.get_all_ref_columns(),
-                        shuffle.keys()
-                    ),
-                }
-                .fail();
-            }
             pred.permute_map(&shuffle)?;
         }
         let new_row_len = new_input_arity + map.len();
