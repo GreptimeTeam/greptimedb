@@ -172,6 +172,7 @@ impl ShardBuilderReader {
 mod tests {
 
     use super::*;
+    use crate::memtable::merge_tree::data::timestamp_array_to_i64_slice;
     use crate::memtable::merge_tree::metrics::WriteMetrics;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
@@ -183,24 +184,24 @@ mod tests {
             build_key_values_with_ts_seq_values(
                 metadata,
                 "shard_builder".to_string(),
-                3,
-                [30, 31].into_iter(),
+                2,
+                [20, 21].into_iter(),
                 [Some(0.0), Some(1.0)].into_iter(),
                 0,
             ),
             build_key_values_with_ts_seq_values(
                 metadata,
                 "shard_builder".to_string(),
-                1,
-                [10, 11].into_iter(),
+                0,
+                [0, 1].into_iter(),
                 [Some(0.0), Some(1.0)].into_iter(),
                 1,
             ),
             build_key_values_with_ts_seq_values(
                 metadata,
                 "shard_builder".to_string(),
-                2,
-                [20, 21].into_iter(),
+                1,
+                [10, 11].into_iter(),
                 [Some(0.0), Some(1.0)].into_iter(),
                 2,
             ),
@@ -226,5 +227,35 @@ mod tests {
         let shard = shard_builder.finish(metadata).unwrap().unwrap();
         assert_eq!(1, shard.shard_id);
         assert_eq!(2, shard_builder.current_shard_id);
+    }
+
+    #[test]
+    fn test_write_read_shard_builder() {
+        let metadata = metadata_for_test();
+        let input = input_with_key(&metadata);
+        let config = MergeTreeConfig::default();
+        let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
+        let mut metrics = WriteMetrics::default();
+
+        for key_values in &input {
+            for kv in key_values.iter() {
+                let key = encode_key_by_kv(&kv);
+                shard_builder.write_with_key(&key, kv, &mut metrics);
+            }
+        }
+
+        let mut pk_weights = Vec::new();
+        let mut reader = shard_builder.read(&mut pk_weights).unwrap();
+        let mut timestamps = Vec::new();
+        while reader.is_valid() {
+            let rb = reader.current_data_batch().slice_record_batch();
+            let ts_array = rb.column(1);
+            let ts_slice = timestamp_array_to_i64_slice(ts_array);
+            timestamps.extend_from_slice(ts_slice);
+
+            reader.next().unwrap();
+        }
+        assert_eq!(vec![0, 1, 10, 11, 20, 21], timestamps);
+        assert_eq!(vec![2, 0, 1], pk_weights);
     }
 }

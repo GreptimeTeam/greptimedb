@@ -308,9 +308,11 @@ impl Node for ShardNode {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::*;
+    use crate::memtable::merge_tree::data::timestamp_array_to_i64_slice;
     use crate::memtable::merge_tree::dict::KeyDictBuilder;
     use crate::memtable::merge_tree::metrics::WriteMetrics;
     use crate::memtable::merge_tree::PkIndex;
@@ -320,31 +322,41 @@ mod tests {
         metadata_for_test,
     };
 
-    fn input_with_key(metadata: &RegionMetadataRef) -> Vec<KeyValues> {
+    /// Returns key values and expect pk index.
+    fn input_with_key(metadata: &RegionMetadataRef) -> Vec<(KeyValues, PkIndex)> {
         vec![
-            build_key_values_with_ts_seq_values(
-                metadata,
-                "shard".to_string(),
+            (
+                build_key_values_with_ts_seq_values(
+                    metadata,
+                    "shard".to_string(),
+                    2,
+                    [20, 21].into_iter(),
+                    [Some(0.0), Some(1.0)].into_iter(),
+                    0,
+                ),
                 2,
-                [20, 21].into_iter(),
-                [Some(0.0), Some(1.0)].into_iter(),
+            ),
+            (
+                build_key_values_with_ts_seq_values(
+                    metadata,
+                    "shard".to_string(),
+                    0,
+                    [0, 1].into_iter(),
+                    [Some(0.0), Some(1.0)].into_iter(),
+                    1,
+                ),
                 0,
             ),
-            build_key_values_with_ts_seq_values(
-                metadata,
-                "shard".to_string(),
-                0,
-                [0, 1].into_iter(),
-                [Some(0.0), Some(1.0)].into_iter(),
+            (
+                build_key_values_with_ts_seq_values(
+                    metadata,
+                    "shard".to_string(),
+                    1,
+                    [10, 11].into_iter(),
+                    [Some(0.0), Some(1.0)].into_iter(),
+                    2,
+                ),
                 1,
-            ),
-            build_key_values_with_ts_seq_values(
-                metadata,
-                "shard".to_string(),
-                1,
-                [10, 11].into_iter(),
-                [Some(0.0), Some(1.0)].into_iter(),
-                2,
             ),
         ]
     }
@@ -352,12 +364,12 @@ mod tests {
     fn new_shard_with_dict(
         shard_id: ShardId,
         metadata: RegionMetadataRef,
-        input: &[KeyValues],
+        input: &[(KeyValues, PkIndex)],
     ) -> Shard {
         let mut dict_builder = KeyDictBuilder::new(1024);
         let mut metrics = WriteMetrics::default();
         let mut keys = Vec::with_capacity(input.len());
-        for kvs in input {
+        for (kvs, _) in input {
             encode_keys(&metadata, kvs, &mut keys);
         }
         for key in &keys {
@@ -370,37 +382,33 @@ mod tests {
         Shard::new(shard_id, Some(Arc::new(dict)), data_parts, true)
     }
 
-    // #[test]
-    // fn test_shard_find_by_key() {
-    //     let metadata = metadata_for_test();
-    //     let input = input_with_key(&metadata);
-    //     let shard = new_shard_with_dict(8, metadata, &input);
-    //     for i in 0..input.len() {
-    //         let key = encode_key("shard", i as u32);
-    //         assert_eq!(
-    //             PkId {
-    //                 shard_id: 8,
-    //                 pk_index: i as PkIndex,
-    //             },
-    //             shard.find_id_by_key(&key).unwrap()
-    //         );
-    //     }
-    //     assert!(shard.find_id_by_key(&encode_key("shard", 100)).is_none());
-    // }
+    #[test]
+    fn test_write_read_shard() {
+        let metadata = metadata_for_test();
+        let input = input_with_key(&metadata);
+        let mut shard = new_shard_with_dict(8, metadata, &input);
+        assert!(shard.is_empty());
+        for (key_values, pk_index) in &input {
+            for kv in key_values.iter() {
+                let pk_id = PkId {
+                    shard_id: shard.shard_id,
+                    pk_index: *pk_index,
+                };
+                shard.write_with_pk_id(pk_id, kv);
+            }
+        }
+        assert!(!shard.is_empty());
 
-    // #[test]
-    // fn test_write_shard() {
-    //     let metadata = metadata_for_test();
-    //     let input = input_with_key(&metadata);
-    //     let mut shard = new_shard_with_dict(8, metadata, &input);
-    //     assert!(shard.is_empty());
-    //     for key_values in &input {
-    //         for kv in key_values.iter() {
-    //             let key = encode_key_by_kv(&kv);
-    //             let pk_id = shard.find_id_by_key(&key).unwrap();
-    //             shard.write_with_pk_id(pk_id, kv);
-    //         }
-    //     }
-    //     assert!(!shard.is_empty());
-    // }
+        let mut reader = shard.read().unwrap();
+        let mut timestamps = Vec::new();
+        while reader.is_valid() {
+            let rb = reader.current_data_batch().slice_record_batch();
+            let ts_array = rb.column(1);
+            let ts_slice = timestamp_array_to_i64_slice(ts_array);
+            timestamps.extend_from_slice(ts_slice);
+
+            reader.next().unwrap();
+        }
+        assert_eq!(vec![0, 1, 10, 11, 20, 21], timestamps);
+    }
 }
