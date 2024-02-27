@@ -204,7 +204,7 @@ impl MapFilterProject {
         }
         // Stable sort predicates by position at which they take effect.
         self.predicates
-            .sort_by_key(|(position, predicate)| *position);
+            .sort_by_key(|(position, _predicate)| *position);
         Ok(self)
     }
 
@@ -887,7 +887,7 @@ mod test {
         let ret = safe_mfp.evaluate_into(&mut input1, &mut Row::empty());
         assert!(matches!(ret, Err(EvalError::InvalidArgument { .. })));
 
-        let mut input2 = vec![Value::from(4i64), Value::from(2), Value::from(3)];
+        let input2 = vec![Value::from(4i64), Value::from(2), Value::from(3)];
         let ret = safe_mfp
             .evaluate_into(&mut input2.clone(), &mut Row::empty())
             .unwrap();
