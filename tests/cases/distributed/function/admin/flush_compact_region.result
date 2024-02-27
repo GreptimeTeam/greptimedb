@@ -4,11 +4,7 @@ CREATE TABLE my_table (
   b STRING,
   ts TIMESTAMP TIME INDEX,
 )
-PARTITION BY RANGE COLUMNS (a) (
-  PARTITION p0 VALUES LESS THAN (10),
-  PARTITION p1 VALUES LESS THAN (20),
-  PARTITION p2 VALUES LESS THAN (MAXVALUE),
-);
+PARTITION ON COLUMNS (a) ();
 
 Affected Rows: 0
 
@@ -41,8 +37,6 @@ SELECT flush_region(greptime_partition_id) from information_schema.partitions WH
 | flush_region(information_schema.partitions.greptime_partition_id) |
 +-------------------------------------------------------------------+
 | 0                                                                 |
-| 0                                                                 |
-| 0                                                                 |
 +-------------------------------------------------------------------+
 
 SELECT compact_region(greptime_partition_id) from information_schema.partitions WHERE table_name = 'my_table';
@@ -50,8 +44,6 @@ SELECT compact_region(greptime_partition_id) from information_schema.partitions 
 +---------------------------------------------------------------------+
 | compact_region(information_schema.partitions.greptime_partition_id) |
 +---------------------------------------------------------------------+
-| 0                                                                   |
-| 0                                                                   |
 | 0                                                                   |
 +---------------------------------------------------------------------+
 
