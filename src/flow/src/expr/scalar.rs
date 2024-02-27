@@ -106,20 +106,23 @@ impl ScalarExpr {
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
     pub fn permute(&mut self, permutation: &[usize]) -> Result<(), EvalError> {
+        // check first so that we don't end up with a partially permuted expression
+        if self
+            .get_all_ref_columns()
+            .into_iter()
+            .any(|i| i >= permutation.len())
+        {
+            return InvalidArgumentSnafu {
+                reason: format!(
+                    "permutation {:?} is not a valid permutation for expression {:?}",
+                    permutation, self
+                ),
+            }
+            .fail();
+        }
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
-                permutation
-                    .get(*old_i)
-                    .map(|new_i| *old_i = *new_i)
-                    .ok_or_else(|| {
-                        InvalidArgumentSnafu {
-                            reason: format!(
-                                "permutation {:?} is not a valid permutation for expression {:?}",
-                                permutation, e
-                            ),
-                        }
-                        .build()
-                    })?;
+                *old_i = permutation[*old_i];
             }
             Ok(())
         })?;
@@ -132,20 +135,22 @@ impl ScalarExpr {
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
     pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) -> Result<(), EvalError> {
+        // check first so that we don't end up with a partially permuted expression
+        if !self
+            .get_all_ref_columns()
+            .is_subset(&permutation.keys().cloned().collect())
+        {
+            return InvalidArgumentSnafu {
+                reason: format!(
+                    "permutation {:?} is not a valid permutation for expression {:?}",
+                    permutation, self
+                ),
+            }
+            .fail();
+        }
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
-                permutation
-                    .get(old_i)
-                    .map(|new_i| *old_i = *new_i)
-                    .ok_or_else(|| {
-                        InvalidArgumentSnafu {
-                            reason: format!(
-                                "permutation {:?} is not a valid permutation for expression {:?}",
-                                permutation, e
-                            ),
-                        }
-                        .build()
-                    })?;
+                *old_i = permutation[old_i];
             }
             Ok(())
         })
@@ -348,6 +353,8 @@ impl ScalarExpr {
 
 #[cfg(test)]
 mod test {
+    use datatypes::arrow::array::Scalar;
+
     use super::*;
     #[test]
     fn test_extract_bound() {
@@ -424,5 +431,18 @@ mod test {
                 (l, r) => panic!("expected: {:?}, actual: {:?}", r, l),
             }
         }
+    }
+
+    #[test]
+    fn test_bad_permute() {
+        let mut expr = ScalarExpr::Column(4);
+        let permutation = vec![1, 2, 3];
+        let res = expr.permute(&permutation);
+        assert!(matches!(res, Err(EvalError::InvalidArgument { .. })));
+
+        let mut expr = ScalarExpr::Column(0);
+        let permute_map = BTreeMap::from([(1, 2), (3, 4)]);
+        let res = expr.permute_map(&permute_map);
+        assert!(matches!(res, Err(EvalError::InvalidArgument { .. })));
     }
 }
