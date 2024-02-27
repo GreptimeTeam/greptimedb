@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::region::{QueryRequest, RegionRequest};
+pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::cache_invalidator::DummyCacheInvalidator;
@@ -28,8 +29,6 @@ use crate::peer::Peer;
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::sequence::SequenceBuilder;
 use crate::wal_options_allocator::WalOptionsAllocator;
-
-pub type AffectedRows = u64;
 
 #[async_trait::async_trait]
 pub trait MockDatanodeHandler: Sync + Send + Clone {

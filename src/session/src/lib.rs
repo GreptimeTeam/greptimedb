@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod context;
+pub mod table_name;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

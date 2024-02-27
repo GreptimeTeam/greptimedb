@@ -79,7 +79,7 @@ impl Datanode for RegionInvoker {
         check_response_header(response.header)
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        Ok(response.affected_rows)
+        Ok(response.affected_rows as _)
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {

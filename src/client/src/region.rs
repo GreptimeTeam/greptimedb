@@ -197,7 +197,7 @@ impl RegionRequester {
 
         check_response_header(header)?;
 
-        Ok(affected_rows)
+        Ok(affected_rows as _)
     }
 
     pub async fn handle(&self, request: RegionRequest) -> Result<AffectedRows> {

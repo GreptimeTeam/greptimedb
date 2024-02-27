@@ -40,4 +40,11 @@ impl RegionRequestFactory {
             body: Some(Body::Deletes(requests)),
         }
     }
+
+    pub fn build_request(&self, body: Body) -> RegionRequest {
+        RegionRequest {
+            header: Some(self.header.clone()),
+            body: Some(body),
+        }
+    }
 }

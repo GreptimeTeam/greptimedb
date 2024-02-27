@@ -1768,6 +1768,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "chrono-tz 0.6.3",
+ "common-base",
  "common-catalog",
  "common-error",
  "common-macro",
@@ -1790,6 +1791,7 @@ dependencies = [
  "session",
  "snafu",
  "statrs",
+ "store-api",
  "table",
 ]
 
@@ -1900,6 +1902,7 @@ dependencies = [
  "base64 0.21.5",
  "bytes",
  "chrono",
+ "common-base",
  "common-catalog",
  "common-error",
  "common-grpc-expr",
@@ -9122,6 +9125,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "derive_builder 0.12.0",
+ "snafu",
  "sql",
 ]
 

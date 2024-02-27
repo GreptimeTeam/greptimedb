@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod flush_compact_region;
+mod flush_compact_table;
 mod migrate_region;
 
 use std::sync::Arc;
 
+use flush_compact_region::{CompactRegionFunction, FlushRegionFunction};
+use flush_compact_table::{CompactTableFunction, FlushTableFunction};
 use migrate_region::MigrateRegionFunction;
 
 use crate::function_registry::FunctionRegistry;
@@ -27,5 +31,9 @@ impl TableFunction {
     /// Register all table functions to [`FunctionRegistry`].
     pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(MigrateRegionFunction));
+        registry.register(Arc::new(FlushRegionFunction));
+        registry.register(Arc::new(CompactRegionFunction));
+        registry.register(Arc::new(FlushTableFunction));
+        registry.register(Arc::new(CompactTableFunction));
     }
 }

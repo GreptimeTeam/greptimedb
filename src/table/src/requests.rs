@@ -286,20 +286,14 @@ pub struct CopyTableRequest {
 pub struct FlushTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
-    pub table_name: Option<String>,
-    pub region_number: Option<RegionNumber>,
-    /// Wait until the flush is done.
-    pub wait: Option<bool>,
+    pub table_name: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct CompactTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
-    pub table_name: Option<String>,
-    pub region_number: Option<RegionNumber>,
-    /// Wait until the compaction is done.
-    pub wait: Option<bool>,
+    pub table_name: String,
 }
 
 /// Truncate table request

@@ -22,6 +22,7 @@ use api::v1::region::{
     InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{self, Rows, SemanticType};
+pub use common_base::AffectedRows;
 use snafu::{ensure, OptionExt};
 use strum::IntoStaticStr;
 
@@ -32,8 +33,6 @@ use crate::metadata::{
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
-
-pub type AffectedRows = usize;
 
 #[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {

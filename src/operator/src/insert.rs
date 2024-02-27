@@ -156,7 +156,7 @@ impl Inserter {
         &self,
         request: TableInsertRequest,
         ctx: QueryContextRef,
-    ) -> Result<usize> {
+    ) -> Result<AffectedRows> {
         let catalog = request.catalog_name.as_str();
         let schema = request.schema_name.as_str();
         let table_name = request.table_name.as_str();
@@ -219,8 +219,8 @@ impl Inserter {
             });
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
-        let affected_rows = results.into_iter().sum::<Result<u64>>()?;
-        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(affected_rows);
+        let affected_rows = results.into_iter().sum::<Result<AffectedRows>>()?;
+        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(affected_rows as u64);
         Ok(affected_rows)
     }
 

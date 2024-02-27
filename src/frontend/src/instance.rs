@@ -47,7 +47,6 @@ use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
-use operator::table::table_idents_to_full_name;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -69,6 +68,7 @@ use servers::query_handler::{
 };
 use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
+use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
