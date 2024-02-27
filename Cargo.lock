@@ -2104,12 +2104,14 @@ dependencies = [
 name = "common-wal"
 version = "0.6.0"
 dependencies = [
+ "async-trait",
  "common-base",
  "common-error",
  "common-macro",
  "common-telemetry",
  "futures-util",
  "humantime-serde",
+ "mockall",
  "rskafka",
  "serde",
  "serde_json",

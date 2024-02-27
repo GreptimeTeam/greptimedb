@@ -12,9 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
+use std::net::SocketAddr;
+
+use async_trait::async_trait;
 use error::{EndpointIpNotFoundSnafu, ResolveEndpointSnafu, Result};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use tokio::net;
 
 pub mod config;
 pub mod error;
@@ -34,16 +39,94 @@ pub enum TopicSelectorType {
     RoundRobin,
 }
 
-pub async fn resolve_broker_endpoint(broker_endpoint: &str) -> Result<String> {
-    let ip = tokio::net::lookup_host(broker_endpoint)
+#[mockall::automock]
+#[async_trait]
+trait DNSResolver {
+    async fn resolve_broker_endpoint(&self, broker_endpoint: &str) -> io::Result<Vec<SocketAddr>>;
+}
+struct TokioDnsResolver;
+#[async_trait]
+impl DNSResolver for TokioDnsResolver {
+    async fn resolve_broker_endpoint(&self, broker_endpoint: &str) -> io::Result<Vec<SocketAddr>> {
+        net::lookup_host(broker_endpoint)
+            .await
+            .map(|iter| iter.collect())
+    }
+}
+async fn resolve_broker_endpoint_inner<R: DNSResolver>(
+    broker_endpoint: &str,
+    resolver: R,
+) -> Result<String> {
+    let ip = resolver
+        .resolve_broker_endpoint(broker_endpoint)
         .await
         .with_context(|_| ResolveEndpointSnafu {
             broker_endpoint: broker_endpoint.to_string(),
         })?
+        .into_iter()
         // only IPv4 addresses are valid
         .find(|addr| addr.is_ipv4())
         .with_context(|| EndpointIpNotFoundSnafu {
             broker_endpoint: broker_endpoint.to_string(),
         })?;
     Ok(ip.to_string())
+}
+pub async fn resolve_broker_endpoint(broker_endpoint: &str) -> Result<String> {
+    resolve_broker_endpoint_inner(broker_endpoint, TokioDnsResolver).await
+}
+
+#[cfg(test)]
+mod tests {
+    use mockall::predicate::eq;
+
+    use super::*;
+    use crate::error::Error;
+    // test for resolve_broker_endpoint
+    #[tokio::test]
+    async fn test_resolve_error_occur() {
+        let endpoint = "example.com:9092";
+        let mut mock_resolver = MockDNSResolver::new();
+        mock_resolver
+            .expect_resolve_broker_endpoint()
+            .with(eq("example.com:9092"))
+            .times(1)
+            .returning(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "mocked error",
+                ))
+            });
+        let ip = resolve_broker_endpoint_inner(endpoint, mock_resolver).await;
+        assert!(ip.is_err_and(|err| { matches!(err, Error::ResolveEndpoint { .. }) }))
+    }
+    #[tokio::test]
+    async fn test_resolve_only_ipv6() {
+        let endpoint = "example.com:9092";
+        let mut mock_resolver = MockDNSResolver::new();
+        mock_resolver
+            .expect_resolve_broker_endpoint()
+            .with(eq("example.com:9092"))
+            .times(1)
+            .returning(|_| {
+                Ok(vec![SocketAddr::new(
+                    std::net::IpAddr::V6(std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
+                    9092,
+                )])
+            });
+        let ip = resolve_broker_endpoint_inner(endpoint, mock_resolver).await;
+        assert!(ip.is_err_and(|err| { matches!(err, Error::EndpointIpNotFound { .. }) }))
+    }
+    #[tokio::test]
+    async fn test_resolve_normal() {
+        let mut mock_resolver = MockDNSResolver::new();
+        mock_resolver
+            .expect_resolve_broker_endpoint()
+            .with(eq("example.com:9092"))
+            .times(1)
+            .returning(|_| Ok(vec!["127.0.0.1:9092".parse().unwrap()]));
+        let ip = resolve_broker_endpoint_inner("example.com:9092", mock_resolver)
+            .await
+            .unwrap();
+        assert_eq!(ip, "127.0.0.1:9092")
+    }
 }
