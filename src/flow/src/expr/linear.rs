@@ -24,6 +24,15 @@ use crate::repr::{self, value_to_internal_ts, Diff, Row};
 
 /// A compound operator that can be applied row-by-row.
 ///
+/// In practice, this operator is a sequence of map, filter, and project in arbitrary order,
+/// which can and is stored by reordering the sequence's
+/// apply order to a `map` first, `filter` second and `project` third order.
+///
+/// input is a row(a sequence of values), which is also being used for store intermediate results,
+/// like `map` operator can append new columns to the row according to it's expressions,
+/// `filter` operator decide whether this entire row can even be output by decide whether the row satisfy the predicates,
+/// `project` operator decide which columns of the row should be output.
+///
 /// This operator integrates the map, filter, and project operators.
 /// It applies a sequences of map expressions, which are allowed to
 /// refer to previous expressions, interleaved with predicates which
@@ -898,5 +907,17 @@ mod test {
         let safe_mfp = SafeMfpPlan { mfp };
         let ret = safe_mfp.evaluate_into(&mut input1, &mut Row::empty());
         assert_eq!(ret.unwrap(), Some(Row::new(vec![Value::from(false)])));
+    }
+    #[test]
+    fn test_mfp_chore() {
+        // project keeps permute columns until it becomes the identity permutation
+        let mfp = MapFilterProject::new(3)
+            .project([1, 2, 0])
+            .unwrap()
+            .project([1, 2, 0])
+            .unwrap()
+            .project([1, 2, 0])
+            .unwrap();
+        assert_eq!(mfp, MapFilterProject::new(3));
     }
 }
