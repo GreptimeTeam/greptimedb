@@ -29,7 +29,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::server::{Server, ServerHandlers};
-use servers::tls::{watch_tls_config, ReloadableTlsServerConfig};
+use servers::tls::{check_and_watch_tls_config, ReloadableTlsServerConfig};
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu};
@@ -199,7 +199,8 @@ where
                 ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
             );
 
-            watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
+            // will not watch if watch is disabled in tls option
+            check_and_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let mysql_io_runtime = Arc::new(
                 RuntimeBuilder::default()
@@ -232,7 +233,7 @@ where
                 ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
             );
 
-            watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
+            check_and_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let pg_io_runtime = Arc::new(
                 RuntimeBuilder::default()

@@ -31,6 +31,7 @@ runtime_size = 2
 mode = "disable"
 cert_path = ""
 key_path = ""
+watch = false
 
 # PostgresSQL server options, see `standalone.example.toml`.
 [postgres]
@@ -43,6 +44,7 @@ runtime_size = 2
 mode = "disable"
 cert_path = ""
 key_path = ""
+watch = false
 
 # OpenTSDB protocol options, see `standalone.example.toml`.
 [opentsdb]
