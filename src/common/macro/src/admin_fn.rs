@@ -185,8 +185,6 @@ fn build_struct(
                     columns[0].len()
                 };
                 let columns = Vec::from(columns);
-
-
                 std::thread::spawn(move || {
                     let query_ctx = &func_ctx.query_ctx;
                     let handler = func_ctx
