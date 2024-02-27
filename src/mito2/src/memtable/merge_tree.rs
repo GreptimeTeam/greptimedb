@@ -461,61 +461,54 @@ mod tests {
     }
 
     #[test]
-    fn write_iter_multi_keys() {
+    fn test_write_iter_multi_keys() {
+        write_iter_multi_keys(1, 100);
+        write_iter_multi_keys(2, 100);
+        write_iter_multi_keys(4, 100);
+        write_iter_multi_keys(8, 5);
+        write_iter_multi_keys(2, 10);
+    }
+
+    fn write_iter_multi_keys(max_keys: usize, freeze_threshold: usize) {
         let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
-        let memtable =
-            MergeTreeMemtable::new(1, metadata.clone(), None, &MergeTreeConfig::default());
+        let memtable = MergeTreeMemtable::new(
+            1,
+            metadata.clone(),
+            None,
+            &MergeTreeConfig {
+                index_max_keys_per_shard: max_keys,
+                data_freeze_threshold: freeze_threshold,
+                ..Default::default()
+            },
+        );
 
         let mut data = Vec::new();
+        // 4 partitions, each partition 4 pks.
         for i in 0..4 {
-            // key: i, a
-            let offset = 100 * (i as i64 + 1);
-            let timestamps = [1 + offset, 7 + offset, 5 + offset, 6 + offset];
-            let kvs = memtable_util::build_key_values(
-                &metadata,
-                "a".to_string(),
-                i,
-                &timestamps,
-                0, // sequence 0, 1, 2, 3
-            );
-            memtable.write(&kvs).unwrap();
-            for ts in timestamps {
-                data.push((i, "a", ts));
+            for j in 0..4 {
+                // key: i, a{j}
+                let timestamps = [11, 13, 1, 5, 3, 7, 9];
+                let key = format!("a{j}");
+                let kvs =
+                    memtable_util::build_key_values(&metadata, key.clone(), i, &timestamps, 0);
+                memtable.write(&kvs).unwrap();
+                for ts in timestamps {
+                    data.push((i, key.clone(), ts));
+                }
+            }
+            for j in 0..4 {
+                // key: i, a{j}
+                let timestamps = [10, 2, 4, 8, 6];
+                let key = format!("a{j}");
+                let kvs =
+                    memtable_util::build_key_values(&metadata, key.clone(), i, &timestamps, 200);
+                memtable.write(&kvs).unwrap();
+                for ts in timestamps {
+                    data.push((i, key.clone(), ts));
+                }
             }
         }
-        for i in 0..4 {
-            // key: i, b
-            let offset = 10 * (i as i64 + 1);
-            let timestamps = [3 + offset, 2 + offset];
-            let kvs = memtable_util::build_key_values(
-                &metadata,
-                "b".to_string(),
-                i,
-                &timestamps,
-                4, // sequence 4, 5
-            );
-            memtable.write(&kvs).unwrap();
-            for ts in timestamps {
-                data.push((i, "b", ts));
-            }
-        }
-        for i in 0..4 {
-            // key: i, a
-            let offset = 100 * (i as i64 + 1);
-            let timestamps = [8 + offset, 3 + offset, 4 + offset];
-            let kvs = memtable_util::build_key_values(
-                &metadata,
-                "a".to_string(),
-                i,
-                &timestamps,
-                6, // sequence 6, 7, 8
-            );
-            memtable.write(&kvs).unwrap();
-            for ts in timestamps {
-                data.push((i, "a", ts));
-            }
-        }
-        data.sort_unstable_by_key(|x| (x.0, x.1, x.2));
+        data.sort_unstable();
 
         let expect = data.into_iter().map(|x| x.2).collect::<Vec<_>>();
         let iter = memtable.iter(None, None).unwrap();

@@ -67,15 +67,16 @@ impl Partition {
         metrics: &mut WriteMetrics,
     ) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
-        // Now we ensure one key only exists in one shard.
+        // Freeze the shard builder if needed.
+        if inner.shard_builder.should_freeze() {
+            inner.freeze_active_shard()?;
+        }
+
+        // Finds key in shards, now we ensure one key only exists in one shard.
         if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
             // Key already in shards.
             inner.write_to_shard(pk_id, key_value);
             return Ok(());
-        }
-
-        if inner.shard_builder.should_freeze() {
-            inner.freeze_active_shard()?;
         }
 
         // Write to the shard builder.
