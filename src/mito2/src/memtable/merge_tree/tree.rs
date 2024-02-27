@@ -27,6 +27,7 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
+use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::partition::{
@@ -49,11 +50,17 @@ pub struct MergeTree {
     partitions: RwLock<BTreeMap<PartitionKey, PartitionRef>>,
     /// Whether the tree has multiple partitions.
     is_partitioned: bool,
+    /// Manager to report size of the tree.
+    write_buffer_manager: Option<WriteBufferManagerRef>,
 }
 
 impl MergeTree {
     /// Creates a new merge tree.
-    pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> MergeTree {
+    pub fn new(
+        metadata: RegionMetadataRef,
+        config: &MergeTreeConfig,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+    ) -> MergeTree {
         let row_codec = McmpRowCodec::new(
             metadata
                 .primary_key_columns()
@@ -68,6 +75,7 @@ impl MergeTree {
             row_codec: Arc::new(row_codec),
             partitions: Default::default(),
             is_partitioned,
+            write_buffer_manager,
         }
     }
 
@@ -183,19 +191,52 @@ impl MergeTree {
             || self.metadata.column_metadatas != metadata.column_metadatas
         {
             // The schema has changed, we can't reuse the tree.
-            return MergeTree::new(metadata, &self.config);
+            return MergeTree::new(metadata, &self.config, self.write_buffer_manager.clone());
+        }
+
+        let mut total_shared_size = 0;
+        let mut part_infos = {
+            let partitions = self.partitions.read().unwrap();
+            partitions
+                .iter()
+                .filter_map(|(part_key, part)| {
+                    let stats = part.stats();
+                    if stats.num_rows > 0 {
+                        // Only fork partitions that have data.
+                        total_shared_size += stats.shared_memory_size;
+                        Some((*part_key, part.clone(), stats))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // TODO(yingwen): Optimize eviction strategy. Now we evict the whole partition.
+        let fork_size = self.config.fork_dictionary_bytes.as_bytes() as usize;
+        if total_shared_size > fork_size {
+            // Sort partitions by memory size desc.
+            part_infos.sort_unstable_by_key(|info| info.2.shared_memory_size);
+            while total_shared_size > fork_size {
+                let Some(info) = part_infos.pop() else {
+                    break;
+                };
+
+                common_telemetry::debug!(
+                    "Evict partition {} with memory size {}, {} shards",
+                    info.0,
+                    info.2.shared_memory_size,
+                    info.2.shard_num,
+                );
+
+                total_shared_size -= info.2.shared_memory_size;
+            }
         }
 
         let mut forked = BTreeMap::new();
-        let partitions = self.partitions.read().unwrap();
-        for (part_key, part) in partitions.iter() {
-            if !part.has_data() {
-                continue;
-            }
-
-            // Only fork partitions that have data.
+        for (part_key, part, _) in part_infos {
             let forked_part = part.fork(&metadata, &self.config);
-            forked.insert(*part_key, Arc::new(forked_part));
+            forked.insert(part_key, Arc::new(forked_part));
         }
 
         MergeTree {
@@ -204,16 +245,13 @@ impl MergeTree {
             row_codec: self.row_codec.clone(),
             partitions: RwLock::new(forked),
             is_partitioned: self.is_partitioned,
+            write_buffer_manager: self.write_buffer_manager.clone(),
         }
     }
 
-    /// Returns the memory size shared by forked trees.
-    pub fn shared_memory_size(&self) -> usize {
-        let partitions = self.partitions.read().unwrap();
-        partitions
-            .values()
-            .map(|part| part.shared_memory_size())
-            .sum()
+    /// Returns the write buffer manager.
+    pub(crate) fn write_buffer_manager(&self) -> Option<WriteBufferManagerRef> {
+        self.write_buffer_manager.clone()
     }
 
     fn write_with_key(

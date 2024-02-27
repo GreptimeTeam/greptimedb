@@ -82,14 +82,6 @@ impl Shard {
         })
     }
 
-    /// Returns the memory size of the shard part.
-    pub fn shared_memory_size(&self) -> usize {
-        self.key_dict
-            .as_ref()
-            .map(|dict| dict.shared_memory_size())
-            .unwrap_or(0)
-    }
-
     /// Forks a shard.
     pub fn fork(&self, metadata: RegionMetadataRef) -> Shard {
         Shard {
@@ -103,6 +95,14 @@ impl Shard {
     /// Returns true if the shard is empty (No data).
     pub fn is_empty(&self) -> bool {
         self.data_parts.is_empty()
+    }
+
+    /// Returns the memory size of the shard part.
+    pub(crate) fn shared_memory_size(&self) -> usize {
+        self.key_dict
+            .as_ref()
+            .map(|dict| dict.shared_memory_size())
+            .unwrap_or(0)
     }
 }
 

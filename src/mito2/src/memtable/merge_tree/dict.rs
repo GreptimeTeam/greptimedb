@@ -21,6 +21,7 @@ use datatypes::arrow::array::{Array, ArrayBuilder, BinaryArray, BinaryBuilder};
 
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::PkIndex;
+use crate::metrics::MEMTABLE_DICT_BYTES;
 
 /// Maximum keys in a [DictBlock].
 const MAX_KEYS_PER_BLOCK: u16 = 256;
@@ -39,7 +40,7 @@ pub struct KeyDictBuilder {
     key_buffer: KeyBuffer,
     /// Dictionary blocks.
     dict_blocks: Vec<DictBlock>,
-    /// Bytes allocated by keys in the [pk_to_index](Self::pk_to_index).
+    /// Bytes allocated by keys in the index.
     key_bytes_in_index: usize,
 }
 
@@ -88,6 +89,9 @@ impl KeyDictBuilder {
         metrics.key_bytes += key.len() * 2;
         self.key_bytes_in_index += key.len();
 
+        // Adds key size of index to the metrics.
+        MEMTABLE_DICT_BYTES.add(key.len() as i64);
+
         pk_index
     }
 
@@ -123,12 +127,14 @@ impl KeyDictBuilder {
             *pk_index = i as PkIndex;
         }
         self.num_keys = 0;
+        let key_bytes_in_index = self.key_bytes_in_index;
+        self.key_bytes_in_index = 0;
 
         Some(KeyDict {
             pk_to_index,
             dict_blocks: std::mem::take(&mut self.dict_blocks),
             key_positions,
-            key_bytes_in_index: self.key_bytes_in_index,
+            key_bytes_in_index,
         })
     }
 
@@ -141,6 +147,12 @@ impl KeyDictBuilder {
         blocks.push(block);
 
         DictBuilderReader::new(blocks, sorted_pk_indices)
+    }
+}
+
+impl Drop for KeyDictBuilder {
+    fn drop(&mut self) {
+        MEMTABLE_DICT_BYTES.sub(self.key_bytes_in_index as i64);
     }
 }
 
@@ -208,6 +220,7 @@ pub struct KeyDict {
     dict_blocks: Vec<DictBlock>,
     /// Maps pk index to position of the key in [Self::dict_blocks].
     key_positions: Vec<PkIndex>,
+    /// Bytes of keys in the index.
     key_bytes_in_index: usize,
 }
 
@@ -239,6 +252,17 @@ impl KeyDict {
     /// Returns the shared memory size.
     pub(crate) fn shared_memory_size(&self) -> usize {
         self.key_bytes_in_index
+            + self
+                .dict_blocks
+                .iter()
+                .map(|block| block.buffer_memory_size())
+                .sum::<usize>()
+    }
+}
+
+impl Drop for KeyDict {
+    fn drop(&mut self) {
+        MEMTABLE_DICT_BYTES.sub(self.key_bytes_in_index as i64);
     }
 }
 
@@ -325,6 +349,9 @@ struct DictBlock {
 
 impl DictBlock {
     fn new(keys: BinaryArray) -> Self {
+        let buffer_size = keys.get_buffer_memory_size();
+        MEMTABLE_DICT_BYTES.add(buffer_size as i64);
+
         Self { keys }
     }
 
@@ -333,9 +360,15 @@ impl DictBlock {
         self.keys.value(pos as usize)
     }
 
-    #[cfg(test)]
     fn buffer_memory_size(&self) -> usize {
         self.keys.get_buffer_memory_size()
+    }
+}
+
+impl Drop for DictBlock {
+    fn drop(&mut self) {
+        let buffer_size = self.keys.get_buffer_memory_size();
+        MEMTABLE_DICT_BYTES.sub(buffer_size as i64);
     }
 }
 
@@ -393,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_memory_size() {
+    fn test_dict_memory_size() {
         let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 3).into());
         let mut metrics = WriteMetrics::default();
         // 513 keys
@@ -404,9 +437,15 @@ mod tests {
             let key = format!("{i:05}");
             builder.insert_key(key.as_bytes(), &mut metrics);
         }
-        // num_keys * 5 * 2
-        assert_eq!(5130, metrics.key_bytes);
+        let key_bytes = num_keys as usize * 5;
+        assert_eq!(key_bytes * 2, metrics.key_bytes);
+        assert_eq!(key_bytes, builder.key_bytes_in_index);
         assert_eq!(8850, builder.memory_size());
+
+        let dict = builder.finish().unwrap();
+        assert_eq!(0, builder.key_bytes_in_index);
+        assert_eq!(key_bytes, dict.key_bytes_in_index);
+        assert!(dict.shared_memory_size() > key_bytes);
     }
 
     #[test]

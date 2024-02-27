@@ -28,6 +28,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -41,6 +42,9 @@ use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
 };
+
+/// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
+const DICTIONARY_SIZE_FACTOR: u64 = 16;
 
 /// Id of a shard, only unique inside a partition.
 type ShardId = u32;
@@ -64,14 +68,26 @@ pub struct MergeTreeConfig {
     pub data_freeze_threshold: usize,
     /// Whether to delete duplicates rows.
     pub dedup: bool,
+    /// Total bytes of dictionary to keep in fork.
+    pub fork_dictionary_bytes: ReadableSize,
 }
 
 impl Default for MergeTreeConfig {
     fn default() -> Self {
+        let mut fork_dictionary_bytes = ReadableSize::mb(512);
+        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+            let adjust_dictionary_bytes =
+                std::cmp::min(sys_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
+            if adjust_dictionary_bytes.0 > 0 {
+                fork_dictionary_bytes = adjust_dictionary_bytes;
+            }
+        }
+
         Self {
             index_max_keys_per_shard: 8192,
             data_freeze_threshold: 102400,
             dedup: true,
+            fork_dictionary_bytes,
         }
     }
 }
@@ -103,6 +119,7 @@ impl Memtable for MergeTreeMemtable {
 
         let mut metrics = WriteMetrics::default();
         let mut pk_buffer = Vec::new();
+        // Ensures the memtable always updates stats.
         let res = self.tree.write(kvs, &mut pk_buffer, &mut metrics);
 
         self.update_stats(&metrics);
@@ -159,8 +176,7 @@ impl Memtable for MergeTreeMemtable {
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         let tree = self.tree.fork(metadata.clone());
 
-        let memtable =
-            MergeTreeMemtable::with_tree(id, tree, self.alloc_tracker.write_buffer_manager());
+        let memtable = MergeTreeMemtable::with_tree(id, tree);
         Arc::new(memtable)
     }
 }
@@ -173,23 +189,17 @@ impl MergeTreeMemtable {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: &MergeTreeConfig,
     ) -> Self {
-        Self::with_tree(id, MergeTree::new(metadata, config), write_buffer_manager)
+        Self::with_tree(
+            id,
+            MergeTree::new(metadata, config, write_buffer_manager.clone()),
+        )
     }
 
     /// Creates a mutable memtable from the tree.
     ///
     /// It also adds the bytes used by shared parts (e.g. index) to the memory usage.
-    fn with_tree(
-        id: MemtableId,
-        tree: MergeTree,
-        write_buffer_manager: Option<WriteBufferManagerRef>,
-    ) -> Self {
-        let alloc_tracker = AllocTracker::new(write_buffer_manager);
-        // Track space allocated by the tree.
-        let allocated = tree.shared_memory_size();
-        // Here we still add the bytes of shared parts to the tracker as the old memtable
-        // will release its tracker soon.
-        alloc_tracker.on_allocation(allocated);
+    fn with_tree(id: MemtableId, tree: MergeTree) -> Self {
+        let alloc_tracker = AllocTracker::new(tree.write_buffer_manager());
 
         Self {
             id,
@@ -202,8 +212,8 @@ impl MergeTreeMemtable {
 
     /// Updates stats of the memtable.
     fn update_stats(&self, metrics: &WriteMetrics) {
-        self.alloc_tracker
-            .on_allocation(metrics.key_bytes + metrics.value_bytes);
+        // Only let the tracker tracks value bytes.
+        self.alloc_tracker.on_allocation(metrics.value_bytes);
 
         loop {
             let current_min = self.min_timestamp.load(Ordering::Relaxed);

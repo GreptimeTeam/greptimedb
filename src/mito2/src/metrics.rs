@@ -28,6 +28,9 @@ lazy_static! {
     /// Global write buffer size in bytes.
     pub static ref WRITE_BUFFER_BYTES: IntGauge =
         register_int_gauge!("greptime_mito_write_buffer_bytes", "mito write buffer bytes").unwrap();
+    /// Global memtable dictionary size in bytes.
+    pub static ref MEMTABLE_DICT_BYTES: IntGauge =
+        register_int_gauge!("greptime_mito_memtable_dict_bytes", "mito memtable dictionary size in bytes").unwrap();
     /// Gauge for open regions
     pub static ref REGION_COUNT: IntGauge =
         register_int_gauge!("greptime_mito_region_count", "mito region count").unwrap();

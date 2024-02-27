@@ -173,14 +173,21 @@ impl Partition {
         inner.num_rows > 0
     }
 
-    /// Returns shared memory size of the partition.
-    pub fn shared_memory_size(&self) -> usize {
+    /// Gets the stats of the partition.
+    pub(crate) fn stats(&self) -> PartitionStats {
         let inner = self.inner.read().unwrap();
-        inner
+        let num_rows = inner.num_rows;
+        let shard_num = inner.shards.len();
+        let shared_memory_size = inner
             .shards
             .iter()
             .map(|shard| shard.shared_memory_size())
-            .sum()
+            .sum();
+        PartitionStats {
+            num_rows,
+            shard_num,
+            shared_memory_size,
+        }
     }
 
     /// Get partition key from the key value.
@@ -209,6 +216,12 @@ impl Partition {
     pub(crate) fn is_partition_column(name: &str) -> bool {
         name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
     }
+}
+
+pub(crate) struct PartitionStats {
+    pub(crate) num_rows: usize,
+    pub(crate) shard_num: usize,
+    pub(crate) shared_memory_size: usize,
 }
 
 /// Reader to scan rows in a partition.
