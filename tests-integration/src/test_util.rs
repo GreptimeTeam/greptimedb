@@ -50,6 +50,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 use servers::server::Server;
+use servers::tls::ReloadableTlsServerConfig;
 use servers::Mode;
 use session::context::QueryContext;
 
@@ -568,7 +569,10 @@ pub async fn setup_mysql_server_with_user_provider(
         )),
         Arc::new(MysqlSpawnConfig::new(
             false,
-            opts.tls.setup().unwrap().map(Arc::new),
+            Arc::new(
+                ReloadableTlsServerConfig::try_new(opts.tls.clone())
+                    .expect("Failed to load certificates and keys"),
+            ),
             opts.reject_no_database.unwrap_or(false),
         )),
     ));
@@ -614,9 +618,15 @@ pub async fn setup_pg_server_with_user_provider(
         addr: fe_pg_addr.clone(),
         ..Default::default()
     };
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(opts.tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
     let fe_pg_server = Arc::new(Box::new(PostgresServer::new(
         ServerSqlQueryHandlerAdapter::arc(fe_instance_ref),
-        opts.tls.clone(),
+        opts.tls.should_force_tls(),
+        tls_server_config,
         runtime,
         user_provider,
     )) as Box<dyn Server>);

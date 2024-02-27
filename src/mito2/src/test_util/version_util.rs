@@ -25,7 +25,7 @@ use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder}
 use store_api::storage::RegionId;
 
 use crate::manifest::action::RegionEdit;
-use crate::memtable::{MemtableBuilder, MemtableBuilderRef};
+use crate::memtable::MemtableBuilder;
 use crate::region::version::{Version, VersionBuilder, VersionControl};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
@@ -79,10 +79,6 @@ impl VersionControlBuilder {
         self.file_purger.clone()
     }
 
-    pub(crate) fn memtable_builder(&self) -> MemtableBuilderRef {
-        self.memtable_builder.clone()
-    }
-
     pub(crate) fn push_l0_file(&mut self, start_ms: i64, end_ms: i64) -> &mut Self {
         let file_id = FileId::random();
         self.files.insert(
@@ -105,7 +101,7 @@ impl VersionControlBuilder {
 
     pub(crate) fn build_version(&self) -> Version {
         let metadata = Arc::new(self.metadata.clone());
-        let mutable = self.memtable_builder.build(&metadata);
+        let mutable = self.memtable_builder.build(0, &metadata);
         VersionBuilder::new(metadata, mutable)
             .add_files(self.file_purger.clone(), self.files.values().cloned())
             .build()

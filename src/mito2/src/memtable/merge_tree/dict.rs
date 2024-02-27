@@ -56,11 +56,6 @@ impl KeyDictBuilder {
         }
     }
 
-    /// Gets the pk index by the key.
-    pub fn get_pk_index(&self, key: &[u8]) -> Option<PkIndex> {
-        self.pk_to_index.get(key).copied()
-    }
-
     /// Returns true if the builder is full.
     pub fn is_full(&self) -> bool {
         self.num_keys >= self.capacity
@@ -80,7 +75,7 @@ impl KeyDictBuilder {
 
         if self.key_buffer.len() >= MAX_KEYS_PER_BLOCK.into() {
             // The write buffer is full. Freeze a dict block.
-            let dict_block = self.key_buffer.finish();
+            let dict_block = self.key_buffer.finish(false);
             self.dict_blocks.push(dict_block);
         }
 
@@ -97,6 +92,7 @@ impl KeyDictBuilder {
     }
 
     /// Memory size of the builder.
+    #[cfg(test)]
     pub fn memory_size(&self) -> usize {
         self.key_bytes_in_index
             + self.key_buffer.buffer_memory_size()
@@ -113,8 +109,8 @@ impl KeyDictBuilder {
             return None;
         }
 
-        // Finishes current dict block.
-        let dict_block = self.key_buffer.finish();
+        // Finishes current dict block and resets the pk index.
+        let dict_block = self.key_buffer.finish(true);
         self.dict_blocks.push(dict_block);
         // Takes the pk to index map.
         let mut pk_to_index = std::mem::take(&mut self.pk_to_index);
@@ -126,6 +122,7 @@ impl KeyDictBuilder {
             // Overwrites the pk index.
             *pk_index = i as PkIndex;
         }
+        self.num_keys = 0;
 
         Some(KeyDict {
             pk_to_index,
@@ -152,8 +149,6 @@ impl KeyDictBuilder {
 pub struct DictBuilderReader {
     blocks: Vec<DictBlock>,
     sorted_pk_indices: Vec<PkIndex>,
-    /// Current offset in the `sorted_pk_indices`.
-    offset: usize,
 }
 
 impl DictBuilderReader {
@@ -161,21 +156,23 @@ impl DictBuilderReader {
         Self {
             blocks,
             sorted_pk_indices,
-            offset: 0,
         }
     }
 
     /// Returns the number of keys.
+    #[cfg(test)]
     pub fn num_keys(&self) -> usize {
         self.sorted_pk_indices.len()
     }
 
     /// Gets the i-th pk index.
+    #[cfg(test)]
     pub fn pk_index(&self, offset: usize) -> PkIndex {
         self.sorted_pk_indices[offset]
     }
 
     /// Gets the i-th key.
+    #[cfg(test)]
     pub fn key(&self, offset: usize) -> &[u8] {
         let pk_index = self.pk_index(offset);
         self.key_by_pk_index(pk_index)
@@ -188,23 +185,17 @@ impl DictBuilderReader {
     }
 
     /// Returns pk weights to sort a data part and replaces pk indices.
-    pub(crate) fn pk_weights_to_sort_data(&self) -> Vec<u16> {
-        compute_pk_weights(&self.sorted_pk_indices)
-    }
-
-    /// Returns pk indices sorted by keys.
-    pub(crate) fn sorted_pk_index(&self) -> &[PkIndex] {
-        &self.sorted_pk_indices
+    pub(crate) fn pk_weights_to_sort_data(&self, pk_weights: &mut Vec<u16>) {
+        compute_pk_weights(&self.sorted_pk_indices, pk_weights)
     }
 }
 
 /// Returns pk weights to sort a data part and replaces pk indices.
-fn compute_pk_weights(sorted_pk_indices: &[PkIndex]) -> Vec<u16> {
-    let mut pk_weights = vec![0; sorted_pk_indices.len()];
+fn compute_pk_weights(sorted_pk_indices: &[PkIndex], pk_weights: &mut Vec<u16>) {
+    pk_weights.resize(sorted_pk_indices.len(), 0);
     for (weight, pk_index) in sorted_pk_indices.iter().enumerate() {
         pk_weights[*pk_index as usize] = weight as u16;
     }
-    pk_weights
 }
 
 /// A key dictionary.
@@ -240,7 +231,9 @@ impl KeyDict {
 
     /// Returns pk weights to sort a data part and replaces pk indices.
     pub(crate) fn pk_weights_to_sort_data(&self) -> Vec<u16> {
-        compute_pk_weights(&self.key_positions)
+        let mut pk_weights = Vec::with_capacity(self.key_positions.len());
+        compute_pk_weights(&self.key_positions, &mut pk_weights);
+        pk_weights
     }
 
     /// Returns the shared memory size.
@@ -289,23 +282,8 @@ impl KeyBuffer {
         self.key_builder.is_empty()
     }
 
-    /// Gets the primary key by its index.
-    ///
-    /// # Panics
-    /// Panics if the index is invalid.
-    fn get_key(&self, index: PkIndex) -> &[u8] {
-        let values = self.key_builder.values_slice();
-        let offsets = self.key_builder.offsets_slice();
-        // Casting index to usize is safe.
-        let start = offsets[index as usize];
-        let end = offsets[index as usize + 1];
-
-        // We ensure no null in the builder so we don't check validity.
-        // The builder offset should be positive.
-        &values[start as usize..end as usize]
-    }
-
     /// Returns the buffer size of the builder.
+    #[cfg(test)]
     fn buffer_memory_size(&self) -> usize {
         self.key_builder.values_slice().len()
             + std::mem::size_of_val(self.key_builder.offsets_slice())
@@ -316,12 +294,15 @@ impl KeyBuffer {
                 .unwrap_or(0)
     }
 
-    fn finish(&mut self) -> DictBlock {
+    fn finish(&mut self, reset_index: bool) -> DictBlock {
         let primary_key = self.key_builder.finish();
         // Reserve capacity for the new builder. `finish()` the builder will leave the builder
         // empty with capacity 0.
         // TODO(yingwen): Do we need to reserve capacity for data?
         self.key_builder = BinaryBuilder::with_capacity(primary_key.len(), 0);
+        if reset_index {
+            self.next_pk_index = 0;
+        }
 
         DictBlock::new(primary_key)
     }
@@ -347,15 +328,12 @@ impl DictBlock {
         Self { keys }
     }
 
-    fn len(&self) -> usize {
-        self.keys.len()
-    }
-
     fn key_by_pk_index(&self, index: PkIndex) -> &[u8] {
         let pos = index % MAX_KEYS_PER_BLOCK;
         self.keys.value(pos as usize)
     }
 
+    #[cfg(test)]
     fn buffer_memory_size(&self) -> usize {
         self.keys.get_buffer_memory_size()
     }
@@ -429,5 +407,21 @@ mod tests {
         // num_keys * 5 * 2
         assert_eq!(5130, metrics.key_bytes);
         assert_eq!(8850, builder.memory_size());
+    }
+
+    #[test]
+    fn test_builder_finish() {
+        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 2).into());
+        let mut metrics = WriteMetrics::default();
+        for i in 0..MAX_KEYS_PER_BLOCK * 2 {
+            let key = format!("{i:010}");
+            assert!(!builder.is_full());
+            builder.insert_key(key.as_bytes(), &mut metrics);
+        }
+        assert!(builder.is_full());
+        builder.finish();
+
+        assert!(!builder.is_full());
+        assert_eq!(0, builder.insert_key(b"a0", &mut metrics));
     }
 }

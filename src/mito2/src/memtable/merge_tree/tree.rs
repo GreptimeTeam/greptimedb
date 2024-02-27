@@ -21,8 +21,6 @@ use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
-use datatypes::arrow;
-use datatypes::data_type::ConcreteDataType;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -32,10 +30,9 @@ use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::partition::{
-    Partition, PartitionKey, PartitionReader, PartitionRef,
+    Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
 };
 use crate::memtable::merge_tree::MergeTreeConfig;
-use crate::memtable::time_series::primary_key_schema;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -122,7 +119,7 @@ impl MergeTree {
     }
 
     /// Scans the tree.
-    pub fn scan(
+    pub fn read(
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
@@ -144,23 +141,18 @@ impl MergeTree {
             .unwrap_or_default();
 
         let partitions = self.prune_partitions(&filters);
-        let pk_schema = primary_key_schema(&self.metadata);
-        let pk_datatypes = self
-            .metadata
-            .primary_key_columns()
-            .map(|pk| pk.column_schema.data_type.clone())
-            .collect();
 
-        let iter = TreeIter {
-            metadata: self.metadata.clone(),
-            pk_schema,
-            pk_datatypes,
-            projection,
-            filters,
-            row_codec: self.row_codec.clone(),
+        let mut iter = TreeIter {
             partitions,
             current_reader: None,
         };
+        let context = ReadPartitionContext::new(
+            self.metadata.clone(),
+            self.row_codec.clone(),
+            projection,
+            filters,
+        );
+        iter.fetch_next_partition(context)?;
 
         Ok(Box::new(iter))
     }
@@ -253,37 +245,37 @@ impl MergeTree {
 
     fn prune_partitions(&self, filters: &[SimpleFilterEvaluator]) -> VecDeque<PartitionRef> {
         let partitions = self.partitions.read().unwrap();
-        if self.is_partitioned {
-            // Prune partition keys.
-            for filter in filters {
-                // Only the first filter takes effect.
-                if Partition::is_partition_column(filter.column_name()) {
-                    let mut pruned = VecDeque::new();
-                    for (key, partition) in partitions.iter() {
-                        if filter
-                            .evaluate_scalar(&ScalarValue::UInt32(Some(*key)))
-                            .unwrap_or(true)
-                        {
-                            pruned.push_back(partition.clone());
-                        }
-                    }
+        if !self.is_partitioned {
+            return partitions.values().cloned().collect();
+        }
 
-                    return pruned;
+        let mut pruned = VecDeque::new();
+        // Prune partition keys.
+        for (key, partition) in partitions.iter() {
+            let mut is_needed = true;
+            for filter in filters {
+                if !Partition::is_partition_column(filter.column_name()) {
+                    continue;
                 }
+
+                if !filter
+                    .evaluate_scalar(&ScalarValue::UInt32(Some(*key)))
+                    .unwrap_or(true)
+                {
+                    is_needed = false;
+                }
+            }
+
+            if is_needed {
+                pruned.push_back(partition.clone());
             }
         }
 
-        partitions.values().cloned().collect()
+        pruned
     }
 }
 
 struct TreeIter {
-    metadata: RegionMetadataRef,
-    pk_schema: arrow::datatypes::SchemaRef,
-    pk_datatypes: Vec<ConcreteDataType>,
-    projection: HashSet<ColumnId>,
-    filters: Vec<SimpleFilterEvaluator>,
-    row_codec: Arc<McmpRowCodec>,
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
 }
@@ -292,6 +284,44 @@ impl Iterator for TreeIter {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        unimplemented!()
+        self.next_batch().transpose()
+    }
+}
+
+impl TreeIter {
+    /// Fetch next partition.
+    fn fetch_next_partition(&mut self, mut context: ReadPartitionContext) -> Result<()> {
+        while let Some(partition) = self.partitions.pop_front() {
+            let part_reader = partition.read(context)?;
+            if !part_reader.is_valid() {
+                context = part_reader.into_context();
+                continue;
+            }
+            self.current_reader = Some(part_reader);
+            break;
+        }
+
+        Ok(())
+    }
+
+    /// Fetches next batch.
+    fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let Some(part_reader) = &mut self.current_reader else {
+            return Ok(None);
+        };
+
+        debug_assert!(part_reader.is_valid());
+        let batch = part_reader.convert_current_batch()?;
+        part_reader.next()?;
+        if part_reader.is_valid() {
+            return Ok(Some(batch));
+        }
+
+        // Safety: current reader is Some.
+        let part_reader = self.current_reader.take().unwrap();
+        let context = part_reader.into_context();
+        self.fetch_next_partition(context)?;
+
+        Ok(Some(batch))
     }
 }

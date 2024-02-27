@@ -441,6 +441,12 @@ pub enum Error {
         "Invalid parameter, physical_table is not expected when metric engine is disabled"
     ))]
     UnexpectedPhysicalTable { location: Location },
+
+    #[snafu(display("Failed to initialize a watcher for file"))]
+    FileWatch {
+        #[snafu(source)]
+        error: notify::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -462,7 +468,8 @@ impl ErrorExt for Error {
             | CatalogError { .. }
             | GrpcReflectionService { .. }
             | BuildHttpResponse { .. }
-            | Arrow { .. } => StatusCode::Internal,
+            | Arrow { .. }
+            | FileWatch { .. } => StatusCode::Internal,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 

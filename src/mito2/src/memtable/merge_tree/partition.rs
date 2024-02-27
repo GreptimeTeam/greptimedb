@@ -19,6 +19,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
+use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
@@ -26,11 +27,16 @@ use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataParts, DATA_INIT_CAP};
+use crate::memtable::merge_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
+use crate::memtable::merge_tree::dedup::DedupReader;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::shard::Shard;
+use crate::memtable::merge_tree::shard::{
+    BoxedDataBatchSource, Shard, ShardMerger, ShardNode, ShardSource,
+};
 use crate::memtable::merge_tree::shard_builder::ShardBuilder;
-use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
+use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
+use crate::read::{Batch, BatchBuilder};
+use crate::row_converter::{McmpRowCodec, RowCodec};
 
 /// Key of a partition.
 pub type PartitionKey = u32;
@@ -38,15 +44,18 @@ pub type PartitionKey = u32;
 /// A tree partition.
 pub struct Partition {
     inner: RwLock<Inner>,
+    /// Whether to dedup batches.
+    dedup: bool,
 }
+
+pub type PartitionRef = Arc<Partition>;
 
 impl Partition {
     /// Creates a new partition.
     pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
-        let shard_builder = ShardBuilder::new(metadata.clone(), config);
-
         Partition {
-            inner: RwLock::new(Inner::new(metadata, shard_builder)),
+            inner: RwLock::new(Inner::new(metadata, config)),
+            dedup: config.dedup,
         }
     }
 
@@ -83,7 +92,7 @@ impl Partition {
         let mut inner = self.inner.write().unwrap();
         // If no primary key, always write to the first shard.
         debug_assert!(!inner.shards.is_empty());
-        debug_assert_eq!(1, inner.active_shard_id);
+        debug_assert_eq!(1, inner.shard_builder.current_shard_id());
 
         // A dummy pk id.
         let pk_id = PkId {
@@ -95,12 +104,31 @@ impl Partition {
     }
 
     /// Scans data in the partition.
-    pub fn scan(
-        &self,
-        _projection: HashSet<ColumnId>,
-        _filters: Vec<SimpleFilterEvaluator>,
-    ) -> Result<PartitionReader> {
-        unimplemented!()
+    pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
+        let nodes = {
+            let inner = self.inner.read().unwrap();
+            let mut nodes = Vec::with_capacity(inner.shards.len() + 1);
+            if !inner.shard_builder.is_empty() {
+                let bulder_reader = inner.shard_builder.read(&mut context.pk_weights)?;
+                nodes.push(ShardNode::new(ShardSource::Builder(bulder_reader)));
+            }
+            for shard in &inner.shards {
+                if !shard.is_empty() {
+                    let shard_reader = shard.read()?;
+                    nodes.push(ShardNode::new(ShardSource::Shard(shard_reader)));
+                }
+            }
+            nodes
+        };
+
+        // Creating a shard merger will invoke next so we do it outside of the lock.
+        let merger = ShardMerger::try_new(nodes)?;
+        if self.dedup {
+            let source = DedupReader::try_new(merger)?;
+            PartitionReader::new(context, Box::new(source))
+        } else {
+            PartitionReader::new(context, Box::new(merger))
+        }
     }
 
     /// Freezes the partition.
@@ -111,10 +139,17 @@ impl Partition {
     }
 
     /// Forks the partition.
+    ///
+    /// Must freeze the partition before fork.
     pub fn fork(&self, metadata: &RegionMetadataRef, config: &MergeTreeConfig) -> Partition {
         let inner = self.inner.read().unwrap();
+        debug_assert!(inner.shard_builder.is_empty());
         // TODO(yingwen): TTL or evict shards.
-        let shard_builder = ShardBuilder::new(metadata.clone(), config);
+        let shard_builder = ShardBuilder::new(
+            metadata.clone(),
+            config,
+            inner.shard_builder.current_shard_id(),
+        );
         let shards = inner
             .shards
             .iter()
@@ -125,10 +160,10 @@ impl Partition {
             inner: RwLock::new(Inner {
                 metadata: metadata.clone(),
                 shard_builder,
-                active_shard_id: inner.active_shard_id,
                 shards,
                 num_rows: 0,
             }),
+            dedup: self.dedup,
         }
     }
 
@@ -179,9 +214,234 @@ impl Partition {
 /// Reader to scan rows in a partition.
 ///
 /// It can merge rows from multiple shards.
-pub struct PartitionReader {}
+pub struct PartitionReader {
+    context: ReadPartitionContext,
+    source: BoxedDataBatchSource,
+    last_yield_pk_id: Option<PkId>,
+}
 
-pub type PartitionRef = Arc<Partition>;
+impl PartitionReader {
+    fn new(context: ReadPartitionContext, source: BoxedDataBatchSource) -> Result<Self> {
+        let mut reader = Self {
+            context,
+            source,
+            last_yield_pk_id: None,
+        };
+        // Find next valid batch.
+        reader.prune_batch_by_key()?;
+
+        Ok(reader)
+    }
+
+    /// Returns true if the reader is valid.
+    pub fn is_valid(&self) -> bool {
+        self.source.is_valid()
+    }
+
+    /// Advances the reader.
+    ///
+    /// # Panics
+    /// Panics if the reader is invalid.
+    pub fn next(&mut self) -> Result<()> {
+        self.source.next()?;
+
+        self.prune_batch_by_key()
+    }
+
+    /// Converts current data batch into a [Batch].
+    ///
+    /// # Panics
+    /// Panics if the reader is invalid.
+    pub fn convert_current_batch(&self) -> Result<Batch> {
+        let data_batch = self.source.current_data_batch();
+        data_batch_to_batch(
+            &self.context.metadata,
+            &self.context.projection,
+            self.source.current_key(),
+            data_batch,
+        )
+    }
+
+    pub(crate) fn into_context(self) -> ReadPartitionContext {
+        self.context
+    }
+
+    fn prune_batch_by_key(&mut self) -> Result<()> {
+        if self.context.metadata.primary_key.is_empty() || !self.context.need_prune_key {
+            // Nothing to prune.
+            return Ok(());
+        }
+
+        while self.source.is_valid() {
+            let pk_id = self.source.current_pk_id();
+            if let Some(yield_pk_id) = self.last_yield_pk_id {
+                if pk_id == yield_pk_id {
+                    // If this batch has the same key as last returned batch.
+                    // We can return it without evaluating filters.
+                    break;
+                }
+            }
+            let key = self.source.current_key().unwrap();
+            // Prune batch by primary key.
+            if prune_primary_key(
+                &self.context.metadata,
+                &self.context.filters,
+                &self.context.row_codec,
+                key,
+            ) {
+                // We need this key.
+                self.last_yield_pk_id = Some(pk_id);
+                break;
+            }
+            self.source.next()?;
+        }
+
+        Ok(())
+    }
+}
+
+// TODO(yingwen): Improve performance of key prunning. Now we need to find index and
+// then decode and convert each value.
+/// Returns true if the `pk` is still needed.
+fn prune_primary_key(
+    metadata: &RegionMetadataRef,
+    filters: &[SimpleFilterEvaluator],
+    codec: &McmpRowCodec,
+    pk: &[u8],
+) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+
+    // no primary key, we simply return true.
+    if metadata.primary_key.is_empty() {
+        return true;
+    }
+
+    let pk_values = match codec.decode(pk) {
+        Ok(values) => values,
+        Err(e) => {
+            common_telemetry::error!(e; "Failed to decode primary key");
+            return true;
+        }
+    };
+
+    // evaluate filters against primary key values
+    let mut result = true;
+    for filter in filters {
+        if Partition::is_partition_column(filter.column_name()) {
+            continue;
+        }
+        let Some(column) = metadata.column_by_name(filter.column_name()) else {
+            continue;
+        };
+        // ignore filters that are not referencing primary key columns
+        if column.semantic_type != SemanticType::Tag {
+            continue;
+        }
+        // index of the column in primary keys.
+        // Safety: A tag column is always in primary key.
+        let index = metadata.primary_key_index(column.column_id).unwrap();
+        // Safety: arrow schema and datatypes are constructed from the same source.
+        let scalar_value = pk_values[index]
+            .try_to_scalar_value(&column.column_schema.data_type)
+            .unwrap();
+        result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
+    }
+
+    result
+}
+
+/// Structs to reuse across readers to avoid allocating for each reader.
+pub(crate) struct ReadPartitionContext {
+    metadata: RegionMetadataRef,
+    row_codec: Arc<McmpRowCodec>,
+    projection: HashSet<ColumnId>,
+    filters: Vec<SimpleFilterEvaluator>,
+    /// Buffer to store pk weights.
+    pk_weights: Vec<u16>,
+    need_prune_key: bool,
+}
+
+impl ReadPartitionContext {
+    pub(crate) fn new(
+        metadata: RegionMetadataRef,
+        row_codec: Arc<McmpRowCodec>,
+        projection: HashSet<ColumnId>,
+        filters: Vec<SimpleFilterEvaluator>,
+    ) -> ReadPartitionContext {
+        let need_prune_key = Self::need_prune_key(&metadata, &filters);
+        ReadPartitionContext {
+            metadata,
+            row_codec,
+            projection,
+            filters,
+            pk_weights: Vec::new(),
+            need_prune_key,
+        }
+    }
+
+    /// Does filters contains predicate on primary key columns after pruning the
+    /// partition column.
+    fn need_prune_key(metadata: &RegionMetadataRef, filters: &[SimpleFilterEvaluator]) -> bool {
+        for filter in filters {
+            // We already pruned partitions before so we skip the partition column.
+            if Partition::is_partition_column(filter.column_name()) {
+                continue;
+            }
+            let Some(column) = metadata.column_by_name(filter.column_name()) else {
+                continue;
+            };
+            if column.semantic_type != SemanticType::Tag {
+                continue;
+            }
+
+            return true;
+        }
+
+        false
+    }
+}
+
+// TODO(yingwen): Pushdown projection to shard readers.
+/// Converts a [DataBatch] to a [Batch].
+fn data_batch_to_batch(
+    metadata: &RegionMetadataRef,
+    projection: &HashSet<ColumnId>,
+    key: Option<&[u8]>,
+    data_batch: DataBatch,
+) -> Result<Batch> {
+    let record_batch = data_batch.slice_record_batch();
+    let primary_key = key.map(|k| k.to_vec()).unwrap_or_default();
+    let mut builder = BatchBuilder::new(primary_key);
+    builder
+        .timestamps_array(record_batch.column(1).clone())?
+        .sequences_array(record_batch.column(2).clone())?
+        .op_types_array(record_batch.column(3).clone())?;
+
+    if record_batch.num_columns() <= 4 {
+        // No fields.
+        return builder.build();
+    }
+
+    // Iterate all field columns.
+    for (array, field) in record_batch
+        .columns()
+        .iter()
+        .zip(record_batch.schema().fields().iter())
+        .skip(4)
+    {
+        // TODO(yingwen): Avoid finding column by name. We know the schema of a DataBatch.
+        // Safety: metadata should contain all fields.
+        let column_id = metadata.column_by_name(field.name()).unwrap().column_id;
+        if !projection.contains(&column_id) {
+            continue;
+        }
+        builder.push_field_array(column_id, array.clone())?;
+    }
+
+    builder.build()
+}
 
 /// Inner struct of the partition.
 ///
@@ -190,29 +450,26 @@ struct Inner {
     metadata: RegionMetadataRef,
     /// Shard whose dictionary is active.
     shard_builder: ShardBuilder,
-    active_shard_id: ShardId,
     /// Shards with frozen dictionary.
     shards: Vec<Shard>,
     num_rows: usize,
 }
 
 impl Inner {
-    fn new(metadata: RegionMetadataRef, shard_builder: ShardBuilder) -> Self {
-        let mut inner = Self {
+    fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+        let (shards, current_shard_id) = if metadata.primary_key.is_empty() {
+            let data_parts = DataParts::new(metadata.clone(), DATA_INIT_CAP, config.dedup);
+            (vec![Shard::new(0, None, data_parts, config.dedup)], 1)
+        } else {
+            (Vec::new(), 0)
+        };
+        let shard_builder = ShardBuilder::new(metadata.clone(), config, current_shard_id);
+        Self {
             metadata,
             shard_builder,
-            active_shard_id: 0,
-            shards: Vec::new(),
+            shards,
             num_rows: 0,
-        };
-
-        if inner.metadata.primary_key.is_empty() {
-            let data_parts = DataParts::new(inner.metadata.clone(), DATA_INIT_CAP);
-            inner.shards.push(Shard::new(0, None, data_parts));
-            inner.active_shard_id = 1;
         }
-
-        inner
     }
 
     fn find_key_in_shards(&self, primary_key: &[u8]) -> Option<PkId> {
@@ -236,11 +493,7 @@ impl Inner {
     }
 
     fn freeze_active_shard(&mut self) -> Result<()> {
-        if let Some(shard) = self
-            .shard_builder
-            .finish(self.active_shard_id, self.metadata.clone())?
-        {
-            self.active_shard_id += 1;
+        if let Some(shard) = self.shard_builder.finish(self.metadata.clone())? {
             self.shards.push(shard);
         }
         Ok(())

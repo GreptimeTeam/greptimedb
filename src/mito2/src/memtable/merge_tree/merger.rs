@@ -17,55 +17,46 @@ use std::collections::BinaryHeap;
 use std::fmt::Debug;
 use std::ops::Range;
 
-use datatypes::arrow::array::{
-    ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt64Array,
-};
-use datatypes::arrow::datatypes::{DataType, TimeUnit};
-
 use crate::error::Result;
 use crate::memtable::merge_tree::data::{DataBatch, DataBufferReader, DataPartReader};
 use crate::memtable::merge_tree::PkIndex;
 
 /// Nodes of merger's heap.
 pub trait Node: Ord {
-    type Item;
-
-    /// Returns current item of node and fetch next.
-    fn fetch_next(&mut self) -> Result<Self::Item>;
-
     /// Returns true if current node is not exhausted.
     fn is_valid(&self) -> bool;
-
-    /// Current item of node.
-    fn current_item(&self) -> &Self::Item;
 
     /// Whether the other node is behind (exclusive) current node.
     fn is_behind(&self, other: &Self) -> bool;
 
-    /// Skips first `num_to_skip` rows from node's current batch. If current batch is empty it fetches
+    /// Advances `len` rows from current batch. If current batch is empty it fetches
     /// next batch from the node.
     ///
     /// # Panics
-    /// If the node is EOF.
-    fn skip(&mut self, offset_to_skip: usize) -> Result<()>;
+    /// If the node is invalid.
+    fn advance(&mut self, len: usize) -> Result<()>;
 
-    /// Searches given item in node's current item and returns the index.
-    fn search_key_in_current_item(&self, key: &Self::Item) -> std::result::Result<usize, usize>;
+    /// Length of current item.
+    fn current_item_len(&self) -> usize;
 
-    /// Slice current item.
-    fn slice_current_item(&self, range: Range<usize>) -> Self::Item;
+    /// Searches first key of `other` in current item and returns the index.
+    fn search_key_in_current_item(&self, other: &Self) -> Result<usize, usize>;
 }
 
 pub struct Merger<T: Node> {
+    /// Heap to find node to read.
+    ///
+    /// Nodes in the heap are always valid.
     heap: BinaryHeap<T>,
-    current_item: Option<T::Item>,
+    /// Current node to read.
+    ///
+    /// The node is always valid if it is not None.
+    current_node: Option<T>,
+    /// The number of rows in current node that are valid to read.
+    current_rows: usize,
 }
 
-impl<T> Merger<T>
-where
-    T: Node,
-{
+impl<T: Node> Merger<T> {
     pub(crate) fn try_new(nodes: Vec<T>) -> Result<Self> {
         let mut heap = BinaryHeap::with_capacity(nodes.len());
         for node in nodes {
@@ -75,7 +66,8 @@ where
         }
         let mut merger = Merger {
             heap,
-            current_item: None,
+            current_node: None,
+            current_rows: 0,
         };
         merger.next()?;
         Ok(merger)
@@ -83,224 +75,154 @@ where
 
     /// Returns true if current merger is still valid.
     pub(crate) fn is_valid(&self) -> bool {
-        self.current_item.is_some()
+        self.current_node.is_some()
     }
 
-    /// Advances current merger to next item.
+    /// Returns current node to read. Only [Self::current_rows] rows in current node
+    /// are valid to read.
+    ///
+    /// # Panics
+    /// Panics if the merger is invalid.
+    pub(crate) fn current_node(&self) -> &T {
+        self.current_node.as_ref().unwrap()
+    }
+
+    /// Returns rows of current node to read.
+    pub(crate) fn current_rows(&self) -> usize {
+        self.current_rows
+    }
+
+    /// Advances the merger to the next item.
     pub(crate) fn next(&mut self) -> Result<()> {
-        let Some(mut top_node) = self.heap.pop() else {
-            // heap is empty
-            self.current_item = None;
+        self.maybe_advance_current_node()?;
+        debug_assert!(self.current_node.is_none());
+
+        // Finds node and range to read from the heap.
+        let Some(top_node) = self.heap.pop() else {
+            // Heap is empty.
             return Ok(());
         };
         if let Some(next_node) = self.heap.peek() {
             if next_node.is_behind(&top_node) {
-                // does not overlap
-                self.current_item = Some(top_node.fetch_next()?);
+                // Does not overlap.
+                self.current_rows = top_node.current_item_len();
             } else {
-                let res = match top_node.search_key_in_current_item(next_node.current_item()) {
+                // Note that the heap ensures the top node always has the minimal row.
+                match top_node.search_key_in_current_item(next_node) {
                     Ok(pos) => {
                         if pos == 0 {
-                            // if the first item of top node has duplicate ts with next node,
-                            // we can simply return the first row in that it must be the one
+                            // If the first item of top node has duplicate key with the next node,
+                            // we can simply return the first row in the top node as it must be the one
                             // with max sequence.
-                            let to_yield = top_node.slice_current_item(0..1);
-                            top_node.skip(1)?;
-                            to_yield
+                            self.current_rows = 1;
                         } else {
-                            let to_yield = top_node.slice_current_item(0..pos);
-                            top_node.skip(pos)?;
-                            to_yield
+                            // We don't know which one has the larger sequence so we use the range before
+                            // the duplicate pos.
+                            self.current_rows = pos;
                         }
                     }
                     Err(pos) => {
-                        // no duplicated timestamp
-                        let to_yield = top_node.slice_current_item(0..pos);
-                        top_node.skip(pos)?;
-                        to_yield
+                        // No duplication. Output rows before pos.
+                        debug_assert!(pos > 0);
+                        self.current_rows = pos;
                     }
-                };
-                self.current_item = Some(res);
+                }
             }
         } else {
-            // top is the only node left.
-            self.current_item = Some(top_node.fetch_next()?);
+            // Top is the only node left. We can read all rows in it.
+            self.current_rows = top_node.current_item_len();
         }
-        if top_node.is_valid() {
-            self.heap.push(top_node);
-        }
+        self.current_node = Some(top_node);
+
         Ok(())
     }
 
-    /// Returns current item held by merger.
-    pub(crate) fn current_item(&self) -> &T::Item {
-        self.current_item.as_ref().unwrap()
+    fn maybe_advance_current_node(&mut self) -> Result<()> {
+        let Some(mut node) = self.current_node.take() else {
+            return Ok(());
+        };
+
+        // Advances current node.
+        node.advance(self.current_rows)?;
+        self.current_rows = 0;
+        if !node.is_valid() {
+            return Ok(());
+        }
+
+        // Puts the node into the heap.
+        self.heap.push(node);
+        Ok(())
     }
 }
 
 #[derive(Debug)]
-pub struct DataBatchKey {
-    pk_index: PkIndex,
-    timestamp: i64,
+pub(crate) struct DataBatchKey {
+    pub(crate) pk_index: PkIndex,
+    pub(crate) timestamp: i64,
 }
 
-impl Eq for DataBatchKey {}
-
-impl PartialEq<Self> for DataBatchKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.pk_index == other.pk_index && self.timestamp == other.timestamp
-    }
-}
-
-impl PartialOrd<Self> for DataBatchKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for DataBatchKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.pk_index
-            .cmp(&other.pk_index)
-            .then(self.timestamp.cmp(&other.timestamp))
-            .reverse()
-    }
-}
-
-impl DataBatch {
-    fn first_row(&self) -> (i64, u64) {
-        let range = self.range();
-        let ts_values = timestamp_array_to_i64_slice(self.rb.column(1));
-        let sequence_values = self
-            .rb
-            .column(2)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values();
-        (ts_values[range.start], sequence_values[range.start])
-    }
-
-    fn last_row(&self) -> (i64, u64) {
-        let range = self.range();
-        let ts_values = timestamp_array_to_i64_slice(self.rb.column(1));
-        let sequence_values = self
-            .rb
-            .column(2)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values();
-        (ts_values[range.end - 1], sequence_values[range.end - 1])
-    }
-}
-
-impl DataBatch {
-    fn remaining(&self) -> usize {
-        self.range().len()
-    }
-
-    fn first_key(&self) -> DataBatchKey {
-        let range = self.range();
-        let batch = self.record_batch();
-        let pk_index = self.pk_index();
-        let ts_array = batch.column(1);
-
-        // maybe safe the result somewhere.
-        let ts_values = timestamp_array_to_i64_slice(ts_array);
-        let timestamp = ts_values[range.start];
-        DataBatchKey {
-            pk_index,
-            timestamp,
-        }
-    }
-
-    fn search_key(&self, key: &DataBatchKey) -> std::result::Result<usize, usize> {
-        let DataBatchKey {
-            pk_index,
-            timestamp,
-        } = key;
-        assert_eq!(*pk_index, self.pk_index);
-        let ts_values = timestamp_array_to_i64_slice(self.record_batch().column(1));
-        ts_values.binary_search(timestamp)
-    }
-
-    fn slice(&self, range: Range<usize>) -> Self {
-        let rb = self.rb.slice(range.start, range.len());
-        let range = 0..rb.num_rows();
-        Self {
-            pk_index: self.pk_index,
-            rb,
-            range,
-        }
-    }
-}
-
-pub struct DataNode {
-    source: DataSource,
-    current_data_batch: Option<DataBatch>,
-}
-
-impl DataNode {
-    pub(crate) fn new(source: DataSource) -> Self {
-        let current_data_batch = source.current_data_batch();
-        Self {
-            source,
-            current_data_batch: Some(current_data_batch),
-        }
-    }
-
-    fn next(&mut self) -> Result<()> {
-        self.current_data_batch = self.source.fetch_next()?;
-        Ok(())
-    }
-
-    fn current_data_batch(&self) -> &DataBatch {
-        self.current_data_batch.as_ref().unwrap()
-    }
-}
-
-pub enum DataSource {
+pub(crate) enum DataSource {
     Buffer(DataBufferReader),
     Part(DataPartReader),
 }
 
 impl DataSource {
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch {
         match self {
             DataSource::Buffer(buffer) => buffer.current_data_batch(),
             DataSource::Part(p) => p.current_data_batch(),
         }
     }
 
-    fn fetch_next(&mut self) -> Result<Option<DataBatch>> {
-        let res = match self {
-            DataSource::Buffer(b) => {
-                b.next()?;
-                if b.is_valid() {
-                    Some(b.current_data_batch())
-                } else {
-                    None
-                }
-            }
-            DataSource::Part(p) => {
-                p.next()?;
-                if p.is_valid() {
-                    Some(p.current_data_batch())
-                } else {
-                    None
-                }
-            }
-        };
-        Ok(res)
+    fn is_valid(&self) -> bool {
+        match self {
+            DataSource::Buffer(b) => b.is_valid(),
+            DataSource::Part(p) => p.is_valid(),
+        }
+    }
+
+    fn next(&mut self) -> Result<()> {
+        match self {
+            DataSource::Buffer(b) => b.next(),
+            DataSource::Part(p) => p.next(),
+        }
+    }
+}
+
+pub(crate) struct DataNode {
+    source: DataSource,
+    /// Current range of the batch in the source.
+    current_range: Option<Range<usize>>,
+}
+
+impl DataNode {
+    pub(crate) fn new(source: DataSource) -> Self {
+        let current_range = source
+            .is_valid()
+            .then(|| 0..source.current_data_batch().range().len());
+
+        Self {
+            source,
+            current_range,
+        }
+    }
+
+    pub(crate) fn current_data_batch(&self) -> DataBatch {
+        let range = self.current_range();
+        let batch = self.source.current_data_batch();
+        batch.slice(range.start, range.len())
+    }
+
+    fn current_range(&self) -> Range<usize> {
+        self.current_range.clone().unwrap()
     }
 }
 
 impl Ord for DataNode {
     fn cmp(&self, other: &Self) -> Ordering {
-        let weight = self.current_data_batch().pk_index;
+        let weight = self.current_data_batch().pk_index();
         let (ts_start, sequence) = self.current_data_batch().first_row();
-        let other_weight = other.current_data_batch().pk_index;
+        let other_weight = other.current_data_batch().pk_index();
         let (other_ts_start, other_sequence) = other.current_data_batch().first_row();
         (weight, ts_start, Reverse(sequence))
             .cmp(&(other_weight, other_ts_start, Reverse(other_sequence)))
@@ -325,78 +247,47 @@ impl PartialOrd<Self> for DataNode {
 }
 
 impl Node for DataNode {
-    type Item = DataBatch;
-
-    fn fetch_next(&mut self) -> Result<Self::Item> {
-        let current = self.current_data_batch.take();
-        self.next()?;
-        Ok(current.unwrap())
-    }
-
     fn is_valid(&self) -> bool {
-        self.current_data_batch.is_some()
-    }
-
-    fn current_item(&self) -> &Self::Item {
-        self.current_data_batch()
+        self.current_range.is_some()
     }
 
     fn is_behind(&self, other: &Self) -> bool {
-        let pk_weight = self.current_data_batch().pk_index;
+        let pk_weight = self.current_data_batch().pk_index();
         let (start, seq) = self.current_data_batch().first_row();
-        let other_pk_weight = other.current_data_batch().pk_index;
+        let other_pk_weight = other.current_data_batch().pk_index();
         let (other_end, other_seq) = other.current_data_batch().last_row();
         (pk_weight, start, Reverse(seq)) > (other_pk_weight, other_end, Reverse(other_seq))
     }
 
-    fn skip(&mut self, offset_to_skip: usize) -> Result<()> {
-        let current = self.current_item();
-        let remaining = current.remaining() - offset_to_skip;
+    fn advance(&mut self, len: usize) -> Result<()> {
+        let mut range = self.current_range();
+        debug_assert!(range.len() >= len);
+
+        let remaining = range.len() - len;
         if remaining == 0 {
-            self.next()?;
+            // Nothing remains, we need to fetch next batch to ensure the current batch is not empty.
+            self.source.next()?;
+            if self.source.is_valid() {
+                self.current_range = Some(0..self.source.current_data_batch().range().len());
+            } else {
+                // The node is exhausted.
+                self.current_range = None;
+            }
         } else {
-            let end = current.remaining();
-            self.current_data_batch = Some(current.slice(offset_to_skip..end));
+            range.start += len;
+            self.current_range = Some(range);
         }
 
         Ok(())
     }
 
-    fn search_key_in_current_item(&self, key: &Self::Item) -> std::result::Result<usize, usize> {
-        let key = key.first_key();
-        self.current_data_batch.as_ref().unwrap().search_key(&key)
+    fn current_item_len(&self) -> usize {
+        self.current_range.clone().unwrap().len()
     }
 
-    fn slice_current_item(&self, range: Range<usize>) -> Self::Item {
-        self.current_data_batch.as_ref().unwrap().slice(range)
-    }
-}
-
-fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
-    match arr.data_type() {
-        DataType::Timestamp(t, _) => match t {
-            TimeUnit::Second => arr
-                .as_any()
-                .downcast_ref::<TimestampSecondArray>()
-                .unwrap()
-                .values(),
-            TimeUnit::Millisecond => arr
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .values(),
-            TimeUnit::Microsecond => arr
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .unwrap()
-                .values(),
-            TimeUnit::Nanosecond => arr
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .unwrap()
-                .values(),
-        },
-        _ => unreachable!(),
+    fn search_key_in_current_item(&self, other: &Self) -> Result<usize, usize> {
+        let key = other.current_data_batch().first_key();
+        self.current_data_batch().search_key(&key)
     }
 }
 
@@ -406,7 +297,7 @@ mod tests {
     use store_api::metadata::RegionMetadataRef;
 
     use super::*;
-    use crate::memtable::merge_tree::data::DataBuffer;
+    use crate::memtable::merge_tree::data::{timestamp_array_to_i64_slice, DataBuffer};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     fn write_rows_to_buffer(
@@ -439,7 +330,8 @@ mod tests {
 
         let mut res = vec![];
         while merger.is_valid() {
-            let data_batch = merger.current_item();
+            let data_batch = merger.current_node().current_data_batch();
+            let data_batch = data_batch.slice(0, merger.current_rows());
             let batch = data_batch.slice_record_batch();
             let ts_array = batch.column(1);
             let ts_values: Vec<_> = timestamp_array_to_i64_slice(ts_array).to_vec();
@@ -456,7 +348,7 @@ mod tests {
                 .map(|(ts, seq)| (ts, seq.unwrap()))
                 .collect::<Vec<_>>();
 
-            res.push((data_batch.pk_index, ts_and_seq));
+            res.push((data_batch.pk_index(), ts_and_seq));
             merger.next().unwrap();
         }
         assert_eq!(expected, &res);
@@ -465,17 +357,21 @@ mod tests {
     #[test]
     fn test_merger() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[2, 1, 0];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 1, vec![2, 3], &mut seq);
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![3], &mut seq);
         write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![1], &mut seq);
-        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
             vec![node1, node2],
@@ -492,20 +388,26 @@ mod tests {
     #[test]
     fn test_merger2() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[2, 1, 0];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 1, vec![2, 3], &mut seq);
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![3], &mut seq);
-        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
-        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
-        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(weight).unwrap()));
+        let node3 = DataNode::new(DataSource::Part(
+            buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
             vec![node1, node3, node2],
@@ -524,19 +426,25 @@ mod tests {
     #[test]
     fn test_merger_overlapping() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 3], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
-        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
-        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
-        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(weight).unwrap()));
+        let node3 = DataNode::new(DataSource::Part(
+            buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
             vec![node1, node3, node2],
@@ -554,22 +462,22 @@ mod tests {
     #[test]
     fn test_merger_parts_and_buffer() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 3], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(Some(weight)).unwrap()));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
         let node2 = DataNode::new(DataSource::Part(
-            buffer2.freeze(weight).unwrap().read().unwrap(),
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
-        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2, 3], &mut seq);
         let node3 = DataNode::new(DataSource::Part(
-            buffer3.freeze(weight).unwrap().read().unwrap(),
+            buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
         ));
 
         check_merger_read(
@@ -588,22 +496,28 @@ mod tests {
     #[test]
     fn test_merger_overlapping_2() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 2], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
-        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
+        write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![2], &mut seq);
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
+
+        let mut buffer3 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer3, &metadata, 0, vec![2], &mut seq);
-        let node3 = DataNode::new(DataSource::Buffer(buffer3.read(weight).unwrap()));
-
-        let mut buffer4 = DataBuffer::with_capacity(metadata.clone(), 10);
-        write_rows_to_buffer(&mut buffer4, &metadata, 0, vec![2], &mut seq);
-        let node4 = DataNode::new(DataSource::Buffer(buffer4.read(weight).unwrap()));
+        let node3 = DataNode::new(DataSource::Part(
+            buffer3.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
-            vec![node1, node3, node4],
+            vec![node1, node2, node3],
             &[
                 (0, vec![(1, 0)]),
                 (0, vec![(2, 4)]),
@@ -616,15 +530,19 @@ mod tests {
     #[test]
     fn test_merger_overlapping_3() {
         let metadata = metadata_for_test();
-        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer1 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![0, 1], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(weight).unwrap()));
+        let node1 = DataNode::new(DataSource::Part(
+            buffer1.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
-        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10);
+        let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 0, vec![1], &mut seq);
-        let node2 = DataNode::new(DataSource::Buffer(buffer2.read(weight).unwrap()));
+        let node2 = DataNode::new(DataSource::Part(
+            buffer2.freeze(Some(weight), true).unwrap().read().unwrap(),
+        ));
 
         check_merger_read(
             vec![node1, node2],

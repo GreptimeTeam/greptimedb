@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, NoneAsEmptyString};
 
 use crate::error::Result;
+use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 /// Default max running background job.
@@ -102,6 +103,9 @@ pub struct MitoConfig {
 
     /// Inverted index configs.
     pub inverted_index: InvertedIndexConfig,
+
+    /// Experimental memtable.
+    pub experimental_memtable: Option<MergeTreeConfig>,
 }
 
 impl Default for MitoConfig {
@@ -127,6 +131,7 @@ impl Default for MitoConfig {
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
             inverted_index: InvertedIndexConfig::default(),
+            experimental_memtable: None,
         };
 
         // Adjust buffer and cache size according to system memory if we can.
