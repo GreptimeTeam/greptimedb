@@ -181,7 +181,13 @@ impl CreateTableProcedure {
     ///   - [Code::Unavailable](tonic::status::Code::Unavailable)
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
         // Safety: the table route must be allocated.
-        match &self.creator.data.table_route.clone().unwrap() {
+        match self
+            .table_route()
+            .context(error::UnexpectedSnafu {
+                err_msg: "table_route is not allocated",
+            })?
+            .clone()
+        {
             TableRouteValue::Physical(x) => {
                 let region_routes = x.region_routes.clone();
                 let request_builder = self.new_region_request_builder(None)?;
@@ -214,7 +220,13 @@ impl CreateTableProcedure {
         request_builder: CreateRequestBuilder,
     ) -> Result<Status> {
         // Safety: the table_route must be allocated.
-        if self.table_route().unwrap().is_physical() {
+        if self
+            .table_route()
+            .context(error::UnexpectedSnafu {
+                err_msg: "table_route is not allocated",
+            })?
+            .is_physical()
+        {
             // Registers opening regions
             let guards = self
                 .creator
@@ -226,7 +238,9 @@ impl CreateTableProcedure {
 
         let create_table_data = &self.creator.data;
         // Safety: the region_wal_options must be allocated
-        let region_wal_options = self.region_wal_options().unwrap();
+        let region_wal_options = self.region_wal_options().context(error::UnexpectedSnafu {
+            err_msg: "region_wal_options is not allocated",
+        })?;
         let create_table_expr = &create_table_data.task.create_table;
         let catalog = &create_table_expr.catalog_name;
         let schema = &create_table_expr.schema_name;
@@ -291,9 +305,19 @@ impl CreateTableProcedure {
 
         let raw_table_info = self.table_info().clone();
         // Safety: the region_wal_options must be allocated.
-        let region_wal_options = self.region_wal_options().unwrap().clone();
+        let region_wal_options = self
+            .region_wal_options()
+            .context(error::UnexpectedSnafu {
+                err_msg: "region_wal_options is not allocated",
+            })?
+            .clone();
         // Safety: the table_route must be allocated.
-        let table_route = self.table_route().unwrap().clone();
+        let table_route = self
+            .table_route()
+            .context(error::UnexpectedSnafu {
+                err_msg: "table_route is not allocated",
+            })?
+            .clone();
         manager
             .create_table_metadata(raw_table_info, table_route, region_wal_options)
             .await?;
