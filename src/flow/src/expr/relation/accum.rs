@@ -14,6 +14,9 @@
 
 //! Accumulators for aggregate functions that's is accumulatable. i.e. sum/count
 //!
+//! Accumulator will only be restore from row and being updated every time dataflow need process a new batch of rows.
+//! So the overhead is acceptable.
+//!
 //! Currently support sum, count, any, all and min/max(with one caveat that min/max can't support delete with aggregate).
 
 use std::fmt::Display;
@@ -174,9 +177,6 @@ impl Accumulator for SimpleNumber {
             Value::UInt16(x) => Some(i128::from(x)),
             Value::UInt32(x) => Some(i128::from(x)),
             Value::UInt64(x) => Some(i128::from(x)),
-            // Date&DateTime is converted to their inner value
-            Value::Date(x) => Some(i128::from(x.val())),
-            Value::DateTime(x) => Some(i128::from(x.val())),
             _ => None,
         };
         if let Some(v) = v {
@@ -421,7 +421,6 @@ impl Accumulator for OrdValue {
                 .clone()
                 .map(|v| v.min(value.clone()))
                 .or_else(|| Some(value));
-        } else if matches!(aggr_fn, AggregateFunc::Count) {
         } else {
             return Err(InternalSnafu {
                 reason: format!(
@@ -482,39 +481,6 @@ impl Accum {
                 accum: 0,
                 non_nulls: 0,
             }),
-            AggregateFunc::MaxInt16
-            | AggregateFunc::MaxInt32
-            | AggregateFunc::MaxInt64
-            | AggregateFunc::MaxUInt16
-            | AggregateFunc::MaxUInt32
-            | AggregateFunc::MaxUInt64
-            | AggregateFunc::MaxFloat32
-            | AggregateFunc::MaxFloat64
-            | AggregateFunc::MaxString
-            | AggregateFunc::MaxDate
-            | AggregateFunc::MaxDateTime
-            | AggregateFunc::MaxTimestamp
-            | AggregateFunc::MaxTime
-            | AggregateFunc::MaxDuration
-            | AggregateFunc::MaxInterval
-            | AggregateFunc::MinInt16
-            | AggregateFunc::MinInt32
-            | AggregateFunc::MinInt64
-            | AggregateFunc::MinUInt16
-            | AggregateFunc::MinUInt32
-            | AggregateFunc::MinUInt64
-            | AggregateFunc::MinFloat32
-            | AggregateFunc::MinFloat64
-            | AggregateFunc::MinString
-            | AggregateFunc::MinDate
-            | AggregateFunc::MinDateTime
-            | AggregateFunc::MinTimestamp
-            | AggregateFunc::MinTime
-            | AggregateFunc::MinDuration
-            | AggregateFunc::MinInterval => Self::from(OrdValue {
-                val: None,
-                non_nulls: 0,
-            }),
             AggregateFunc::SumFloat32 | AggregateFunc::SumFloat64 => Self::from(Float {
                 accum: OrderedF64::from(0.0),
                 pos_infs: 0,
@@ -522,6 +488,22 @@ impl Accum {
                 nans: 0,
                 non_nulls: 0,
             }),
+            f => {
+                if f.is_max() || f.is_min() {
+                    Self::from(OrdValue {
+                        val: None,
+                        non_nulls: 0,
+                    })
+                } else {
+                    return Err(InternalSnafu {
+                        reason: format!(
+                            "Accumulator does not support this aggregation function: {:?}",
+                            f
+                        ),
+                    }
+                    .build());
+                }
+            }
         })
     }
     pub fn try_into_accum(aggr_fn: &AggregateFunc, state: Vec<Value>) -> Result<Self, EvalError> {
@@ -537,39 +519,21 @@ impl Accum {
             | AggregateFunc::SumUInt16
             | AggregateFunc::SumUInt32
             | AggregateFunc::SumUInt64 => Ok(Self::from(SimpleNumber::try_from(state)?)),
-
-            AggregateFunc::MaxInt16
-            | AggregateFunc::MaxInt32
-            | AggregateFunc::MaxInt64
-            | AggregateFunc::MaxUInt16
-            | AggregateFunc::MaxUInt32
-            | AggregateFunc::MaxUInt64
-            | AggregateFunc::MaxFloat32
-            | AggregateFunc::MaxFloat64
-            | AggregateFunc::MaxString
-            | AggregateFunc::MaxDate
-            | AggregateFunc::MaxDateTime
-            | AggregateFunc::MaxTimestamp
-            | AggregateFunc::MaxTime
-            | AggregateFunc::MaxDuration
-            | AggregateFunc::MaxInterval
-            | AggregateFunc::MinInt16
-            | AggregateFunc::MinInt32
-            | AggregateFunc::MinInt64
-            | AggregateFunc::MinUInt16
-            | AggregateFunc::MinUInt32
-            | AggregateFunc::MinUInt64
-            | AggregateFunc::MinFloat32
-            | AggregateFunc::MinFloat64
-            | AggregateFunc::MinString
-            | AggregateFunc::MinDate
-            | AggregateFunc::MinDateTime
-            | AggregateFunc::MinTimestamp
-            | AggregateFunc::MinTime
-            | AggregateFunc::MinDuration
-            | AggregateFunc::MinInterval => Ok(Self::from(OrdValue::try_from(state)?)),
             AggregateFunc::SumFloat32 | AggregateFunc::SumFloat64 => {
                 Ok(Self::from(Float::try_from(state)?))
+            }
+            f => {
+                if f.is_max() || f.is_min() {
+                    Ok(Self::from(OrdValue::try_from(state)?))
+                } else {
+                    Err(InternalSnafu {
+                        reason: format!(
+                            "Accumulator does not support this aggregation function: {:?}",
+                            f
+                        ),
+                    }
+                    .build())
+                }
             }
         }
     }
@@ -688,6 +652,19 @@ mod test {
         assert_eq!(
             acc.into_state(),
             vec![Value::DateTime(DateTime::from(1)), 2i64.into(),]
+        );
+
+        // count
+        let mut acc = Accum::new_accum(&AggregateFunc::Count).unwrap();
+        acc.update(&AggregateFunc::Count, Value::Int32(1), 1)
+            .unwrap();
+        acc.update(&AggregateFunc::Count, Value::Int32(2), 1)
+            .unwrap();
+
+        assert_eq!(acc.eval(&AggregateFunc::Count).unwrap(), Value::UInt64(2));
+        assert_eq!(
+            acc.into_state(),
+            vec![Value::Decimal128(Decimal128::new(0, 38, 0)), 2i64.into()]
         );
     }
 }
