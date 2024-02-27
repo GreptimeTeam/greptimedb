@@ -242,7 +242,7 @@ impl TableRouteManager {
     /// It won't follow the [`LogicalTableRouteValue`] to find the next level [`PhysicalTableRouteValue`].
     ///
     /// Returns an error if the first level value is not a [`PhysicalTableRouteValue`].
-    pub async fn get_first_physical_table_route(
+    pub async fn try_get_physical_table_route(
         &self,
         table_id: TableId,
     ) -> Result<Option<PhysicalTableRouteValue>> {

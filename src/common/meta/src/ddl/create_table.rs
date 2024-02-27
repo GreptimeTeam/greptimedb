@@ -194,7 +194,7 @@ impl CreateTableProcedure {
                     .context
                     .table_metadata_manager
                     .table_route_manager()
-                    .get_first_physical_table_route(physical_table_id)
+                    .try_get_physical_table_route(physical_table_id)
                     .await?
                     .context(TableRouteNotFoundSnafu {
                         table_id: physical_table_id,
