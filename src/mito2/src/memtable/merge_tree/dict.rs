@@ -116,11 +116,9 @@ impl KeyDictBuilder {
         // Finishes current dict block and resets the pk index.
         let dict_block = self.key_buffer.finish(true);
         self.dict_blocks.push(dict_block);
-        // Takes the pk to index map.
-        let mut pk_to_index = std::mem::take(&mut self.pk_to_index);
         // Computes key position and then alter pk index.
-        let mut key_positions = vec![0; pk_to_index.len()];
-        for (i, pk_index) in pk_to_index.values_mut().enumerate() {
+        let mut key_positions = vec![0; self.pk_to_index.len()];
+        for (i, pk_index) in self.pk_to_index.values_mut().enumerate() {
             // The position of the i-th key is the old pk index.
             key_positions[i] = *pk_index;
             // Overwrites the pk index.
@@ -129,9 +127,10 @@ impl KeyDictBuilder {
         self.num_keys = 0;
         let key_bytes_in_index = self.key_bytes_in_index;
         self.key_bytes_in_index = 0;
+        // Clears the pk to index map.
+        self.pk_to_index.clear();
 
         Some(KeyDict {
-            pk_to_index,
             dict_blocks: std::mem::take(&mut self.dict_blocks),
             key_positions,
             key_bytes_in_index,
@@ -214,8 +213,6 @@ fn compute_pk_weights(sorted_pk_indices: &[PkIndex], pk_weights: &mut Vec<u16>) 
 #[derive(Default)]
 pub struct KeyDict {
     // TODO(yingwen): We can use key_positions to do a binary search.
-    /// Key map to find a key in the dict.
-    pk_to_index: PkIndexMap,
     /// Unsorted key blocks.
     dict_blocks: Vec<DictBlock>,
     /// Maps pk index to position of the key in [Self::dict_blocks].
@@ -235,11 +232,6 @@ impl KeyDict {
         let position = self.key_positions[index as usize];
         let block_index = position / MAX_KEYS_PER_BLOCK;
         self.dict_blocks[block_index as usize].key_by_pk_index(position)
-    }
-
-    /// Gets the pk index by the key.
-    pub fn get_pk_index(&self, key: &[u8]) -> Option<PkIndex> {
-        self.pk_to_index.get(key).copied()
     }
 
     /// Returns pk weights to sort a data part and replaces pk indices.

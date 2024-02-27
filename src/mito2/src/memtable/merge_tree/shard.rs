@@ -52,17 +52,6 @@ impl Shard {
         }
     }
 
-    /// Returns the pk id of the key if it exists.
-    pub fn find_id_by_key(&self, key: &[u8]) -> Option<PkId> {
-        let key_dict = self.key_dict.as_ref()?;
-        let pk_index = key_dict.get_pk_index(key)?;
-
-        Some(PkId {
-            shard_id: self.shard_id,
-            pk_index,
-        })
-    }
-
     /// Writes a key value into the shard.
     pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: KeyValue) {
         debug_assert_eq!(self.shard_id, pk_id.shard_id);
@@ -381,37 +370,37 @@ mod tests {
         Shard::new(shard_id, Some(Arc::new(dict)), data_parts, true)
     }
 
-    #[test]
-    fn test_shard_find_by_key() {
-        let metadata = metadata_for_test();
-        let input = input_with_key(&metadata);
-        let shard = new_shard_with_dict(8, metadata, &input);
-        for i in 0..input.len() {
-            let key = encode_key("shard", i as u32);
-            assert_eq!(
-                PkId {
-                    shard_id: 8,
-                    pk_index: i as PkIndex,
-                },
-                shard.find_id_by_key(&key).unwrap()
-            );
-        }
-        assert!(shard.find_id_by_key(&encode_key("shard", 100)).is_none());
-    }
+    // #[test]
+    // fn test_shard_find_by_key() {
+    //     let metadata = metadata_for_test();
+    //     let input = input_with_key(&metadata);
+    //     let shard = new_shard_with_dict(8, metadata, &input);
+    //     for i in 0..input.len() {
+    //         let key = encode_key("shard", i as u32);
+    //         assert_eq!(
+    //             PkId {
+    //                 shard_id: 8,
+    //                 pk_index: i as PkIndex,
+    //             },
+    //             shard.find_id_by_key(&key).unwrap()
+    //         );
+    //     }
+    //     assert!(shard.find_id_by_key(&encode_key("shard", 100)).is_none());
+    // }
 
-    #[test]
-    fn test_write_shard() {
-        let metadata = metadata_for_test();
-        let input = input_with_key(&metadata);
-        let mut shard = new_shard_with_dict(8, metadata, &input);
-        assert!(shard.is_empty());
-        for key_values in &input {
-            for kv in key_values.iter() {
-                let key = encode_key_by_kv(&kv);
-                let pk_id = shard.find_id_by_key(&key).unwrap();
-                shard.write_with_pk_id(pk_id, kv);
-            }
-        }
-        assert!(!shard.is_empty());
-    }
+    // #[test]
+    // fn test_write_shard() {
+    //     let metadata = metadata_for_test();
+    //     let input = input_with_key(&metadata);
+    //     let mut shard = new_shard_with_dict(8, metadata, &input);
+    //     assert!(shard.is_empty());
+    //     for key_values in &input {
+    //         for kv in key_values.iter() {
+    //             let key = encode_key_by_kv(&kv);
+    //             let pk_id = shard.find_id_by_key(&key).unwrap();
+    //             shard.write_with_pk_id(pk_id, kv);
+    //         }
+    //     }
+    //     assert!(!shard.is_empty());
+    // }
 }
