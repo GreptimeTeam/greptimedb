@@ -127,6 +127,7 @@ impl KeyDictBuilder {
             *pk_index = i as PkIndex;
         }
         self.num_keys = 0;
+        self.key_bytes = 0;
 
         Some(KeyDict {
             pk_to_index,
