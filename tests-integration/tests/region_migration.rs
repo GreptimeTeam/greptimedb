@@ -816,10 +816,10 @@ async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
     CREATE TABLE {TEST_TABLE_NAME} (
         i INT PRIMARY KEY,
         ts TIMESTAMP TIME INDEX,
-    ) PARTITION BY RANGE COLUMNS (i) (
-        PARTITION r0 VALUES LESS THAN (10),
-        PARTITION r1 VALUES LESS THAN (50),
-        PARTITION r3 VALUES LESS THAN (MAXVALUE),
+    ) PARTITION ON COLUMNS (i) (
+        i <= 10,
+        i > 10 AND i <= 50,
+        i > 50
     )"
     );
     let mut result = cluster.frontend.do_query(&sql, QueryContext::arc()).await;

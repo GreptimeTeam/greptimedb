@@ -16,6 +16,7 @@ use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
 use itertools::Itertools;
+use sqlparser::ast::Expr;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
@@ -128,7 +129,7 @@ impl CreateTable {
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct Partitions {
     pub column_list: Vec<Ident>,
-    pub entries: Vec<PartitionEntry>,
+    pub exprs: Vec<Expr>,
 }
 
 impl Partitions {
@@ -162,9 +163,9 @@ impl Display for Partitions {
         if !self.column_list.is_empty() {
             write!(
                 f,
-                "PARTITION BY RANGE COLUMNS ({}) (\n{}\n)",
+                "PARTITION ON COLUMNS ({}) (\n{}\n)",
                 format_list_comma!(self.column_list),
-                format_list_indent!(self.entries),
+                format_list_indent!(self.exprs),
             )
         } else {
             write!(f, "")
@@ -233,12 +234,11 @@ mod tests {
                              cpu double default 0,
                              memory double,
                              TIME INDEX (ts),
-                             PRIMARY KEY(ts, host)
+                             PRIMARY KEY(host)
                        )
-                       PARTITION BY RANGE COLUMNS (ts) (
-                         PARTITION r0 VALUES LESS THAN (5),
-                         PARTITION r1 VALUES LESS THAN (9),
-                         PARTITION r2 VALUES LESS THAN (MAXVALUE),
+                       PARTITION ON COLUMNS (host) (
+                            host = 'a',
+                            host > 'a',
                        )
                        engine=mito
                        with(regions=1, ttl='7d', storage='File');
@@ -259,12 +259,11 @@ CREATE TABLE IF NOT EXISTS demo (
   cpu DOUBLE DEFAULT 0,
   memory DOUBLE,
   TIME INDEX (ts),
-  PRIMARY KEY (ts, host)
+  PRIMARY KEY (host)
 )
-PARTITION BY RANGE COLUMNS (ts) (
-  PARTITION r0 VALUES LESS THAN (5),
-  PARTITION r1 VALUES LESS THAN (9),
-  PARTITION r2 VALUES LESS THAN (MAXVALUE)
+PARTITION ON COLUMNS (host) (
+  host = 'a',
+  host > 'a'
 )
 ENGINE=mito
 WITH(
@@ -341,13 +340,9 @@ ENGINE=mito
             cpu double default 0,
             memory double,
             TIME INDEX (ts),
-            PRIMARY KEY(ts, host)
+            PRIMARY KEY(host)
       )
-      PARTITION BY RANGE COLUMNS (ts) (
-        PARTITION r0 VALUES LESS THAN (5),
-        PARTITION r1 VALUES LESS THAN (9),
-        PARTITION r2 VALUES LESS THAN (MAXVALUE),
-      )
+      PARTITION ON COLUMNS (host) ()
       engine=mito
       with(regions=1, ttl='7d', hello='world');
 ";

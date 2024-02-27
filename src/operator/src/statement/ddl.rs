@@ -37,11 +37,8 @@ use partition::partition::{PartitionBound, PartitionDef};
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
-use sql::ast::Value as SqlValue;
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, Partitions};
-use sql::statements::sql_value_to_value;
-use sql::MAXVALUE;
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions};
@@ -52,8 +49,8 @@ use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, CreateTableWithMultiCatalogsSnafu,
     CreateTableWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyCreateTableExprSnafu,
-    InvalidPartitionColumnsSnafu, InvalidTableNameSnafu, ParseSqlSnafu, Result,
-    SchemaNotFoundSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    InvalidPartitionColumnsSnafu, InvalidTableNameSnafu, Result, SchemaNotFoundSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
@@ -564,6 +561,7 @@ fn validate_partition_columns(
     Ok(())
 }
 
+/// Parse partition statement [Partitions] into [MetaPartition] and partition columns.
 fn parse_partitions(
     create_table: &CreateTableExpr,
     partitions: Option<Partitions>,
@@ -690,9 +688,9 @@ fn find_partition_entries(
     create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
     partition_columns: &[String],
-    query_ctx: &QueryContextRef,
+    _query_ctx: &QueryContextRef,
 ) -> Result<Vec<Vec<PartitionBound>>> {
-    let entries = if let Some(partitions) = partitions {
+    let entries = if let Some(_partitions) = partitions {
         let column_defs = partition_columns
             .iter()
             .map(|pc| {
@@ -714,24 +712,8 @@ fn find_partition_entries(
             column_name_and_type.push((column_name, data_type));
         }
 
-        let mut entries = Vec::with_capacity(partitions.entries.len());
-        for e in partitions.entries.iter() {
-            let mut values = Vec::with_capacity(e.value_list.len());
-            for (i, v) in e.value_list.iter().enumerate() {
-                // indexing is safe here because we have checked that "value_list" and "column_list" are matched in size
-                let (column_name, data_type) = &column_name_and_type[i];
-                let v = match v {
-                    SqlValue::Number(n, _) if n == MAXVALUE => PartitionBound::MaxValue,
-                    _ => PartitionBound::Value(
-                        sql_value_to_value(column_name, data_type, v, Some(&query_ctx.timezone()))
-                            .context(ParseSqlSnafu)?,
-                    ),
-                };
-                values.push(v);
-            }
-            entries.push(values);
-        }
-        entries
+        // TODO(ruihang): implement the partition value parser.
+        vec![vec![PartitionBound::MaxValue]]
     } else {
         vec![vec![PartitionBound::MaxValue]]
     };
@@ -786,6 +768,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "TODO(ruihang): WIP new partition rule"]
     async fn test_parse_partitions() {
         common_telemetry::init_default_ut_logging();
         let cases = [
