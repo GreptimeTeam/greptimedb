@@ -22,7 +22,6 @@ use api::v1::{Row, Rows, SemanticType};
 use datatypes::arrow::array::UInt64Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use datatypes::value::ValueRef;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
@@ -289,16 +288,6 @@ pub(crate) fn encode_keys(
         let key = row_codec.encode(kv.primary_keys()).unwrap();
         keys.push(key);
     }
-}
-
-/// Encode one key.
-pub(crate) fn encode_key(k0: &str, k1: u32) -> Vec<u8> {
-    let row_codec = McmpRowCodec::new(vec![
-        SortField::new(ConcreteDataType::string_datatype()),
-        SortField::new(ConcreteDataType::uint32_datatype()),
-    ]);
-    let key = [ValueRef::String(k0), ValueRef::UInt32(k1)];
-    row_codec.encode(key.into_iter()).unwrap()
 }
 
 /// Encode one key.

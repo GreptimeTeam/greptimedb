@@ -79,11 +79,10 @@ impl Partition {
         }
 
         // Write to the shard builder.
-        let pk_id = inner
+        inner
             .shard_builder
             .write_with_key(primary_key, key_value, metrics);
         inner.num_rows += 1;
-        inner.pk_to_pk_id.insert(primary_key.to_vec(), pk_id);
 
         Ok(())
     }
@@ -146,7 +145,6 @@ impl Partition {
         let (shards, shard_builder) = {
             let inner = self.inner.read().unwrap();
             debug_assert!(inner.shard_builder.is_empty());
-            // TODO(yingwen): TTL or evict shards.
             let shard_builder = ShardBuilder::new(
                 metadata.clone(),
                 config,
@@ -517,7 +515,10 @@ impl Inner {
     }
 
     fn freeze_active_shard(&mut self) -> Result<()> {
-        if let Some(shard) = self.shard_builder.finish(self.metadata.clone())? {
+        if let Some(shard) = self
+            .shard_builder
+            .finish(self.metadata.clone(), &mut self.pk_to_pk_id)?
+        {
             self.shards.push(shard);
         }
         Ok(())

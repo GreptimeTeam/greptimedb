@@ -308,7 +308,7 @@ impl Node for ShardNode {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use super::*;
@@ -318,8 +318,7 @@ mod tests {
     use crate::memtable::merge_tree::PkIndex;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
-        build_key_values_with_ts_seq_values, encode_key, encode_key_by_kv, encode_keys,
-        metadata_for_test,
+        build_key_values_with_ts_seq_values, encode_keys, metadata_for_test,
     };
 
     /// Returns key values and expect pk index.
@@ -376,7 +375,7 @@ mod tests {
             dict_builder.insert_key(key, &mut metrics);
         }
 
-        let dict = dict_builder.finish().unwrap();
+        let dict = dict_builder.finish(&mut BTreeMap::new()).unwrap();
         let data_parts = DataParts::new(metadata, DATA_INIT_CAP, true);
 
         Shard::new(shard_id, Some(Arc::new(dict)), data_parts, true)

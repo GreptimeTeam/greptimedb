@@ -14,6 +14,7 @@
 
 //! Builder of a shard.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use store_api::metadata::RegionMetadataRef;
@@ -59,20 +60,10 @@ impl ShardBuilder {
     }
 
     /// Write a key value with its encoded primary key.
-    pub fn write_with_key(
-        &mut self,
-        key: &[u8],
-        key_value: KeyValue,
-        metrics: &mut WriteMetrics,
-    ) -> PkId {
+    pub fn write_with_key(&mut self, key: &[u8], key_value: KeyValue, metrics: &mut WriteMetrics) {
         // Safety: we check whether the builder need to freeze before.
         let pk_index = self.dict_builder.insert_key(key, metrics);
         self.data_buffer.write_row(pk_index, key_value);
-
-        PkId {
-            shard_id: self.current_shard_id,
-            pk_index,
-        }
     }
 
     /// Returns true if the builder need to freeze.
@@ -88,14 +79,31 @@ impl ShardBuilder {
     /// Builds a new shard and resets the builder.
     ///
     /// Returns `None` if the builder is empty.
-    pub fn finish(&mut self, metadata: RegionMetadataRef) -> Result<Option<Shard>> {
+    pub fn finish(
+        &mut self,
+        metadata: RegionMetadataRef,
+        pk_to_pk_id: &mut HashMap<Vec<u8>, PkId>,
+    ) -> Result<Option<Shard>> {
         if self.is_empty() {
             return Ok(None);
         }
 
-        let key_dict = self.dict_builder.finish();
+        let mut pk_to_index = BTreeMap::new();
+        let key_dict = self.dict_builder.finish(&mut pk_to_index);
         let data_part = match &key_dict {
             Some(dict) => {
+                // Adds mapping to the map.
+                pk_to_pk_id.reserve(pk_to_index.len());
+                for (k, pk_index) in pk_to_index {
+                    pk_to_pk_id.insert(
+                        k,
+                        PkId {
+                            shard_id: self.current_shard_id,
+                            pk_index,
+                        },
+                    );
+                }
+
                 let pk_weights = dict.pk_weights_to_sort_data();
                 self.data_buffer.freeze(Some(&pk_weights), true)?
             }
@@ -215,7 +223,10 @@ mod tests {
         let config = MergeTreeConfig::default();
         let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
         let mut metrics = WriteMetrics::default();
-        assert!(shard_builder.finish(metadata.clone()).unwrap().is_none());
+        assert!(shard_builder
+            .finish(metadata.clone(), &mut HashMap::new())
+            .unwrap()
+            .is_none());
         assert_eq!(1, shard_builder.current_shard_id);
 
         for key_values in &input {
@@ -224,7 +235,10 @@ mod tests {
                 shard_builder.write_with_key(&key, kv, &mut metrics);
             }
         }
-        let shard = shard_builder.finish(metadata).unwrap().unwrap();
+        let shard = shard_builder
+            .finish(metadata, &mut HashMap::new())
+            .unwrap()
+            .unwrap();
         assert_eq!(1, shard.shard_id);
         assert_eq!(2, shard_builder.current_shard_id);
     }

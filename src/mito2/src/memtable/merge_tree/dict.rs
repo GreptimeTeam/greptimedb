@@ -108,7 +108,7 @@ impl KeyDictBuilder {
     }
 
     /// Finishes the builder.
-    pub fn finish(&mut self) -> Option<KeyDict> {
+    pub fn finish(&mut self, pk_to_index: &mut BTreeMap<Vec<u8>, PkIndex>) -> Option<KeyDict> {
         if self.key_buffer.is_empty() {
             return None;
         }
@@ -127,8 +127,7 @@ impl KeyDictBuilder {
         self.num_keys = 0;
         let key_bytes_in_index = self.key_bytes_in_index;
         self.key_bytes_in_index = 0;
-        // Clears the pk to index map.
-        self.pk_to_index.clear();
+        *pk_to_index = std::mem::take(&mut self.pk_to_index);
 
         Some(KeyDict {
             dict_blocks: std::mem::take(&mut self.dict_blocks),
@@ -434,7 +433,7 @@ mod tests {
         assert_eq!(key_bytes, builder.key_bytes_in_index);
         assert_eq!(8850, builder.memory_size());
 
-        let dict = builder.finish().unwrap();
+        let dict = builder.finish(&mut BTreeMap::new()).unwrap();
         assert_eq!(0, builder.key_bytes_in_index);
         assert_eq!(key_bytes, dict.key_bytes_in_index);
         assert!(dict.shared_memory_size() > key_bytes);
@@ -450,7 +449,7 @@ mod tests {
             builder.insert_key(key.as_bytes(), &mut metrics);
         }
         assert!(builder.is_full());
-        builder.finish();
+        builder.finish(&mut BTreeMap::new());
 
         assert!(!builder.is_full());
         assert_eq!(0, builder.insert_key(b"a0", &mut metrics));
