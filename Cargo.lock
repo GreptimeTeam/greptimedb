@@ -2105,6 +2105,8 @@ name = "common-wal"
 version = "0.6.0"
 dependencies = [
  "common-base",
+ "common-error",
+ "common-macro",
  "common-telemetry",
  "futures-util",
  "humantime-serde",
@@ -2112,6 +2114,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "snafu",
+ "tokio",
  "toml 0.8.8",
 ]
 

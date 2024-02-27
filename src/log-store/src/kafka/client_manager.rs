@@ -21,13 +21,11 @@ use rskafka::client::producer::aggregator::RecordAggregator;
 use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
 use rskafka::client::{Client as RsKafkaClient, ClientBuilder};
 use rskafka::BackoffConfig;
-use snafu::{OptionExt, ResultExt};
-use tokio::net;
+use snafu::ResultExt;
 use tokio::sync::RwLock;
 
 use crate::error::{
-    BuildClientSnafu, BuildPartitionClientSnafu, EndpointIpNotFoundSnafu,
-    ResolveKafkaEndpointSnafu, Result,
+    BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
 };
 
 // Each topic only has one partition for now.
@@ -84,10 +82,15 @@ impl ClientManager {
             base: config.backoff.base as f64,
             deadline: config.backoff.deadline,
         };
-        let mut broker_endpoints = Vec::with_capacity(config.broker_endpoints.len());
-        for endpoint in &config.broker_endpoints {
-            broker_endpoints.push(Self::resolve_broker_endpoint(endpoint).await?);
-        }
+        let broker_endpoints =
+            futures::future::try_join_all(config.broker_endpoints.clone().into_iter().map(
+                |endpoint| async move {
+                    common_wal::resolve_broker_endpoint(&endpoint)
+                        .await
+                        .context(ResolveKafkaEndpointSnafu)
+                },
+            ))
+            .await?;
         let client = ClientBuilder::new(broker_endpoints)
             .backoff_config(backoff_config)
             .build()
@@ -101,19 +104,6 @@ impl ClientManager {
             client_factory: client,
             client_pool: RwLock::new(HashMap::new()),
         })
-    }
-    async fn resolve_broker_endpoint(broker_endpoint: &str) -> Result<String> {
-        let ip = net::lookup_host(broker_endpoint)
-            .await
-            .with_context(|_| ResolveKafkaEndpointSnafu {
-                broker_endpoint: broker_endpoint.to_string(),
-            })?
-            // Not sure if we should filter out ipv6 addresses
-            .find(|addr| addr.is_ipv4())
-            .with_context(|| EndpointIpNotFoundSnafu {
-                broker_endpoint: broker_endpoint.to_string(),
-            })?;
-        Ok(ip.to_string())
     }
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will

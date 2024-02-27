@@ -108,15 +108,8 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to resolve Kafka broker endpoint {:?}", broker_endpoint))]
-    ResolveKafkaEndpoint {
-        broker_endpoint: String,
-        #[snafu(source)]
-        error: std::io::Error,
-    },
-
-    #[snafu(display("Failed to find ip for broker endpoint: {:?}", broker_endpoint))]
-    EndpointIpNotFound { broker_endpoint: String },
+    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
+    ResolveKafkaEndpoint { source: common_wal::error::Error },
 
     #[snafu(display(
         "Failed to build a Kafka partition client, topic: {}, partition: {}",

@@ -25,13 +25,12 @@ use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rskafka::BackoffConfig;
-use snafu::{ensure, OptionExt, ResultExt};
-use tokio::net;
+use snafu::{ensure, ResultExt};
 
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, BuildKafkaPartitionClientSnafu,
-    CreateKafkaWalTopicSnafu, DecodeJsonSnafu, EncodeJsonSnafu, EndpointIpNotFoundSnafu,
-    InvalidNumTopicsSnafu, ProduceRecordSnafu, ResolveKafkaEndpointSnafu, Result,
+    CreateKafkaWalTopicSnafu, DecodeJsonSnafu, EncodeJsonSnafu, InvalidNumTopicsSnafu,
+    ProduceRecordSnafu, ResolveKafkaEndpointSnafu, Result,
 };
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::PutRequest;
@@ -109,19 +108,6 @@ impl TopicManager {
         Ok(())
     }
 
-    async fn resolve_broker_endpoint(broker_endpoint: &str) -> Result<String> {
-        let ip = net::lookup_host(broker_endpoint)
-            .await
-            .with_context(|_| ResolveKafkaEndpointSnafu {
-                broker_endpoint: broker_endpoint.to_string(),
-            })?
-            // Not sure if we should filter out ipv6 addresses
-            .find(|addr| addr.is_ipv4())
-            .with_context(|| EndpointIpNotFoundSnafu {
-                broker_endpoint: broker_endpoint.to_string(),
-            })?;
-        Ok(ip.to_string())
-    }
     /// Tries to create topics specified by indexes in `to_be_created`.
     async fn try_create_topics(&self, topics: &[String], to_be_created: &[usize]) -> Result<()> {
         // Builds an kafka controller client for creating topics.
@@ -131,10 +117,15 @@ impl TopicManager {
             base: self.config.backoff.base as f64,
             deadline: self.config.backoff.deadline,
         };
-        let mut broker_endpoints = Vec::with_capacity(self.config.broker_endpoints.len());
-        for endpoint in &self.config.broker_endpoints {
-            broker_endpoints.push(Self::resolve_broker_endpoint(endpoint).await?);
-        }
+        let broker_endpoints =
+            futures::future::try_join_all(self.config.broker_endpoints.clone().into_iter().map(
+                |endpoint| async move {
+                    common_wal::resolve_broker_endpoint(&endpoint)
+                        .await
+                        .context(ResolveKafkaEndpointSnafu)
+                },
+            ))
+            .await?;
         let client = ClientBuilder::new(broker_endpoints)
             .backoff_config(backoff_config)
             .build()

@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use error::{EndpointIpNotFoundSnafu, ResolveEndpointSnafu, Result};
 use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt};
 
 pub mod config;
+pub mod error;
 pub mod options;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
@@ -29,4 +32,18 @@ pub const TOPIC_NAME_PREFIX: &str = "greptimedb_wal_topic";
 pub enum TopicSelectorType {
     #[default]
     RoundRobin,
+}
+
+pub async fn resolve_broker_endpoint(broker_endpoint: &str) -> Result<String> {
+    let ip = tokio::net::lookup_host(broker_endpoint)
+        .await
+        .with_context(|_| ResolveEndpointSnafu {
+            broker_endpoint: broker_endpoint.to_string(),
+        })?
+        // only IPv4 addresses are valid
+        .find(|addr| addr.is_ipv4())
+        .with_context(|| EndpointIpNotFoundSnafu {
+            broker_endpoint: broker_endpoint.to_string(),
+        })?;
+    Ok(ip.to_string())
 }
