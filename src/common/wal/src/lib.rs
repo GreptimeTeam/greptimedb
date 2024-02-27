@@ -16,7 +16,7 @@ use std::io;
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use error::{EndpointIpNotFoundSnafu, ResolveEndpointSnafu, Result};
+use error::{EndpointIPV4NotFoundSnafu, ResolveEndpointSnafu, Result};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio::net;
@@ -67,7 +67,7 @@ async fn resolve_broker_endpoint_inner<R: DNSResolver>(
         // only IPv4 addresses are valid
         .find(|addr| addr.is_ipv4())
         .map(|addr| addr.to_string())
-        .with_context(|| EndpointIpNotFoundSnafu {
+        .with_context(|| EndpointIPV4NotFoundSnafu {
             broker_endpoint: broker_endpoint.to_string(),
         })
 }
@@ -114,7 +114,7 @@ mod tests {
                 )])
             });
         let ip = resolve_broker_endpoint_inner(endpoint, mock_resolver).await;
-        assert!(ip.is_err_and(|err| { matches!(err, Error::EndpointIpNotFound { .. }) }))
+        assert!(ip.is_err_and(|err| { matches!(err, Error::EndpointIPV4NotFound { .. }) }))
     }
     #[tokio::test]
     async fn test_resolve_normal() {

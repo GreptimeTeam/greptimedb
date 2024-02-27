@@ -25,8 +25,9 @@ pub enum Error {
         #[snafu(source)]
         error: std::io::Error,
     },
+
     #[snafu(display("Failed to find ipv4 endpoint: {:?}", broker_endpoint))]
-    EndpointIpNotFound { broker_endpoint: String },
+    EndpointIPV4NotFound { broker_endpoint: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
