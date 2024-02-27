@@ -22,7 +22,7 @@ use datatypes::arrow::array::{Array, ArrayBuilder, BinaryArray, BinaryBuilder};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::PkIndex;
-use crate::memtable::AllocTracker;
+use crate::metrics::DICT_BUFFER_BYTES;
 
 /// Maximum keys in a [DictBlock].
 const MAX_KEYS_PER_BLOCK: u16 = 256;
@@ -41,25 +41,20 @@ pub struct KeyDictBuilder {
     key_buffer: KeyBuffer,
     /// Dictionary blocks.
     dict_blocks: Vec<DictBlock>,
-    /// Write buffer manager.
-    write_buffer_manager: Option<WriteBufferManagerRef>,
-    // TODO(yingwen): Use a tracker that takes `&mut self`.
-    /// Tracker to report bytes used by the dictionary.
-    tracker: AllocTracker,
+    /// Bytes allocated by keys.
+    key_bytes: usize,
 }
 
 impl KeyDictBuilder {
     /// Creates a new builder that can hold up to `capacity` keys.
-    pub fn new(capacity: usize, write_buffer_manager: Option<WriteBufferManagerRef>) -> Self {
-        let tracker = AllocTracker::new(None);
+    pub fn new(capacity: usize, _tracker: Option<WriteBufferManagerRef>) -> Self {
         Self {
             capacity,
             num_keys: 0,
             pk_to_index: BTreeMap::new(),
             key_buffer: KeyBuffer::new(MAX_KEYS_PER_BLOCK.into()),
             dict_blocks: Vec::with_capacity(capacity / MAX_KEYS_PER_BLOCK as usize + 1),
-            write_buffer_manager,
-            tracker,
+            key_bytes: 0,
         }
     }
 
@@ -92,9 +87,10 @@ impl KeyDictBuilder {
         self.num_keys += 1;
 
         // Since we store the key twice so the bytes usage doubled.
-        metrics.key_bytes += key.len() * 2;
-
-        self.tracker.on_allocation(key.len() * 2);
+        let key_size = key.len() * 2;
+        metrics.key_bytes += key_size;
+        self.key_bytes += key_size;
+        DICT_BUFFER_BYTES.add(key_size as i64);
 
         pk_index
     }
@@ -102,7 +98,7 @@ impl KeyDictBuilder {
     /// Memory size of the builder.
     #[cfg(test)]
     pub fn memory_size(&self) -> usize {
-        self.tracker.bytes_allocated()
+        self.key_bytes
             + self.key_buffer.buffer_memory_size()
             + self
                 .dict_blocks
@@ -131,17 +127,12 @@ impl KeyDictBuilder {
             *pk_index = i as PkIndex;
         }
         self.num_keys = 0;
-        // Done allocating for current tracker.
-        self.tracker.done_allocating();
 
         Some(KeyDict {
             pk_to_index,
             dict_blocks: std::mem::take(&mut self.dict_blocks),
             key_positions,
-            tracker: std::mem::replace(
-                &mut self.tracker,
-                AllocTracker::new(self.write_buffer_manager.clone()),
-            ),
+            key_bytes: self.key_bytes,
         })
     }
 
@@ -221,7 +212,7 @@ pub struct KeyDict {
     dict_blocks: Vec<DictBlock>,
     /// Maps pk index to position of the key in [Self::dict_blocks].
     key_positions: Vec<PkIndex>,
-    tracker: AllocTracker,
+    key_bytes: usize,
 }
 
 pub type KeyDictRef = Arc<KeyDict>;
@@ -251,7 +242,13 @@ impl KeyDict {
 
     /// Returns the shared memory size.
     pub(crate) fn shared_memory_size(&self) -> usize {
-        self.tracker.bytes_allocated()
+        self.key_bytes
+    }
+}
+
+impl Drop for KeyDict {
+    fn drop(&mut self) {
+        DICT_BUFFER_BYTES.sub(self.key_bytes as i64);
     }
 }
 

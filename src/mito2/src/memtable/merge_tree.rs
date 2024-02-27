@@ -75,7 +75,7 @@ impl Default for MergeTreeConfig {
             index_max_keys_per_shard: 8192,
             data_freeze_threshold: 102400,
             dedup: true,
-            fork_dictionary_bytes: ReadableSize::mb(384),
+            fork_dictionary_bytes: ReadableSize::mb(512),
         }
     }
 }
