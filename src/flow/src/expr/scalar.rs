@@ -82,7 +82,7 @@ impl ScalarExpr {
         match self {
             ScalarExpr::Column(index) => Ok(values[*index].clone()),
             ScalarExpr::Literal(row_res, _ty) => Ok(row_res.clone()),
-            ScalarExpr::CallUnmaterializable(f) => OptimizeSnafu {
+            ScalarExpr::CallUnmaterializable(_) => OptimizeSnafu {
                 reason: "Can't eval unmaterializable function".to_string(),
             }
             .fail(),
@@ -106,24 +106,23 @@ impl ScalarExpr {
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
     pub fn permute(&mut self, permutation: &[usize]) -> Result<(), EvalError> {
-        if self
-            .get_all_ref_columns()
-            .into_iter()
-            .any(|i| i >= permutation.len())
-        {
-            return InvalidArgumentSnafu {
-                reason: format!(
-                    "permutation {:?} is not a valid permutation for expression {:?}",
-                    permutation, self
-                ),
-            }
-            .fail();
-        }
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
-                *old_i = permutation[*old_i];
+                permutation
+                    .get(*old_i)
+                    .map(|new_i| *old_i = *new_i)
+                    .ok_or_else(|| {
+                        InvalidArgumentSnafu {
+                            reason: format!(
+                                "permutation {:?} is not a valid permutation for expression {:?}",
+                                permutation, e
+                            ),
+                        }
+                        .build()
+                    })?;
             }
-        });
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -133,24 +132,23 @@ impl ScalarExpr {
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
     pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) -> Result<(), EvalError> {
-        if !self
-            .get_all_ref_columns()
-            .is_subset(&permutation.keys().cloned().collect())
-        {
-            return InvalidArgumentSnafu {
-                reason: format!(
-                    "permutation {:?} is not a valid permutation for expression {:?}",
-                    permutation, self
-                ),
-            }
-            .fail();
-        }
         self.visit_mut_post_nolimit(&mut |e| {
             if let ScalarExpr::Column(old_i) = e {
-                *old_i = permutation[old_i];
+                permutation
+                    .get(old_i)
+                    .map(|new_i| *old_i = *new_i)
+                    .ok_or_else(|| {
+                        InvalidArgumentSnafu {
+                            reason: format!(
+                                "permutation {:?} is not a valid permutation for expression {:?}",
+                                permutation, e
+                            ),
+                        }
+                        .build()
+                    })?;
             }
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Returns the set of columns that are referenced by `self`.
@@ -160,7 +158,9 @@ impl ScalarExpr {
             if let ScalarExpr::Column(i) = e {
                 support.insert(*i);
             }
-        });
+            Ok(())
+        })
+        .unwrap();
         support
     }
 
@@ -207,70 +207,72 @@ impl ScalarExpr {
 
 impl ScalarExpr {
     /// visit post-order without stack call limit, but may cause stack overflow
-    fn visit_post_nolimit<F>(&self, f: &mut F)
+    fn visit_post_nolimit<F>(&self, f: &mut F) -> Result<(), EvalError>
     where
-        F: FnMut(&Self),
+        F: FnMut(&Self) -> Result<(), EvalError>,
     {
-        self.visit_children(|e| e.visit_post_nolimit(f));
-        f(self);
+        self.visit_children(|e| e.visit_post_nolimit(f))?;
+        f(self)
     }
 
-    fn visit_children<F>(&self, mut f: F)
+    fn visit_children<F>(&self, mut f: F) -> Result<(), EvalError>
     where
-        F: FnMut(&Self),
+        F: FnMut(&Self) -> Result<(), EvalError>,
     {
         match self {
             ScalarExpr::Column(_)
             | ScalarExpr::Literal(_, _)
-            | ScalarExpr::CallUnmaterializable(_) => (),
+            | ScalarExpr::CallUnmaterializable(_) => Ok(()),
             ScalarExpr::CallUnary { expr, .. } => f(expr),
             ScalarExpr::CallBinary { expr1, expr2, .. } => {
-                f(expr1);
-                f(expr2);
+                f(expr1)?;
+                f(expr2)
             }
             ScalarExpr::CallVariadic { exprs, .. } => {
                 for expr in exprs {
-                    f(expr);
+                    f(expr)?;
                 }
+                Ok(())
             }
             ScalarExpr::If { cond, then, els } => {
-                f(cond);
-                f(then);
-                f(els);
+                f(cond)?;
+                f(then)?;
+                f(els)
             }
         }
     }
 
-    fn visit_mut_post_nolimit<F>(&mut self, f: &mut F)
+    fn visit_mut_post_nolimit<F>(&mut self, f: &mut F) -> Result<(), EvalError>
     where
-        F: FnMut(&mut Self),
+        F: FnMut(&mut Self) -> Result<(), EvalError>,
     {
-        self.visit_mut_children(|e: &mut Self| e.visit_mut_post_nolimit(f));
-        f(self);
+        self.visit_mut_children(|e: &mut Self| e.visit_mut_post_nolimit(f))?;
+        f(self)
     }
 
-    fn visit_mut_children<F>(&mut self, mut f: F)
+    fn visit_mut_children<F>(&mut self, mut f: F) -> Result<(), EvalError>
     where
-        F: FnMut(&mut Self),
+        F: FnMut(&mut Self) -> Result<(), EvalError>,
     {
         match self {
             ScalarExpr::Column(_)
             | ScalarExpr::Literal(_, _)
-            | ScalarExpr::CallUnmaterializable(_) => (),
+            | ScalarExpr::CallUnmaterializable(_) => Ok(()),
             ScalarExpr::CallUnary { expr, .. } => f(expr),
             ScalarExpr::CallBinary { expr1, expr2, .. } => {
-                f(expr1);
-                f(expr2);
+                f(expr1)?;
+                f(expr2)
             }
             ScalarExpr::CallVariadic { exprs, .. } => {
                 for expr in exprs {
-                    f(expr);
+                    f(expr)?;
                 }
+                Ok(())
             }
             ScalarExpr::If { cond, then, els } => {
-                f(cond);
-                f(then);
-                f(els);
+                f(cond)?;
+                f(then)?;
+                f(els)
             }
         }
     }
@@ -284,7 +286,9 @@ impl ScalarExpr {
             if let ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now) = e {
                 contains = true;
             }
-        });
+            Ok(())
+        })
+        .unwrap();
         contains
     }
 
@@ -417,7 +421,6 @@ mod test {
             // EvalError is not Eq, so we need to compare the error message
             match (actual, expected) {
                 (Ok(l), Ok(r)) => assert_eq!(l, r),
-                (Err(l), Err(r)) => assert!(matches!(l, r)),
                 (l, r) => panic!("expected: {:?}, actual: {:?}", r, l),
             }
         }
