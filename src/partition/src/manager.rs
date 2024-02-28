@@ -142,6 +142,7 @@ impl PartitionRuleManager {
                     .filter_map(|info| match &info.partition.partition_bounds()[0] {
                         PartitionBound::Value(v) => Some(v.clone()),
                         PartitionBound::MaxValue => None,
+                        PartitionBound::Expr(_) => todo!(),
                     })
                     .collect::<Vec<Value>>();
                 Arc::new(RangePartitionRule::new(
@@ -266,10 +267,15 @@ fn create_partitions_from_region_routes(
 fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<HashSet<RegionNumber>> {
     let expr = filter.df_expr();
     match expr {
-        DfExpr::BinaryExpr(BinaryExpr { left, op, right }) if is_compare_op(op) => {
+        DfExpr::BinaryExpr(BinaryExpr { left, op, right }) if op.is_comparison_operator() => {
             let column_op_value = match (left.as_ref(), right.as_ref()) {
                 (DfExpr::Column(c), DfExpr::Literal(v)) => Some((&c.name, *op, v)),
-                (DfExpr::Literal(v), DfExpr::Column(c)) => Some((&c.name, reverse_operator(op), v)),
+                (DfExpr::Literal(v), DfExpr::Column(c)) => Some((
+                    &c.name,
+                    // Safety: previous branch ensures this is a comparison operator
+                    op.swap().unwrap(),
+                    v,
+                )),
                 _ => None,
             };
             if let Some((column, op, scalar)) = column_op_value {
@@ -310,28 +316,4 @@ fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<Hash
         .find_regions_by_exprs(&[])?
         .into_iter()
         .collect::<HashSet<RegionNumber>>())
-}
-
-#[inline]
-fn is_compare_op(op: &Operator) -> bool {
-    matches!(
-        *op,
-        Operator::Eq
-            | Operator::NotEq
-            | Operator::Lt
-            | Operator::LtEq
-            | Operator::Gt
-            | Operator::GtEq
-    )
-}
-
-#[inline]
-fn reverse_operator(op: &Operator) -> Operator {
-    match *op {
-        Operator::Lt => Operator::Gt,
-        Operator::Gt => Operator::Lt,
-        Operator::LtEq => Operator::GtEq,
-        Operator::GtEq => Operator::LtEq,
-        _ => *op,
-    }
 }

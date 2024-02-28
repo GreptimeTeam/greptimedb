@@ -33,7 +33,9 @@ use common_query::Output;
 use common_telemetry::{info, tracing};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
+use datatypes::value::Value;
 use lazy_static::lazy_static;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::partition::{PartitionBound, PartitionDef};
 use query::sql::create_table_stmt;
 use regex::Regex;
@@ -42,6 +44,8 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, CreateTableLike, Partitions};
+use sql::statements::sql_value_to_value;
+use sqlparser::ast::{Expr, Ident, Value as ParserValue};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions};
@@ -52,9 +56,9 @@ use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, CreateTableWithMultiCatalogsSnafu,
     CreateTableWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyCreateTableExprSnafu,
-    InvalidPartitionColumnsSnafu, InvalidTableNameSnafu, Result, SchemaNotFoundSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UnrecognizedTableOptionSnafu,
+    InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
+    ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, TableAlreadyExistsSnafu,
+    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -728,13 +732,17 @@ fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>
     Ok(columns)
 }
 
+/// Parse [Partitions] into a group of partition entries.
+///
+/// Returns a list of [PartitionBound], each of which defines a partition.
 fn find_partition_entries(
     create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
     partition_columns: &[String],
     _query_ctx: &QueryContextRef,
 ) -> Result<Vec<Vec<PartitionBound>>> {
-    let entries = if let Some(_partitions) = partitions {
+    let entries = if let Some(partitions) = partitions {
+        // extract concrete data type of partition columns
         let column_defs = partition_columns
             .iter()
             .map(|pc| {
@@ -746,24 +754,95 @@ fn find_partition_entries(
                     .unwrap()
             })
             .collect::<Vec<_>>();
-        let mut column_name_and_type = Vec::with_capacity(column_defs.len());
+        let mut column_name_and_type = HashMap::with_capacity(column_defs.len());
         for column in column_defs {
             let column_name = &column.name;
             let data_type = ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension.clone())
                     .context(ColumnDataTypeSnafu)?,
             );
-            column_name_and_type.push((column_name, data_type));
+            column_name_and_type.insert(column_name, data_type);
         }
 
-        // TODO(ruihang): implement the partition value parser.
-        vec![vec![PartitionBound::MaxValue]]
+        // Transform parser expr to partition expr
+        let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
+        for partition in &partitions.exprs {
+            let partition_expr = convert_one_expr(partition, &column_name_and_type)?;
+            partition_exprs.push(vec![PartitionBound::Expr(partition_expr)]);
+        }
+
+        partition_exprs
     } else {
         vec![vec![PartitionBound::MaxValue]]
     };
     Ok(entries)
 }
 
+fn convert_one_expr(
+    expr: &Expr,
+    column_name_and_type: &HashMap<&String, ConcreteDataType>,
+) -> Result<PartitionExpr> {
+    let Expr::BinaryOp { left, op, right } = expr else {
+        return InvalidPartitionRuleSnafu {
+            reason: "partition rule must be a binary expression",
+        }
+        .fail();
+    };
+
+    let op = RestrictedOp::try_from_parser(&op.clone().into()).with_context(|| {
+        InvalidPartitionRuleSnafu {
+            reason: format!("unsupported operator in partition expr {op}"),
+        }
+    })?;
+
+    // convert leaf node.
+    let (lhs, op, rhs) = match (left.as_ref(), right.as_ref()) {
+        (Expr::Identifier(ident), Expr::Value(value)) => {
+            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+            let value = convert_value(value, data_type)?;
+            (Operand::Column(column_name), op, Operand::Value(value))
+        }
+        (Expr::Value(value), Expr::Identifier(ident)) => {
+            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+            let value = convert_value(value, data_type)?;
+            // todo: swap op
+            (Operand::Value(value), op, Operand::Column(column_name))
+        }
+        (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
+            // sub-expr must against another sub-expr
+            let lhs = convert_one_expr(left, column_name_and_type)?;
+            let rhs = convert_one_expr(right, column_name_and_type)?;
+            (Operand::Expr(lhs), op, Operand::Expr(rhs))
+        }
+        _ => {
+            return InvalidPartitionRuleSnafu {
+                reason: format!("invalid partition expr {expr}"),
+            }
+            .fail();
+        }
+    };
+
+    Ok(PartitionExpr::new(lhs, op, rhs))
+}
+
+fn convert_identifier(
+    ident: &Ident,
+    column_name_and_type: &HashMap<&String, ConcreteDataType>,
+) -> Result<(String, ConcreteDataType)> {
+    let column_name = ident.value.clone();
+    let data_type = column_name_and_type
+        .get(&column_name)
+        .cloned()
+        .with_context(|| ColumnNotFoundSnafu { msg: &column_name })?;
+    Ok((column_name, data_type))
+}
+
+fn convert_value(value: &ParserValue, data_type: ConcreteDataType) -> Result<Value> {
+    // TODO(ruihang): pass timezone here
+    sql_value_to_value("<NONAME>", &data_type, value, None).context(ParseSqlValueSnafu)
+}
+
+/// Merge table level table options with schema level table options.
 fn merge_options(mut table_opts: TableOptions, schema_opts: SchemaNameValue) -> TableOptions {
     table_opts.ttl = table_opts.ttl.or(schema_opts.ttl);
     table_opts
