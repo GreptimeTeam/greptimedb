@@ -466,7 +466,9 @@ mod tests {
         let weight = &[0, 1, 2];
         let mut seq = 0;
         write_rows_to_buffer(&mut buffer1, &metadata, 0, vec![1, 2, 3], &mut seq);
-        let node1 = DataNode::new(DataSource::Buffer(buffer1.read(Some(weight)).unwrap()));
+        let node1 = DataNode::new(DataSource::Buffer(
+            buffer1.read().unwrap().build(Some(weight)).unwrap(),
+        ));
 
         let mut buffer2 = DataBuffer::with_capacity(metadata.clone(), 10, true);
         write_rows_to_buffer(&mut buffer2, &metadata, 1, vec![2, 3], &mut seq);
