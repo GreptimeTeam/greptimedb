@@ -58,7 +58,7 @@ desc TABLE neg_default_value;
 
 DROP TABLE neg_default_value;
 
-CREATE TABLE test_like_1 (i INTEGER, j TIMESTAMP TIME INDEX);
+CREATE TABLE test_like_1 (PK STRING PRIMARY KEY, i INTEGER DEFAULT 7, j TIMESTAMP TIME INDEX);
 
 CREATE TABLE test_like_2 LIKE test_like_1;
 

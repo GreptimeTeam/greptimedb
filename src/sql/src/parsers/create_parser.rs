@@ -131,11 +131,11 @@ impl<'a> ParserContext<'a> {
         let table_name = self.parse_table_name()?;
 
         if self.parser.parse_keyword(Keyword::LIKE) {
-            let target_table_name = self.parse_table_name()?;
+            let source_name = self.parse_table_name()?;
 
             return Ok(Statement::CreateTableLike(CreateTableLike {
-                name: table_name,
-                target: target_table_name,
+                table_name,
+                source_name,
             }));
         }
 
@@ -754,8 +754,8 @@ mod tests {
         assert_eq!(1, stmts.len());
         match &stmts[0] {
             Statement::CreateTableLike(c) => {
-                assert_eq!(c.name.to_string(), "t1");
-                assert_eq!(c.target.to_string(), "t2");
+                assert_eq!(c.table_name.to_string(), "t1");
+                assert_eq!(c.source_name.to_string(), "t2");
             }
             _ => unreachable!(),
         }

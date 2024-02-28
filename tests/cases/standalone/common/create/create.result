@@ -143,7 +143,7 @@ DROP TABLE neg_default_value;
 
 Affected Rows: 0
 
-CREATE TABLE test_like_1 (i INTEGER, j TIMESTAMP TIME INDEX);
+CREATE TABLE test_like_1 (PK STRING PRIMARY KEY, i INTEGER DEFAULT 7, j TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -160,7 +160,8 @@ DESC TABLE test_like_1;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| i      | Int32                |     | YES  |         | FIELD         |
+| pk     | String               | PRI | YES  |         | TAG           |
+| i      | Int32                |     | YES  | 7       | FIELD         |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
 
@@ -169,7 +170,8 @@ DESC TABLE test_like_2;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| i      | Int32                |     | YES  |         | FIELD         |
+| pk     | String               | PRI | YES  |         | TAG           |
+| i      | Int32                |     | YES  | 7       | FIELD         |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
 

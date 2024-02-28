@@ -222,8 +222,9 @@ pub struct CreateExternalTable {
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct CreateTableLike {
     /// Table name
-    pub name: ObjectName,
-    pub target: ObjectName,
+    pub table_name: ObjectName,
+    /// The table that is designated to be imitated by `Like`
+    pub source_name: ObjectName,
 }
 
 #[cfg(test)]

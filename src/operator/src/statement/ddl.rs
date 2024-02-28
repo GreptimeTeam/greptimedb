@@ -81,7 +81,7 @@ impl StatementExecutor {
         stmt: CreateTableLike,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let (catalog, schema, table) = table_idents_to_full_name(&stmt.target, &ctx)
+        let (catalog, schema, table) = table_idents_to_full_name(&stmt.source_name, &ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
         let table_ref = self
@@ -100,7 +100,7 @@ impl StatementExecutor {
         let mut create_stmt =
             show_create_table::create_table_stmt(&table_ref.table_info(), quote_style)
                 .context(error::ParseQuerySnafu)?;
-        create_stmt.name = stmt.name;
+        create_stmt.name = stmt.table_name;
         create_stmt.if_not_exists = false;
 
         let partitions = create_partitions_stmt(partitions)?.and_then(|mut partitions| {

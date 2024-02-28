@@ -181,7 +181,7 @@ pub(crate) async fn create_external_expr(
     Ok(expr)
 }
 
-/// Convert `CreateTable` statement to `CreateTableExpr` gRPC request.
+/// Convert `CreateTable` statement to [`CreateTableExpr`] gRPC request.
 pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, &query_ctx)
