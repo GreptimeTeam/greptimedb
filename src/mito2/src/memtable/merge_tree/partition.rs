@@ -424,20 +424,29 @@ pub(crate) struct ReadPartitionContext {
 
 impl Drop for ReadPartitionContext {
     fn drop(&mut self) {
+        let partition_prune_pk = self.metrics.prune_pk.as_secs_f64();
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_prune_pk"])
-            .observe(self.metrics.prune_pk.as_secs_f64());
+            .observe(partition_prune_pk);
+        let partition_read_source = self.metrics.read_source.as_secs_f64();
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_read_source"])
-            .observe(self.metrics.read_source.as_secs_f64());
+            .observe(partition_read_source);
+        let partition_data_batch_to_batch = self.metrics.data_batch_to_batch.as_secs_f64();
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_data_batch_to_batch"])
-            .observe(self.metrics.data_batch_to_batch.as_secs_f64());
-        common_telemetry::debug!(
-            "TreeIter pruning, before: {}, after: {}",
-            self.metrics.keys_before_pruning,
-            self.metrics.keys_before_pruning
-        );
+            .observe(partition_data_batch_to_batch);
+
+        if self.metrics.keys_before_pruning != 0 {
+            common_telemetry::debug!(
+                "TreeIter pruning, before: {}, after: {}, partition_read_source: {}s, partition_prune_pk: {}s, partition_data_batch_to_batch: {}s",
+                self.metrics.keys_before_pruning,
+                self.metrics.keys_after_pruning,
+                partition_read_source,
+                partition_prune_pk,
+                partition_data_batch_to_batch,
+            );
+        }
     }
 }
 
