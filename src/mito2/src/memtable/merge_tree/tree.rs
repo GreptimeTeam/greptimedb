@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::tracing::log;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use snafu::ensure;
@@ -135,6 +134,7 @@ impl MergeTree {
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
+        let start = Instant::now();
         // Creates the projection set.
         let projection: HashSet<_> = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -167,6 +167,7 @@ impl MergeTree {
         );
         iter.fetch_next_partition(context)?;
 
+        iter.metrics.iter_elapsed += start.elapsed();
         Ok(Box::new(iter))
     }
 
@@ -331,7 +332,6 @@ struct TreeIterMetrics {
     batches_fetched: usize,
     partitions_total: usize,
     partitions_after_pruning: usize,
-    partitions_fetched: usize,
 }
 
 struct TreeIter {
@@ -349,11 +349,10 @@ impl Drop for TreeIter {
         READ_STAGE_ELAPSED
             .with_label_values(&["scan_memtable"])
             .observe(scan_elapsed);
-        log::debug!(
-            "TreeIter partitions total: {}, partitions after prune: {}, partitions fetched: {}, rows fetched: {}, batches fetched: {}, scan elapsed: {}",
+        common_telemetry::debug!(
+            "TreeIter partitions total: {}, partitions after prune: {}, rows fetched: {}, batches fetched: {}, scan elapsed: {}",
             self.metrics.partitions_total,
             self.metrics.partitions_after_pruning,
-            self.metrics.partitions_fetched,
             self.metrics.rows_fetched,
             self.metrics.batches_fetched,
             scan_elapsed
@@ -382,7 +381,6 @@ impl TreeIter {
                 context = part_reader.into_context();
                 continue;
             }
-            self.metrics.partitions_fetched += 1;
             self.current_reader = Some(part_reader);
             break;
         }
