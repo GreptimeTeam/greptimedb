@@ -49,6 +49,14 @@ pub struct ExternalSorter {
     /// In-memory buffer to hold values and their corresponding bitmaps until memory threshold is exceeded
     values_buffer: BTreeMap<Bytes, BitVec>,
 
+    /// Count of rows in the last dumped buffer, used to streamline memory usage of `values_buffer`.
+    ///
+    /// After data is dumped to external files, `last_dump_row_count` is updated to reflect the new starting point
+    /// for `BitVec` indexing. This means each `BitVec` in `values_buffer` thereafter encodes positions relative to
+    /// this count, not from 0. This mechanism effectively shrinks the memory footprint of each `BitVec`, helping manage
+    /// memory use more efficiently by focusing only on newly ingested data post-dump.
+    last_dump_row_count: usize,
+
     /// Count of all rows ingested so far
     total_row_count: usize,
 
@@ -84,7 +92,8 @@ impl Sorter for ExternalSorter {
             return Ok(());
         }
 
-        let segment_index_range = self.segment_index_range(n);
+        let segment_index_range = self.segment_index_range(n, value.is_none());
+        // println!("[push, total_row_count = {}, seg = {}, seg_range = {segment_index_range:?}, last_dump = {}] value {value:?}", self.total_row_count, self.segment_row_count, self.last_dump_row_count);
         self.total_row_count += n;
 
         if let Some(value) = value {
@@ -104,8 +113,15 @@ impl Sorter for ExternalSorter {
         // TODO(zhongzc): k-way merge instead of 2-way merge
 
         let mut tree_nodes: VecDeque<SortedStream> = VecDeque::with_capacity(readers.len() + 1);
+        let leading_zeros = self.last_dump_row_count / self.segment_row_count;
         tree_nodes.push_back(Box::new(stream::iter(
-            mem::take(&mut self.values_buffer).into_iter().map(Ok),
+            mem::take(&mut self.values_buffer)
+                .into_iter()
+                .map(move |(value, mut bitmap)| {
+                    bitmap.resize(bitmap.len() + leading_zeros, false);
+                    bitmap.shift_right(leading_zeros);
+                    Ok((value, bitmap))
+                }),
         )));
         for reader in readers {
             tree_nodes.push_back(IntermediateReader::new(reader).into_stream().await?);
@@ -145,6 +161,7 @@ impl ExternalSorter {
             values_buffer: BTreeMap::new(),
 
             total_row_count: 0,
+            last_dump_row_count: 0,
             segment_row_count,
 
             current_memory_usage: 0,
@@ -232,8 +249,11 @@ impl ExternalSorter {
             .fetch_sub(memory_usage, Ordering::Relaxed);
         self.current_memory_usage = 0;
 
+        let bitmap_leading_zeros = self.last_dump_row_count / self.segment_row_count;
+        self.last_dump_row_count = self.total_row_count - self.total_row_count % self.segment_row_count; // align to segment
+
         let entries = values.len();
-        IntermediateWriter::new(writer).write_all(values).await.inspect(|_|
+        IntermediateWriter::new(writer).write_all(values, bitmap_leading_zeros as _).await.inspect(|_|
             logging::debug!("Dumped {entries} entries ({memory_usage} bytes) to intermediate file {file_id} for index {index_name}")
         ).inspect_err(|e|
             logging::error!("Failed to dump {entries} entries to intermediate file {file_id} for index {index_name}. Error: {e}")
@@ -241,10 +261,16 @@ impl ExternalSorter {
     }
 
     /// Determines the segment index range for the row index range
-    /// `[self.total_row_count, self.total_row_count + n - 1]`
-    fn segment_index_range(&self, n: usize) -> RangeInclusive<usize> {
-        let start = self.segment_index(self.total_row_count);
-        let end = self.segment_index(self.total_row_count + n - 1);
+    /// `[row_begin, row_begin + n - 1]`
+    fn segment_index_range(&self, n: usize, is_null: bool) -> RangeInclusive<usize> {
+        let row_begin = if is_null {
+            self.total_row_count
+        } else {
+            self.total_row_count - self.last_dump_row_count
+        };
+
+        let start = self.segment_index(row_begin);
+        let end = self.segment_index(row_begin + n - 1);
         start..=end
     }
 

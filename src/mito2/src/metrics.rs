@@ -183,7 +183,8 @@ lazy_static! {
     pub static ref INDEX_CREATE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_index_create_elapsed",
         "index create elapsed",
-        &[STAGE_LABEL]
+        &[STAGE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
     /// Counter of rows indexed.

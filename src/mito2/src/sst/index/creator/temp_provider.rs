@@ -110,7 +110,7 @@ impl TempFileProvider {
     pub async fn cleanup(&self) -> Result<()> {
         self.manager
             .store()
-            .remove_all(self.location.root_path())
+            .remove_all(self.location.dir_to_cleanup())
             .await
     }
 }
@@ -172,7 +172,7 @@ mod tests {
         assert!(provider
             .manager
             .store()
-            .list(location.root_path())
+            .list(location.dir_to_cleanup())
             .await
             .unwrap()
             .is_empty());

@@ -134,7 +134,7 @@ create_on_compaction = "auto"
 apply_on_query = "auto"
 # Memory threshold for performing an external sort during index creation.
 # Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
-mem_threshold_on_create = "512M"
+mem_threshold_on_create = "64M"
 # File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`).
 intermediate_path = ""
 
