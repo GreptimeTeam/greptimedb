@@ -45,7 +45,7 @@ impl<T: DataBatchSource> DataBatchSource for DedupReader<T> {
     }
 
     fn next(&mut self) -> Result<()> {
-        loop {
+        while self.inner.is_valid() {
             match &mut self.prev_batch_last_row {
                 None => {
                     // First shot, fill prev_batch_last_row and current_batch_range with first batch.
