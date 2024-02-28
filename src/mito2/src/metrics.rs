@@ -186,7 +186,8 @@ lazy_static! {
     pub static ref INDEX_CREATE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_index_create_elapsed",
         "index create elapsed",
-        &[STAGE_LABEL]
+        &[STAGE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
     /// Counter of rows indexed.
@@ -201,7 +202,11 @@ lazy_static! {
         "index create bytes total",
     )
     .unwrap();
-
+    /// Gauge of index create memory usage.
+    pub static ref INDEX_CREATE_MEMORY_USAGE: IntGauge = register_int_gauge!(
+        "greptime_index_create_memory_usage",
+        "index create memory usage",
+    ).unwrap();
     /// Counter of r/w bytes on index related IO operations.
     pub static ref INDEX_IO_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
         "greptime_index_io_bytes_total",

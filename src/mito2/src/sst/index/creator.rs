@@ -17,6 +17,7 @@ mod temp_provider;
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::warn;
@@ -45,9 +46,13 @@ use crate::sst::index::creator::statistics::Statistics;
 use crate::sst::index::creator::temp_provider::TempFileProvider;
 use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
 use crate::sst::index::store::InstrumentedStore;
-use crate::sst::index::{
-    INDEX_BLOB_TYPE, MIN_MEMORY_USAGE_THRESHOLD, PIPE_BUFFER_SIZE_FOR_SENDING_BLOB,
-};
+use crate::sst::index::INDEX_BLOB_TYPE;
+
+/// The minimum memory usage threshold for one column.
+const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
+
+/// The buffer size for the pipe used to send index data to the puffin blob.
+const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 
 type ByteCount = usize;
 type RowCount = usize;
@@ -75,6 +80,9 @@ pub struct SstIndexCreator {
 
     /// Ignore column IDs for index creation.
     ignore_column_ids: HashSet<ColumnId>,
+
+    /// The memory usage of the index creator.
+    memory_usage: Arc<AtomicUsize>,
 }
 
 impl SstIndexCreator {
@@ -89,16 +97,19 @@ impl SstIndexCreator {
         memory_usage_threshold: Option<usize>,
         segment_row_count: NonZeroUsize,
     ) -> Self {
-        // `memory_usage_threshold` is the total memory usage threshold of the index creation,
-        // so we need to divide it by the number of columns
-        let memory_threshold = memory_usage_threshold.map(|threshold| {
-            (threshold / metadata.primary_key.len()).max(MIN_MEMORY_USAGE_THRESHOLD)
-        });
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&metadata.region_id, &sst_file_id),
             intermediate_manager,
         ));
-        let sorter = ExternalSorter::factory(temp_file_provider.clone() as _, memory_threshold);
+
+        let memory_usage = Arc::new(AtomicUsize::new(0));
+
+        let sorter = ExternalSorter::factory(
+            temp_file_provider.clone() as _,
+            Some(MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN),
+            memory_usage.clone(),
+            memory_usage_threshold,
+        );
         let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
@@ -115,6 +126,7 @@ impl SstIndexCreator {
             aborted: false,
 
             ignore_column_ids: HashSet::default(),
+            memory_usage,
         }
     }
 
@@ -293,6 +305,10 @@ impl SstIndexCreator {
         let _guard = self.stats.record_cleanup();
 
         self.temp_file_provider.cleanup().await
+    }
+
+    pub fn memory_usage(&self) -> usize {
+        self.memory_usage.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

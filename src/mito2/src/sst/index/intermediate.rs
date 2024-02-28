@@ -68,7 +68,8 @@ impl IntermediateManager {
 /// during external sorting.
 #[derive(Debug, Clone)]
 pub struct IntermediateLocation {
-    root_path: String,
+    files_dir: String,
+    sst_dir: String,
 }
 
 impl IntermediateLocation {
@@ -80,19 +81,20 @@ impl IntermediateLocation {
         let region_id = region_id.as_u64();
         let uuid = Uuid::new_v4();
         Self {
-            root_path: format!("{INTERMEDIATE_DIR}/{region_id}/{sst_file_id}/{uuid}/"),
+            files_dir: format!("{INTERMEDIATE_DIR}/{region_id}/{sst_file_id}/{uuid}/"),
+            sst_dir: format!("{INTERMEDIATE_DIR}/{region_id}/{sst_file_id}/"),
         }
     }
 
-    /// Returns the root directory of the intermediate files
-    pub fn root_path(&self) -> &str {
-        &self.root_path
+    /// Returns the directory to clean up when the sorting is done
+    pub fn dir_to_cleanup(&self) -> &str {
+        &self.sst_dir
     }
 
     /// Returns the path of the directory for intermediate files associated with a column:
     /// `__intm/{region_id}/{sst_file_id}/{uuid}/{column_id}/`
     pub fn column_path(&self, column_id: &str) -> String {
-        util::join_path(&self.root_path, &format!("{column_id}/"))
+        util::join_path(&self.files_dir, &format!("{column_id}/"))
     }
 
     /// Returns the path of the intermediate file with the given id for a column:
@@ -135,14 +137,19 @@ mod tests {
         let sst_file_id = FileId::random();
         let location = IntermediateLocation::new(&RegionId::new(0, 0), &sst_file_id);
 
+        assert_eq!(
+            location.dir_to_cleanup(),
+            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/")
+        );
+
         let re = Regex::new(&format!(
             "{INTERMEDIATE_DIR}/0/{sst_file_id}/{}/",
             r"\w{8}-\w{4}-\w{4}-\w{4}-\w{12}"
         ))
         .unwrap();
-        assert!(re.is_match(location.root_path()));
+        assert!(re.is_match(&location.files_dir));
 
-        let uuid = location.root_path().split('/').nth(3).unwrap();
+        let uuid = location.files_dir.split('/').nth(3).unwrap();
 
         let column_id = "1";
         assert_eq!(
