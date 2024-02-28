@@ -26,7 +26,6 @@ function retry_fetch() {
     curl \
       --connect-timeout 10 \
       --retry 3 \
-      --retry-connrefused \
       -fsSL $url --output $filename || \
       {
         echo "Failed to download $url"
