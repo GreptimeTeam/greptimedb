@@ -20,7 +20,9 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataBatch, DataParts, DataPartsReader, DATA_INIT_CAP};
+use crate::memtable::merge_tree::data::{
+    DataBatch, DataParts, DataPartsReader, DataPartsReaderBuilder, DATA_INIT_CAP,
+};
 use crate::memtable::merge_tree::dict::KeyDictRef;
 use crate::memtable::merge_tree::merger::{Merger, Node};
 use crate::memtable::merge_tree::shard_builder::ShardBuilderReader;
@@ -61,13 +63,13 @@ impl Shard {
 
     /// Scans the shard.
     // TODO(yingwen): Push down projection to data parts.
-    pub fn read(&self) -> Result<ShardReader> {
+    pub fn read(&self) -> Result<ShardReaderBuilder> {
         let parts_reader = self.data_parts.read()?;
 
-        Ok(ShardReader {
+        Ok(ShardReaderBuilder {
             shard_id: self.shard_id,
             key_dict: self.key_dict.clone(),
-            parts_reader,
+            inner: parts_reader,
         })
     }
 
@@ -121,6 +123,28 @@ pub trait DataBatchSource {
 }
 
 pub type BoxedDataBatchSource = Box<dyn DataBatchSource + Send>;
+
+pub struct ShardReaderBuilder {
+    shard_id: ShardId,
+    key_dict: Option<KeyDictRef>,
+    inner: DataPartsReaderBuilder,
+}
+
+impl ShardReaderBuilder {
+    pub(crate) fn build(self) -> Result<ShardReader> {
+        let ShardReaderBuilder {
+            shard_id,
+            key_dict,
+            inner,
+        } = self;
+        let parts_reader = inner.build()?;
+        Ok(ShardReader {
+            shard_id,
+            key_dict,
+            parts_reader,
+        })
+    }
+}
 
 /// Reader to read rows in a shard.
 pub struct ShardReader {
@@ -398,7 +422,7 @@ mod tests {
         }
         assert!(!shard.is_empty());
 
-        let mut reader = shard.read().unwrap();
+        let mut reader = shard.read().unwrap().build().unwrap();
         let mut timestamps = Vec::new();
         while reader.is_valid() {
             let rb = reader.current_data_batch().slice_record_batch();

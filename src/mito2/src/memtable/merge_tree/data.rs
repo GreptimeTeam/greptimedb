@@ -960,29 +960,45 @@ impl DataParts {
     /// Reads data from all parts including active and frozen parts.
     /// The returned iterator yields a record batch of one primary key at a time.
     /// The order of yielding primary keys is determined by provided weights.
-    pub fn read(&self) -> Result<DataPartsReader> {
+    pub fn read(&self) -> Result<DataPartsReaderBuilder> {
         let _timer = MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["build_data_parts_reader"])
             .start_timer();
 
-        let mut nodes = Vec::with_capacity(self.frozen.len() + 1);
+        let buffer = self.active.read()?;
+        let mut parts = Vec::with_capacity(self.frozen.len());
+        for p in &self.frozen {
+            parts.push(p.read()?);
+        }
+        Ok(DataPartsReaderBuilder { buffer, parts })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.active.is_empty() && self.frozen.iter().all(|part| part.is_empty())
+    }
+}
+
+pub struct DataPartsReaderBuilder {
+    buffer: DataBufferReaderBuilder,
+    parts: Vec<DataPartReader>,
+}
+
+impl DataPartsReaderBuilder {
+    pub(crate) fn build(self) -> Result<DataPartsReader> {
+        let mut nodes = Vec::with_capacity(self.parts.len() + 1);
         nodes.push(DataNode::new(DataSource::Buffer(
             // `DataPars::read` ensures that all pk_index inside `DataBuffer` are replaced by weights.
             // then we pass None to sort rows directly according to pk_index.
-            self.active.read()?.build(None)?,
+            self.buffer.build(None)?,
         )));
-        for p in &self.frozen {
-            nodes.push(DataNode::new(DataSource::Part(p.read()?)));
+        for p in self.parts {
+            nodes.push(DataNode::new(DataSource::Part(p)));
         }
         let merger = Merger::try_new(nodes)?;
         Ok(DataPartsReader {
             merger,
             elapsed: Default::default(),
         })
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.active.is_empty() && self.frozen.iter().all(|part| part.is_empty())
     }
 }
 

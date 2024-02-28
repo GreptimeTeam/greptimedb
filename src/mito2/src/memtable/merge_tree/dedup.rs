@@ -179,7 +179,8 @@ mod tests {
         let parts = DataParts::new(meta, 10, true).with_frozen(frozens);
 
         let mut res = Vec::with_capacity(expected.len());
-        let mut reader = DedupReader::try_new(MockSource(parts.read().unwrap())).unwrap();
+        let mut reader =
+            DedupReader::try_new(MockSource(parts.read().unwrap().build().unwrap())).unwrap();
         while reader.is_valid() {
             let batch = reader.current_data_batch();
             res.push(extract_data_batch(&batch));

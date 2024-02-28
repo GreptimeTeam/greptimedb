@@ -108,7 +108,7 @@ impl Partition {
 
     /// Scans data in the partition.
     pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
-        let (builder_source, mut nodes) = {
+        let (builder_source, shard_reader_builders) = {
             let inner = self.inner.read().unwrap();
             let mut shard_source = Vec::with_capacity(inner.shards.len() + 1);
             let builder_reader = if !inner.shard_builder.is_empty() {
@@ -119,12 +119,17 @@ impl Partition {
             };
             for shard in &inner.shards {
                 if !shard.is_empty() {
-                    let shard_reader = shard.read()?;
-                    shard_source.push(ShardNode::new(ShardSource::Shard(shard_reader)));
+                    let shard_reader_builder = shard.read()?;
+                    shard_source.push(shard_reader_builder);
                 }
             }
             (builder_reader, shard_source)
         };
+
+        let mut nodes = shard_reader_builders
+            .into_iter()
+            .map(|builder| Ok(ShardNode::new(ShardSource::Shard(builder.build()?))))
+            .collect::<Result<Vec<_>>>()?;
 
         if let Some(builder) = builder_source {
             // Move the initialization of ShardBuilderReader out of read lock.
