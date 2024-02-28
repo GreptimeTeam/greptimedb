@@ -30,7 +30,8 @@ use super::*;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
     build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
-    flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    flush_region, group_put_rows, put_rows, reopen_region, rows_schema, CreateRequestBuilder,
+    TestEnv,
 };
 
 #[tokio::test]
@@ -79,6 +80,31 @@ async fn test_write_to_region() {
         rows: build_rows(0, 42),
     };
     put_rows(&engine, region_id, rows).await;
+}
+
+#[tokio::test]
+async fn test_group_write_to_region() {
+    let mut env = TestEnv::with_prefix("group_write-to-region");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let mut group_rows = Vec::new();
+    for i in 0..42 {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, i + 1),
+        };
+        group_rows.push(rows);
+    }
+    group_put_rows(&engine, region_id, group_rows).await;
 }
 
 #[tokio::test]

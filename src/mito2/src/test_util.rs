@@ -686,6 +686,21 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     assert_eq!(num_rows, rows_inserted);
 }
 
+pub async fn group_put_rows(engine: &MitoEngine, region_id: RegionId, group_rows: Vec<Rows>) {
+    let num_rows: usize = group_rows.iter().map(|r| r.rows.len()).sum();
+    let rows_inserted = engine
+        .handle_group_puts(
+            region_id,
+            group_rows
+                .into_iter()
+                .map(|rows| RegionPutRequest { rows })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(num_rows, rows_inserted);
+}
+
 /// Build rows to put for specific `key`.
 pub fn build_rows_for_key(key: &str, start: usize, end: usize, value_start: usize) -> Vec<Row> {
     (start..end)
