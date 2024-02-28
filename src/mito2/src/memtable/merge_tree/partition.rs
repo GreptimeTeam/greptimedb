@@ -64,7 +64,8 @@ impl Partition {
     /// Writes to the partition with a primary key.
     pub fn write_with_key(
         &self,
-        primary_key: &[u8],
+        primary_key: &mut Vec<u8>,
+        row_codec: &McmpRowCodec,
         key_value: KeyValue,
         metrics: &mut WriteMetrics,
     ) -> Result<()> {
@@ -75,18 +76,41 @@ impl Partition {
         }
 
         // Finds key in shards, now we ensure one key only exists in one shard.
-        if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
+        let pk_in_builder = if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
             // Key already in shards.
-            inner.write_to_shard(pk_id, key_value);
-            return Ok(());
+            if inner.write_to_shard(pk_id, &key_value) {
+                return Ok(());
+            } else {
+                // Key found in inner.pk_to_pk_id but is not a shard pk, then it must be in builder
+                Some(pk_id)
+            }
+        } else {
+            None
+        };
+
+        match pk_in_builder {
+            None => { // Key does not yet exist in builder, try encode and insert.
+                // Short key for the map.
+                let short_key = primary_key.clone();
+                // Encode full primary key.
+                primary_key.clear();
+                row_codec.encode_to_vec(key_value.primary_keys(), primary_key)?;
+
+                // Write to the shard builder.
+                let pk_id = inner
+                    .shard_builder
+                    .write_with_key(primary_key, &key_value, metrics);
+                inner.pk_to_pk_id.insert(short_key, pk_id);
+            }
+            Some(builder_pk_id) => {
+                // Key already exists in builder, just write to it.
+                inner
+                    .shard_builder
+                    .write_with_pk_id(builder_pk_id, &key_value);
+            }
         }
 
-        // Write to the shard builder.
-        inner
-            .shard_builder
-            .write_with_key(primary_key, key_value, metrics);
         inner.num_rows += 1;
-
         Ok(())
     }
 
@@ -102,7 +126,7 @@ impl Partition {
             shard_id: 0,
             pk_index: 0,
         };
-        inner.shards[0].write_with_pk_id(pk_id, key_value);
+        inner.shards[0].write_with_pk_id(pk_id, &key_value);
         inner.num_rows += 1;
     }
 
@@ -578,19 +602,20 @@ impl Inner {
         }
     }
 
-    fn find_key_in_shards(&self, primary_key: &[u8]) -> Option<PkId> {
+    fn find_key_in_shards(&self, short_key: &[u8]) -> Option<PkId> {
         assert!(!self.frozen);
-        self.pk_to_pk_id.get(primary_key).copied()
+        self.pk_to_pk_id.get(short_key).copied()
     }
 
-    fn write_to_shard(&mut self, pk_id: PkId, key_value: KeyValue) {
+    fn write_to_shard(&mut self, pk_id: PkId, key_value: &KeyValue) -> bool {
         for shard in &mut self.shards {
             if shard.shard_id == pk_id.shard_id {
                 shard.write_with_pk_id(pk_id, key_value);
                 self.num_rows += 1;
-                return;
+                return true;
             }
         }
+        false
     }
 
     fn freeze_active_shard(&mut self) -> Result<()> {
