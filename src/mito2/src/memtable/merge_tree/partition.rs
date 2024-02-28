@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use datatypes::value::Value;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
@@ -39,7 +38,7 @@ use crate::memtable::merge_tree::shard_builder::ShardBuilder;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
 use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
-use crate::row_converter::{McmpRowCodec, RowCodec};
+use crate::row_converter::McmpRowCodec;
 
 /// Key of a partition.
 pub type PartitionKey = u32;
@@ -124,6 +123,15 @@ impl Partition {
 
     /// Scans data in the partition.
     pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
+        let key_filter = if context.need_prune_key {
+            Some(PrimaryKeyFilter {
+                metadata: context.metadata.clone(),
+                filters: context.filters.clone(),
+                codec: context.row_codec.clone(),
+            })
+        } else {
+            None
+        };
         let (builder_source, shard_reader_builders) = {
             let inner = self.inner.read().unwrap();
             let mut shard_source = Vec::with_capacity(inner.shards.len() + 1);
@@ -144,12 +152,17 @@ impl Partition {
 
         let mut nodes = shard_reader_builders
             .into_iter()
-            .map(|builder| Ok(ShardNode::new(ShardSource::Shard(builder.build()?))))
+            .map(|builder| {
+                Ok(ShardNode::new(ShardSource::Shard(
+                    builder.build(key_filter.clone())?,
+                )))
+            })
             .collect::<Result<Vec<_>>>()?;
 
         if let Some(builder) = builder_source {
             // Move the initialization of ShardBuilderReader out of read lock.
-            let shard_builder_reader = builder.build(Some(&context.pk_weights))?;
+            let shard_builder_reader =
+                builder.build(Some(&context.pk_weights), key_filter.clone())?;
             nodes.push(ShardNode::new(ShardSource::Builder(shard_builder_reader)));
         }
 
@@ -267,10 +280,9 @@ pub(crate) struct PartitionStats {
 
 #[derive(Default)]
 struct PartitionReaderMetrics {
-    prune_pk: Duration,
+    // prune_pk: Duration,
     read_source: Duration,
     data_batch_to_batch: Duration,
-    keys_before_pruning: usize,
     keys_after_pruning: usize,
 }
 
@@ -280,20 +292,11 @@ struct PartitionReaderMetrics {
 pub struct PartitionReader {
     context: ReadPartitionContext,
     source: BoxedDataBatchSource,
-    last_yield_pk_id: Option<PkId>,
-    values_buffer: Vec<Value>,
 }
 
 impl PartitionReader {
     fn new(context: ReadPartitionContext, source: BoxedDataBatchSource) -> Result<Self> {
-        let mut reader = Self {
-            context,
-            source,
-            last_yield_pk_id: None,
-            values_buffer: Vec::new(),
-        };
-        // Find next valid batch.
-        reader.prune_batch_by_key()?;
+        let reader = Self { context, source };
 
         Ok(reader)
     }
@@ -308,8 +311,7 @@ impl PartitionReader {
     /// # Panics
     /// Panics if the reader is invalid.
     pub fn next(&mut self) -> Result<()> {
-        self.advance_source()?;
-        self.prune_batch_by_key()
+        self.advance_source()
     }
 
     /// Converts current data batch into a [Batch].
@@ -339,123 +341,141 @@ impl PartitionReader {
         self.context.metrics.read_source += read_source.elapsed();
         Ok(())
     }
+}
 
-    fn prune_batch_by_key(&mut self) -> Result<()> {
-        if self.context.metadata.primary_key.is_empty() || !self.context.need_prune_key {
-            // Nothing to prune.
-            return Ok(());
+#[derive(Clone)]
+pub(crate) struct PrimaryKeyFilter {
+    metadata: RegionMetadataRef,
+    filters: Arc<Vec<SimpleFilterEvaluator>>,
+    codec: Arc<McmpRowCodec>,
+}
+
+impl PrimaryKeyFilter {
+    pub(crate) fn prune_primary_key(&self, pk: &[u8]) -> bool {
+        if self.filters.is_empty() {
+            return true;
         }
 
-        while self.source.is_valid() {
-            let pk_id = self.source.current_pk_id();
-            if let Some(yield_pk_id) = self.last_yield_pk_id {
-                if pk_id == yield_pk_id {
-                    // If this batch has the same key as last returned batch.
-                    // We can return it without evaluating filters.
-                    break;
+        // no primary key, we simply return true.
+        if self.metadata.primary_key.is_empty() {
+            return true;
+        }
+
+        // evaluate filters against primary key values
+        let mut result = true;
+        for filter in &*self.filters {
+            if Partition::is_partition_column(filter.column_name()) {
+                continue;
+            }
+            let Some(column) = self.metadata.column_by_name(filter.column_name()) else {
+                continue;
+            };
+            // ignore filters that are not referencing primary key columns
+            if column.semantic_type != SemanticType::Tag {
+                continue;
+            }
+            // index of the column in primary keys.
+            // Safety: A tag column is always in primary key.
+            let index = self.metadata.primary_key_index(column.column_id).unwrap();
+
+            let value = match self.codec.decode_value_at(pk, index) {
+                Ok(v) => v,
+                Err(e) => {
+                    common_telemetry::error!(e; "Failed to decode primary key");
+                    return true;
                 }
-            }
-            let key = self.source.current_key().unwrap();
-            self.context.metrics.keys_before_pruning += 1;
-            // Prune batch by primary key.
-            if prune_primary_key(
-                &self.context.metadata,
-                &self.context.filters,
-                &self.context.row_codec,
-                key,
-                &mut self.context.metrics,
-                &mut self.values_buffer,
-            ) {
-                // We need this key.
-                self.last_yield_pk_id = Some(pk_id);
-                self.context.metrics.keys_after_pruning += 1;
-                break;
-            }
-            self.advance_source()?;
+            };
+
+            // Safety: arrow schema and datatypes are constructed from the same source.
+            let scalar_value = value
+                .try_to_scalar_value(&column.column_schema.data_type)
+                .unwrap();
+            result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
         }
-        Ok(())
+
+        result
     }
 }
 
-fn prune_primary_key(
-    metadata: &RegionMetadataRef,
-    filters: &[SimpleFilterEvaluator],
-    codec: &McmpRowCodec,
-    pk: &[u8],
-    metrics: &mut PartitionReaderMetrics,
-    values_buffer: &mut Vec<Value>,
-) -> bool {
-    let start = Instant::now();
-    let res = prune_primary_key_inner(metadata, filters, codec, pk, values_buffer);
-    metrics.prune_pk += start.elapsed();
-    res
-}
+// fn prune_primary_key(
+//     metadata: &RegionMetadataRef,
+//     filters: &[SimpleFilterEvaluator],
+//     codec: &McmpRowCodec,
+//     pk: &[u8],
+//     metrics: &mut PartitionReaderMetrics,
+//     values_buffer: &mut Vec<Value>,
+// ) -> bool {
+//     let start = Instant::now();
+//     let res = prune_primary_key_inner(metadata, filters, codec, pk, values_buffer);
+//     metrics.prune_pk += start.elapsed();
+//     res
+// }
 
-// TODO(yingwen): Improve performance of key pruning. Now we need to find index and
-// then decode and convert each value.
-/// Returns true if the `pk` is still needed.
-fn prune_primary_key_inner(
-    metadata: &RegionMetadataRef,
-    filters: &[SimpleFilterEvaluator],
-    codec: &McmpRowCodec,
-    pk: &[u8],
-    _values_buffer: &mut Vec<Value>,
-) -> bool {
-    if filters.is_empty() {
-        return true;
-    }
+// // TODO(yingwen): Improve performance of key pruning. Now we need to find index and
+// // then decode and convert each value.
+// /// Returns true if the `pk` is still needed.
+// fn prune_primary_key_inner(
+//     metadata: &RegionMetadataRef,
+//     filters: &[SimpleFilterEvaluator],
+//     codec: &McmpRowCodec,
+//     pk: &[u8],
+//     _values_buffer: &mut Vec<Value>,
+// ) -> bool {
+//     if filters.is_empty() {
+//         return true;
+//     }
 
-    // no primary key, we simply return true.
-    if metadata.primary_key.is_empty() {
-        return true;
-    }
+//     // no primary key, we simply return true.
+//     if metadata.primary_key.is_empty() {
+//         return true;
+//     }
 
-    // if let Err(e) = codec.decode_to_vec(pk, values_buffer) {
-    //     common_telemetry::error!(e; "Failed to decode primary key");
-    //     return true;
-    // }
+//     // if let Err(e) = codec.decode_to_vec(pk, values_buffer) {
+//     //     common_telemetry::error!(e; "Failed to decode primary key");
+//     //     return true;
+//     // }
 
-    // evaluate filters against primary key values
-    let mut result = true;
-    for filter in filters {
-        if Partition::is_partition_column(filter.column_name()) {
-            continue;
-        }
-        let Some(column) = metadata.column_by_name(filter.column_name()) else {
-            continue;
-        };
-        // ignore filters that are not referencing primary key columns
-        if column.semantic_type != SemanticType::Tag {
-            continue;
-        }
-        // index of the column in primary keys.
-        // Safety: A tag column is always in primary key.
-        let index = metadata.primary_key_index(column.column_id).unwrap();
+//     // evaluate filters against primary key values
+//     let mut result = true;
+//     for filter in filters {
+//         if Partition::is_partition_column(filter.column_name()) {
+//             continue;
+//         }
+//         let Some(column) = metadata.column_by_name(filter.column_name()) else {
+//             continue;
+//         };
+//         // ignore filters that are not referencing primary key columns
+//         if column.semantic_type != SemanticType::Tag {
+//             continue;
+//         }
+//         // index of the column in primary keys.
+//         // Safety: A tag column is always in primary key.
+//         let index = metadata.primary_key_index(column.column_id).unwrap();
 
-        let value = match codec.decode_value_at(pk, index) {
-            Ok(v) => v,
-            Err(e) => {
-                common_telemetry::error!(e; "Failed to decode primary key");
-                return true;
-            }
-        };
+//         let value = match codec.decode_value_at(pk, index) {
+//             Ok(v) => v,
+//             Err(e) => {
+//                 common_telemetry::error!(e; "Failed to decode primary key");
+//                 return true;
+//             }
+//         };
 
-        // Safety: arrow schema and datatypes are constructed from the same source.
-        let scalar_value = value
-            .try_to_scalar_value(&column.column_schema.data_type)
-            .unwrap();
-        result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
-    }
+//         // Safety: arrow schema and datatypes are constructed from the same source.
+//         let scalar_value = value
+//             .try_to_scalar_value(&column.column_schema.data_type)
+//             .unwrap();
+//         result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
+//     }
 
-    result
-}
+//     result
+// }
 
 /// Structs to reuse across readers to avoid allocating for each reader.
 pub(crate) struct ReadPartitionContext {
     metadata: RegionMetadataRef,
     row_codec: Arc<McmpRowCodec>,
     projection: HashSet<ColumnId>,
-    filters: Vec<SimpleFilterEvaluator>,
+    filters: Arc<Vec<SimpleFilterEvaluator>>,
     /// Buffer to store pk weights.
     pk_weights: Vec<u16>,
     need_prune_key: bool,
@@ -464,10 +484,10 @@ pub(crate) struct ReadPartitionContext {
 
 impl Drop for ReadPartitionContext {
     fn drop(&mut self) {
-        let partition_prune_pk = self.metrics.prune_pk.as_secs_f64();
-        MERGE_TREE_READ_STAGE_ELAPSED
-            .with_label_values(&["partition_prune_pk"])
-            .observe(partition_prune_pk);
+        // let partition_prune_pk = self.metrics.prune_pk.as_secs_f64();
+        // MERGE_TREE_READ_STAGE_ELAPSED
+        //     .with_label_values(&["partition_prune_pk"])
+        //     .observe(partition_prune_pk);
         let partition_read_source = self.metrics.read_source.as_secs_f64();
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_read_source"])
@@ -477,13 +497,11 @@ impl Drop for ReadPartitionContext {
             .with_label_values(&["partition_data_batch_to_batch"])
             .observe(partition_data_batch_to_batch);
 
-        if self.metrics.keys_before_pruning != 0 {
+        if self.metrics.keys_after_pruning != 0 {
             common_telemetry::debug!(
-                "TreeIter pruning, before: {}, after: {}, partition_read_source: {}s, partition_prune_pk: {}s, partition_data_batch_to_batch: {}s",
-                self.metrics.keys_before_pruning,
+                "TreeIter partitions metrics, after: {}, partition_read_source: {}s, partition_data_batch_to_batch: {}s",
                 self.metrics.keys_after_pruning,
                 partition_read_source,
-                partition_prune_pk,
                 partition_data_batch_to_batch,
             );
         }
@@ -502,7 +520,7 @@ impl ReadPartitionContext {
             metadata,
             row_codec,
             projection,
-            filters,
+            filters: Arc::new(filters),
             pk_weights: Vec::new(),
             need_prune_key,
             metrics: Default::default(),

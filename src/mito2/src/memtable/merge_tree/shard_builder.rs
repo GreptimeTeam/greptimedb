@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use store_api::metadata::RegionMetadataRef;
 
@@ -26,8 +27,9 @@ use crate::memtable::merge_tree::data::{
 };
 use crate::memtable::merge_tree::dict::{DictBuilderReader, KeyDictBuilder};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
+use crate::memtable::merge_tree::partition::PrimaryKeyFilter;
 use crate::memtable::merge_tree::shard::Shard;
-use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
+use crate::memtable::merge_tree::{MergeTreeConfig, PkId, PkIndex, ShardId};
 use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 
 /// Builder to write keys and data to a shard that the key dictionary
@@ -176,13 +178,13 @@ pub(crate) struct ShardBuilderReaderBuilder {
 }
 
 impl ShardBuilderReaderBuilder {
-    pub(crate) fn build(self, pk_weights: Option<&[u16]>) -> Result<ShardBuilderReader> {
+    pub(crate) fn build(
+        self,
+        pk_weights: Option<&[u16]>,
+        key_filter: Option<PrimaryKeyFilter>,
+    ) -> Result<ShardBuilderReader> {
         let data_reader = self.data_reader.build(pk_weights)?;
-        Ok(ShardBuilderReader {
-            shard_id: self.shard_id,
-            dict_reader: self.dict_reader,
-            data_reader,
-        })
+        ShardBuilderReader::new(self.shard_id, self.dict_reader, data_reader, key_filter)
     }
 }
 
@@ -191,9 +193,35 @@ pub struct ShardBuilderReader {
     shard_id: ShardId,
     dict_reader: DictBuilderReader,
     data_reader: DataBufferReader,
+    key_filter: Option<PrimaryKeyFilter>,
+    last_yield_pk_index: Option<PkIndex>,
+    keys_before_pruning: usize,
+    keys_after_pruning: usize,
+    prune_pk_cost: Duration,
 }
 
 impl ShardBuilderReader {
+    fn new(
+        shard_id: ShardId,
+        dict_reader: DictBuilderReader,
+        data_reader: DataBufferReader,
+        key_filter: Option<PrimaryKeyFilter>,
+    ) -> Result<Self> {
+        let mut reader = ShardBuilderReader {
+            shard_id,
+            dict_reader,
+            data_reader,
+            key_filter,
+            last_yield_pk_index: None,
+            keys_before_pruning: 0,
+            keys_after_pruning: 0,
+            prune_pk_cost: Duration::default(),
+        };
+        reader.prune_batch_by_key()?;
+
+        Ok(reader)
+    }
+
     pub fn is_valid(&self) -> bool {
         self.data_reader.is_valid()
     }
@@ -217,6 +245,49 @@ impl ShardBuilderReader {
 
     pub fn current_data_batch(&self) -> DataBatch {
         self.data_reader.current_data_batch()
+    }
+
+    fn prune_batch_by_key(&mut self) -> Result<()> {
+        let Some(key_filter) = &self.key_filter else {
+            return Ok(());
+        };
+
+        while self.data_reader.is_valid() {
+            let pk_index = self.data_reader.current_data_batch().pk_index();
+            if let Some(yield_pk_index) = self.last_yield_pk_index {
+                if pk_index == yield_pk_index {
+                    break;
+                }
+            }
+            self.keys_before_pruning += 1;
+            let key = self.current_key().unwrap();
+            let now = Instant::now();
+            if key_filter.prune_primary_key(key) {
+                self.prune_pk_cost += now.elapsed();
+                self.last_yield_pk_index = Some(pk_index);
+                self.keys_after_pruning += 1;
+                break;
+            }
+            self.prune_pk_cost += now.elapsed();
+            self.data_reader.next()?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for ShardBuilderReader {
+    fn drop(&mut self) {
+        let shard_builder_prune_pk = self.prune_pk_cost.as_secs_f64();
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["shard_builder_prune_pk"])
+            .observe(shard_builder_prune_pk);
+        common_telemetry::debug!(
+            "ShardBuilderReader metrics, before pruning: {}, after pruning: {}, cost: {}s",
+            self.keys_before_pruning,
+            self.keys_after_pruning,
+            shard_builder_prune_pk,
+        );
     }
 }
 
@@ -306,7 +377,7 @@ mod tests {
         let mut reader = shard_builder
             .read(&mut pk_weights)
             .unwrap()
-            .build(Some(&pk_weights))
+            .build(Some(&pk_weights), None)
             .unwrap();
         let mut timestamps = Vec::new();
         while reader.is_valid() {
