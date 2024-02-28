@@ -30,7 +30,7 @@ use hydroflow::futures::stream::Concat;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
-use crate::expr::error::{InternalSnafu, TryFromValueSnafu, TypeMismatchSnafu};
+use crate::expr::error::{InternalSnafu, OverflowSnafu, TryFromValueSnafu, TypeMismatchSnafu};
 use crate::expr::{AggregateFunc, EvalError};
 use crate::repr::Diff;
 
@@ -57,6 +57,7 @@ pub trait Accumulator: Sized {
     fn eval(&self, aggr_fn: &AggregateFunc) -> Result<Value, EvalError>;
 }
 
+/// Bool accumulator, used for `Any` `All` `Max/MinBool`
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Bool {
     /// The number of `true` values observed.
@@ -90,6 +91,7 @@ impl Accumulator for Bool {
         vec![self.trues.into(), self.falses.into()]
     }
 
+    /// Null values are ignored
     fn update(
         &mut self,
         aggr_fn: &AggregateFunc,
@@ -115,11 +117,14 @@ impl Accumulator for Bool {
             Value::Boolean(true) => self.trues += diff,
             Value::Boolean(false) => self.falses += diff,
             x => {
+                if x.is_null() {
+                    return Ok(());
+                }
                 return Err(TypeMismatchSnafu {
                     expected: ConcreteDataType::boolean_datatype(),
                     actual: x.data_type(),
                 }
-                .build())
+                .build());
             }
         };
         Ok(())
@@ -142,7 +147,7 @@ impl Accumulator for Bool {
     }
 }
 
-/// Accumulates simple numeric values.
+/// Accumulates simple numeric values for sum over integer.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SimpleNumber {
     /// The accumulation of all non-NULL values observed.
@@ -204,15 +209,18 @@ impl Accumulator for SimpleNumber {
             }
         );
 
-        let v = match value {
-            Value::Int16(x) => i128::from(x),
-            Value::Int32(x) => i128::from(x),
-            Value::Int64(x) => i128::from(x),
-            Value::UInt16(x) => i128::from(x),
-            Value::UInt32(x) => i128::from(x),
-            Value::UInt64(x) => i128::from(x),
-            v => {
-                let expected_datatype = match aggr_fn {
+        let v = match (aggr_fn, value) {
+            (AggregateFunc::SumInt16, Value::Int16(x)) => i128::from(x),
+            (AggregateFunc::SumInt32, Value::Int32(x)) => i128::from(x),
+            (AggregateFunc::SumInt64, Value::Int64(x)) => i128::from(x),
+            (AggregateFunc::SumUInt16, Value::UInt16(x)) => i128::from(x),
+            (AggregateFunc::SumUInt32, Value::UInt32(x)) => i128::from(x),
+            (AggregateFunc::SumUInt64, Value::UInt64(x)) => i128::from(x),
+            (f, v) => {
+                if v.is_null() {
+                    return Ok(());
+                }
+                let expected_datatype = match f {
                     AggregateFunc::SumInt16 => ConcreteDataType::int16_datatype(),
                     AggregateFunc::SumInt32 => ConcreteDataType::int32_datatype(),
                     AggregateFunc::SumInt64 => ConcreteDataType::int64_datatype(),
@@ -238,10 +246,14 @@ impl Accumulator for SimpleNumber {
     fn eval(&self, aggr_fn: &AggregateFunc) -> Result<Value, EvalError> {
         match aggr_fn {
             AggregateFunc::SumInt16 | AggregateFunc::SumInt32 | AggregateFunc::SumInt64 => {
-                Ok(Value::from(self.accum as i64))
+                i64::try_from(self.accum)
+                    .map_err(|_e| OverflowSnafu {}.build())
+                    .map(Value::from)
             }
             AggregateFunc::SumUInt16 | AggregateFunc::SumUInt32 | AggregateFunc::SumUInt64 => {
-                Ok(Value::from(self.accum as u64))
+                u64::try_from(self.accum)
+                    .map_err(|_e| OverflowSnafu {}.build())
+                    .map(Value::from)
             }
             _ => Err(InternalSnafu {
                 reason: format!(
@@ -253,7 +265,7 @@ impl Accumulator for SimpleNumber {
         }
     }
 }
-/// Accumulates float values.
+/// Accumulates float values for sum over floating numbers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 
 pub struct Float {
@@ -311,6 +323,7 @@ impl Accumulator for Float {
         ]
     }
 
+    /// sum ignore null
     fn update(
         &mut self,
         aggr_fn: &AggregateFunc,
@@ -329,11 +342,14 @@ impl Accumulator for Float {
                 ),
             }
         );
-        let x = match value {
-            Value::Float32(x) => OrderedF64::from(*x as f64),
-            Value::Float64(x) => OrderedF64::from(x),
-            v => {
-                let expected_datatype = match aggr_fn {
+        let x = match (aggr_fn, value) {
+            (AggregateFunc::SumFloat32, Value::Float32(x)) => OrderedF64::from(*x as f64),
+            (AggregateFunc::SumFloat64, Value::Float64(x)) => OrderedF64::from(x),
+            (f, v) => {
+                if v.is_null() {
+                    return Ok(());
+                }
+                let expected_datatype = match f {
                     AggregateFunc::SumFloat32 => ConcreteDataType::float32_datatype(),
                     AggregateFunc::SumFloat64 => ConcreteDataType::float64_datatype(),
                     _ => unreachable!(),
@@ -398,7 +414,14 @@ impl TryFrom<Vec<Value>> for OrdValue {
         let mut iter = state.into_iter();
 
         Ok(Self {
-            val: Some(iter.next().unwrap()),
+            val: {
+                let v = iter.next().unwrap();
+                if v == Value::Null {
+                    None
+                } else {
+                    Some(v)
+                }
+            },
             non_nulls: Diff::try_from(iter.next().unwrap()).map_err(err_try_from_val)?,
         })
     }
@@ -409,6 +432,9 @@ impl Accumulator for OrdValue {
         vec![self.val.unwrap_or(Value::Null), self.non_nulls.into()]
     }
 
+    /// min/max try to find results in all non-null values, if all values are null, the result is null.
+    /// count(col_name) gives the number of non-null values, count(*) gives the number of rows including nulls.
+    /// TODO(discord9): add count(*) as a aggr function
     fn update(
         &mut self,
         aggr_fn: &AggregateFunc,
@@ -424,8 +450,14 @@ impl Accumulator for OrdValue {
                 ),
             }
         );
+        if diff <= 0 && (aggr_fn.is_max() || aggr_fn.is_min()) {
+            return Err(InternalSnafu {
+                reason: "OrdValue Accumulator does not support non-monotonic input for min/max aggregation".to_string(),
+            }.build());
+        }
+
         if let Some(v) = &self.val {
-            if v.data_type() != value.data_type() {
+            if v.data_type() != value.data_type() && !value.is_null() {
                 return Err(TypeMismatchSnafu {
                     expected: v.data_type(),
                     actual: value.data_type(),
@@ -433,30 +465,67 @@ impl Accumulator for OrdValue {
                 .build());
             }
         }
-        if diff <= 0 && (aggr_fn.is_max() || aggr_fn.is_min()) {
-            return Err(InternalSnafu {
-                reason: "OrdValue Accumulator does not support non-monotonic input for min/max aggregation".to_string(),
-            }.build());
+
+        if value != Value::Null {
+            self.non_nulls += diff;
         }
+
         if aggr_fn.is_max() {
-            self.val = self
-                .val
-                .clone()
-                .map(|v| v.max(value.clone()))
-                .or_else(|| Some(value));
+            if !value.is_null() {
+                self.val = self
+                    .val
+                    .clone()
+                    .map(|v| v.max(value.clone()))
+                    .or_else(|| Some(value));
+            }
         } else if aggr_fn.is_min() {
-            self.val = self
-                .val
-                .clone()
-                .map(|v| v.min(value.clone()))
-                .or_else(|| Some(value));
+            if !value.is_null() {
+                self.val = self
+                    .val
+                    .clone()
+                    .map(|v| v.min(value.clone()))
+                    .or_else(|| Some(value));
+            }
+        } else if matches!(aggr_fn, AggregateFunc::Count) {
+            // store numbers of null for case like count(*)
+            if value.is_null() {
+                self.val = match &self.val {
+                    None => Some(Diff::from(1).into()),
+                    Some(v) => {
+                        let v = match v {
+                            Value::Int64(v) => v,
+                            _ => {
+                                return Err(TypeMismatchSnafu {
+                                    expected: ConcreteDataType::int64_datatype(),
+                                    actual: v.data_type(),
+                                }
+                                .build())
+                            }
+                        };
+                        Some((v + 1).into())
+                    }
+                };
+            }
+        } else {
+            unreachable!()
         }
-        self.non_nulls += diff;
         Ok(())
     }
 
-    fn eval(&self, _aggr_fn: &AggregateFunc) -> Result<Value, EvalError> {
-        Ok(self.val.clone().unwrap_or(Value::Null))
+    fn eval(&self, aggr_fn: &AggregateFunc) -> Result<Value, EvalError> {
+        if aggr_fn.is_max() || aggr_fn.is_min() {
+            Ok(self.val.clone().unwrap_or(Value::Null))
+        } else if matches!(aggr_fn, AggregateFunc::Count) {
+            Ok(self.non_nulls.into())
+        } else {
+            Err(InternalSnafu {
+                reason: format!(
+                    "OrdValue Accumulator does not support this aggregation function: {:?}",
+                    aggr_fn
+                ),
+            }
+            .build())
+        }
     }
 }
 
@@ -573,7 +642,7 @@ mod test {
         let testcases = vec![
             (
                 AggregateFunc::SumInt32,
-                vec![(Value::Int32(1), 1)],
+                vec![(Value::Int32(1), 1), (Value::Null, 1)],
                 (
                     Value::Int64(1),
                     vec![Value::Decimal128(Decimal128::new(1, 38, 0)), 1i64.into()],
@@ -581,7 +650,7 @@ mod test {
             ),
             (
                 AggregateFunc::SumFloat32,
-                vec![(Value::Float32(OrderedF32::from(1.0)), 1)],
+                vec![(Value::Float32(OrderedF32::from(1.0)), 1), (Value::Null, 1)],
                 (
                     Value::Float32(OrderedF32::from(1.0)),
                     vec![
@@ -595,12 +664,12 @@ mod test {
             ),
             (
                 AggregateFunc::MaxInt32,
-                vec![(Value::Int32(1), 1), (Value::Int32(2), 1)],
+                vec![(Value::Int32(1), 1), (Value::Int32(2), 1), (Value::Null, 1)],
                 (Value::Int32(2), vec![Value::Int32(2), 2i64.into()]),
             ),
             (
                 AggregateFunc::MinInt32,
-                vec![(Value::Int32(2), 1), (Value::Int32(1), 1)],
+                vec![(Value::Int32(2), 1), (Value::Int32(1), 1), (Value::Null, 1)],
                 (Value::Int32(1), vec![Value::Int32(1), 2i64.into()]),
             ),
             (
@@ -608,6 +677,7 @@ mod test {
                 vec![
                     (Value::Float32(OrderedF32::from(1.0)), 1),
                     (Value::Float32(OrderedF32::from(2.0)), 1),
+                    (Value::Null, 1),
                 ],
                 (
                     Value::Float32(OrderedF32::from(2.0)),
@@ -619,6 +689,7 @@ mod test {
                 vec![
                     (Value::DateTime(DateTime::from(0)), 1),
                     (Value::DateTime(DateTime::from(1)), 1),
+                    (Value::Null, 1),
                 ],
                 (
                     Value::DateTime(DateTime::from(1)),
@@ -627,8 +698,13 @@ mod test {
             ),
             (
                 AggregateFunc::Count,
-                vec![(Value::Int32(1), 1), (Value::Int32(2), 1)],
-                (Value::Null, vec![Value::Null, 2i64.into()]),
+                vec![
+                    (Value::Int32(1), 1),
+                    (Value::Int32(2), 1),
+                    (Value::Null, 1),
+                    (Value::Null, 1),
+                ],
+                (2i64.into(), vec![2i64.into(), 2i64.into()]),
             ),
             (
                 AggregateFunc::Any,
@@ -636,6 +712,7 @@ mod test {
                     (Value::Boolean(false), 1),
                     (Value::Boolean(false), 1),
                     (Value::Boolean(true), 1),
+                    (Value::Null, 1),
                 ],
                 (
                     Value::Boolean(true),
@@ -648,6 +725,7 @@ mod test {
                     (Value::Boolean(false), 1),
                     (Value::Boolean(false), 1),
                     (Value::Boolean(true), 1),
+                    (Value::Null, 1),
                 ],
                 (
                     Value::Boolean(false),
@@ -660,6 +738,7 @@ mod test {
                     (Value::Boolean(false), 1),
                     (Value::Boolean(false), 1),
                     (Value::Boolean(true), 1),
+                    (Value::Null, 1),
                 ],
                 (
                     Value::Boolean(true),
@@ -672,6 +751,7 @@ mod test {
                     (Value::Boolean(false), 1),
                     (Value::Boolean(false), 1),
                     (Value::Boolean(true), 1),
+                    (Value::Null, 1),
                 ],
                 (
                     Value::Boolean(false),
@@ -681,13 +761,166 @@ mod test {
         ];
 
         for (aggr_fn, input, (eval_res, state)) in testcases {
-            let mut acc = Accum::new_accum(&aggr_fn).unwrap();
-            acc.update_batch(&aggr_fn, input).unwrap();
-            let row = acc.into_state();
-            let acc = Accum::try_into_accum(&aggr_fn, row).unwrap();
+            let create_and_insert = || -> Result<Accum, EvalError> {
+                let mut acc = Accum::new_accum(&aggr_fn)?;
+                acc.update_batch(&aggr_fn, input.clone())?;
+                let row = acc.into_state();
+                let acc = Accum::try_into_accum(&aggr_fn, row)?;
+                Ok(acc)
+            };
+            let acc = match create_and_insert() {
+                Ok(acc) => acc,
+                Err(err) => panic!(
+                    "Failed to create accum for {:?} with input {:?} with error: {:?}",
+                    aggr_fn, input, err
+                ),
+            };
 
-            assert_eq!(acc.eval(&aggr_fn).unwrap(), eval_res);
-            assert_eq!(acc.into_state(), state);
+            if acc.eval(&aggr_fn).unwrap() != eval_res {
+                panic!(
+                    "Failed to eval accum for {:?} with input {:?}, expect {:?}, got {:?}",
+                    aggr_fn,
+                    input,
+                    eval_res,
+                    acc.eval(&aggr_fn).unwrap()
+                );
+            }
+            let actual_state = acc.into_state();
+            if actual_state != state {
+                panic!(
+                    "Failed to cast into state from accum for {:?} with input {:?}, expect state {:?}, got state {:?}",
+                    aggr_fn,
+                    input,
+                    state,
+                    actual_state
+                );
+            }
+        }
+    }
+    #[test]
+    fn test_fail_path_accum() {
+        {
+            let bool_accum = Bool::try_from(vec![Value::Null]);
+            assert!(matches!(bool_accum, Err(EvalError::Internal { .. })));
+        }
+
+        {
+            let mut bool_accum = Bool::try_from(vec![1i64.into(), 1i64.into()]).unwrap();
+            // serde
+            let bool_accum_serde = serde_json::to_string(&bool_accum).unwrap();
+            let bool_accum_de = serde_json::from_str::<Bool>(&bool_accum_serde).unwrap();
+            assert_eq!(bool_accum, bool_accum_de);
+            assert!(matches!(
+                bool_accum.update(&AggregateFunc::MaxDate, 1.into(), 1),
+                Err(EvalError::Internal { .. })
+            ));
+            assert!(matches!(
+                bool_accum.update(&AggregateFunc::Any, 1.into(), 1),
+                Err(EvalError::TypeMismatch { .. })
+            ));
+            assert!(matches!(
+                bool_accum.eval(&AggregateFunc::MaxDate),
+                Err(EvalError::Internal { .. })
+            ));
+        }
+
+        {
+            let ret = SimpleNumber::try_from(vec![Value::Null]);
+            assert!(matches!(ret, Err(EvalError::Internal { .. })));
+            let mut accum =
+                SimpleNumber::try_from(vec![Decimal128::new(0, 38, 0).into(), 0i64.into()])
+                    .unwrap();
+
+            assert!(matches!(
+                accum.update(&AggregateFunc::All, 0.into(), 1),
+                Err(EvalError::Internal { .. })
+            ));
+            assert!(matches!(
+                accum.update(&AggregateFunc::SumInt64, 0i32.into(), 1),
+                Err(EvalError::TypeMismatch { .. })
+            ));
+            assert!(matches!(
+                accum.eval(&AggregateFunc::All),
+                Err(EvalError::Internal { .. })
+            ));
+            accum
+                .update(&AggregateFunc::SumInt64, 1i64.into(), 1)
+                .unwrap();
+            accum
+                .update(&AggregateFunc::SumInt64, i64::MAX.into(), 1)
+                .unwrap();
+            assert!(matches!(
+                accum.eval(&AggregateFunc::SumInt64),
+                Err(EvalError::Overflow { .. })
+            ));
+        }
+
+        {
+            let ret = Float::try_from(vec![2f64.into(), 0i64.into(), 0i64.into(), 0i64.into()]);
+            assert!(matches!(ret, Err(EvalError::Internal { .. })));
+            let mut accum = Float::try_from(vec![
+                2f64.into(),
+                0i64.into(),
+                0i64.into(),
+                0i64.into(),
+                1i64.into(),
+            ])
+            .unwrap();
+            accum
+                .update(&AggregateFunc::SumFloat64, 2f64.into(), -1)
+                .unwrap();
+            assert!(matches!(
+                accum.update(&AggregateFunc::All, 0.into(), 1),
+                Err(EvalError::Internal { .. })
+            ));
+            assert!(matches!(
+                accum.update(&AggregateFunc::SumFloat64, 0.0f32.into(), 1),
+                Err(EvalError::TypeMismatch { .. })
+            ));
+            // no record, no accum
+            assert_eq!(
+                accum.eval(&AggregateFunc::SumFloat64).unwrap(),
+                0.0f64.into()
+            );
+
+            assert!(matches!(
+                accum.eval(&AggregateFunc::All),
+                Err(EvalError::Internal { .. })
+            ));
+
+            accum
+                .update(&AggregateFunc::SumFloat64, f64::INFINITY.into(), 1)
+                .unwrap();
+            accum
+                .update(&AggregateFunc::SumFloat64, (-f64::INFINITY).into(), 1)
+                .unwrap();
+            accum
+                .update(&AggregateFunc::SumFloat64, f64::NAN.into(), 1)
+                .unwrap();
+        }
+
+        {
+            let ret = OrdValue::try_from(vec![Value::Null]);
+            assert!(matches!(ret, Err(EvalError::Internal { .. })));
+            let mut accum = OrdValue::try_from(vec![Value::Null, 0i64.into()]).unwrap();
+            assert!(matches!(
+                accum.update(&AggregateFunc::All, 0.into(), 1),
+                Err(EvalError::Internal { .. })
+            ));
+            accum
+                .update(&AggregateFunc::MaxInt16, 1i16.into(), 1)
+                .unwrap();
+            assert!(matches!(
+                accum.update(&AggregateFunc::MaxInt16, 0i32.into(), 1),
+                Err(EvalError::TypeMismatch { .. })
+            ));
+            assert!(matches!(
+                accum.update(&AggregateFunc::MaxInt16, 0i16.into(), -1),
+                Err(EvalError::Internal { .. })
+            ));
+            accum
+                .update(&AggregateFunc::MaxInt16, Value::Null, 1)
+                .unwrap();
         }
     }
 }

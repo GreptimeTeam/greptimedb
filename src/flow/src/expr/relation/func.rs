@@ -15,7 +15,6 @@
 use common_time::{Date, DateTime};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};

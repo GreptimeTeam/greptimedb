@@ -3413,6 +3413,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "serde",
+ "serde_json",
  "servers",
  "session",
  "snafu",
