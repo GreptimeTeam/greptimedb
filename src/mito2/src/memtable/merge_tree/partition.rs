@@ -18,9 +18,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_telemetry::tracing::log;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
@@ -35,6 +37,7 @@ use crate::memtable::merge_tree::shard::{
 };
 use crate::memtable::merge_tree::shard_builder::ShardBuilder;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
+use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
 use crate::row_converter::{McmpRowCodec, RowCodec};
 
@@ -110,8 +113,8 @@ impl Partition {
             let inner = self.inner.read().unwrap();
             let mut nodes = Vec::with_capacity(inner.shards.len() + 1);
             if !inner.shard_builder.is_empty() {
-                let bulder_reader = inner.shard_builder.read(&mut context.pk_weights)?;
-                nodes.push(ShardNode::new(ShardSource::Builder(bulder_reader)));
+                let builder_reader = inner.shard_builder.read(&mut context.pk_weights)?;
+                nodes.push(ShardNode::new(ShardSource::Builder(builder_reader)));
             }
             for shard in &inner.shards {
                 if !shard.is_empty() {
@@ -122,7 +125,7 @@ impl Partition {
             nodes
         };
 
-        // Creating a shard merger will invoke next so we do it outside of the lock.
+        // Creating a shard merger will invoke next so we do it outside the lock.
         let merger = ShardMerger::try_new(nodes)?;
         if self.dedup {
             let source = DedupReader::try_new(merger)?;
@@ -234,6 +237,15 @@ pub(crate) struct PartitionStats {
     pub(crate) shared_memory_size: usize,
 }
 
+#[derive(Default)]
+struct PartitionReaderMetrics {
+    prune_pk: Duration,
+    read_source: Duration,
+    data_batch_to_batch: Duration,
+    keys_before_pruning: usize,
+    keys_after_pruning: usize,
+}
+
 /// Reader to scan rows in a partition.
 ///
 /// It can merge rows from multiple shards.
@@ -266,8 +278,9 @@ impl PartitionReader {
     /// # Panics
     /// Panics if the reader is invalid.
     pub fn next(&mut self) -> Result<()> {
+        let read_source = Instant::now();
         self.source.next()?;
-
+        self.context.metrics.read_source += read_source.elapsed();
         self.prune_batch_by_key()
     }
 
@@ -275,14 +288,17 @@ impl PartitionReader {
     ///
     /// # Panics
     /// Panics if the reader is invalid.
-    pub fn convert_current_batch(&self) -> Result<Batch> {
+    pub fn convert_current_batch(&mut self) -> Result<Batch> {
+        let start = Instant::now();
         let data_batch = self.source.current_data_batch();
-        data_batch_to_batch(
+        let batch = data_batch_to_batch(
             &self.context.metadata,
             &self.context.projection,
             self.source.current_key(),
             data_batch,
-        )
+        )?;
+        self.context.metrics.data_batch_to_batch += start.elapsed();
+        Ok(batch)
     }
 
     pub(crate) fn into_context(self) -> ReadPartitionContext {
@@ -290,6 +306,7 @@ impl PartitionReader {
     }
 
     fn prune_batch_by_key(&mut self) -> Result<()> {
+        let start = Instant::now();
         if self.context.metadata.primary_key.is_empty() || !self.context.need_prune_key {
             // Nothing to prune.
             return Ok(());
@@ -305,6 +322,7 @@ impl PartitionReader {
                 }
             }
             let key = self.source.current_key().unwrap();
+            self.context.metrics.keys_before_pruning += 1;
             // Prune batch by primary key.
             if prune_primary_key(
                 &self.context.metadata,
@@ -314,11 +332,12 @@ impl PartitionReader {
             ) {
                 // We need this key.
                 self.last_yield_pk_id = Some(pk_id);
+                self.context.metrics.keys_after_pruning += 1;
                 break;
             }
             self.source.next()?;
         }
-
+        self.context.metrics.prune_pk += start.elapsed();
         Ok(())
     }
 }
@@ -384,6 +403,26 @@ pub(crate) struct ReadPartitionContext {
     /// Buffer to store pk weights.
     pk_weights: Vec<u16>,
     need_prune_key: bool,
+    metrics: PartitionReaderMetrics,
+}
+
+impl Drop for ReadPartitionContext {
+    fn drop(&mut self) {
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["partition_prune_pk"])
+            .observe(self.metrics.prune_pk.as_secs_f64());
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["partition_read_source"])
+            .observe(self.metrics.read_source.as_secs_f64());
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["partition_data_batch_to_batch"])
+            .observe(self.metrics.data_batch_to_batch.as_secs_f64());
+        log::debug!(
+            "TreeIter pruning, before: {}, after: {}",
+            self.metrics.keys_before_pruning,
+            self.metrics.keys_before_pruning
+        );
+    }
 }
 
 impl ReadPartitionContext {
@@ -401,10 +440,11 @@ impl ReadPartitionContext {
             filters,
             pk_weights: Vec::new(),
             need_prune_key,
+            metrics: Default::default(),
         }
     }
 
-    /// Does filters contains predicate on primary key columns after pruning the
+    /// Does filter contain predicate on primary key columns after pruning the
     /// partition column.
     fn need_prune_key(metadata: &RegionMetadataRef, filters: &[SimpleFilterEvaluator]) -> bool {
         for filter in filters {

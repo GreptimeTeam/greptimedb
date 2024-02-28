@@ -28,6 +28,7 @@ use crate::memtable::merge_tree::dict::{DictBuilderReader, KeyDictBuilder};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::shard::Shard;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
+use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
@@ -125,10 +126,21 @@ impl ShardBuilder {
 
     /// Scans the shard builder.
     pub fn read(&self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReader> {
-        let dict_reader = self.dict_builder.read();
-        dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
-        let data_reader = self.data_buffer.read(Some(pk_weights_buffer))?;
+        let dict_reader = {
+            let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+                .with_label_values(&["shard_builder_read_pk"])
+                .start_timer();
+            self.dict_builder.read()
+        };
 
+        {
+            let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+                .with_label_values(&["sort_pk"])
+                .start_timer();
+            dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
+        }
+
+        let data_reader = self.data_buffer.read(Some(pk_weights_buffer))?;
         Ok(ShardBuilderReader {
             shard_id: self.current_shard_id,
             dict_reader,

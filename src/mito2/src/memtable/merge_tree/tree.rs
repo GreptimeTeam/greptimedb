@@ -16,9 +16,11 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_telemetry::tracing::log;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use snafu::ensure;
@@ -35,6 +37,7 @@ use crate::memtable::merge_tree::partition::{
 };
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
+use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
@@ -153,6 +156,7 @@ impl MergeTree {
         let mut iter = TreeIter {
             partitions,
             current_reader: None,
+            metrics: Default::default(),
         };
         let context = ReadPartitionContext::new(
             self.metadata.clone(),
@@ -313,9 +317,30 @@ impl MergeTree {
     }
 }
 
+#[derive(Default)]
+struct TreeIterMetrics {
+    fetch_partition_elapsed: Duration,
+    rows_fetched: usize,
+    batches_fetched: usize,
+}
+
 struct TreeIter {
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
+    metrics: TreeIterMetrics,
+}
+
+impl Drop for TreeIter {
+    fn drop(&mut self) {
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["fetch_next_partition"])
+            .observe(self.metrics.fetch_partition_elapsed.as_secs_f64());
+        log::debug!(
+            "TreeIter rows fetched: {}, batches fetched: {}",
+            self.metrics.rows_fetched,
+            self.metrics.batches_fetched
+        );
+    }
 }
 
 impl Iterator for TreeIter {
@@ -329,6 +354,7 @@ impl Iterator for TreeIter {
 impl TreeIter {
     /// Fetch next partition.
     fn fetch_next_partition(&mut self, mut context: ReadPartitionContext) -> Result<()> {
+        let start = Instant::now();
         while let Some(partition) = self.partitions.pop_front() {
             let part_reader = partition.read(context)?;
             if !part_reader.is_valid() {
@@ -338,7 +364,7 @@ impl TreeIter {
             self.current_reader = Some(part_reader);
             break;
         }
-
+        self.metrics.fetch_partition_elapsed += start.elapsed();
         Ok(())
     }
 
@@ -360,6 +386,8 @@ impl TreeIter {
         let context = part_reader.into_context();
         self.fetch_next_partition(context)?;
 
+        self.metrics.rows_fetched += batch.num_rows();
+        self.metrics.batches_fetched += 1;
         Ok(Some(batch))
     }
 }
