@@ -38,9 +38,10 @@ use partition::partition::{PartitionBound, PartitionDef};
 use query::sql::show_create_table;
 use regex::Regex;
 use session::context::QueryContextRef;
+use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
-use sql::statements::create::{CreateExternalTable, CreateTable, Partitions};
+use sql::statements::create::{CreateExternalTable, CreateTable, CreateTableLike, Partitions};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions};
@@ -57,7 +58,6 @@ use crate::error::{
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
-use crate::table::table_idents_to_full_name;
 
 lazy_static! {
     static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();

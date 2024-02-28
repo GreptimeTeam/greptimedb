@@ -32,7 +32,7 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::create::{
-    CreateDatabase, CreateExternalTable, CreateTable, Partitions, TIME_INDEX,
+    CreateDatabase, CreateExternalTable, CreateTable, CreateTableLike, Partitions, TIME_INDEX,
 };
 use crate::statements::get_data_type_by_alias_name;
 use crate::statements::statement::Statement;
@@ -66,7 +66,7 @@ impl<'a> ParserContext<'a> {
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-        let table_name = self.parse_table_name()?;
+        let table_name = ParserContext::_parse_table_name(&mut self.parser, self.sql)?;
         let (columns, constraints) = self.parse_columns()?;
         let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
         let options = self
@@ -128,10 +128,10 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
 
-        let table_name = self.parse_table_name()?;
+        let table_name = ParserContext::_parse_table_name(&mut self.parser, self.sql)?;
 
         if self.parser.parse_keyword(Keyword::LIKE) {
-            let source_name = self.parse_table_name()?;
+            let source_name = ParserContext::_parse_table_name(&mut self.parser, self.sql)?;
 
             return Ok(Statement::CreateTableLike(CreateTableLike {
                 table_name,
@@ -171,18 +171,6 @@ impl<'a> ParserContext<'a> {
         validate_create(&create_table)?;
 
         Ok(Statement::CreateTable(create_table))
-    }
-
-    fn parse_table_name(&mut self) -> Result<ObjectName> {
-        let raw_table_name = self
-            .parser
-            .parse_object_name()
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "a table name",
-                actual: self.peek_token_as_string(),
-            })?;
-        Ok(Self::canonicalize_object_name(raw_table_name))
     }
 
     /// "PARTITION BY ..." syntax:
