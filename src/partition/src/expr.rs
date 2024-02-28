@@ -19,9 +19,9 @@ use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr,
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PartitionExpr {
-    lhs: Box<Operand>,
-    op: RestrictedOp,
-    rhs: Box<Operand>,
+    pub(crate) lhs: Box<Operand>,
+    pub(crate) op: RestrictedOp,
+    pub(crate) rhs: Box<Operand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

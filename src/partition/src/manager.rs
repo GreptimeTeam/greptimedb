@@ -30,6 +30,7 @@ use table::metadata::TableId;
 
 use crate::columns::RangeColumnsPartitionRule;
 use crate::error::{FindLeaderSnafu, Result};
+use crate::multi_dim::MultiDimPartitionRule;
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::splitter::RowSplitter;
@@ -122,8 +123,35 @@ impl PartitionRuleManager {
         Ok(results)
     }
 
-    /// Get partition rule of given table.
     pub async fn find_table_partition_rule(&self, table_id: TableId) -> Result<PartitionRuleRef> {
+        let partitions = self.find_table_partitions(table_id).await?;
+
+        let partition_columns = partitions[0].partition.partition_columns();
+
+        let regions = partitions
+            .iter()
+            .map(|x| x.id.region_number())
+            .collect::<Vec<RegionNumber>>();
+
+        let exprs = partitions
+            .iter()
+            .filter_map(|x| match &x.partition.partition_bounds()[0] {
+                PartitionBound::Expr(e) => Some(e.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        Ok(Arc::new(MultiDimPartitionRule::new(
+            partition_columns.clone(),
+            regions,
+            exprs,
+        )) as _)
+    }
+
+    /// Get partition rule of given table.
+    pub async fn find_table_partition_rule_deprecated(
+        &self,
+        table_id: TableId,
+    ) -> Result<PartitionRuleRef> {
         let partitions = self.find_table_partitions(table_id).await?;
 
         let partition_columns = partitions[0].partition.partition_columns();
@@ -142,7 +170,7 @@ impl PartitionRuleManager {
                     .filter_map(|info| match &info.partition.partition_bounds()[0] {
                         PartitionBound::Value(v) => Some(v.clone()),
                         PartitionBound::MaxValue => None,
-                        PartitionBound::Expr(_) => todo!(),
+                        PartitionBound::Expr(_) => None,
                     })
                     .collect::<Vec<Value>>();
                 Arc::new(RangePartitionRule::new(

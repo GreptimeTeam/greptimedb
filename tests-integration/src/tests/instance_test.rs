@@ -83,7 +83,6 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
 }
 
 #[apply(both_instances_cases)]
-#[ignore = "TODO(ruihang): WIP new partition rule"]
 async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let sql = if instance.is_distributed_mode() {
@@ -92,11 +91,11 @@ async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     ts timestamp,
     TIME INDEX(ts)
 )
-PARTITION BY RANGE COLUMNS (n) (
-    PARTITION r0 VALUES LESS THAN (1),
-    PARTITION r1 VALUES LESS THAN (10),
-    PARTITION r2 VALUES LESS THAN (100),
-    PARTITION r3 VALUES LESS THAN (MAXVALUE),
+PARTITION ON COLUMNS (n) (
+    n < 1,
+    n >= 1 AND n < 10,
+    n >= 10 AND n < 100,
+    n >= 100
 )"#
     } else {
         r#"create table demo(
@@ -113,26 +112,26 @@ PARTITION BY RANGE COLUMNS (n) (
     let output = execute_sql(&frontend, "show create table demo").await;
 
     let expected = if instance.is_distributed_mode() {
-        r#"+-------+--------------------------------------------+
-| Table | Create Table                               |
-+-------+--------------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS "demo" (        |
-|       |   "n" INT NULL,                            |
-|       |   "ts" TIMESTAMP(3) NOT NULL,              |
-|       |   TIME INDEX ("ts"),                       |
-|       |   PRIMARY KEY ("n")                        |
-|       | )                                          |
-|       | PARTITION BY RANGE COLUMNS ("n") (         |
-|       |   PARTITION r0 VALUES LESS THAN (1),       |
-|       |   PARTITION r1 VALUES LESS THAN (10),      |
-|       |   PARTITION r2 VALUES LESS THAN (100),     |
-|       |   PARTITION r3 VALUES LESS THAN (MAXVALUE) |
-|       | )                                          |
-|       | ENGINE=mito                                |
-|       | WITH(                                      |
-|       |   regions = 4                              |
-|       | )                                          |
-+-------+--------------------------------------------+"#
+        r#"+-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS "demo" ( |
+|       |   "n" INT NULL,                     |
+|       |   "ts" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX ("ts"),                |
+|       |   PRIMARY KEY ("n")                 |
+|       | )                                   |
+|       | PARTITION ON COLUMNS ("n") (        |
+|       |   n < 1,                            |
+|       |   n >= 100,                         |
+|       |   n >= 1 AND n < 10,                |
+|       |   n >= 10 AND n < 100               |
+|       | )                                   |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   regions = 4                       |
+|       | )                                   |
++-------+-------------------------------------+"#
     } else {
         r#"+-------+-------------------------------------+
 | Table | Create Table                        |

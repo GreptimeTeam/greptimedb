@@ -771,6 +771,11 @@ fn find_partition_entries(
             partition_exprs.push(vec![PartitionBound::Expr(partition_expr)]);
         }
 
+        // fallback for no expr
+        if partition_exprs.is_empty() {
+            partition_exprs.push(vec![PartitionBound::MaxValue]);
+        }
+
         partition_exprs
     } else {
         vec![vec![PartitionBound::MaxValue]]
@@ -805,7 +810,6 @@ fn convert_one_expr(
         (Expr::Value(value), Expr::Identifier(ident)) => {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
             let value = convert_value(value, data_type)?;
-            // todo: swap op
             (Operand::Value(value), op, Operand::Column(column_name))
         }
         (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
