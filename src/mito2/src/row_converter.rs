@@ -218,6 +218,47 @@ impl SortField {
             Decimal128, Decimal128
         )
     }
+
+    /// Skip deserializing this field.
+    fn skip_deserialize(&self, bytes: &[u8], deserializer: &mut Deserializer<&[u8]>) -> Result<()> {
+        let pos = deserializer.position();
+        match bytes[pos] {
+            0 => {
+                deserializer.advance(1);
+                return Ok(());
+            }
+            _ => (),
+        }
+
+        let to_skip = match &self.data_type {
+            ConcreteDataType::Boolean(_) => 2,
+            ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => 2,
+            ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => 3,
+            ConcreteDataType::Int32(_) | ConcreteDataType::UInt32(_) => 5,
+            ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => 9,
+            ConcreteDataType::Float32(_) => 5,
+            ConcreteDataType::Float64(_) => 9,
+            ConcreteDataType::Binary(_) | ConcreteDataType::String(_) => {
+                deserializer.advance(1);
+                deserializer
+                    .skip_bytes()
+                    .context(error::DeserializeFieldSnafu)?;
+                return Ok(());
+            }
+            ConcreteDataType::Date(_) => 5,
+            ConcreteDataType::DateTime(_) => 9,
+            ConcreteDataType::Timestamp(_) => 9, // We treat timestamp as Option<i64>
+            ConcreteDataType::Time(_) => 10,     // i64 and 1 byte time unit
+            ConcreteDataType::Duration(_) => 10,
+            ConcreteDataType::Interval(_) => 18,
+            ConcreteDataType::Decimal128(_) => 19,
+            ConcreteDataType::Null(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Dictionary(_) => 0,
+        };
+        deserializer.advance(to_skip);
+        Ok(())
+    }
 }
 
 /// A memory-comparable row [Value] encoder/decoder.
@@ -238,6 +279,14 @@ impl McmpRowCodec {
     /// Estimated length for encoded bytes.
     pub fn estimated_size(&self) -> usize {
         self.fields.iter().map(|f| f.estimated_size()).sum()
+    }
+
+    pub fn decode_value_at(&self, bytes: &[u8], pos: usize) -> Result<Value> {
+        let mut deserializer = Deserializer::new(bytes);
+        for i in 0..pos {
+            self.fields[i].skip_deserialize(bytes, &mut deserializer)?;
+        }
+        self.fields[pos].deserialize(&mut deserializer)
     }
 }
 

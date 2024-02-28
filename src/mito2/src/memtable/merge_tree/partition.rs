@@ -399,7 +399,7 @@ fn prune_primary_key_inner(
     filters: &[SimpleFilterEvaluator],
     codec: &McmpRowCodec,
     pk: &[u8],
-    values_buffer: &mut Vec<Value>,
+    _values_buffer: &mut Vec<Value>,
 ) -> bool {
     if filters.is_empty() {
         return true;
@@ -410,10 +410,10 @@ fn prune_primary_key_inner(
         return true;
     }
 
-    if let Err(e) = codec.decode_to_vec(pk, values_buffer) {
-        common_telemetry::error!(e; "Failed to decode primary key");
-        return true;
-    }
+    // if let Err(e) = codec.decode_to_vec(pk, values_buffer) {
+    //     common_telemetry::error!(e; "Failed to decode primary key");
+    //     return true;
+    // }
 
     // evaluate filters against primary key values
     let mut result = true;
@@ -431,8 +431,17 @@ fn prune_primary_key_inner(
         // index of the column in primary keys.
         // Safety: A tag column is always in primary key.
         let index = metadata.primary_key_index(column.column_id).unwrap();
+
+        let value = match codec.decode_value_at(pk, index) {
+            Ok(v) => v,
+            Err(e) => {
+                common_telemetry::error!(e; "Failed to decode primary key");
+                return true;
+            }
+        };
+
         // Safety: arrow schema and datatypes are constructed from the same source.
-        let scalar_value = values_buffer[index]
+        let scalar_value = value
             .try_to_scalar_value(&column.column_schema.data_type)
             .unwrap();
         result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
