@@ -22,7 +22,7 @@ use store_api::metadata::RegionMetadataRef;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::{
-    DataBatch, DataBuffer, DataBufferReader, DataParts, DATA_INIT_CAP,
+    DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts, DATA_INIT_CAP,
 };
 use crate::memtable::merge_tree::dict::{DictBuilderReader, KeyDictBuilder};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
@@ -125,7 +125,7 @@ impl ShardBuilder {
     }
 
     /// Scans the shard builder.
-    pub fn read(&self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReader> {
+    pub fn read(&self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReaderBuilder> {
         let dict_reader = {
             let _timer = MERGE_TREE_READ_STAGE_ELAPSED
                 .with_label_values(&["shard_builder_read_pk"])
@@ -140,8 +140,8 @@ impl ShardBuilder {
             dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
         }
 
-        let data_reader = self.data_buffer.read(Some(pk_weights_buffer))?;
-        Ok(ShardBuilderReader {
+        let data_reader = self.data_buffer.read()?;
+        Ok(ShardBuilderReaderBuilder {
             shard_id: self.current_shard_id,
             dict_reader,
             data_reader,
@@ -151,6 +151,23 @@ impl ShardBuilder {
     /// Returns true if the builder is empty.
     pub fn is_empty(&self) -> bool {
         self.data_buffer.is_empty()
+    }
+}
+
+pub(crate) struct ShardBuilderReaderBuilder {
+    shard_id: ShardId,
+    dict_reader: DictBuilderReader,
+    data_reader: DataBufferReaderBuilder,
+}
+
+impl ShardBuilderReaderBuilder {
+    pub(crate) fn build(self, pk_weights: Option<&[u16]>) -> Result<ShardBuilderReader> {
+        let data_reader = self.data_reader.build(pk_weights)?;
+        Ok(ShardBuilderReader {
+            shard_id: self.shard_id,
+            dict_reader: self.dict_reader,
+            data_reader,
+        })
     }
 }
 
@@ -271,7 +288,11 @@ mod tests {
         }
 
         let mut pk_weights = Vec::new();
-        let mut reader = shard_builder.read(&mut pk_weights).unwrap();
+        let mut reader = shard_builder
+            .read(&mut pk_weights)
+            .unwrap()
+            .build(Some(&pk_weights))
+            .unwrap();
         let mut timestamps = Vec::new();
         while reader.is_valid() {
             let rb = reader.current_data_batch().slice_record_batch();

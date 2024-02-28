@@ -108,21 +108,34 @@ impl Partition {
 
     /// Scans data in the partition.
     pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
-        let nodes = {
+        let (builder_source, shard_reader_builders) = {
             let inner = self.inner.read().unwrap();
-            let mut nodes = Vec::with_capacity(inner.shards.len() + 1);
-            if !inner.shard_builder.is_empty() {
+            let mut shard_source = Vec::with_capacity(inner.shards.len() + 1);
+            let builder_reader = if !inner.shard_builder.is_empty() {
                 let builder_reader = inner.shard_builder.read(&mut context.pk_weights)?;
-                nodes.push(ShardNode::new(ShardSource::Builder(builder_reader)));
-            }
+                Some(builder_reader)
+            } else {
+                None
+            };
             for shard in &inner.shards {
                 if !shard.is_empty() {
-                    let shard_reader = shard.read()?;
-                    nodes.push(ShardNode::new(ShardSource::Shard(shard_reader)));
+                    let shard_reader_builder = shard.read()?;
+                    shard_source.push(shard_reader_builder);
                 }
             }
-            nodes
+            (builder_reader, shard_source)
         };
+
+        let mut nodes = shard_reader_builders
+            .into_iter()
+            .map(|builder| Ok(ShardNode::new(ShardSource::Shard(builder.build()?))))
+            .collect::<Result<Vec<_>>>()?;
+
+        if let Some(builder) = builder_source {
+            // Move the initialization of ShardBuilderReader out of read lock.
+            let shard_builder_reader = builder.build(Some(&context.pk_weights))?;
+            nodes.push(ShardNode::new(ShardSource::Builder(shard_builder_reader)));
+        }
 
         // Creating a shard merger will invoke next so we do it outside the lock.
         let merger = ShardMerger::try_new(nodes)?;
