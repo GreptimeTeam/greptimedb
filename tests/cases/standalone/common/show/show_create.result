@@ -35,11 +35,13 @@ SHOW CREATE TABLE system_metrics;
 |                |   PRIMARY KEY ("id", "host")                              |
 |                | )                                                         |
 |                | PARTITION ON COLUMNS ("id") (                             |
-|                |                                                           |
+|                |   id < 5,                                                 |
+|                |   id >= 9,                                                |
+|                |   id >= 5 AND id < 9                                      |
 |                | )                                                         |
 |                | ENGINE=mito                                               |
 |                | WITH(                                                     |
-|                |   regions = 1,                                            |
+|                |   regions = 3,                                            |
 |                |   ttl = '7days',                                          |
 |                |   write_buffer_size = '1.0KiB'                            |
 |                | )                                                         |

@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion::sql::sqlparser::ast::BinaryOperator as ParserBinaryOperator;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
+use sql::statements::value_to_sql_value;
+use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Ident};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PartitionExpr {
@@ -61,6 +62,19 @@ impl RestrictedOp {
             _ => None,
         }
     }
+
+    pub fn to_parser_op(&self) -> ParserBinaryOperator {
+        match self {
+            Self::Eq => ParserBinaryOperator::Eq,
+            Self::NotEq => ParserBinaryOperator::NotEq,
+            Self::Lt => ParserBinaryOperator::Lt,
+            Self::LtEq => ParserBinaryOperator::LtEq,
+            Self::Gt => ParserBinaryOperator::Gt,
+            Self::GtEq => ParserBinaryOperator::GtEq,
+            Self::And => ParserBinaryOperator::And,
+            Self::Or => ParserBinaryOperator::Or,
+        }
+    }
 }
 
 impl PartitionExpr {
@@ -69,6 +83,31 @@ impl PartitionExpr {
             lhs: Box::new(lhs),
             op,
             rhs: Box::new(rhs),
+        }
+    }
+
+    /// Convert [Self] back to sqlparser's [Expr]
+    ///
+    /// [Expr]: ParserExpr
+    pub fn to_parser_expr(&self) -> ParserExpr {
+        // Safety: Partition rule won't contains unsupported value type.
+        // Otherwise it will be rejected by the parser.
+        let lhs = match &*self.lhs {
+            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
+            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
+            Operand::Expr(e) => e.to_parser_expr(),
+        };
+
+        let rhs = match &*self.rhs {
+            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
+            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
+            Operand::Expr(e) => e.to_parser_expr(),
+        };
+
+        ParserExpr::BinaryOp {
+            left: Box::new(lhs),
+            op: self.op.to_parser_op(),
+            right: Box::new(rhs),
         }
     }
 }
