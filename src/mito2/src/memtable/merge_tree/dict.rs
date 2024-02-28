@@ -108,7 +108,7 @@ impl KeyDictBuilder {
     }
 
     /// Finishes the builder.
-    pub fn finish(&mut self) -> Option<KeyDict> {
+    pub fn finish(&mut self, pk_to_index: &mut BTreeMap<Vec<u8>, PkIndex>) -> Option<KeyDict> {
         if self.key_buffer.is_empty() {
             return None;
         }
@@ -116,11 +116,9 @@ impl KeyDictBuilder {
         // Finishes current dict block and resets the pk index.
         let dict_block = self.key_buffer.finish(true);
         self.dict_blocks.push(dict_block);
-        // Takes the pk to index map.
-        let mut pk_to_index = std::mem::take(&mut self.pk_to_index);
         // Computes key position and then alter pk index.
-        let mut key_positions = vec![0; pk_to_index.len()];
-        for (i, pk_index) in pk_to_index.values_mut().enumerate() {
+        let mut key_positions = vec![0; self.pk_to_index.len()];
+        for (i, pk_index) in self.pk_to_index.values_mut().enumerate() {
             // The position of the i-th key is the old pk index.
             key_positions[i] = *pk_index;
             // Overwrites the pk index.
@@ -129,9 +127,9 @@ impl KeyDictBuilder {
         self.num_keys = 0;
         let key_bytes_in_index = self.key_bytes_in_index;
         self.key_bytes_in_index = 0;
+        *pk_to_index = std::mem::take(&mut self.pk_to_index);
 
         Some(KeyDict {
-            pk_to_index,
             dict_blocks: std::mem::take(&mut self.dict_blocks),
             key_positions,
             key_bytes_in_index,
@@ -214,8 +212,6 @@ fn compute_pk_weights(sorted_pk_indices: &[PkIndex], pk_weights: &mut Vec<u16>) 
 #[derive(Default)]
 pub struct KeyDict {
     // TODO(yingwen): We can use key_positions to do a binary search.
-    /// Key map to find a key in the dict.
-    pk_to_index: PkIndexMap,
     /// Unsorted key blocks.
     dict_blocks: Vec<DictBlock>,
     /// Maps pk index to position of the key in [Self::dict_blocks].
@@ -235,11 +231,6 @@ impl KeyDict {
         let position = self.key_positions[index as usize];
         let block_index = position / MAX_KEYS_PER_BLOCK;
         self.dict_blocks[block_index as usize].key_by_pk_index(position)
-    }
-
-    /// Gets the pk index by the key.
-    pub fn get_pk_index(&self, key: &[u8]) -> Option<PkIndex> {
-        self.pk_to_index.get(key).copied()
     }
 
     /// Returns pk weights to sort a data part and replaces pk indices.
@@ -442,7 +433,7 @@ mod tests {
         assert_eq!(key_bytes, builder.key_bytes_in_index);
         assert_eq!(8850, builder.memory_size());
 
-        let dict = builder.finish().unwrap();
+        let dict = builder.finish(&mut BTreeMap::new()).unwrap();
         assert_eq!(0, builder.key_bytes_in_index);
         assert_eq!(key_bytes, dict.key_bytes_in_index);
         assert!(dict.shared_memory_size() > key_bytes);
@@ -458,7 +449,7 @@ mod tests {
             builder.insert_key(key.as_bytes(), &mut metrics);
         }
         assert!(builder.is_full());
-        builder.finish();
+        builder.finish(&mut BTreeMap::new());
 
         assert!(!builder.is_full());
         assert_eq!(0, builder.insert_key(b"a0", &mut metrics));

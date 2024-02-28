@@ -16,7 +16,7 @@
 //!
 //! We only support partitioning the tree by pre-defined internal columns.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use api::v1::SemanticType;
@@ -67,15 +67,16 @@ impl Partition {
         metrics: &mut WriteMetrics,
     ) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
-        // Now we ensure one key only exists in one shard.
+        // Freeze the shard builder if needed.
+        if inner.shard_builder.should_freeze() {
+            inner.freeze_active_shard()?;
+        }
+
+        // Finds key in shards, now we ensure one key only exists in one shard.
         if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
             // Key already in shards.
             inner.write_to_shard(pk_id, key_value);
             return Ok(());
-        }
-
-        if inner.shard_builder.should_freeze() {
-            inner.freeze_active_shard()?;
         }
 
         // Write to the shard builder.
@@ -142,19 +143,26 @@ impl Partition {
     ///
     /// Must freeze the partition before fork.
     pub fn fork(&self, metadata: &RegionMetadataRef, config: &MergeTreeConfig) -> Partition {
-        let inner = self.inner.read().unwrap();
-        debug_assert!(inner.shard_builder.is_empty());
-        // TODO(yingwen): TTL or evict shards.
-        let shard_builder = ShardBuilder::new(
-            metadata.clone(),
-            config,
-            inner.shard_builder.current_shard_id(),
-        );
-        let shards = inner
-            .shards
-            .iter()
-            .map(|shard| shard.fork(metadata.clone()))
-            .collect();
+        let (shards, shard_builder) = {
+            let inner = self.inner.read().unwrap();
+            debug_assert!(inner.shard_builder.is_empty());
+            let shard_builder = ShardBuilder::new(
+                metadata.clone(),
+                config,
+                inner.shard_builder.current_shard_id(),
+            );
+            let shards = inner
+                .shards
+                .iter()
+                .map(|shard| shard.fork(metadata.clone()))
+                .collect();
+
+            (shards, shard_builder)
+        };
+        let pk_to_pk_id = {
+            let mut inner = self.inner.write().unwrap();
+            std::mem::take(&mut inner.pk_to_pk_id)
+        };
 
         Partition {
             inner: RwLock::new(Inner {
@@ -162,6 +170,8 @@ impl Partition {
                 shard_builder,
                 shards,
                 num_rows: 0,
+                pk_to_pk_id,
+                frozen: false,
             }),
             dedup: self.dedup,
         }
@@ -461,11 +471,14 @@ fn data_batch_to_batch(
 /// A key only exists in one shard.
 struct Inner {
     metadata: RegionMetadataRef,
+    /// Map to index pk to pk id.
+    pk_to_pk_id: HashMap<Vec<u8>, PkId>,
     /// Shard whose dictionary is active.
     shard_builder: ShardBuilder,
     /// Shards with frozen dictionary.
     shards: Vec<Shard>,
     num_rows: usize,
+    frozen: bool,
 }
 
 impl Inner {
@@ -479,20 +492,17 @@ impl Inner {
         let shard_builder = ShardBuilder::new(metadata.clone(), config, current_shard_id);
         Self {
             metadata,
+            pk_to_pk_id: HashMap::new(),
             shard_builder,
             shards,
             num_rows: 0,
+            frozen: false,
         }
     }
 
     fn find_key_in_shards(&self, primary_key: &[u8]) -> Option<PkId> {
-        for shard in &self.shards {
-            if let Some(pkid) = shard.find_id_by_key(primary_key) {
-                return Some(pkid);
-            }
-        }
-
-        None
+        assert!(!self.frozen);
+        self.pk_to_pk_id.get(primary_key).copied()
     }
 
     fn write_to_shard(&mut self, pk_id: PkId, key_value: KeyValue) {
@@ -506,7 +516,10 @@ impl Inner {
     }
 
     fn freeze_active_shard(&mut self) -> Result<()> {
-        if let Some(shard) = self.shard_builder.finish(self.metadata.clone())? {
+        if let Some(shard) = self
+            .shard_builder
+            .finish(self.metadata.clone(), &mut self.pk_to_pk_id)?
+        {
             self.shards.push(shard);
         }
         Ok(())
