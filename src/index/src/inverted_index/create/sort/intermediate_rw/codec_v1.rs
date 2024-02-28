@@ -191,7 +191,10 @@ mod tests {
         };
         let decoded_item = decoder.decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded_item.0, b"hello");
-        assert_eq!(decoded_item.1, bitvec![u8, Lsb0; 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0]);
+        assert_eq!(
+            decoded_item.1,
+            bitvec![u8, Lsb0; 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+        );
         assert_eq!(decoder.decode(&mut buf).unwrap(), None);
         assert!(buf.is_empty());
     }

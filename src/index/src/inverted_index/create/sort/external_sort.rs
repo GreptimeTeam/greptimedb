@@ -250,7 +250,8 @@ impl ExternalSorter {
         self.current_memory_usage = 0;
 
         let bitmap_leading_zeros = self.last_dump_row_count / self.segment_row_count;
-        self.last_dump_row_count = self.total_row_count - self.total_row_count % self.segment_row_count; // align to segment
+        self.last_dump_row_count =
+            self.total_row_count - self.total_row_count % self.segment_row_count; // align to segment
 
         let entries = values.len();
         IntermediateWriter::new(writer).write_all(values, bitmap_leading_zeros as _).await.inspect(|_|

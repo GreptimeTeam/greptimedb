@@ -188,9 +188,21 @@ mod tests {
         let mut stream = reader.into_stream().await.unwrap();
 
         let a = stream.next().await.unwrap().unwrap();
-        assert_eq!(a, (Bytes::from("a"), BitVec::from_slice(&[0b00000000, 0b10101010])));
+        assert_eq!(
+            a,
+            (
+                Bytes::from("a"),
+                BitVec::from_slice(&[0b00000000, 0b10101010])
+            )
+        );
         let b = stream.next().await.unwrap().unwrap();
-        assert_eq!(b, (Bytes::from("b"), BitVec::from_slice(&[0b00000000, 0b01010101])));
+        assert_eq!(
+            b,
+            (
+                Bytes::from("b"),
+                BitVec::from_slice(&[0b00000000, 0b01010101])
+            )
+        );
         assert!(stream.next().await.is_none());
     }
 
