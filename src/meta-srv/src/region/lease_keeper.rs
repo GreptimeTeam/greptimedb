@@ -105,10 +105,17 @@ impl RegionLeaseKeeper {
 
         // The subset of all table metadata.
         // TODO: considers storing all active regions in meta's memory.
-        let metadata_subset = table_route_manager
+        let table_routes = table_route_manager
+            .table_route_storage()
             .batch_get(table_ids)
             .await
             .context(error::TableMetadataManagerSnafu)?;
+
+        let metadata_subset = table_routes
+            .into_iter()
+            .zip(table_ids)
+            .filter_map(|(route, id)| route.map(|route| (*id, route)))
+            .collect::<HashMap<_, _>>();
 
         Ok(metadata_subset)
     }

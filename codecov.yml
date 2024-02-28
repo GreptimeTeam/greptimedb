@@ -8,5 +8,6 @@ coverage:
 ignore:
   - "**/error*.rs" # ignore all error.rs files
   - "tests/runner/*.rs" # ignore integration test runner
+  - "tests-integration/**/*.rs" # ignore integration tests
 comment:                  # this is a top-level key
   layout: "diff"

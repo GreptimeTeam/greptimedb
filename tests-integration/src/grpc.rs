@@ -516,11 +516,11 @@ CREATE TABLE {table_name} (
         let table_route_value = instance
             .table_metadata_manager()
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()
-            .unwrap()
-            .into_inner();
+            .unwrap();
 
         let region_to_dn_map = region_distribution(
             table_route_value

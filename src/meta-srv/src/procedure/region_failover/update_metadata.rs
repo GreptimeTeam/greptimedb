@@ -82,7 +82,8 @@ impl UpdateRegionMetadata {
         let table_route_value = ctx
             .table_metadata_manager
             .table_route_manager()
-            .get(table_id)
+            .table_route_storage()
+            .get_raw(table_id)
             .await
             .context(error::TableMetadataManagerSnafu)?
             .context(TableRouteNotFoundSnafu { table_id })?;
@@ -233,7 +234,8 @@ mod tests {
             env.context
                 .table_metadata_manager
                 .table_route_manager()
-                .get(table_id)
+                .table_route_storage()
+                .get_raw(table_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -396,11 +398,11 @@ mod tests {
                 .context
                 .table_metadata_manager
                 .table_route_manager()
+                .table_route_storage()
                 .get(table_id)
                 .await
                 .unwrap()
-                .unwrap()
-                .into_inner();
+                .unwrap();
 
             let peers = &extract_all_peers(table_route_value.region_routes().unwrap());
             let actual = table_route_value.region_routes().unwrap();
@@ -416,11 +418,11 @@ mod tests {
             let manager = &env.context.table_metadata_manager;
             let table_route_value = manager
                 .table_route_manager()
+                .table_route_storage()
                 .get(table_id)
                 .await
                 .unwrap()
-                .unwrap()
-                .into_inner();
+                .unwrap();
 
             let map = region_distribution(table_route_value.region_routes().unwrap());
             assert_eq!(map.len(), 2);
