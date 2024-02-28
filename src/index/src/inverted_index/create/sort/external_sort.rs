@@ -93,7 +93,6 @@ impl Sorter for ExternalSorter {
         }
 
         let segment_index_range = self.segment_index_range(n, value.is_none());
-        // println!("[push, total_row_count = {}, seg = {}, seg_range = {segment_index_range:?}, last_dump = {}] value {value:?}", self.total_row_count, self.segment_row_count, self.last_dump_row_count);
         self.total_row_count += n;
 
         if let Some(value) = value {
