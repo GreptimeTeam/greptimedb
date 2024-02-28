@@ -283,12 +283,14 @@ impl Drop for ShardBuilderReader {
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["shard_builder_prune_pk"])
             .observe(shard_builder_prune_pk);
-        common_telemetry::debug!(
-            "ShardBuilderReader metrics, before pruning: {}, after pruning: {}, cost: {}s",
-            self.keys_before_pruning,
-            self.keys_after_pruning,
-            shard_builder_prune_pk,
-        );
+        if self.keys_before_pruning > 0 {
+            common_telemetry::debug!(
+                "ShardBuilderReader metrics, before pruning: {}, after pruning: {}, cost: {}s",
+                self.keys_before_pruning,
+                self.keys_after_pruning,
+                shard_builder_prune_pk,
+            );
+        }
     }
 }
 

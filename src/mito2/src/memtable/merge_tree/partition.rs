@@ -280,10 +280,8 @@ pub(crate) struct PartitionStats {
 
 #[derive(Default)]
 struct PartitionReaderMetrics {
-    // prune_pk: Duration,
     read_source: Duration,
     data_batch_to_batch: Duration,
-    keys_after_pruning: usize,
 }
 
 /// Reader to scan rows in a partition.
@@ -397,79 +395,6 @@ impl PrimaryKeyFilter {
     }
 }
 
-// fn prune_primary_key(
-//     metadata: &RegionMetadataRef,
-//     filters: &[SimpleFilterEvaluator],
-//     codec: &McmpRowCodec,
-//     pk: &[u8],
-//     metrics: &mut PartitionReaderMetrics,
-//     values_buffer: &mut Vec<Value>,
-// ) -> bool {
-//     let start = Instant::now();
-//     let res = prune_primary_key_inner(metadata, filters, codec, pk, values_buffer);
-//     metrics.prune_pk += start.elapsed();
-//     res
-// }
-
-// // TODO(yingwen): Improve performance of key pruning. Now we need to find index and
-// // then decode and convert each value.
-// /// Returns true if the `pk` is still needed.
-// fn prune_primary_key_inner(
-//     metadata: &RegionMetadataRef,
-//     filters: &[SimpleFilterEvaluator],
-//     codec: &McmpRowCodec,
-//     pk: &[u8],
-//     _values_buffer: &mut Vec<Value>,
-// ) -> bool {
-//     if filters.is_empty() {
-//         return true;
-//     }
-
-//     // no primary key, we simply return true.
-//     if metadata.primary_key.is_empty() {
-//         return true;
-//     }
-
-//     // if let Err(e) = codec.decode_to_vec(pk, values_buffer) {
-//     //     common_telemetry::error!(e; "Failed to decode primary key");
-//     //     return true;
-//     // }
-
-//     // evaluate filters against primary key values
-//     let mut result = true;
-//     for filter in filters {
-//         if Partition::is_partition_column(filter.column_name()) {
-//             continue;
-//         }
-//         let Some(column) = metadata.column_by_name(filter.column_name()) else {
-//             continue;
-//         };
-//         // ignore filters that are not referencing primary key columns
-//         if column.semantic_type != SemanticType::Tag {
-//             continue;
-//         }
-//         // index of the column in primary keys.
-//         // Safety: A tag column is always in primary key.
-//         let index = metadata.primary_key_index(column.column_id).unwrap();
-
-//         let value = match codec.decode_value_at(pk, index) {
-//             Ok(v) => v,
-//             Err(e) => {
-//                 common_telemetry::error!(e; "Failed to decode primary key");
-//                 return true;
-//             }
-//         };
-
-//         // Safety: arrow schema and datatypes are constructed from the same source.
-//         let scalar_value = value
-//             .try_to_scalar_value(&column.column_schema.data_type)
-//             .unwrap();
-//         result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
-//     }
-
-//     result
-// }
-
 /// Structs to reuse across readers to avoid allocating for each reader.
 pub(crate) struct ReadPartitionContext {
     metadata: RegionMetadataRef,
@@ -484,10 +409,6 @@ pub(crate) struct ReadPartitionContext {
 
 impl Drop for ReadPartitionContext {
     fn drop(&mut self) {
-        // let partition_prune_pk = self.metrics.prune_pk.as_secs_f64();
-        // MERGE_TREE_READ_STAGE_ELAPSED
-        //     .with_label_values(&["partition_prune_pk"])
-        //     .observe(partition_prune_pk);
         let partition_read_source = self.metrics.read_source.as_secs_f64();
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_read_source"])
@@ -497,14 +418,11 @@ impl Drop for ReadPartitionContext {
             .with_label_values(&["partition_data_batch_to_batch"])
             .observe(partition_data_batch_to_batch);
 
-        if self.metrics.keys_after_pruning != 0 {
-            common_telemetry::debug!(
-                "TreeIter partitions metrics, after: {}, partition_read_source: {}s, partition_data_batch_to_batch: {}s",
-                self.metrics.keys_after_pruning,
-                partition_read_source,
-                partition_data_batch_to_batch,
-            );
-        }
+        common_telemetry::debug!(
+            "TreeIter partitions metrics, partition_read_source: {}s, partition_data_batch_to_batch: {}s",
+            partition_read_source,
+            partition_data_batch_to_batch,
+        );
     }
 }
 
