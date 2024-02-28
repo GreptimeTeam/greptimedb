@@ -89,8 +89,8 @@ impl Partition {
         };
 
         match pk_in_builder {
-            None => { // Key does not yet exist in builder, try encode and insert.
-                // Short key for the map.
+            None => {
+                // Key does not yet exist in builder, encode and insert the full primary key.
                 let short_key = primary_key.clone();
                 // Encode full primary key.
                 primary_key.clear();
