@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::tracing::log;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
@@ -278,9 +277,7 @@ impl PartitionReader {
     /// # Panics
     /// Panics if the reader is invalid.
     pub fn next(&mut self) -> Result<()> {
-        let read_source = Instant::now();
-        self.source.next()?;
-        self.context.metrics.read_source += read_source.elapsed();
+        self.advance_source()?;
         self.prune_batch_by_key()
     }
 
@@ -305,8 +302,14 @@ impl PartitionReader {
         self.context
     }
 
+    fn advance_source(&mut self) -> Result<()> {
+        let read_source = Instant::now();
+        self.source.next()?;
+        self.context.metrics.read_source += read_source.elapsed();
+        Ok(())
+    }
+
     fn prune_batch_by_key(&mut self) -> Result<()> {
-        let start = Instant::now();
         if self.context.metadata.primary_key.is_empty() || !self.context.need_prune_key {
             // Nothing to prune.
             return Ok(());
@@ -329,23 +332,36 @@ impl PartitionReader {
                 &self.context.filters,
                 &self.context.row_codec,
                 key,
+                &mut self.context.metrics,
             ) {
                 // We need this key.
                 self.last_yield_pk_id = Some(pk_id);
                 self.context.metrics.keys_after_pruning += 1;
                 break;
             }
-            self.source.next()?;
+            self.advance_source()?;
         }
-        self.context.metrics.prune_pk += start.elapsed();
         Ok(())
     }
 }
 
-// TODO(yingwen): Improve performance of key prunning. Now we need to find index and
+fn prune_primary_key(
+    metadata: &RegionMetadataRef,
+    filters: &[SimpleFilterEvaluator],
+    codec: &McmpRowCodec,
+    pk: &[u8],
+    metrics: &mut PartitionReaderMetrics,
+) -> bool {
+    let start = Instant::now();
+    let res = prune_primary_key_inner(metadata, filters, codec, pk);
+    metrics.prune_pk += start.elapsed();
+    res
+}
+
+// TODO(yingwen): Improve performance of key pruning. Now we need to find index and
 // then decode and convert each value.
 /// Returns true if the `pk` is still needed.
-fn prune_primary_key(
+fn prune_primary_key_inner(
     metadata: &RegionMetadataRef,
     filters: &[SimpleFilterEvaluator],
     codec: &McmpRowCodec,
@@ -408,20 +424,29 @@ pub(crate) struct ReadPartitionContext {
 
 impl Drop for ReadPartitionContext {
     fn drop(&mut self) {
+        let partition_prune_pk = self.metrics.prune_pk.as_secs_f64();
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_prune_pk"])
-            .observe(self.metrics.prune_pk.as_secs_f64());
+            .observe(partition_prune_pk);
+        let partition_read_source = self.metrics.read_source.as_secs_f64();
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_read_source"])
-            .observe(self.metrics.read_source.as_secs_f64());
+            .observe(partition_read_source);
+        let partition_data_batch_to_batch = self.metrics.data_batch_to_batch.as_secs_f64();
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_data_batch_to_batch"])
-            .observe(self.metrics.data_batch_to_batch.as_secs_f64());
-        log::debug!(
-            "TreeIter pruning, before: {}, after: {}",
-            self.metrics.keys_before_pruning,
-            self.metrics.keys_before_pruning
-        );
+            .observe(partition_data_batch_to_batch);
+
+        if self.metrics.keys_before_pruning != 0 {
+            common_telemetry::debug!(
+                "TreeIter pruning, before: {}, after: {}, partition_read_source: {}s, partition_prune_pk: {}s, partition_data_batch_to_batch: {}s",
+                self.metrics.keys_before_pruning,
+                self.metrics.keys_after_pruning,
+                partition_read_source,
+                partition_prune_pk,
+                partition_data_batch_to_batch,
+            );
+        }
     }
 }
 

@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::tracing::log;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use snafu::ensure;
@@ -37,7 +36,7 @@ use crate::memtable::merge_tree::partition::{
 };
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
-use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
+use crate::metrics::{MERGE_TREE_READ_STAGE_ELAPSED, READ_STAGE_ELAPSED};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
@@ -135,6 +134,7 @@ impl MergeTree {
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
+        let start = Instant::now();
         // Creates the projection set.
         let projection: HashSet<_> = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -151,12 +151,13 @@ impl MergeTree {
             })
             .unwrap_or_default();
 
-        let partitions = self.prune_partitions(&filters);
+        let mut tree_iter_metric = TreeIterMetrics::default();
+        let partitions = self.prune_partitions(&filters, &mut tree_iter_metric);
 
         let mut iter = TreeIter {
             partitions,
             current_reader: None,
-            metrics: Default::default(),
+            metrics: tree_iter_metric,
         };
         let context = ReadPartitionContext::new(
             self.metadata.clone(),
@@ -166,6 +167,7 @@ impl MergeTree {
         );
         iter.fetch_next_partition(context)?;
 
+        iter.metrics.iter_elapsed += start.elapsed();
         Ok(Box::new(iter))
     }
 
@@ -285,8 +287,13 @@ impl MergeTree {
             .clone()
     }
 
-    fn prune_partitions(&self, filters: &[SimpleFilterEvaluator]) -> VecDeque<PartitionRef> {
+    fn prune_partitions(
+        &self,
+        filters: &[SimpleFilterEvaluator],
+        metrics: &mut TreeIterMetrics,
+    ) -> VecDeque<PartitionRef> {
         let partitions = self.partitions.read().unwrap();
+        metrics.partitions_total = partitions.len();
         if !self.is_partitioned {
             return partitions.values().cloned().collect();
         }
@@ -312,16 +319,19 @@ impl MergeTree {
                 pruned.push_back(partition.clone());
             }
         }
-
+        metrics.partitions_after_pruning = pruned.len();
         pruned
     }
 }
 
 #[derive(Default)]
 struct TreeIterMetrics {
+    iter_elapsed: Duration,
     fetch_partition_elapsed: Duration,
     rows_fetched: usize,
     batches_fetched: usize,
+    partitions_total: usize,
+    partitions_after_pruning: usize,
 }
 
 struct TreeIter {
@@ -335,10 +345,17 @@ impl Drop for TreeIter {
         MERGE_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["fetch_next_partition"])
             .observe(self.metrics.fetch_partition_elapsed.as_secs_f64());
-        log::debug!(
-            "TreeIter rows fetched: {}, batches fetched: {}",
+        let scan_elapsed = self.metrics.iter_elapsed.as_secs_f64();
+        READ_STAGE_ELAPSED
+            .with_label_values(&["scan_memtable"])
+            .observe(scan_elapsed);
+        common_telemetry::debug!(
+            "TreeIter partitions total: {}, partitions after prune: {}, rows fetched: {}, batches fetched: {}, scan elapsed: {}",
+            self.metrics.partitions_total,
+            self.metrics.partitions_after_pruning,
             self.metrics.rows_fetched,
-            self.metrics.batches_fetched
+            self.metrics.batches_fetched,
+            scan_elapsed
         );
     }
 }
@@ -347,7 +364,10 @@ impl Iterator for TreeIter {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_batch().transpose()
+        let start = Instant::now();
+        let res = self.next_batch().transpose();
+        self.metrics.iter_elapsed += start.elapsed();
+        res
     }
 }
 
@@ -378,6 +398,8 @@ impl TreeIter {
         let batch = part_reader.convert_current_batch()?;
         part_reader.next()?;
         if part_reader.is_valid() {
+            self.metrics.rows_fetched += batch.num_rows();
+            self.metrics.batches_fetched += 1;
             return Ok(Some(batch));
         }
 
