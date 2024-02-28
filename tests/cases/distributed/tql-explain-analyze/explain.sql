@@ -13,6 +13,7 @@ TQL EXPLAIN (0, 10, '5s') test;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 
 DROP TABLE test;

@@ -16,6 +16,7 @@ TQL ANALYZE (0, 10, '5s') test;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (Duration.*) REDACTED
 TQL ANALYZE VERBOSE (0, 10, '5s') test;
