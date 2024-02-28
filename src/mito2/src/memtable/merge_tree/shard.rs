@@ -244,7 +244,8 @@ impl Drop for ShardReader {
             .with_label_values(&["shard_prune_pk"])
             .observe(shard_prune_pk);
         common_telemetry::debug!(
-            "ShardReader metrics, before pruning: {}, after pruning: {}, cost: {:?}s",
+            "ShardReader metrics, data parts: {}, before pruning: {}, after pruning: {}, cost: {:?}s",
+            self.parts_reader.num_parts(),
             self.keys_before_pruning,
             self.keys_after_pruning,
             shard_prune_pk,

@@ -994,9 +994,11 @@ impl DataPartsReaderBuilder {
         for p in self.parts {
             nodes.push(DataNode::new(DataSource::Part(p)));
         }
+        let num_parts = nodes.len();
         let merger = Merger::try_new(nodes)?;
         Ok(DataPartsReader {
             merger,
+            num_parts,
             elapsed: Default::default(),
         })
     }
@@ -1005,6 +1007,7 @@ impl DataPartsReaderBuilder {
 /// Reader for all parts inside a `DataParts`.
 pub struct DataPartsReader {
     merger: Merger<DataNode>,
+    num_parts: usize,
     elapsed: Duration,
 }
 
@@ -1031,6 +1034,10 @@ impl DataPartsReader {
 
     pub(crate) fn is_valid(&self) -> bool {
         self.merger.is_valid()
+    }
+
+    pub(crate) fn num_parts(&self) -> usize {
+        self.num_parts
     }
 }
 
