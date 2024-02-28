@@ -551,120 +551,125 @@ mod test {
     use super::*;
     #[test]
     fn test_accum() {
-        // sum i32
-        let mut acc = Accum::new_accum(&AggregateFunc::SumInt32).unwrap();
-        acc.update(&AggregateFunc::SumInt32, Value::Int32(1), 1)
-            .unwrap();
+        let testcases = vec![
+            (
+                AggregateFunc::SumInt32,
+                vec![(Value::Int32(1), 1)],
+                (
+                    Value::Int64(1),
+                    vec![Value::Decimal128(Decimal128::new(1, 38, 0)), 1i64.into()],
+                ),
+            ),
+            (
+                AggregateFunc::SumFloat32,
+                vec![(Value::Float32(OrderedF32::from(1.0)), 1)],
+                (
+                    Value::Float32(OrderedF32::from(1.0)),
+                    vec![
+                        Value::Float64(OrderedF64::from(1.0)),
+                        0i64.into(),
+                        0i64.into(),
+                        0i64.into(),
+                        1i64.into(),
+                    ],
+                ),
+            ),
+            (
+                AggregateFunc::MaxInt32,
+                vec![(Value::Int32(1), 1), (Value::Int32(2), 1)],
+                (Value::Int32(2), vec![Value::Int32(2), 2i64.into()]),
+            ),
+            (
+                AggregateFunc::MinInt32,
+                vec![(Value::Int32(2), 1), (Value::Int32(1), 1)],
+                (Value::Int32(1), vec![Value::Int32(1), 2i64.into()]),
+            ),
+            (
+                AggregateFunc::MaxFloat32,
+                vec![
+                    (Value::Float32(OrderedF32::from(1.0)), 1),
+                    (Value::Float32(OrderedF32::from(2.0)), 1),
+                ],
+                (
+                    Value::Float32(OrderedF32::from(2.0)),
+                    vec![Value::Float32(OrderedF32::from(2.0)), 2i64.into()],
+                ),
+            ),
+            (
+                AggregateFunc::MaxDateTime,
+                vec![
+                    (Value::DateTime(DateTime::from(0)), 1),
+                    (Value::DateTime(DateTime::from(1)), 1),
+                ],
+                (
+                    Value::DateTime(DateTime::from(1)),
+                    vec![Value::DateTime(DateTime::from(1)), 2i64.into()],
+                ),
+            ),
+            (
+                AggregateFunc::Count,
+                vec![(Value::Int32(1), 1), (Value::Int32(2), 1)],
+                (
+                    Value::UInt64(2),
+                    vec![Value::Decimal128(Decimal128::new(0, 38, 0)), 2i64.into()],
+                ),
+            ),
+            (
+                AggregateFunc::Any,
+                vec![
+                    (Value::Boolean(false), 1),
+                    (Value::Boolean(false), 1),
+                    (Value::Boolean(true), 1),
+                ],
+                (
+                    Value::Boolean(true),
+                    vec![Value::from(1i64), Value::from(2i64)],
+                ),
+            ),
+            (
+                AggregateFunc::All,
+                vec![
+                    (Value::Boolean(false), 1),
+                    (Value::Boolean(false), 1),
+                    (Value::Boolean(true), 1),
+                ],
+                (
+                    Value::Boolean(false),
+                    vec![Value::from(1i64), Value::from(2i64)],
+                ),
+            ),
+            (
+                AggregateFunc::MaxBool,
+                vec![
+                    (Value::Boolean(false), 1),
+                    (Value::Boolean(false), 1),
+                    (Value::Boolean(true), 1),
+                ],
+                (
+                    Value::Boolean(true),
+                    vec![Value::from(1i64), Value::from(2i64)],
+                ),
+            ),
+            (
+                AggregateFunc::MinBool,
+                vec![
+                    (Value::Boolean(false), 1),
+                    (Value::Boolean(false), 1),
+                    (Value::Boolean(true), 1),
+                ],
+                (
+                    Value::Boolean(false),
+                    vec![Value::from(1i64), Value::from(2i64)],
+                ),
+            ),
+        ];
 
-        assert_eq!(acc.eval(&AggregateFunc::SumInt32).unwrap(), Value::Int64(1));
-        assert_eq!(
-            acc.into_state(),
-            vec![Value::Decimal128(Decimal128::new(1, 38, 0)), 1i64.into()]
-        );
+        for (aggr_fn, input, (eval_res, state)) in testcases {
+            let mut acc = Accum::new_accum(&aggr_fn).unwrap();
+            acc.update_batch(&aggr_fn, input).unwrap();
 
-        // sum f32
-        let mut acc = Accum::new_accum(&AggregateFunc::SumFloat32).unwrap();
-        acc.update(
-            &AggregateFunc::SumFloat32,
-            Value::Float32(OrderedF32::from(1.0)),
-            1,
-        )
-        .unwrap();
-
-        assert_eq!(
-            acc.eval(&AggregateFunc::SumFloat32).unwrap(),
-            Value::Float32(OrderedF32::from(1.0))
-        );
-        assert_eq!(
-            acc.into_state(),
-            vec![
-                Value::Float64(OrderedF64::from(1.0)),
-                0i64.into(),
-                0i64.into(),
-                0i64.into(),
-                1i64.into()
-            ]
-        );
-
-        // max i32
-        let mut acc = Accum::new_accum(&AggregateFunc::MaxInt32).unwrap();
-        acc.update(&AggregateFunc::MaxInt32, Value::Int32(1), 1)
-            .unwrap();
-        acc.update(&AggregateFunc::MaxInt32, Value::Int32(2), 1)
-            .unwrap();
-
-        assert_eq!(acc.eval(&AggregateFunc::MaxInt32).unwrap(), Value::Int32(2));
-        assert_eq!(acc.into_state(), vec![Value::Int32(2), 2i64.into()]);
-
-        // min i32
-        let mut acc = Accum::new_accum(&AggregateFunc::MinInt32).unwrap();
-        acc.update(&AggregateFunc::MinInt32, Value::Int32(2), 1)
-            .unwrap();
-        acc.update(&AggregateFunc::MinInt32, Value::Int32(1), 1)
-            .unwrap();
-
-        assert_eq!(acc.eval(&AggregateFunc::MinInt32).unwrap(), Value::Int32(1));
-        assert_eq!(acc.into_state(), vec![Value::Int32(1), 2i64.into()]);
-
-        // max f32
-        let mut acc = Accum::new_accum(&AggregateFunc::MaxFloat32).unwrap();
-        acc.update(
-            &AggregateFunc::MaxFloat32,
-            Value::Float32(OrderedF32::from(1.0)),
-            1,
-        )
-        .unwrap();
-        acc.update(
-            &AggregateFunc::MaxFloat32,
-            Value::Float32(OrderedF32::from(2.0)),
-            1,
-        )
-        .unwrap();
-
-        assert_eq!(
-            acc.eval(&AggregateFunc::MaxFloat32).unwrap(),
-            Value::Float32(OrderedF32::from(2.0))
-        );
-        assert_eq!(
-            acc.into_state(),
-            vec![Value::Float32(OrderedF32::from(2.0)), 2i64.into(),]
-        );
-
-        // max DateTime
-        let mut acc = Accum::new_accum(&AggregateFunc::MaxDateTime).unwrap();
-        acc.update(
-            &AggregateFunc::MaxDateTime,
-            Value::DateTime(DateTime::from(0)),
-            1,
-        )
-        .unwrap();
-        acc.update(
-            &AggregateFunc::MaxDateTime,
-            Value::DateTime(DateTime::from(1)),
-            1,
-        )
-        .unwrap();
-
-        assert_eq!(
-            acc.eval(&AggregateFunc::MaxDateTime).unwrap(),
-            Value::DateTime(DateTime::from(1))
-        );
-        assert_eq!(
-            acc.into_state(),
-            vec![Value::DateTime(DateTime::from(1)), 2i64.into(),]
-        );
-
-        // count
-        let mut acc = Accum::new_accum(&AggregateFunc::Count).unwrap();
-        acc.update(&AggregateFunc::Count, Value::Int32(1), 1)
-            .unwrap();
-        acc.update(&AggregateFunc::Count, Value::Int32(2), 1)
-            .unwrap();
-
-        assert_eq!(acc.eval(&AggregateFunc::Count).unwrap(), Value::UInt64(2));
-        assert_eq!(
-            acc.into_state(),
-            vec![Value::Decimal128(Decimal128::new(0, 38, 0)), 2i64.into()]
-        );
+            assert_eq!(acc.eval(&aggr_fn).unwrap(), eval_res);
+            assert_eq!(acc.into_state(), state);
+        }
     }
 }
