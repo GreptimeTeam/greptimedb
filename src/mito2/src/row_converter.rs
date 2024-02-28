@@ -46,6 +46,9 @@ pub trait RowCodec {
 
     /// Decode row values from bytes.
     fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>>;
+
+    /// Decode row values from bytes to a vec.
+    fn decode_to_vec(&self, bytes: &[u8], values: &mut Vec<Value>) -> Result<()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +271,17 @@ impl RowCodec for McmpRowCodec {
             values.push(value);
         }
         Ok(values)
+    }
+
+    fn decode_to_vec(&self, bytes: &[u8], values: &mut Vec<Value>) -> Result<()> {
+        values.clear();
+        values.reserve(self.fields.len());
+        let mut deserializer = Deserializer::new(bytes);
+        for f in &self.fields {
+            let value = f.deserialize(&mut deserializer)?;
+            values.push(value);
+        }
+        Ok(())
     }
 }
 

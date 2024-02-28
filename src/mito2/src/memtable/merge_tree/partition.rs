@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use datatypes::value::Value;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
@@ -280,6 +281,7 @@ pub struct PartitionReader {
     context: ReadPartitionContext,
     source: BoxedDataBatchSource,
     last_yield_pk_id: Option<PkId>,
+    values_buffer: Vec<Value>,
 }
 
 impl PartitionReader {
@@ -288,6 +290,7 @@ impl PartitionReader {
             context,
             source,
             last_yield_pk_id: None,
+            values_buffer: Vec::new(),
         };
         // Find next valid batch.
         reader.prune_batch_by_key()?;
@@ -361,6 +364,7 @@ impl PartitionReader {
                 &self.context.row_codec,
                 key,
                 &mut self.context.metrics,
+                &mut self.values_buffer,
             ) {
                 // We need this key.
                 self.last_yield_pk_id = Some(pk_id);
@@ -379,9 +383,10 @@ fn prune_primary_key(
     codec: &McmpRowCodec,
     pk: &[u8],
     metrics: &mut PartitionReaderMetrics,
+    values_buffer: &mut Vec<Value>,
 ) -> bool {
     let start = Instant::now();
-    let res = prune_primary_key_inner(metadata, filters, codec, pk);
+    let res = prune_primary_key_inner(metadata, filters, codec, pk, values_buffer);
     metrics.prune_pk += start.elapsed();
     res
 }
@@ -394,6 +399,7 @@ fn prune_primary_key_inner(
     filters: &[SimpleFilterEvaluator],
     codec: &McmpRowCodec,
     pk: &[u8],
+    values_buffer: &mut Vec<Value>,
 ) -> bool {
     if filters.is_empty() {
         return true;
@@ -404,13 +410,10 @@ fn prune_primary_key_inner(
         return true;
     }
 
-    let pk_values = match codec.decode(pk) {
-        Ok(values) => values,
-        Err(e) => {
-            common_telemetry::error!(e; "Failed to decode primary key");
-            return true;
-        }
-    };
+    if let Err(e) = codec.decode_to_vec(pk, values_buffer) {
+        common_telemetry::error!(e; "Failed to decode primary key");
+        return true;
+    }
 
     // evaluate filters against primary key values
     let mut result = true;
@@ -429,7 +432,7 @@ fn prune_primary_key_inner(
         // Safety: A tag column is always in primary key.
         let index = metadata.primary_key_index(column.column_id).unwrap();
         // Safety: arrow schema and datatypes are constructed from the same source.
-        let scalar_value = pk_values[index]
+        let scalar_value = values_buffer[index]
             .try_to_scalar_value(&column.column_schema.data_type)
             .unwrap();
         result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
