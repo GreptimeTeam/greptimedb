@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_meta::table_name::TableName;
 use common_query::Output;
+use common_telemetry::tracing;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -173,6 +174,7 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
 }
 
 impl Instance {
+    #[tracing::instrument(skip_all)]
     pub async fn handle_inserts(
         &self,
         requests: InsertRequests,
@@ -184,6 +186,7 @@ impl Instance {
             .context(TableOperationSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn handle_row_inserts(
         &self,
         requests: RowInsertRequests,
@@ -195,6 +198,7 @@ impl Instance {
             .context(TableOperationSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn handle_metric_row_inserts(
         &self,
         requests: RowInsertRequests,
@@ -207,6 +211,7 @@ impl Instance {
             .context(TableOperationSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn handle_deletes(
         &self,
         requests: DeleteRequests,
@@ -218,6 +223,7 @@ impl Instance {
             .context(TableOperationSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn handle_row_deletes(
         &self,
         requests: RowDeleteRequests,

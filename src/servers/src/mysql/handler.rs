@@ -335,7 +335,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let _ = guard.remove(&stmt_id);
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(protocol = "mysql"))]
     async fn on_query<'a>(
         &'a mut self,
         query: &'a str,

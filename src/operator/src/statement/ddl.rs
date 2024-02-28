@@ -84,6 +84,7 @@ impl StatementExecutor {
         self.create_table_inner(create_expr, None, &ctx).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn create_table_inner(
         &self,
         create_table: &mut CreateTableExpr,
@@ -367,6 +368,7 @@ impl StatementExecutor {
         self.alter_table_inner(expr).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn alter_table_inner(&self, expr: AlterExpr) -> Result<Output> {
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME

@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime};
 use chrono::DateTime;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
+use common_telemetry::tracing;
 use promql_parser::parser::ast::{Extension as NodeExtension, ExtensionExpr};
 use promql_parser::parser::Expr::Extension;
 use promql_parser::parser::{EvalStmt, Expr, ValueType};
@@ -124,6 +125,7 @@ impl QueryLanguageParser {
     }
 
     /// Try to parse PromQL, return the statement when success.
+    #[tracing::instrument(skip_all)]
     pub fn parse_promql(query: &PromQuery, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
         let _timer = METRIC_PARSE_PROMQL_ELAPSED.start_timer();
 

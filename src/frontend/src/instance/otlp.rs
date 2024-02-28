@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
+use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
@@ -33,6 +34,7 @@ use crate::metrics::{OTLP_METRICS_ROWS, OTLP_TRACES_ROWS};
 
 #[async_trait]
 impl OpenTelemetryProtocolHandler for Instance {
+    #[tracing::instrument(skip_all)]
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
@@ -59,6 +61,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         Ok(resp)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn traces(
         &self,
         request: ExportTraceServiceRequest,

@@ -16,6 +16,7 @@ use axum::extract::{RawBody, State};
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Extension;
+use common_telemetry::tracing;
 use hyper::Body;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
@@ -31,6 +32,7 @@ use crate::error::{self, Result};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "metrics"))]
 pub async fn metrics(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(query_ctx): Extension<QueryContextRef>,
@@ -69,6 +71,7 @@ impl IntoResponse for OtlpMetricsResponse {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
 pub async fn traces(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(query_ctx): Extension<QueryContextRef>,

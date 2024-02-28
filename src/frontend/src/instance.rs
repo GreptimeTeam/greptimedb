@@ -39,8 +39,8 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::error;
 use common_telemetry::logging::info;
+use common_telemetry::{error, tracing};
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
@@ -275,6 +275,7 @@ impl Instance {
 impl SqlQueryHandler for Instance {
     type Error = Error;
 
+    #[tracing::instrument(skip_all)]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         let _timer = metrics::METRIC_HANDLE_SQL_ELAPSED.start_timer();
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
@@ -345,6 +346,7 @@ impl SqlQueryHandler for Instance {
             .context(ExecLogicalPlanSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn do_promql_query(
         &self,
         query: &PromQuery,
@@ -400,6 +402,7 @@ impl SqlQueryHandler for Instance {
 
 #[async_trait]
 impl PrometheusHandler for Instance {
+    #[tracing::instrument(skip_all)]
     async fn do_query(
         &self,
         query: &PromQuery,
