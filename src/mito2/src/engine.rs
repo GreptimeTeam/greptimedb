@@ -235,6 +235,10 @@ impl EngineInner {
         region_id: RegionId,
         requests: Vec<RegionPutRequest>,
     ) -> Result<AffectedRows> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&["group_puts"])
+            .start_timer();
+
         let mut write_requests = Vec::with_capacity(requests.len());
         let mut receivers = Vec::with_capacity(requests.len());
         for request in requests {
