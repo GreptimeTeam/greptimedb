@@ -185,7 +185,8 @@ impl ShardReader {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.parts_reader.next()
+        self.parts_reader.next()?;
+        self.prune_batch_by_key()
     }
 
     fn current_key(&self) -> Option<&[u8]> {

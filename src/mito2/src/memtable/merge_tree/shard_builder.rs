@@ -227,7 +227,8 @@ impl ShardBuilderReader {
     }
 
     pub fn next(&mut self) -> Result<()> {
-        self.data_reader.next()
+        self.data_reader.next()?;
+        self.prune_batch_by_key()
     }
 
     pub fn current_key(&self) -> Option<&[u8]> {
