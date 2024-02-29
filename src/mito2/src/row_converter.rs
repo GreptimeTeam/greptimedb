@@ -223,12 +223,9 @@ impl SortField {
         deserializer: &mut Deserializer<&[u8]>,
     ) -> Result<usize> {
         let pos = deserializer.position();
-        match bytes[pos] {
-            0 => {
-                deserializer.advance(1);
-                return Ok(1);
-            }
-            _ => (),
+        if bytes[pos] == 0 {
+            deserializer.advance(1);
+            return Ok(1);
         }
 
         let to_skip = match &self.data_type {
