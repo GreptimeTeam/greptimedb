@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+
 use error::{EndpointIPV4NotFoundSnafu, ResolveEndpointSnafu, Result};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
