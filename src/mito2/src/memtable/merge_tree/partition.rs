@@ -394,7 +394,6 @@ impl PrimaryKeyFilter {
             // index of the column in primary keys.
             // Safety: A tag column is always in primary key.
             let index = self.metadata.primary_key_index(column.column_id).unwrap();
-
             let value = match self.codec.decode_value_at(pk, index, &mut self.offsets_buf) {
                 Ok(v) => v,
                 Err(e) => {

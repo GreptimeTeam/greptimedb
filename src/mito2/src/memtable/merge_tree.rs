@@ -293,6 +293,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use common_time::Timestamp;
+    use datafusion_common::{Column, ScalarValue};
+    use datafusion_expr::{BinaryExpr, Expr, Operator};
     use datatypes::scalars::ScalarVector;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
 
@@ -527,5 +529,56 @@ mod tests {
             .map(|v| v.unwrap().0.value())
             .collect::<Vec<_>>();
         assert_eq!(expect, read);
+    }
+
+    #[test]
+    fn test_memtable_filter() {
+        let metadata = memtable_util::metadata_with_primary_key(vec![0, 1], false);
+        // Try to build a memtable via the builder.
+        let memtable = MergeTreeMemtableBuilder::new(
+            MergeTreeConfig {
+                index_max_keys_per_shard: 40,
+                ..Default::default()
+            },
+            None,
+        )
+        .build(1, &metadata);
+
+        for i in 0..100 {
+            let timestamps: Vec<_> = (0..10).map(|v| i as i64 * 1000 + v).collect();
+            let kvs =
+                memtable_util::build_key_values(&metadata, "hello".to_string(), i, &timestamps, 1);
+            memtable.write(&kvs).unwrap();
+        }
+
+        for i in 0..100 {
+            let timestamps: Vec<_> = (0..10).map(|v| i as i64 * 1000 + v).collect();
+            let expr = Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(Expr::Column(Column {
+                    relation: None,
+                    name: "k1".to_string(),
+                })),
+                op: Operator::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::UInt32(Some(i)))),
+            });
+            let iter = memtable
+                .iter(None, Some(Predicate::new(vec![expr.into()])))
+                .unwrap();
+            let read = iter
+                .flat_map(|batch| {
+                    batch
+                        .unwrap()
+                        .timestamps()
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondVector>()
+                        .unwrap()
+                        .iter_data()
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                })
+                .map(|v| v.unwrap().0.value())
+                .collect::<Vec<_>>();
+            assert_eq!(timestamps, read);
+        }
     }
 }
