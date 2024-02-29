@@ -298,12 +298,13 @@ impl McmpRowCodec {
 
         offsets_buf.clear();
         let mut offset = 0;
-        offsets_buf.push(offset);
         for i in 0..pos {
+            offsets_buf.push(offset);
             let skip = self.fields[i].skip_deserialize(bytes, &mut deserializer)?;
             offset += skip;
-            offsets_buf.push(offset);
         }
+        // Push offset for the this field.
+        offsets_buf.push(offset);
         self.fields[pos].deserialize(&mut deserializer)
     }
 }
