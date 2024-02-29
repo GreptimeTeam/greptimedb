@@ -379,6 +379,7 @@ impl PrimaryKeyFilter {
 
         // evaluate filters against primary key values
         let mut result = true;
+        self.offsets_buf.clear();
         for filter in &*self.filters {
             if Partition::is_partition_column(filter.column_name()) {
                 continue;

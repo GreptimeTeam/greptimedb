@@ -307,16 +307,33 @@ impl McmpRowCodec {
             // We computed the offset before.
             let to_skip = offsets_buf[pos];
             deserializer.advance(to_skip);
-        } else {
-            offsets_buf.clear();
+            return self.fields[pos].deserialize(&mut deserializer);
+        }
+
+        if offsets_buf.is_empty() {
             let mut offset = 0;
+            // Skip values before `pos`.
             for i in 0..pos {
+                // Offset to skip before reading value i.
                 offsets_buf.push(offset);
                 let skip = self.fields[i].skip_deserialize(bytes, &mut deserializer)?;
                 offset += skip;
             }
-            // Push offset for the this field.
+            // Offset to skip before reading this value.
             offsets_buf.push(offset);
+        } else {
+            // Offsets are not enough.
+            let value_start = offsets_buf.len() - 1;
+            // Advances to decode value at `value_start`.
+            let mut offset = offsets_buf[value_start];
+            deserializer.advance(offset);
+            for i in value_start..pos {
+                // Skip value i.
+                let skip = self.fields[i].skip_deserialize(bytes, &mut deserializer)?;
+                // Offset for the value at i + 1.
+                offset += skip;
+                offsets_buf.push(offset);
+            }
         }
 
         self.fields[pos].deserialize(&mut deserializer)
@@ -386,7 +403,7 @@ mod tests {
                 let value = encoder.decode_value_at(&result, i, &mut offsets).unwrap();
                 decoded.push(value);
             }
-            assert_eq!(data_types.len(), offsets.len());
+            assert_eq!(data_types.len(), offsets.len(), "offsets: {:?}", offsets);
             assert_eq!(decoded, row);
         }
     }
