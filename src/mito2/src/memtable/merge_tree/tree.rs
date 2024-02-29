@@ -41,7 +41,7 @@ use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::metrics::{MERGE_TREE_READ_STAGE_ELAPSED, READ_STAGE_ELAPSED};
 use crate::read::Batch;
-use crate::row_converter::{McmpRowCodec, SortField};
+use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// The merge tree.
 pub struct MergeTree {
@@ -57,7 +57,7 @@ pub struct MergeTree {
     is_partitioned: bool,
     /// Manager to report size of the tree.
     write_buffer_manager: Option<WriteBufferManagerRef>,
-    short_encoder: Arc<ShortEncoder>,
+    sparse_encoder: Arc<ShortEncoder>,
 }
 
 impl MergeTree {
@@ -91,7 +91,7 @@ impl MergeTree {
             partitions: Default::default(),
             is_partitioned,
             write_buffer_manager,
-            short_encoder: Arc::new(short_encoder),
+            sparse_encoder: Arc::new(short_encoder),
         }
     }
 
@@ -130,10 +130,15 @@ impl MergeTree {
 
             // Encode primary key.
             pk_buffer.clear();
-            self.short_encoder
-                .encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            if self.is_partitioned {
+                // Use sparse encoder for metric engine.
+                self.sparse_encoder
+                    .encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            } else {
+                self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            }
 
-            // Write rows with short primary keys.
+            // Write rows with
             self.write_with_key(pk_buffer, kv, metrics)?;
         }
 
@@ -267,7 +272,7 @@ impl MergeTree {
             partitions: RwLock::new(forked),
             is_partitioned: self.is_partitioned,
             write_buffer_manager: self.write_buffer_manager.clone(),
-            short_encoder: self.short_encoder.clone(),
+            sparse_encoder: self.sparse_encoder.clone(),
         }
     }
 
@@ -285,7 +290,13 @@ impl MergeTree {
         let partition_key = Partition::get_partition_key(&key_value, self.is_partitioned);
         let partition = self.get_or_create_partition(partition_key);
 
-        partition.write_with_key(primary_key, &self.row_codec, key_value, metrics)
+        partition.write_with_key(
+            primary_key,
+            &self.row_codec,
+            key_value,
+            self.is_partitioned, // If tree is partitioned, re-encode is required to get the full primary key.
+            metrics,
+        )
     }
 
     fn write_no_key(&self, key_value: KeyValue) {

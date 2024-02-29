@@ -67,6 +67,7 @@ impl Partition {
         primary_key: &mut Vec<u8>,
         row_codec: &McmpRowCodec,
         key_value: KeyValue,
+        re_encode: bool,
         metrics: &mut WriteMetrics,
     ) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
@@ -83,16 +84,22 @@ impl Partition {
         }
 
         // Key does not yet exist in shard or builder, encode and insert the full primary key.
-        let short_key = primary_key.clone();
-        // Encode full primary key.
-        primary_key.clear();
-        row_codec.encode_to_vec(key_value.primary_keys(), primary_key)?;
-
-        // Write to the shard builder.
-        let pk_id = inner
-            .shard_builder
-            .write_with_key(primary_key, &key_value, metrics);
-        inner.pk_to_pk_id.insert(short_key, pk_id);
+        if re_encode {
+            // `primary_key` is sparse, re-encode the full primary key.
+            let sparse_key = primary_key.clone();
+            primary_key.clear();
+            row_codec.encode_to_vec(key_value.primary_keys(), primary_key)?;
+            let pk_id = inner
+                .shard_builder
+                .write_with_key(primary_key, &key_value, metrics);
+            inner.pk_to_pk_id.insert(sparse_key, pk_id);
+        } else {
+            // `primary_key` is already the full primary key.
+            let pk_id = inner
+                .shard_builder
+                .write_with_key(primary_key, &key_value, metrics);
+            inner.pk_to_pk_id.insert(std::mem::take(primary_key), pk_id);
+        };
 
         inner.num_rows += 1;
         Ok(())
