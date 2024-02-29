@@ -57,7 +57,7 @@ pub struct MergeTree {
     is_partitioned: bool,
     /// Manager to report size of the tree.
     write_buffer_manager: Option<WriteBufferManagerRef>,
-    sparse_encoder: Arc<ShortEncoder>,
+    sparse_encoder: Arc<SparseEncoder>,
 }
 
 impl MergeTree {
@@ -73,7 +73,7 @@ impl MergeTree {
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))
                 .collect(),
         );
-        let short_encoder = ShortEncoder {
+        let sparse_encoder = SparseEncoder {
             fields: metadata
                 .primary_key_columns()
                 .map(|c| FieldWithId {
@@ -91,7 +91,7 @@ impl MergeTree {
             partitions: Default::default(),
             is_partitioned,
             write_buffer_manager,
-            sparse_encoder: Arc::new(short_encoder),
+            sparse_encoder: Arc::new(sparse_encoder),
         }
     }
 
@@ -356,11 +356,11 @@ struct FieldWithId {
     column_id: ColumnId,
 }
 
-struct ShortEncoder {
+struct SparseEncoder {
     fields: Vec<FieldWithId>,
 }
 
-impl ShortEncoder {
+impl SparseEncoder {
     fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
     where
         I: Iterator<Item = ValueRef<'a>>,

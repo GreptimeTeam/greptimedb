@@ -593,9 +593,9 @@ impl Inner {
         }
     }
 
-    fn find_key_in_shards(&self, short_key: &[u8]) -> Option<PkId> {
+    fn find_key_in_shards(&self, primary_key: &[u8]) -> Option<PkId> {
         assert!(!self.frozen);
-        self.pk_to_pk_id.get(short_key).copied()
+        self.pk_to_pk_id.get(primary_key).copied()
     }
 
     fn write_to_shard(&mut self, pk_id: PkId, key_value: &KeyValue) {
