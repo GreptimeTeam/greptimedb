@@ -239,12 +239,25 @@ impl SortField {
             ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => 9,
             ConcreteDataType::Float32(_) => 5,
             ConcreteDataType::Float64(_) => 9,
-            ConcreteDataType::Binary(_) | ConcreteDataType::String(_) => {
+            ConcreteDataType::Binary(_) => {
+                // Now the encoder encode binary as a list of bytes so we can't use
+                // skip bytes.
+                let pos_before = deserializer.position();
+                let mut current = pos_before + 1;
+                while bytes[current] == 1 {
+                    current += 2;
+                }
+                let to_skip = current - pos_before + 1;
+                deserializer.advance(to_skip);
+                return Ok(to_skip);
+            }
+            ConcreteDataType::String(_) => {
+                let pos_before = deserializer.position();
                 deserializer.advance(1);
-                let bytes_length = deserializer
+                deserializer
                     .skip_bytes()
                     .context(error::DeserializeFieldSnafu)?;
-                return Ok(bytes_length);
+                return Ok(deserializer.position() - pos_before);
             }
             ConcreteDataType::Date(_) => 5,
             ConcreteDataType::DateTime(_) => 9,
@@ -294,17 +307,18 @@ impl McmpRowCodec {
             // We computed the offset before.
             let to_skip = offsets_buf[pos];
             deserializer.advance(to_skip);
+        } else {
+            offsets_buf.clear();
+            let mut offset = 0;
+            for i in 0..pos {
+                offsets_buf.push(offset);
+                let skip = self.fields[i].skip_deserialize(bytes, &mut deserializer)?;
+                offset += skip;
+            }
+            // Push offset for the this field.
+            offsets_buf.push(offset);
         }
 
-        offsets_buf.clear();
-        let mut offset = 0;
-        for i in 0..pos {
-            offsets_buf.push(offset);
-            let skip = self.fields[i].skip_deserialize(bytes, &mut deserializer)?;
-            offset += skip;
-        }
-        // Push offset for the this field.
-        offsets_buf.push(offset);
         self.fields[pos].deserialize(&mut deserializer)
     }
 }
@@ -368,8 +382,8 @@ mod tests {
         // Iter two times to test offsets buffer.
         for _ in 0..2 {
             decoded.clear();
-            for _ in 0..data_types.len() {
-                let value = encoder.decode_value_at(&result, 0, &mut offsets).unwrap();
+            for i in 0..data_types.len() {
+                let value = encoder.decode_value_at(&result, i, &mut offsets).unwrap();
                 decoded.push(value);
             }
             assert_eq!(data_types.len(), offsets.len());
