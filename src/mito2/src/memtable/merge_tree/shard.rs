@@ -213,7 +213,7 @@ impl ShardReader {
     }
 
     fn prune_batch_by_key(&mut self) -> Result<()> {
-        let Some(key_filter) = &self.key_filter else {
+        let Some(key_filter) = &mut self.key_filter else {
             return Ok(());
         };
 
@@ -225,7 +225,8 @@ impl ShardReader {
                 }
             }
             self.keys_before_pruning += 1;
-            let key = self.current_key().unwrap();
+            // Safety: `key_filter` is some so the shard has primary keys.
+            let key = self.key_dict.as_ref().unwrap().key_by_pk_index(pk_index);
             let now = Instant::now();
             if key_filter.prune_primary_key(key) {
                 self.prune_pk_cost += now.elapsed();

@@ -219,13 +219,17 @@ impl SortField {
         )
     }
 
-    /// Skip deserializing this field.
-    fn skip_deserialize(&self, bytes: &[u8], deserializer: &mut Deserializer<&[u8]>) -> Result<()> {
+    /// Skip deserializing this field, returns the length of it.
+    fn skip_deserialize(
+        &self,
+        bytes: &[u8],
+        deserializer: &mut Deserializer<&[u8]>,
+    ) -> Result<usize> {
         let pos = deserializer.position();
         match bytes[pos] {
             0 => {
                 deserializer.advance(1);
-                return Ok(());
+                return Ok(1);
             }
             _ => (),
         }
@@ -240,10 +244,10 @@ impl SortField {
             ConcreteDataType::Float64(_) => 9,
             ConcreteDataType::Binary(_) | ConcreteDataType::String(_) => {
                 deserializer.advance(1);
-                deserializer
+                let bytes_length = deserializer
                     .skip_bytes()
                     .context(error::DeserializeFieldSnafu)?;
-                return Ok(());
+                return Ok(bytes_length);
             }
             ConcreteDataType::Date(_) => 5,
             ConcreteDataType::DateTime(_) => 9,
@@ -257,7 +261,7 @@ impl SortField {
             | ConcreteDataType::Dictionary(_) => 0,
         };
         deserializer.advance(to_skip);
-        Ok(())
+        Ok(to_skip)
     }
 }
 
@@ -281,10 +285,27 @@ impl McmpRowCodec {
         self.fields.iter().map(|f| f.estimated_size()).sum()
     }
 
-    pub fn decode_value_at(&self, bytes: &[u8], pos: usize) -> Result<Value> {
+    /// Decode value at `pos` in `bytes`.a
+    pub fn decode_value_at(
+        &self,
+        bytes: &[u8],
+        pos: usize,
+        offsets_buf: &mut Vec<usize>,
+    ) -> Result<Value> {
         let mut deserializer = Deserializer::new(bytes);
+        if pos <= offsets_buf.len() {
+            // We computed the offset before.
+            let to_skip = offsets_buf[pos];
+            deserializer.advance(to_skip);
+        }
+
+        offsets_buf.clear();
+        let mut offset = 0;
+        offsets_buf.push(offset);
         for i in 0..pos {
-            self.fields[i].skip_deserialize(bytes, &mut deserializer)?;
+            let skip = self.fields[i].skip_deserialize(bytes, &mut deserializer)?;
+            offset += skip;
+            offsets_buf.push(offset);
         }
         self.fields[pos].deserialize(&mut deserializer)
     }

@@ -124,11 +124,11 @@ impl Partition {
     /// Scans data in the partition.
     pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
         let key_filter = if context.need_prune_key {
-            Some(PrimaryKeyFilter {
-                metadata: context.metadata.clone(),
-                filters: context.filters.clone(),
-                codec: context.row_codec.clone(),
-            })
+            Some(PrimaryKeyFilter::new(
+                context.metadata.clone(),
+                context.filters.clone(),
+                context.row_codec.clone(),
+            ))
         } else {
             None
         };
@@ -350,10 +350,24 @@ pub(crate) struct PrimaryKeyFilter {
     metadata: RegionMetadataRef,
     filters: Arc<Vec<SimpleFilterEvaluator>>,
     codec: Arc<McmpRowCodec>,
+    offsets_buf: Vec<usize>,
 }
 
 impl PrimaryKeyFilter {
-    pub(crate) fn prune_primary_key(&self, pk: &[u8]) -> bool {
+    pub(crate) fn new(
+        metadata: RegionMetadataRef,
+        filters: Arc<Vec<SimpleFilterEvaluator>>,
+        codec: Arc<McmpRowCodec>,
+    ) -> Self {
+        Self {
+            metadata,
+            filters,
+            codec,
+            offsets_buf: Vec::new(),
+        }
+    }
+
+    pub(crate) fn prune_primary_key(&mut self, pk: &[u8]) -> bool {
         if self.filters.is_empty() {
             return true;
         }
@@ -380,7 +394,7 @@ impl PrimaryKeyFilter {
             // Safety: A tag column is always in primary key.
             let index = self.metadata.primary_key_index(column.column_id).unwrap();
 
-            let value = match self.codec.decode_value_at(pk, index) {
+            let value = match self.codec.decode_value_at(pk, index, &mut self.offsets_buf) {
                 Ok(v) => v,
                 Err(e) => {
                     common_telemetry::error!(e; "Failed to decode primary key");
