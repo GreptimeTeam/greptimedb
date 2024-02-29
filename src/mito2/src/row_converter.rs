@@ -46,9 +46,6 @@ pub trait RowCodec {
 
     /// Decode row values from bytes.
     fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>>;
-
-    /// Decode row values from bytes to a vec.
-    fn decode_to_vec(&self, bytes: &[u8], values: &mut Vec<Value>) -> Result<()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,7 +282,7 @@ impl McmpRowCodec {
         self.fields.iter().map(|f| f.estimated_size()).sum()
     }
 
-    /// Decode value at `pos` in `bytes`.a
+    /// Decode value at `pos` in `bytes`.
     pub fn decode_value_at(
         &self,
         bytes: &[u8],
@@ -342,23 +339,12 @@ impl RowCodec for McmpRowCodec {
         }
         Ok(values)
     }
-
-    fn decode_to_vec(&self, bytes: &[u8], values: &mut Vec<Value>) -> Result<()> {
-        values.clear();
-        values.reserve(self.fields.len());
-        let mut deserializer = Deserializer::new(bytes);
-        for f in &self.fields {
-            let value = f.deserialize(&mut deserializer)?;
-            values.push(value);
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use common_base::bytes::StringBytes;
-    use common_time::Timestamp;
+    use common_time::{DateTime, Timestamp};
     use datatypes::value::Value;
 
     use super::*;
@@ -376,6 +362,18 @@ mod tests {
         let result = encoder.encode(value_ref.iter().cloned()).unwrap();
         let decoded = encoder.decode(&result).unwrap();
         assert_eq!(decoded, row);
+        let mut decoded = Vec::new();
+        let mut offsets = Vec::new();
+        // Iter two times to test offsets buffer.
+        for _ in 0..2 {
+            decoded.clear();
+            for _ in 0..data_types.len() {
+                let value = encoder.decode_value_at(&result, 0, &mut offsets).unwrap();
+                decoded.push(value);
+            }
+            assert_eq!(data_types.len(), offsets.len());
+            assert_eq!(decoded, row);
+        }
     }
 
     #[test]
@@ -499,6 +497,54 @@ mod tests {
                 ConcreteDataType::boolean_datatype(),
             ],
             vec![Value::Null, Value::Int64(43), Value::Boolean(true)],
+        );
+
+        // All types.
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::boolean_datatype(),
+                ConcreteDataType::int8_datatype(),
+                ConcreteDataType::uint8_datatype(),
+                ConcreteDataType::int16_datatype(),
+                ConcreteDataType::uint16_datatype(),
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::uint32_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::uint64_datatype(),
+                ConcreteDataType::float32_datatype(),
+                ConcreteDataType::float64_datatype(),
+                ConcreteDataType::binary_datatype(),
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::date_datatype(),
+                ConcreteDataType::datetime_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::time_millisecond_datatype(),
+                ConcreteDataType::duration_millisecond_datatype(),
+                ConcreteDataType::interval_month_day_nano_datatype(),
+                ConcreteDataType::decimal128_default_datatype(),
+            ],
+            vec![
+                Value::Boolean(true),
+                Value::Int8(8),
+                Value::UInt8(8),
+                Value::Int16(16),
+                Value::UInt16(16),
+                Value::Int32(32),
+                Value::UInt32(32),
+                Value::Int64(64),
+                Value::UInt64(64),
+                Value::Float32(1.0.into()),
+                Value::Float64(1.0.into()),
+                Value::Binary(b"hello"[..].into()),
+                Value::String("world".into()),
+                Value::Date(Date::new(10)),
+                Value::DateTime(DateTime::new(11)),
+                Value::Timestamp(Timestamp::new_millisecond(12)),
+                Value::Time(Time::new_millisecond(13)),
+                Value::Duration(Duration::new_millisecond(14)),
+                Value::Interval(Interval::from_month_day_nano(1, 1, 15)),
+                Value::Decimal128(Decimal128::from(16)),
+            ],
         );
     }
 }
