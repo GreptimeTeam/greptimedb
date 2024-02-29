@@ -77,7 +77,6 @@ criterion = "0.4"
 log-store.workspace = true
 rand.workspace = true
 
-
 [[bench]]
 name = "bench_merge_tree"
 harness = false

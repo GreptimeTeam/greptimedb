@@ -76,39 +76,23 @@ impl Partition {
         }
 
         // Finds key in shards, now we ensure one key only exists in one shard.
-        let pk_in_builder = if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
-            // Key already in shards.
-            if inner.write_to_shard(pk_id, &key_value) {
-                return Ok(());
-            } else {
-                // Key found in inner.pk_to_pk_id but is not a shard pk, then it must be in builder
-                Some(pk_id)
-            }
-        } else {
-            None
-        };
-
-        match pk_in_builder {
-            None => {
-                // Key does not yet exist in builder, encode and insert the full primary key.
-                let short_key = primary_key.clone();
-                // Encode full primary key.
-                primary_key.clear();
-                row_codec.encode_to_vec(key_value.primary_keys(), primary_key)?;
-
-                // Write to the shard builder.
-                let pk_id = inner
-                    .shard_builder
-                    .write_with_key(primary_key, &key_value, metrics);
-                inner.pk_to_pk_id.insert(short_key, pk_id);
-            }
-            Some(builder_pk_id) => {
-                // Key already exists in builder, just write to it.
-                inner
-                    .shard_builder
-                    .write_with_pk_id(builder_pk_id, &key_value);
-            }
+        if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
+            inner.write_to_shard(pk_id, &key_value);
+            inner.num_rows += 1;
+            return Ok(());
         }
+
+        // Key does not yet exist in shard or builder, encode and insert the full primary key.
+        let short_key = primary_key.clone();
+        // Encode full primary key.
+        primary_key.clear();
+        row_codec.encode_to_vec(key_value.primary_keys(), primary_key)?;
+
+        // Write to the shard builder.
+        let pk_id = inner
+            .shard_builder
+            .write_with_key(primary_key, &key_value, metrics);
+        inner.pk_to_pk_id.insert(short_key, pk_id);
 
         inner.num_rows += 1;
         Ok(())
@@ -607,15 +591,18 @@ impl Inner {
         self.pk_to_pk_id.get(short_key).copied()
     }
 
-    fn write_to_shard(&mut self, pk_id: PkId, key_value: &KeyValue) -> bool {
+    fn write_to_shard(&mut self, pk_id: PkId, key_value: &KeyValue) {
+        if pk_id.shard_id == self.shard_builder.current_shard_id() {
+            self.shard_builder.write_with_pk_id(pk_id, key_value);
+            return;
+        }
         for shard in &mut self.shards {
             if shard.shard_id == pk_id.shard_id {
                 shard.write_with_pk_id(pk_id, key_value);
                 self.num_rows += 1;
-                return true;
+                return;
             }
         }
-        false
     }
 
     fn freeze_active_shard(&mut self) -> Result<()> {

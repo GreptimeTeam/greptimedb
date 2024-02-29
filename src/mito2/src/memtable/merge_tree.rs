@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn test_memtable_sorted_input() {
         write_iter_sorted_input(true);
-        // write_iter_sorted_input(false);
+        write_iter_sorted_input(false);
     }
 
     fn write_iter_sorted_input(has_pk: bool) {
