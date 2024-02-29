@@ -296,6 +296,8 @@ impl McmpRowCodec {
     }
 
     /// Decode value at `pos` in `bytes`.
+    ///
+    /// The i-th element in offsets buffer is how many bytes to skip in order to read value at `pos`.
     pub fn decode_value_at(
         &self,
         bytes: &[u8],
