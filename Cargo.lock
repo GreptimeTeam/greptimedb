@@ -2104,7 +2104,6 @@ dependencies = [
 name = "common-wal"
 version = "0.6.0"
 dependencies = [
- "async-trait",
  "common-base",
  "common-error",
  "common-macro",
