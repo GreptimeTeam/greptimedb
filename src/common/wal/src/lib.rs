@@ -12,9 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(assert_matches)]
+
+use std::net::SocketAddr;
+
+use error::{EndpointIPV4NotFoundSnafu, ResolveEndpointSnafu, Result};
 use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt};
+use tokio::net;
 
 pub mod config;
+pub mod error;
 pub mod options;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
@@ -29,4 +37,53 @@ pub const TOPIC_NAME_PREFIX: &str = "greptimedb_wal_topic";
 pub enum TopicSelectorType {
     #[default]
     RoundRobin,
+}
+
+pub async fn resolve_to_ipv4<T: AsRef<str>>(endpoints: &[T]) -> Result<Vec<String>> {
+    futures_util::future::try_join_all(endpoints.iter().map(resolve_to_ipv4_one)).await
+}
+
+async fn resolve_to_ipv4_one<T: AsRef<str>>(endpoint: T) -> Result<String> {
+    let endpoint = endpoint.as_ref();
+    net::lookup_host(endpoint)
+        .await
+        .context(ResolveEndpointSnafu {
+            broker_endpoint: endpoint,
+        })?
+        .find(SocketAddr::is_ipv4)
+        .map(|addr| addr.to_string())
+        .context(EndpointIPV4NotFoundSnafu {
+            broker_endpoint: endpoint,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use super::*;
+    use crate::error::Error;
+
+    // test for resolve_broker_endpoint
+    #[tokio::test]
+    async fn test_valid_host() {
+        let host = "localhost:9092";
+        let got = resolve_to_ipv4_one(host).await;
+        assert_eq!(got.unwrap(), "127.0.0.1:9092");
+    }
+
+    #[tokio::test]
+    async fn test_valid_host_ipv6() {
+        // the host is valid, it is an IPv6 address, but we only accept IPv4 addresses
+        let host = "::1:9092";
+        let got = resolve_to_ipv4_one(host).await;
+        assert_matches!(got.unwrap_err(), Error::EndpointIPV4NotFound { .. });
+    }
+
+    #[tokio::test]
+    async fn test_invalid_host() {
+        let host = "non-exist-host:9092";
+        let got = resolve_to_ipv4_one(host).await;
+        assert_matches!(got.unwrap_err(), Error::ResolveEndpoint { .. });
+    }
 }

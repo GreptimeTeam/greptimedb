@@ -340,6 +340,9 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
+    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
+    ResolveKafkaEndpoint { source: common_wal::error::Error },
+
     #[snafu(display("Failed to build a Kafka controller client"))]
     BuildKafkaCtrlClient {
         location: Location,
@@ -425,6 +428,7 @@ impl ErrorExt for Error {
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
             | BuildKafkaPartitionClient { .. }
+            | ResolveKafkaEndpoint { .. }
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. }
