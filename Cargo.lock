@@ -2111,7 +2111,6 @@ dependencies = [
  "common-telemetry",
  "futures-util",
  "humantime-serde",
- "mockall",
  "rskafka",
  "serde",
  "serde_json",

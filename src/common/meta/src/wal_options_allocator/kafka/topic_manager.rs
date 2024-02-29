@@ -118,9 +118,9 @@ impl TopicManager {
             deadline: self.config.backoff.deadline,
         };
         let broker_endpoints =
-            futures::future::try_join_all(self.config.broker_endpoints.clone().into_iter().map(
+            futures::future::try_join_all(self.config.broker_endpoints.iter().map(
                 |endpoint| async move {
-                    common_wal::resolve_broker_endpoint(&endpoint)
+                    common_wal::resolve_to_ipv4(endpoint)
                         .await
                         .context(ResolveKafkaEndpointSnafu)
                 },

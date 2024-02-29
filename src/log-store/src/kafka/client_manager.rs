@@ -82,15 +82,14 @@ impl ClientManager {
             base: config.backoff.base as f64,
             deadline: config.backoff.deadline,
         };
-        let broker_endpoints =
-            futures::future::try_join_all(config.broker_endpoints.clone().into_iter().map(
-                |endpoint| async move {
-                    common_wal::resolve_broker_endpoint(&endpoint)
-                        .await
-                        .context(ResolveKafkaEndpointSnafu)
-                },
-            ))
-            .await?;
+        let broker_endpoints = futures::future::try_join_all(config.broker_endpoints.iter().map(
+            |endpoint| async move {
+                common_wal::resolve_to_ipv4(endpoint)
+                    .await
+                    .context(ResolveKafkaEndpointSnafu)
+            },
+        ))
+        .await?;
         let client = ClientBuilder::new(broker_endpoints)
             .backoff_config(backoff_config)
             .build()
