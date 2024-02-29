@@ -62,6 +62,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_valid_host_ipv6() {
+        // the host is valid, it is an IPv6 address, but we only accept IPv4 addresses
         let host = "::1:9092";
         let got = resolve_to_ipv4(host).await;
         assert_matches!(got.unwrap_err(), Error::EndpointIPV4NotFound { .. });
