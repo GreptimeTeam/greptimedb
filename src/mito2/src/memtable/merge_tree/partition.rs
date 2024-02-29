@@ -402,6 +402,9 @@ impl PrimaryKeyFilter {
                 }
             };
 
+            // TODO(yingwen): `evaluate_scalar()` creates temporary arrays to compare scalars. We
+            // can compare the bytes directly without allocation and matching types as we use
+            // comparable encoding.
             // Safety: arrow schema and datatypes are constructed from the same source.
             let scalar_value = value
                 .try_to_scalar_value(&column.column_schema.data_type)
