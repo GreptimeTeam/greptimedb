@@ -183,8 +183,15 @@ impl ShardBuilderReaderBuilder {
         pk_weights: Option<&[u16]>,
         key_filter: Option<PrimaryKeyFilter>,
     ) -> Result<ShardBuilderReader> {
+        let now = Instant::now();
         let data_reader = self.data_reader.build(pk_weights)?;
-        ShardBuilderReader::new(self.shard_id, self.dict_reader, data_reader, key_filter)
+        ShardBuilderReader::new(
+            self.shard_id,
+            self.dict_reader,
+            data_reader,
+            key_filter,
+            now.elapsed(),
+        )
     }
 }
 
@@ -198,6 +205,7 @@ pub struct ShardBuilderReader {
     keys_before_pruning: usize,
     keys_after_pruning: usize,
     prune_pk_cost: Duration,
+    data_build_cost: Duration,
 }
 
 impl ShardBuilderReader {
@@ -206,6 +214,7 @@ impl ShardBuilderReader {
         dict_reader: DictBuilderReader,
         data_reader: DataBufferReader,
         key_filter: Option<PrimaryKeyFilter>,
+        data_build_cost: Duration,
     ) -> Result<Self> {
         let mut reader = ShardBuilderReader {
             shard_id,
@@ -216,6 +225,7 @@ impl ShardBuilderReader {
             keys_before_pruning: 0,
             keys_after_pruning: 0,
             prune_pk_cost: Duration::default(),
+            data_build_cost,
         };
         reader.prune_batch_by_key()?;
 
@@ -285,10 +295,11 @@ impl Drop for ShardBuilderReader {
             .observe(shard_builder_prune_pk);
         if self.keys_before_pruning > 0 {
             common_telemetry::debug!(
-                "ShardBuilderReader metrics, before pruning: {}, after pruning: {}, cost: {}s",
+                "ShardBuilderReader metrics, before pruning: {}, after pruning: {}, prune cost: {}s, build cost: {}s",
                 self.keys_before_pruning,
                 self.keys_after_pruning,
                 shard_builder_prune_pk,
+                self.data_build_cost.as_secs_f64(),
             );
         }
     }

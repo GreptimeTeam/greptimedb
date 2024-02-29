@@ -150,6 +150,7 @@ impl Partition {
             (builder_reader, shard_source)
         };
 
+        context.metrics.num_shards = shard_reader_builders.len();
         let mut nodes = shard_reader_builders
             .into_iter()
             .map(|builder| {
@@ -160,6 +161,7 @@ impl Partition {
             .collect::<Result<Vec<_>>>()?;
 
         if let Some(builder) = builder_source {
+            context.metrics.read_builder = true;
             // Move the initialization of ShardBuilderReader out of read lock.
             let shard_builder_reader =
                 builder.build(Some(&context.pk_weights), key_filter.clone())?;
@@ -282,6 +284,8 @@ pub(crate) struct PartitionStats {
 struct PartitionReaderMetrics {
     read_source: Duration,
     data_batch_to_batch: Duration,
+    read_builder: bool,
+    num_shards: usize,
 }
 
 /// Reader to scan rows in a partition.
@@ -419,7 +423,9 @@ impl Drop for ReadPartitionContext {
             .observe(partition_data_batch_to_batch);
 
         common_telemetry::debug!(
-            "TreeIter partitions metrics, partition_read_source: {}s, partition_data_batch_to_batch: {}s",
+            "TreeIter partitions metrics, read_builder: {}, num_shards: {}, partition_read_source: {}s, partition_data_batch_to_batch: {}s",
+            self.metrics.read_builder,
+            self.metrics.num_shards,
             partition_read_source,
             partition_data_batch_to_batch,
         );

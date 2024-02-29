@@ -249,7 +249,7 @@ impl Drop for ShardReader {
             .observe(shard_prune_pk);
         if self.keys_before_pruning > 0 {
             common_telemetry::debug!(
-                "ShardReader metrics, data parts: {}, before pruning: {}, after pruning: {}, prune cost: {}s, data build cost: {}s",
+                "ShardReader metrics, data parts: {}, before pruning: {}, after pruning: {}, prune cost: {}s, build cost: {}s",
                 self.parts_reader.num_parts(),
                 self.keys_before_pruning,
                 self.keys_after_pruning,
