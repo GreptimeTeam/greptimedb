@@ -235,8 +235,12 @@ fn create_partitions_from_region_routes(
             })?;
         let partition_def = PartitionDef::try_from(partition)?;
 
+        // The region routes belong to the physical table but are shared among all logical tables.
+        // That it to say, the region id points to the physical table, so we need to use the actual
+        // table id (which may be a logical table) to renew the region id.
+        let id = RegionId::new(table_id, r.region.id.region_number());
         partitions.push(PartitionInfo {
-            id: r.region.id,
+            id,
             partition: partition_def,
         });
     }
