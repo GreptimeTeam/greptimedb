@@ -293,7 +293,7 @@ impl McmpRowCodec {
         offsets_buf: &mut Vec<usize>,
     ) -> Result<Value> {
         let mut deserializer = Deserializer::new(bytes);
-        if pos <= offsets_buf.len() {
+        if pos < offsets_buf.len() {
             // We computed the offset before.
             let to_skip = offsets_buf[pos];
             deserializer.advance(to_skip);
