@@ -6199,6 +6199,7 @@ dependencies = [
  "meta-client",
  "meter-core",
  "meter-macros",
+ "moka",
  "object-store",
  "partition",
  "path-slash",

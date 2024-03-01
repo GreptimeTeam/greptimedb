@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::alter_expr::Kind;
 use api::v1::region::{InsertRequests as RegionInsertRequests, RegionRequestHeader};
@@ -33,6 +34,7 @@ use common_telemetry::{error, info};
 use datatypes::schema::Schema;
 use futures_util::future;
 use meter_macros::write_meter;
+use moka::future::{Cache, CacheBuilder};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -44,19 +46,23 @@ use table::requests::InsertRequest as TableInsertRequest;
 use table::table_reference::TableReference;
 use table::TableRef;
 
+use crate::error::Error::{GetTableCache, TableCacheNotGet};
 use crate::error::{
     CatalogSnafu, FindNewColumnsOnInsertionSnafu, FindRegionLeaderSnafu, InvalidInsertRequestSnafu,
-    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
+    JoinTaskSnafu, RequestInsertsSnafu, Result, TableCacheNotGetSnafu, TableNotFoundSnafu,
 };
 use crate::expr_factory::CreateExprFactory;
 use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::insert::{ColumnToRow, RowToRegion, StatementToRegion, TableToRegion};
 use crate::statement::StatementExecutor;
 
+type TableCacheRef = Arc<Cache<String, TableRef>>;
+
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_manager: DatanodeManagerRef,
+    table_cache: TableCacheRef,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -67,10 +73,17 @@ impl Inserter {
         partition_manager: PartitionRuleManagerRef,
         datanode_manager: DatanodeManagerRef,
     ) -> Self {
+        let table_cache = Arc::new(
+            CacheBuilder::new(65536)
+                .time_to_live(Duration::from_secs(10 * 60))
+                .time_to_idle(Duration::from_secs(5 * 60))
+                .build(),
+        );
         Self {
             catalog_manager,
             partition_manager,
             datanode_manager,
+            table_cache,
         }
     }
 
@@ -355,10 +368,24 @@ impl Inserter {
         schema: &str,
         table: &str,
     ) -> Result<Option<TableRef>> {
-        self.catalog_manager
-            .table(catalog, schema, table)
-            .await
-            .context(CatalogSnafu)
+        let key = format!("{}.{}.{}", catalog, schema, table);
+        let init = async {
+            self.catalog_manager
+                .table(catalog, schema, table)
+                .await
+                .map(|table| table.with_context(|| TableCacheNotGetSnafu { key: key.clone() }))
+                .context(CatalogSnafu)?
+        };
+        match self.table_cache.try_get_with_by_ref(&key, init).await {
+            Ok(table) => Ok(Some(table)),
+            Err(err) => match err.as_ref() {
+                TableCacheNotGet { .. } => Ok(None),
+                _ => Err(err),
+            },
+        }
+        .map_err(|err| GetTableCache {
+            err_msg: err.to_string(),
+        })
     }
 
     async fn alter_table_on_demand(

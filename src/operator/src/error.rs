@@ -522,6 +522,12 @@ pub enum Error {
 
     #[snafu(display("Failed to create logical tables: {}", reason))]
     CreateLogicalTables { reason: String, location: Location },
+
+    #[snafu(display("Get null from table cache, key: {}", key))]
+    TableCacheNotGet { key: String, location: Location },
+
+    #[snafu(display("Failed to get table cache, err: {}", err_msg))]
+    GetTableCache { err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -646,6 +652,8 @@ impl ErrorExt for Error {
             | Error::EmptyCreateTableExpr { .. } => StatusCode::InvalidArguments,
 
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
+
+            Error::TableCacheNotGet { .. } | Error::GetTableCache { .. } => StatusCode::Internal,
         }
     }
 
