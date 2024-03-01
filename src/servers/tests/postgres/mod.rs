@@ -273,6 +273,7 @@ async fn test_server_secure_require_client_plain() -> Result<()> {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server-rsa.key".to_owned(),
+        watch: false,
     };
     let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
@@ -288,6 +289,7 @@ async fn test_server_secure_require_client_plain_with_pkcs8_priv_key() -> Result
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server-pkcs8.key".to_owned(),
+        watch: false,
     };
     let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
@@ -520,6 +522,7 @@ async fn do_simple_query_with_secure_server(
                 "tests/ssl/server-rsa.key".to_owned()
             }
         },
+        watch: false,
     };
 
     do_simple_query(server_tls, client_tls).await

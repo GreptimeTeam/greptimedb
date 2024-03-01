@@ -61,6 +61,8 @@ pub struct TlsOption {
     pub cert_path: String,
     #[serde(default)]
     pub key_path: String,
+    #[serde(default)]
+    pub watch: bool,
 }
 
 impl TlsOption {
@@ -138,6 +140,10 @@ impl TlsOption {
     pub fn key_path(&self) -> &Path {
         Path::new(&self.key_path)
     }
+
+    pub fn watch_enabled(&self) -> bool {
+        self.mode != TlsMode::Disable && self.watch
+    }
 }
 
 /// A mutable container for TLS server config
@@ -186,8 +192,8 @@ impl ReloadableTlsServerConfig {
     }
 }
 
-pub fn watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>) -> Result<()> {
-    if tls_server_config.get_tls_option().mode == TlsMode::Disable {
+pub fn maybe_watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>) -> Result<()> {
+    if !tls_server_config.get_tls_option().watch_enabled() {
         return Ok(());
     }
 
@@ -250,6 +256,7 @@ mod tests {
                 mode: Disable,
                 cert_path: "/path/to/cert_path".to_string(),
                 key_path: "/path/to/key_path".to_string(),
+                watch: false
             },
             TlsOption::new(
                 Some(Disable),
@@ -274,6 +281,7 @@ mod tests {
         assert!(matches!(t.mode, TlsMode::Disable));
         assert!(t.key_path.is_empty());
         assert!(t.cert_path.is_empty());
+        assert!(!t.watch_enabled());
 
         let setup = t.setup();
         let setup = setup.unwrap();
@@ -297,6 +305,7 @@ mod tests {
         assert!(matches!(t.mode, TlsMode::Prefer));
         assert!(!t.key_path.is_empty());
         assert!(!t.cert_path.is_empty());
+        assert!(!t.watch_enabled());
     }
 
     #[test]
@@ -316,6 +325,7 @@ mod tests {
         assert!(matches!(t.mode, TlsMode::Require));
         assert!(!t.key_path.is_empty());
         assert!(!t.cert_path.is_empty());
+        assert!(!t.watch_enabled());
     }
 
     #[test]
@@ -335,6 +345,7 @@ mod tests {
         assert!(matches!(t.mode, TlsMode::VerifyCa));
         assert!(!t.key_path.is_empty());
         assert!(!t.cert_path.is_empty());
+        assert!(!t.watch_enabled());
     }
 
     #[test]
@@ -354,6 +365,28 @@ mod tests {
         assert!(matches!(t.mode, TlsMode::VerifyFull));
         assert!(!t.key_path.is_empty());
         assert!(!t.cert_path.is_empty());
+        assert!(!t.watch_enabled());
+    }
+
+    #[test]
+    fn test_tls_option_watch_enabled() {
+        let s = r#"
+        {
+            "mode": "verify_full",
+            "cert_path": "/some_dir/some.crt",
+            "key_path": "/some_dir/some.key",
+            "watch": true
+        }
+        "#;
+
+        let t: TlsOption = serde_json::from_str(s).unwrap();
+
+        assert!(t.should_force_tls());
+
+        assert!(matches!(t.mode, TlsMode::VerifyFull));
+        assert!(!t.key_path.is_empty());
+        assert!(!t.cert_path.is_empty());
+        assert!(t.watch_enabled());
     }
 
     #[test]
@@ -377,12 +410,13 @@ mod tests {
                 .into_os_string()
                 .into_string()
                 .expect("failed to convert path to string"),
+            watch: true,
         };
 
         let server_config = Arc::new(
             ReloadableTlsServerConfig::try_new(server_tls).expect("failed to create server config"),
         );
-        watch_tls_config(server_config.clone()).expect("failed to watch server config");
+        maybe_watch_tls_config(server_config.clone()).expect("failed to watch server config");
 
         assert_eq!(0, server_config.get_version());
         assert!(server_config.get_server_config().is_some());
@@ -391,7 +425,7 @@ mod tests {
             .expect("failed to copy key to tmpdir");
 
         // waiting for async load
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(server_config.get_version() > 1);
         assert!(server_config.get_server_config().is_some());
     }

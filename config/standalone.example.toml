@@ -44,6 +44,8 @@ mode = "disable"
 cert_path = ""
 # Private key file path.
 key_path = ""
+# Watch for Certificate and key file change and auto reload
+watch = false
 
 # PostgresSQL server options.
 [postgres]
@@ -62,6 +64,8 @@ mode = "disable"
 cert_path = ""
 # private key file path.
 key_path = ""
+# Watch for Certificate and key file change and auto reload
+watch = false
 
 # OpenTSDB protocol options.
 [opentsdb]
@@ -118,7 +122,7 @@ sync_period = "1000ms"
 # Number of topics to be created upon start.
 # num_topics = 64
 # Topic selector type.
-# Available selector types: 
+# Available selector types:
 # - "round_robin" (default)
 # selector_type = "round_robin"
 # The prefix of topic name.
