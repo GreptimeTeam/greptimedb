@@ -20,6 +20,7 @@ show tables;
 +---------------------------------------+
 | Tables                                |
 +---------------------------------------+
+| build_info                            |
 | character_sets                        |
 | check_constraints                     |
 | collation_character_set_applicability |
@@ -31,6 +32,7 @@ show tables;
 | events                                |
 | files                                 |
 | global_status                         |
+| greptime_region_peers                 |
 | key_column_usage                      |
 | optimizer_trace                       |
 | parameters                            |
@@ -38,6 +40,7 @@ show tables;
 | profiling                             |
 | referential_constraints               |
 | routines                              |
+| runtime_metrics                       |
 | schema_privileges                     |
 | schemata                              |
 | session_status                        |
