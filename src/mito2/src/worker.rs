@@ -27,7 +27,7 @@ mod handle_write;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
@@ -62,6 +62,9 @@ use crate::wal::Wal;
 pub(crate) type WorkerId = u32;
 
 pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
+
+/// Interval to check whether regions should flush.
+pub(crate) const CHECK_REGION_INTERVAL: Duration = Duration::from_secs(60);
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
@@ -353,6 +356,7 @@ impl<S: LogStore> WorkerStarter<S> {
             listener: self.listener,
             cache_manager: self.cache_manager,
             intermediate_manager: self.intermediate_manager,
+            last_periodical_check_time: Instant::now(),
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -511,6 +515,8 @@ struct RegionWorkerLoop<S> {
     cache_manager: CacheManagerRef,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
+    /// Last time to check regions periodically.
+    last_periodical_check_time: Instant,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -541,6 +547,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
 
             self.handle_requests(&mut buffer).await;
+
+            self.handle_periodical_tasks();
         }
 
         self.clean().await;
@@ -627,6 +635,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             ddl.sender.send(res);
         }
+    }
+
+    /// Handle periodical tasks such as region auto flush.
+    fn handle_periodical_tasks(&mut self) {
+        if self.last_periodical_check_time.elapsed() < CHECK_REGION_INTERVAL {
+            return;
+        }
+
+        if let Err(e) = self.flush_periodically() {
+            error!(e; "Failed to flush regions periodically");
+        }
+
+        self.last_periodical_check_time = Instant::now();
     }
 
     /// Handles region background request

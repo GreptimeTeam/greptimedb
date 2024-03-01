@@ -176,6 +176,8 @@ pub enum FlushReason {
     Manual,
     /// Flush to alter table.
     Alter,
+    /// Flush periodically.
+    Periodically,
 }
 
 impl FlushReason {
@@ -432,17 +434,18 @@ impl FlushScheduler {
     ) -> Result<()> {
         debug_assert_eq!(region_id, task.region_id);
 
-        FLUSH_REQUESTS_TOTAL
-            .with_label_values(&[task.reason.as_str()])
-            .inc();
-
         let version = version_control.current().version;
-        if version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty() {
+        if version.memtables.is_empty() {
             debug_assert!(!self.region_status.contains_key(&region_id));
             // The region has nothing to flush.
             task.on_success();
             return Ok(());
         }
+
+        // Don't increase the counter if a region has nothing to flush.
+        FLUSH_REQUESTS_TOTAL
+            .with_label_values(&[task.reason.as_str()])
+            .inc();
 
         // Add this region to status map.
         let flush_status = self
