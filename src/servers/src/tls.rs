@@ -192,7 +192,7 @@ impl ReloadableTlsServerConfig {
     }
 }
 
-pub fn check_and_watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>) -> Result<()> {
+pub fn maybe_watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>) -> Result<()> {
     if !tls_server_config.get_tls_option().watch_enabled() {
         return Ok(());
     }
@@ -416,7 +416,7 @@ mod tests {
         let server_config = Arc::new(
             ReloadableTlsServerConfig::try_new(server_tls).expect("failed to create server config"),
         );
-        check_and_watch_tls_config(server_config.clone()).expect("failed to watch server config");
+        maybe_watch_tls_config(server_config.clone()).expect("failed to watch server config");
 
         assert_eq!(0, server_config.get_version());
         assert!(server_config.get_server_config().is_some());
