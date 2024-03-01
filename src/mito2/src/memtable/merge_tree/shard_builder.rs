@@ -60,11 +60,26 @@ impl ShardBuilder {
         }
     }
 
+    /// Write a key value with given pk_index (caller must ensure the pk_index exist in dict_builder)
+    pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: &KeyValue) {
+        assert_eq!(self.current_shard_id, pk_id.shard_id);
+        self.data_buffer.write_row(pk_id.pk_index, key_value);
+    }
+
     /// Write a key value with its encoded primary key.
-    pub fn write_with_key(&mut self, key: &[u8], key_value: KeyValue, metrics: &mut WriteMetrics) {
+    pub fn write_with_key(
+        &mut self,
+        primary_key: &[u8],
+        key_value: &KeyValue,
+        metrics: &mut WriteMetrics,
+    ) -> PkId {
         // Safety: we check whether the builder need to freeze before.
-        let pk_index = self.dict_builder.insert_key(key, metrics);
+        let pk_index = self.dict_builder.insert_key(primary_key, metrics);
         self.data_buffer.write_row(pk_index, key_value);
+        PkId {
+            shard_id: self.current_shard_id,
+            pk_index,
+        }
     }
 
     /// Returns true if the builder need to freeze.
@@ -261,7 +276,7 @@ mod tests {
         for key_values in &input {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
-                shard_builder.write_with_key(&key, kv, &mut metrics);
+                shard_builder.write_with_key(&key, &kv, &mut metrics);
             }
         }
         let shard = shard_builder
@@ -283,7 +298,7 @@ mod tests {
         for key_values in &input {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
-                shard_builder.write_with_key(&key, kv, &mut metrics);
+                shard_builder.write_with_key(&key, &kv, &mut metrics);
             }
         }
 

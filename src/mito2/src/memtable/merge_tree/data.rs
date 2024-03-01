@@ -216,7 +216,7 @@ impl DataBuffer {
     }
 
     /// Writes a row to data buffer.
-    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
+    pub fn write_row(&mut self, pk_index: PkIndex, kv: &KeyValue) {
         self.ts_builder.push_value_ref(kv.timestamp());
         self.pk_index_builder.push(Some(pk_index));
         self.sequence_builder.push(Some(kv.sequence()));
@@ -953,7 +953,7 @@ impl DataParts {
     }
 
     /// Writes a row into parts.
-    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
+    pub fn write_row(&mut self, pk_index: PkIndex, kv: &KeyValue) {
         self.active.write_row(pk_index, kv)
     }
 

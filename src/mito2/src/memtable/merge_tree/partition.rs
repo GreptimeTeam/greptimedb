@@ -64,8 +64,10 @@ impl Partition {
     /// Writes to the partition with a primary key.
     pub fn write_with_key(
         &self,
-        primary_key: &[u8],
+        primary_key: &mut Vec<u8>,
+        row_codec: &McmpRowCodec,
         key_value: KeyValue,
+        re_encode: bool,
         metrics: &mut WriteMetrics,
     ) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
@@ -76,17 +78,30 @@ impl Partition {
 
         // Finds key in shards, now we ensure one key only exists in one shard.
         if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
-            // Key already in shards.
-            inner.write_to_shard(pk_id, key_value);
+            inner.write_to_shard(pk_id, &key_value);
+            inner.num_rows += 1;
             return Ok(());
         }
 
-        // Write to the shard builder.
-        inner
-            .shard_builder
-            .write_with_key(primary_key, key_value, metrics);
-        inner.num_rows += 1;
+        // Key does not yet exist in shard or builder, encode and insert the full primary key.
+        if re_encode {
+            // `primary_key` is sparse, re-encode the full primary key.
+            let sparse_key = primary_key.clone();
+            primary_key.clear();
+            row_codec.encode_to_vec(key_value.primary_keys(), primary_key)?;
+            let pk_id = inner
+                .shard_builder
+                .write_with_key(primary_key, &key_value, metrics);
+            inner.pk_to_pk_id.insert(sparse_key, pk_id);
+        } else {
+            // `primary_key` is already the full primary key.
+            let pk_id = inner
+                .shard_builder
+                .write_with_key(primary_key, &key_value, metrics);
+            inner.pk_to_pk_id.insert(std::mem::take(primary_key), pk_id);
+        };
 
+        inner.num_rows += 1;
         Ok(())
     }
 
@@ -102,7 +117,7 @@ impl Partition {
             shard_id: 0,
             pk_index: 0,
         };
-        inner.shards[0].write_with_pk_id(pk_id, key_value);
+        inner.shards[0].write_with_pk_id(pk_id, &key_value);
         inner.num_rows += 1;
     }
 
@@ -583,7 +598,11 @@ impl Inner {
         self.pk_to_pk_id.get(primary_key).copied()
     }
 
-    fn write_to_shard(&mut self, pk_id: PkId, key_value: KeyValue) {
+    fn write_to_shard(&mut self, pk_id: PkId, key_value: &KeyValue) {
+        if pk_id.shard_id == self.shard_builder.current_shard_id() {
+            self.shard_builder.write_with_pk_id(pk_id, key_value);
+            return;
+        }
         for shard in &mut self.shards {
             if shard.shard_id == pk_id.shard_id {
                 shard.write_with_pk_id(pk_id, key_value);

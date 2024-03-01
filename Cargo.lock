@@ -5346,6 +5346,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-wal",
+ "criterion",
  "dashmap",
  "datafusion",
  "datafusion-common",

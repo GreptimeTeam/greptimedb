@@ -55,7 +55,7 @@ impl Shard {
     }
 
     /// Writes a key value into the shard.
-    pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: KeyValue) {
+    pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: &KeyValue) {
         debug_assert_eq!(self.shard_id, pk_id.shard_id);
 
         self.data_parts.write_row(pk_id.pk_index, key_value);
@@ -417,7 +417,7 @@ mod tests {
                     shard_id: shard.shard_id,
                     pk_index: *pk_index,
                 };
-                shard.write_with_pk_id(pk_id, kv);
+                shard.write_with_pk_id(pk_id, &kv);
             }
         }
         assert!(!shard.is_empty());

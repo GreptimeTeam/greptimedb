@@ -319,7 +319,7 @@ mod tests {
         );
 
         for kv in kvs.iter() {
-            buffer.write_row(pk_index, kv);
+            buffer.write_row(pk_index, &kv);
         }
 
         *sequence += rows;
