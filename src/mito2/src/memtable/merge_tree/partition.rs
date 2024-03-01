@@ -38,7 +38,7 @@ use crate::memtable::merge_tree::shard_builder::ShardBuilder;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
 use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
-use crate::row_converter::McmpRowCodec;
+use crate::row_converter::{McmpRowCodec, RowCodec};
 
 /// Key of a partition.
 pub type PartitionKey = u32;
