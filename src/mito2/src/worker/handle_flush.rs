@@ -77,7 +77,7 @@ impl<S> RegionWorkerLoop<S> {
         }
     }
 
-    /// Find some regions to flush to reduce write buffer usage.
+    /// Finds some regions to flush to reduce write buffer usage.
     fn flush_regions_on_engine_full(&mut self) -> Result<()> {
         let regions = self.regions.list_regions();
         let now = current_time_millis();
@@ -129,7 +129,38 @@ impl<S> RegionWorkerLoop<S> {
         Ok(())
     }
 
-    /// Create a flush task with specific `reason` for the `region`.
+    /// Flushes regions periodically.
+    pub(crate) fn flush_periodically(&mut self) -> Result<()> {
+        let regions = self.regions.list_regions();
+        let now = current_time_millis();
+        let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
+
+        for region in &regions {
+            if self.flush_scheduler.is_flush_requested(region.region_id) {
+                // Already flushing.
+                continue;
+            }
+
+            if region.last_flush_millis() < min_last_flush_time {
+                // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
+                let task = self.new_flush_task(
+                    region,
+                    FlushReason::Periodically,
+                    None,
+                    self.config.clone(),
+                );
+                self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Creates a flush task with specific `reason` for the `region`.
     pub(crate) fn new_flush_task(
         &self,
         region: &MitoRegionRef,
