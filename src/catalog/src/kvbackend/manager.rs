@@ -17,7 +17,9 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Weak};
 
 use async_stream::try_stream;
-use common_catalog::consts::{DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
+};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef, Context};
 use common_meta::error::Result as MetaResult;
@@ -97,8 +99,7 @@ impl KvBackendCatalogManager {
                 catalog_manager: me.clone(),
                 catalog_cache: Cache::new(DEFAULT_CACHED_CATALOG),
                 information_schema_provider: Arc::new(InformationSchemaProvider::new(
-                    // The catalog name is not used in system_catalog, so let it empty
-                    String::default(),
+                    DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                 )),
             },
