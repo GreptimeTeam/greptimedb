@@ -37,12 +37,32 @@ impl Default for TracingSampleOptions {
     }
 }
 
+/// Determine the sampling rate of a span according to the `rules` provided in `RuleSampler`.
+/// For spans that do not hit any `rules`, the `default_ratio` is used.
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TracingSampleRule {
     pub protocol: String,
-    pub request_types: Vec<String>,
+    pub request_types: HashSet<String>,
     pub ratio: f64,
+}
+
+impl TracingSampleRule {
+    pub fn match_rule(&self, protocol: &str, request_type: Option<&str>) -> Option<f64> {
+        if protocol == self.protocol {
+            if self.request_types.is_empty() {
+                Some(self.ratio)
+            } else if let Some(t) = request_type
+                && self.request_types.contains(t)
+            {
+                Some(self.ratio)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
 
 impl PartialEq for TracingSampleOptions {
@@ -65,61 +85,11 @@ pub fn create_sampler(opt: &TracingSampleOptions) -> Box<dyn ShouldSample> {
     if opt.rules.is_empty() {
         Box::new(Sampler::TraceIdRatioBased(opt.default_ratio))
     } else {
-        Box::new(RuleSampler::new(opt))
+        Box::new(opt.clone())
     }
 }
 
-/// Determine the sampling rate of a span according to the `rules` provided in `RuleSampler`.
-/// For spans that do not hit any `rules`, the `default_ratio` is used.
-#[derive(Debug, Clone)]
-struct RuleSampler {
-    default_ratio: f64,
-    rules: Vec<Rule>,
-}
-
-#[derive(Debug, Clone)]
-struct Rule {
-    protocol: String,
-    request_types: HashSet<String>,
-    ratio: f64,
-}
-
-impl Rule {
-    pub fn new(rule: &TracingSampleRule) -> Self {
-        Self {
-            protocol: rule.protocol.clone(),
-            request_types: rule.request_types.iter().cloned().collect(),
-            ratio: rule.ratio,
-        }
-    }
-
-    pub fn match_rule(&self, protocol: &str, request_type: Option<&str>) -> Option<f64> {
-        if protocol == self.protocol {
-            if self.request_types.is_empty() {
-                Some(self.ratio)
-            } else if request_type.is_none() {
-                None
-            } else if self.request_types.contains(request_type.unwrap()) {
-                Some(self.ratio)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-}
-
-impl RuleSampler {
-    pub fn new(opt: &TracingSampleOptions) -> Self {
-        Self {
-            default_ratio: opt.default_ratio,
-            rules: opt.rules.iter().map(Rule::new).collect(),
-        }
-    }
-}
-
-impl ShouldSample for RuleSampler {
+impl ShouldSample for TracingSampleOptions {
     fn should_sample(
         &self,
         parent_context: Option<&opentelemetry::Context>,
@@ -138,11 +108,10 @@ impl ShouldSample for RuleSampler {
             }
         }
         let ratio = protocol
-            .map(|p| {
+            .and_then(|p| {
                 self.rules
                     .iter()
                     .find_map(|rule| rule.match_rule(p.as_ref(), request_type.as_deref()))
-                    .unwrap_or(self.default_ratio)
             })
             .unwrap_or(self.default_ratio);
         SamplingResult {
@@ -181,23 +150,25 @@ fn sample_based_on_probability(prob: f64, trace_id: TraceId) -> SamplingDecision
 
 #[cfg(test)]
 mod test {
-    use super::Rule;
+    use std::collections::HashSet;
+
+    use crate::tracing_sampler::TracingSampleRule;
 
     #[test]
     fn test_rule() {
-        let rule = Rule::new(&super::TracingSampleRule {
+        let rule = TracingSampleRule {
             protocol: "http".to_string(),
-            request_types: vec![],
+            request_types: HashSet::new(),
             ratio: 1.0,
-        });
+        };
         assert_eq!(rule.match_rule("not_http", None), None);
         assert_eq!(rule.match_rule("http", None), Some(1.0));
         assert_eq!(rule.match_rule("http", Some("abc")), Some(1.0));
-        let rule1 = Rule::new(&super::TracingSampleRule {
+        let rule1 = TracingSampleRule {
             protocol: "http".to_string(),
-            request_types: vec!["mysql".to_string()],
+            request_types: HashSet::from(["mysql".to_string()]),
             ratio: 1.0,
-        });
+        };
         assert_eq!(rule1.match_rule("http", None), None);
         assert_eq!(rule1.match_rule("http", Some("abc")), None);
         assert_eq!(rule1.match_rule("http", Some("mysql")), Some(1.0));
