@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use common_procedure::{watcher, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{info, tracing};
+use common_telemetry::{debug, info, tracing};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::TableId;
 
@@ -545,7 +545,7 @@ impl ProcedureExecutor for DdlManager {
             .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
         async move {
             let cluster_id = ctx.cluster_id.unwrap_or_default();
-            info!("Submitting Ddl task: {:?}", request.task);
+            debug!("Submitting Ddl task: {:?}", request.task);
             match request.task {
                 CreateTable(create_table_task) => {
                     handle_create_table_task(self, cluster_id, create_table_task).await
