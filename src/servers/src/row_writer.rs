@@ -212,7 +212,7 @@ fn write_by_semantic_type(
         let index = column_indexes.entry(name.clone()).or_insert(schema.len());
         if *index == schema.len() {
             schema.push(ColumnSchema {
-                column_name: name.to_string(),
+                column_name: name,
                 datatype: datatype as i32,
                 semantic_type: semantic_type as i32,
                 ..Default::default()

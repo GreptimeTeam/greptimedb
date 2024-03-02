@@ -78,6 +78,21 @@ lazy_static! {
         &[METRIC_DB_LABEL]
     )
     .unwrap();
+    pub static ref METRIC_HTTP_PROM_STORE_DECODE_ELAPSED: Histogram = register_histogram!(
+        "greptime_servers_http_prometheus_decode_elapsed",
+        "servers http prometheus decode elapsed",
+    )
+    .unwrap();
+    pub static ref METRIC_HTTP_PROM_STORE_DECODE_NUM_SERIES: Histogram = register_histogram!(
+        "greptime_servers_http_prometheus_decode_num_series",
+        "servers http prometheus decode num series",
+    )
+    .unwrap();
+    pub static ref METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED: Histogram = register_histogram!(
+        "greptime_servers_http_prometheus_convert_elapsed",
+        "servers http prometheus convert to gRPC request elapsed",
+    )
+    .unwrap();
     pub static ref METRIC_HTTP_PROM_STORE_READ_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_prometheus_read_elapsed",
         "servers http prometheus read elapsed",

@@ -82,12 +82,10 @@ impl CachedMetaKvBackendBuilder {
         let cache_ttl = self.cache_ttl.unwrap_or(DEFAULT_CACHE_TTL);
         let cache_tti = self.cache_tti.unwrap_or(DEFAULT_CACHE_TTI);
 
-        let cache = Arc::new(
-            CacheBuilder::new(cache_max_capacity)
-                .time_to_live(cache_ttl)
-                .time_to_idle(cache_tti)
-                .build(),
-        );
+        let cache = CacheBuilder::new(cache_max_capacity)
+            .time_to_live(cache_ttl)
+            .time_to_idle(cache_tti)
+            .build();
 
         let kv_backend = Arc::new(MetaKvBackend {
             client: self.meta_client,
@@ -104,7 +102,7 @@ impl CachedMetaKvBackendBuilder {
     }
 }
 
-pub type CacheBackendRef = Arc<Cache<Vec<u8>, KeyValue>>;
+pub type CacheBackend = Cache<Vec<u8>, KeyValue>;
 
 /// A wrapper of `MetaKvBackend` with cache support.
 ///
@@ -117,7 +115,7 @@ pub type CacheBackendRef = Arc<Cache<Vec<u8>, KeyValue>>;
 /// TTL and TTI for cache.
 pub struct CachedMetaKvBackend {
     kv_backend: KvBackendRef,
-    cache: CacheBackendRef,
+    cache: CacheBackend,
     name: String,
     version: AtomicUsize,
 }
@@ -317,12 +315,10 @@ impl CachedMetaKvBackend {
     // only for test
     #[cfg(test)]
     fn wrap(kv_backend: KvBackendRef) -> Self {
-        let cache = Arc::new(
-            CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
-                .time_to_live(DEFAULT_CACHE_TTL)
-                .time_to_idle(DEFAULT_CACHE_TTI)
-                .build(),
-        );
+        let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+            .time_to_live(DEFAULT_CACHE_TTL)
+            .time_to_idle(DEFAULT_CACHE_TTI)
+            .build();
 
         let name = format!("CachedKvBackend({})", kv_backend.name());
         Self {
@@ -333,7 +329,7 @@ impl CachedMetaKvBackend {
         }
     }
 
-    pub fn cache(&self) -> &CacheBackendRef {
+    pub fn cache(&self) -> &CacheBackend {
         &self.cache
     }
 
