@@ -35,7 +35,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use lazy_static::lazy_static;
 use partition::partition::{PartitionBound, PartitionDef};
-use query::sql::show_create_table;
+use query::sql::create_table_stmt;
 use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
@@ -88,8 +88,8 @@ impl StatementExecutor {
             .catalog_manager
             .table(&catalog, &schema, &table)
             .await
-            .context(error::CatalogSnafu)?
-            .context(error::TableNotFoundSnafu { table_name: &table })?;
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu { table_name: &table })?;
         let partitions = self
             .partition_manager
             .find_table_partitions(table_ref.table_info().table_id())
@@ -97,9 +97,8 @@ impl StatementExecutor {
             .context(error::FindTablePartitionRuleSnafu { table_name: table })?;
 
         let quote_style = ctx.quote_style();
-        let mut create_stmt =
-            show_create_table::create_table_stmt(&table_ref.table_info(), quote_style)
-                .context(error::ParseQuerySnafu)?;
+        let mut create_stmt = create_table_stmt(&table_ref.table_info(), quote_style)
+            .context(error::ParseQuerySnafu)?;
         create_stmt.name = stmt.table_name;
         create_stmt.if_not_exists = false;
 
@@ -205,7 +204,7 @@ impl StatementExecutor {
 
         table_info.ident.table_id = table_id;
 
-        let table_info = Arc::new(table_info.try_into().context(error::CreateTableInfoSnafu)?);
+        let table_info = Arc::new(table_info.try_into().context(CreateTableInfoSnafu)?);
         create_table.table_id = Some(api::v1::TableId { id: table_id });
 
         let table = DistTable::table(table_info);

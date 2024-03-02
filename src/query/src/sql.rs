@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod show_create_table;
+mod show_create_table;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,6 +37,7 @@ use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use session::context::QueryContextRef;
+pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables, ShowVariables};
@@ -260,7 +261,7 @@ pub fn show_create_table(
 
     let quote_style = query_ctx.quote_style();
 
-    let mut stmt = show_create_table::create_table_stmt(&table_info, quote_style)?;
+    let mut stmt = create_table_stmt(&table_info, quote_style)?;
     stmt.partitions = partitions.map(|mut p| {
         p.set_quote(quote_style);
         p

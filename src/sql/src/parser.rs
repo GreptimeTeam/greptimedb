@@ -75,21 +75,22 @@ impl<'a> ParserContext<'a> {
     }
 
     pub fn parse_table_name(sql: &'a str, dialect: &dyn Dialect) -> Result<ObjectName> {
-        let mut parser = Parser::new(dialect)
+        let parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
-
-        Self::_parse_table_name(&mut parser, sql)
+        ParserContext { parser, sql }.intern_parse_table_name()
     }
 
-    pub(crate) fn _parse_table_name(parser: &mut Parser, sql: &'a str) -> Result<ObjectName> {
-        let raw_table_name = parser.parse_object_name().context(error::UnexpectedSnafu {
-            sql,
-            expected: "a table name",
-            actual: parser.peek_token().to_string(),
-        })?;
-
+    pub(crate) fn intern_parse_table_name(&mut self) -> Result<ObjectName> {
+        let raw_table_name = self
+            .parser
+            .parse_object_name()
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a table name",
+                actual: self.parser.peek_token().to_string(),
+            })?;
         Ok(Self::canonicalize_object_name(raw_table_name))
     }
 

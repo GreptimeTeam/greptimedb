@@ -66,7 +66,7 @@ impl<'a> ParserContext<'a> {
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-        let table_name = ParserContext::_parse_table_name(&mut self.parser, self.sql)?;
+        let table_name = self.intern_parse_table_name()?;
         let (columns, constraints) = self.parse_columns()?;
         let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
         let options = self
@@ -128,10 +128,10 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
 
-        let table_name = ParserContext::_parse_table_name(&mut self.parser, self.sql)?;
+        let table_name = self.intern_parse_table_name()?;
 
         if self.parser.parse_keyword(Keyword::LIKE) {
-            let source_name = ParserContext::_parse_table_name(&mut self.parser, self.sql)?;
+            let source_name = self.intern_parse_table_name()?;
 
             return Ok(Statement::CreateTableLike(CreateTableLike {
                 table_name,
