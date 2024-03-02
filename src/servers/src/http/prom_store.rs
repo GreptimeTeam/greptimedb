@@ -128,13 +128,18 @@ pub async fn remote_read(
 }
 
 async fn decode_remote_write_request(body: Body) -> Result<WriteRequest> {
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
     let body = hyper::body::to_bytes(body)
         .await
         .context(error::HyperSnafu)?;
 
     let buf = snappy_decompress(&body[..])?;
 
-    WriteRequest::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)
+    let request = WriteRequest::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)?;
+    crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_NUM_SERIES
+        .observe(request.timeseries.len() as f64);
+
+    Ok(request)
 }
 
 async fn decode_remote_read_request(body: Body) -> Result<ReadRequest> {
