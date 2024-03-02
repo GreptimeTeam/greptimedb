@@ -471,6 +471,10 @@ pub fn check_permission(
         Statement::CreateTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }
+        Statement::CreateTableLike(stmt) => {
+            validate_param(&stmt.table_name, query_ctx)?;
+            validate_param(&stmt.source_name, query_ctx)?;
+        }
         Statement::DropTable(drop_stmt) => {
             validate_param(drop_stmt.table_name(), query_ctx)?;
         }

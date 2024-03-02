@@ -19,7 +19,9 @@ use sqlparser_derive::{Visit, VisitMut};
 use super::show::ShowVariables;
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::alter::AlterTable;
-use crate::statements::create::{CreateDatabase, CreateExternalTable, CreateTable};
+use crate::statements::create::{
+    CreateDatabase, CreateExternalTable, CreateTable, CreateTableLike,
+};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::DropTable;
@@ -45,6 +47,8 @@ pub enum Statement {
     CreateTable(CreateTable),
     // CREATE EXTERNAL TABLE
     CreateExternalTable(CreateExternalTable),
+    // CREATE TABLE ... LIKE
+    CreateTableLike(CreateTableLike),
     // DROP TABLE
     DropTable(DropTable),
     // CREATE DATABASE

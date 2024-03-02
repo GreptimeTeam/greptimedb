@@ -32,7 +32,7 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::create::{
-    CreateDatabase, CreateExternalTable, CreateTable, Partitions, TIME_INDEX,
+    CreateDatabase, CreateExternalTable, CreateTable, CreateTableLike, Partitions, TIME_INDEX,
 };
 use crate::statements::get_data_type_by_alias_name;
 use crate::statements::statement::Statement;
@@ -66,15 +66,7 @@ impl<'a> ParserContext<'a> {
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-        let raw_table_name = self
-            .parser
-            .parse_object_name()
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "a table name",
-                actual: self.peek_token_as_string(),
-            })?;
-        let table_name = Self::canonicalize_object_name(raw_table_name);
+        let table_name = self.intern_parse_table_name()?;
         let (columns, constraints) = self.parse_columns()?;
         let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
         let options = self
@@ -136,15 +128,16 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
 
-        let raw_table_name = self
-            .parser
-            .parse_object_name()
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "a table name",
-                actual: self.peek_token_as_string(),
-            })?;
-        let table_name = Self::canonicalize_object_name(raw_table_name);
+        let table_name = self.intern_parse_table_name()?;
+
+        if self.parser.parse_keyword(Keyword::LIKE) {
+            let source_name = self.intern_parse_table_name()?;
+
+            return Ok(Statement::CreateTableLike(CreateTableLike {
+                table_name,
+                source_name,
+            }));
+        }
 
         let (columns, constraints) = self.parse_columns()?;
 
@@ -738,6 +731,23 @@ mod tests {
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
+
+    #[test]
+    fn test_parse_create_table_like() {
+        let sql = "CREATE TABLE t1 LIKE t2";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        assert_eq!(1, stmts.len());
+        match &stmts[0] {
+            Statement::CreateTableLike(c) => {
+                assert_eq!(c.table_name.to_string(), "t1");
+                assert_eq!(c.source_name.to_string(), "t2");
+            }
+            _ => unreachable!(),
+        }
+    }
 
     #[test]
     fn test_validate_external_table_options() {
