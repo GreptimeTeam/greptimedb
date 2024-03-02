@@ -38,7 +38,9 @@ use crate::metrics::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 const DEFAULT_LOOKBACK: u64 = 5 * 60; // 5m
 pub const DEFAULT_LOOKBACK_STRING: &str = "5m";
 pub const EXPLAIN_NODE_NAME: &str = "EXPLAIN";
+pub const EXPLAIN_VERBOSE_NODE_NAME: &str = "EXPLAIN VERBOSE";
 pub const ANALYZE_NODE_NAME: &str = "ANALYZE";
+pub const ANALYZE_VERBOSE_NODE_NAME: &str = "ANALYZE VERBOSE";
 
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
@@ -75,8 +77,14 @@ impl QueryStatement {
             ANALYZE_NODE_NAME => Some(NodeExtension {
                 expr: Arc::new(AnalyzeExpr { expr: expr.clone() }),
             }),
+            ANALYZE_VERBOSE_NODE_NAME => Some(NodeExtension {
+                expr: Arc::new(AnalyzeVerboseExpr { expr: expr.clone() }),
+            }),
             EXPLAIN_NODE_NAME => Some(NodeExtension {
                 expr: Arc::new(ExplainExpr { expr: expr.clone() }),
+            }),
+            EXPLAIN_VERBOSE_NODE_NAME => Some(NodeExtension {
+                expr: Arc::new(ExplainVerboseExpr { expr: expr.clone() }),
             }),
             _ => None,
         }
@@ -235,7 +243,19 @@ macro_rules! define_node_ast_extension {
 }
 
 define_node_ast_extension!(Analyze, AnalyzeExpr, Expr, ANALYZE_NODE_NAME);
+define_node_ast_extension!(
+    AnalyzeVerbose,
+    AnalyzeVerboseExpr,
+    Expr,
+    ANALYZE_VERBOSE_NODE_NAME
+);
 define_node_ast_extension!(Explain, ExplainExpr, Expr, EXPLAIN_NODE_NAME);
+define_node_ast_extension!(
+    ExplainVerbose,
+    ExplainVerboseExpr,
+    Expr,
+    EXPLAIN_VERBOSE_NODE_NAME
+);
 
 #[cfg(test)]
 mod test {

@@ -29,20 +29,22 @@ pub struct TqlEval {
     pub query: String,
 }
 
-/// TQL EXPLAIN (like SQL EXPLAIN): doesn't execute the query but tells how the query would be executed.
+/// TQL EXPLAIN [VERBOSE] (like SQL EXPLAIN): doesn't execute the query but tells how the query would be executed.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlExplain {
     pub start: String,
     pub end: String,
     pub step: String,
     pub query: String,
+    pub is_verbose: bool,
 }
 
-/// TQL ANALYZE (like SQL ANALYZE): executes the plan and tells the detailed per-step execution time.
+/// TQL ANALYZE [VERBOSE] (like SQL ANALYZE): executes the plan and tells the detailed per-step execution time.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlAnalyze {
     pub start: String,
     pub end: String,
     pub step: String,
     pub query: String,
+    pub is_verbose: bool,
 }

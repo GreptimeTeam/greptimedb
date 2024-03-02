@@ -11,4 +11,14 @@ INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL ANALYZE (0, 10, '5s') test;
 
+-- analyze verbose at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (Duration.*) REDACTED
+TQL ANALYZE VERBOSE (0, 10, '5s') test;
+
 DROP TABLE test;
