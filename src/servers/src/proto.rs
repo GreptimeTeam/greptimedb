@@ -4,7 +4,6 @@ use std::fmt::{Debug, Formatter};
 use api::prom_store::remote::Sample;
 use bytes::{Buf, Bytes};
 use object_pool::Pool;
-use prost::bytes::BufMut;
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, DecodeContext, WireType};
 use prost::DecodeError;
@@ -17,22 +16,8 @@ pub struct PromLabel {
     pub value: Bytes,
 }
 
-impl prost::Message for PromLabel {
-    #[allow(unused_variables)]
-    fn encode_raw<B>(&self, buf: &mut B)
-    where
-        B: BufMut,
-    {
-        if self.name != b"" as &[u8] {
-            prost::encoding::bytes::encode(1u32, &self.name, buf);
-        }
-        if self.value != b"" as &[u8] {
-            prost::encoding::bytes::encode(2u32, &self.value, buf);
-        }
-    }
-
-    #[allow(unused_variables)]
-    fn merge_field<B>(
+impl PromLabel {
+    pub fn merge_field<B>(
         &mut self,
         tag: u32,
         wire_type: WireType,
@@ -62,20 +47,7 @@ impl prost::Message for PromLabel {
         }
     }
 
-    #[inline]
-    fn encoded_len(&self) -> usize {
-        0 + if self.name != b"" as &[u8] {
-            prost::encoding::bytes::encoded_len(1u32, &self.name)
-        } else {
-            0
-        } + if self.value != b"" as &[u8] {
-            prost::encoding::bytes::encoded_len(2u32, &self.value)
-        } else {
-            0
-        }
-    }
-
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.name.clear();
         self.value.clear();
     }
@@ -122,17 +94,8 @@ pub struct PromTimeSeries {
     pub samples: Vec<Sample>,
 }
 
-impl prost::Message for PromTimeSeries {
-    #[allow(unused_variables)]
-    fn encode_raw<B>(&self, buf: &mut B)
-    where
-        B: BufMut,
-    {
-        todo!()
-    }
-
-    #[allow(unused_variables)]
-    fn merge_field<B>(
+impl PromTimeSeries {
+    pub fn merge_field<B>(
         &mut self,
         tag: u32,
         wire_type: WireType,
@@ -146,7 +109,20 @@ impl prost::Message for PromTimeSeries {
             1u32 => {
                 let mut label = Label::default();
 
-                merge(WireType::LengthDelimited, &mut label, buf, ctx)?;
+                let len = decode_varint(buf)?;
+                let remaining = buf.remaining();
+                if len > remaining as u64 {
+                    return Err(DecodeError::new("buffer underflow"));
+                }
+
+                let limit = remaining - len as usize;
+                while buf.remaining() > limit {
+                    let (tag, wire_type) = decode_key(buf)?;
+                    label.merge_field(tag, wire_type, buf, ctx.clone())?;
+                }
+                if buf.remaining() != limit {
+                    return Err(DecodeError::new("delimited length exceeded"));
+                }
                 self.labels.push(label);
                 Ok(())
             }
@@ -160,12 +136,8 @@ impl prost::Message for PromTimeSeries {
             _ => prost::encoding::skip_field(wire_type, tag, buf, ctx),
         }
     }
-    #[inline]
-    fn encoded_len(&self) -> usize {
-        todo!()
-    }
 
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.labels.clear();
         self.samples.clear();
     }
@@ -206,35 +178,8 @@ impl Debug for PromWriteRequest {
     }
 }
 
-impl prost::Message for PromWriteRequest {
-    #[allow(unused_variables)]
-    fn encode_raw<B>(&self, buf: &mut B)
-    where
-        B: BufMut,
-    {
-        todo!()
-    }
-
-    #[allow(unused_variables)]
-    fn merge_field<B>(
-        &mut self,
-        tag: u32,
-        wire_type: WireType,
-        buf: &mut B,
-        ctx: DecodeContext,
-    ) -> Result<(), DecodeError>
-    where
-        B: Buf,
-    {
-        todo!()
-    }
-
-    #[inline]
-    fn encoded_len(&self) -> usize {
-        todo!()
-    }
-
-    fn merge<B>(&mut self, mut buf: B) -> Result<(), DecodeError>
+impl PromWriteRequest {
+    pub fn merge<B>(&mut self, mut buf: B) -> Result<(), DecodeError>
     where
         B: Buf,
         Self: Sized,
@@ -279,7 +224,7 @@ impl prost::Message for PromWriteRequest {
         Ok(())
     }
 
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         for mut ts in self.timeseries.drain(..) {
             ts.clear();
             self.timeseries_pool.attach(ts);
@@ -299,7 +244,6 @@ impl Default for PromWriteRequest {
 #[cfg(test)]
 mod tests {
     use base64::Engine;
-    use prost::Message;
 
     use crate::proto::PromWriteRequest;
 
@@ -313,8 +257,10 @@ mod tests {
         let mut request = PromWriteRequest::default();
         request.clear();
         request.merge(buf).unwrap();
-        println!("labels: {:?}", request.timeseries[0].labels);
-        println!("samples: {:?}", request.timeseries[0].samples);
-        println!("{}", request.timeseries.len());
+        assert_eq!(10000, request.timeseries.len());
+
+        for ts in &request.timeseries {
+            assert_eq!(1, ts.samples.len());
+        }
     }
 }
