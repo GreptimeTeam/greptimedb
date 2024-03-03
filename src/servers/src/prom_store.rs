@@ -303,7 +303,7 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
 
     let mut multi_table_data = MultiTableData::new();
 
-    for series in &request.timeseries {
+    for series in request.timeseries {
         let table_name = &series
             .labels
             .iter()
@@ -326,29 +326,54 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
             series.samples.len(),
         );
 
-        for Sample { value, timestamp } in &series.samples {
+        // labels
+        let kvs = series.labels.into_iter().filter_map(|label| {
+            if label.name == METRIC_NAME_LABEL {
+                None
+            } else {
+                Some((label.name, label.value))
+            }
+        });
+
+        if series.samples.len() == 1 {
             let mut one_row = table_data.alloc_one_row();
 
-            // labels
-            let kvs = series.labels.iter().filter_map(|label| {
-                if label.name == METRIC_NAME_LABEL {
-                    None
-                } else {
-                    Some((label.name.to_string(), label.value.as_str()))
-                }
-            });
             row_writer::write_tags(table_data, kvs, &mut one_row)?;
             // value
-            row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
+            row_writer::write_f64(
+                table_data,
+                GREPTIME_VALUE,
+                series.samples[0].value,
+                &mut one_row,
+            )?;
             // timestamp
             row_writer::write_ts_millis(
                 table_data,
                 GREPTIME_TIMESTAMP,
-                Some(*timestamp),
+                Some(series.samples[0].timestamp),
                 &mut one_row,
             )?;
 
             table_data.add_row(one_row);
+        } else {
+            for Sample { value, timestamp } in &series.samples {
+                let mut one_row = table_data.alloc_one_row();
+
+                // labels
+                let kvs = kvs.clone();
+                row_writer::write_tags(table_data, kvs, &mut one_row)?;
+                // value
+                row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
+                // timestamp
+                row_writer::write_ts_millis(
+                    table_data,
+                    GREPTIME_TIMESTAMP,
+                    Some(*timestamp),
+                    &mut one_row,
+                )?;
+
+                table_data.add_row(one_row);
+            }
         }
     }
 
