@@ -19,7 +19,6 @@ pub mod frontend;
 pub mod heartbeat;
 pub mod instance;
 pub(crate) mod metrics;
-pub mod proto;
 mod script;
 pub mod server;
 pub mod service_config;

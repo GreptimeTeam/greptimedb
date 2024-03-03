@@ -103,6 +103,7 @@ tonic-reflection = "0.10"
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 urlencoding = "2.1"
+object-pool = "0.5"
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
@@ -111,6 +112,7 @@ tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 auth = { workspace = true, features = ["testing"] }
 axum-test-helper = "0.3"
 catalog = { workspace = true, features = ["testing"] }
+criterion = "0.4"
 client.workspace = true
 common-base.workspace = true
 common-test-util.workspace = true
@@ -129,3 +131,7 @@ tokio-test = "0.4"
 
 [build-dependencies]
 common-version.workspace = true
+
+[[bench]]
+name = "bench_prom"
+harness = false

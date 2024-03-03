@@ -142,7 +142,6 @@ impl prost::Message for PromTimeSeries {
     where
         B: Buf,
     {
-        const STRUCT_NAME: &'static str = "PromTimeSeries";
         match tag {
             1u32 => {
                 let mut label = Label::default();

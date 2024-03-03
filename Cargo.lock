@@ -204,7 +204,7 @@ dependencies = [
  "common-macro",
  "common-time",
  "datatypes",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=96f1f0404f421ee560a4310c73c5071e49168168)",
+ "greptime-proto",
  "paste",
  "prost 0.12.3",
  "snafu",
@@ -2049,7 +2049,7 @@ dependencies = [
  "backtrace",
  "common-error",
  "console-subscriber",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=96f1f0404f421ee560a4310c73c5071e49168168)",
+ "greptime-proto",
  "lazy_static",
  "once_cell",
  "opentelemetry 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3467,7 +3467,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "auth",
- "base64 0.21.5",
  "bytes",
  "catalog",
  "chrono",
@@ -3489,7 +3488,6 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
- "criterion",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -3498,7 +3496,6 @@ dependencies = [
  "file-engine",
  "futures",
  "futures-util",
- "greptime-proto 0.1.0",
  "humantime-serde",
  "itertools 0.10.5",
  "lazy_static",
@@ -3506,7 +3503,6 @@ dependencies = [
  "meta-client",
  "meta-srv",
  "moka",
- "object-pool",
  "object-store",
  "openmetrics-parser",
  "opentelemetry-proto 0.3.0",
@@ -3803,19 +3799,6 @@ name = "glob"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
-
-[[package]]
-name = "greptime-proto"
-version = "0.1.0"
-dependencies = [
- "prost 0.12.3",
- "serde",
- "serde_json",
- "strum 0.25.0",
- "strum_macros 0.25.3",
- "tonic 0.10.2",
- "tonic-build 0.10.2",
-]
 
 [[package]]
 name = "greptime-proto"
@@ -4321,7 +4304,7 @@ dependencies = [
  "common-telemetry",
  "fst",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=96f1f0404f421ee560a4310c73c5071e49168168)",
+ "greptime-proto",
  "mockall",
  "pin-project",
  "prost 0.12.3",
@@ -7079,7 +7062,7 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=96f1f0404f421ee560a4310c73c5071e49168168)",
+ "greptime-proto",
  "lazy_static",
  "prometheus",
  "promql-parser",
@@ -7431,7 +7414,7 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=96f1f0404f421ee560a4310c73c5071e49168168)",
+ "greptime-proto",
  "humantime",
  "lazy_static",
  "meter-core",
@@ -9081,6 +9064,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-version",
+ "criterion",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -9100,6 +9084,7 @@ dependencies = [
  "mime_guess",
  "mysql_async",
  "notify",
+ "object-pool",
  "once_cell",
  "openmetrics-parser",
  "opensrv-mysql",

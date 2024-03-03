@@ -18,8 +18,8 @@ use api::prom_store::remote::WriteRequest;
 use base64::Engine;
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
-use frontend::proto::PromWriteRequest;
 use prost::Message;
+use servers::proto::PromWriteRequest;
 
 fn bench_decode_prom_request(c: &mut Criterion) {
     let data = base64::engine::general_purpose::STANDARD
