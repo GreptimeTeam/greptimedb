@@ -53,6 +53,7 @@ use crate::error::{
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
+use crate::metrics::OnDone;
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
@@ -101,6 +102,8 @@ impl DatafusionQueryEngine {
         dml: DmlStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        // TODO(yingwen): dml timer.
+
         ensure!(
             matches!(dml.op, WriteOp::InsertInto | WriteOp::Delete),
             UnsupportedExprSnafu {
@@ -418,16 +421,22 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let _timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
+        let exec_timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
-            1 => Ok(plan
-                .execute(0, task_ctx)
-                .context(error::ExecutePhysicalPlanSnafu)
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu))?,
+            1 => {
+                let stream = plan
+                    .execute(0, task_ctx)
+                    .context(error::ExecutePhysicalPlanSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+                let stream = OnDone::new(stream, move || {
+                    exec_timer.observe_duration();
+                });
+                Ok(Box::pin(stream))
+            }
             _ => {
                 let df_plan = Arc::new(DfPhysicalPlanAdapter(plan.clone()));
                 // merge into a single partition
@@ -444,6 +453,9 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(df_plan);
+                let stream = OnDone::new(Box::pin(stream), move || {
+                    exec_timer.observe_duration();
+                });
                 Ok(Box::pin(stream))
             }
         }

@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use datatypes::schema::SchemaRef;
+use futures::Stream;
+use futures_util::ready;
 use lazy_static::lazy_static;
 use prometheus::*;
 
@@ -61,4 +68,46 @@ lazy_static! {
         "query merge scan errors total"
     )
     .unwrap();
+}
+
+/// A stream to call the callback once a RecordBatch stream is done.
+pub struct OnDone<F> {
+    stream: SendableRecordBatchStream,
+    callback: Option<F>,
+}
+
+impl<F> OnDone<F> {
+    /// Attaches a `callback` to invoke once the `stream` is terminated.
+    pub fn new(stream: SendableRecordBatchStream, callback: F) -> Self {
+        Self {
+            stream,
+            callback: Some(callback),
+        }
+    }
+}
+
+impl<F: FnOnce() + Unpin> RecordBatchStream for OnDone<F> {
+    fn schema(&self) -> SchemaRef {
+        self.stream.schema()
+    }
+}
+
+impl<F: FnOnce() + Unpin> Stream for OnDone<F> {
+    type Item = common_recordbatch::error::Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match ready!(Pin::new(&mut self.stream).poll_next(cx)) {
+            Some(rb) => Poll::Ready(Some(rb)),
+            None => {
+                if let Some(callback) = self.callback.take() {
+                    callback();
+                }
+                Poll::Ready(None)
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.stream.size_hint()
+    }
 }

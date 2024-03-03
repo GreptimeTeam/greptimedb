@@ -47,6 +47,8 @@ use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
+use prometheus::HistogramTimer;
+use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -85,7 +87,6 @@ use crate::error::{
 };
 use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::heartbeat::HeartbeatTask;
-use crate::metrics;
 use crate::script::ScriptExecutor;
 
 #[async_trait]
@@ -276,7 +277,6 @@ impl SqlQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let _timer = metrics::METRIC_HANDLE_SQL_ELAPSED.start_timer();
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -336,7 +336,6 @@ impl SqlQueryHandler for Instance {
     }
 
     async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
-        let _timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
         // plan should be prepared before exec
         // we'll do check there
         self.query_engine
@@ -398,6 +397,19 @@ impl SqlQueryHandler for Instance {
     }
 }
 
+/// Attaches a timer to the output and observes it once the output is exhausted.
+pub fn attach_timer(output: Output, timer: HistogramTimer) -> Output {
+    match output {
+        Output::AffectedRows(_) | Output::RecordBatches(_) => output,
+        Output::Stream(stream, plan) => {
+            let stream = OnDone::new(stream, move || {
+                timer.observe_duration();
+            });
+            Output::Stream(Box::pin(stream), plan)
+        }
+    }
+}
+
 #[async_trait]
 impl PrometheusHandler for Instance {
     async fn do_query(
@@ -405,7 +417,6 @@ impl PrometheusHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        let _timer = metrics::METRIC_HANDLE_PROMQL_ELAPSED.start_timer();
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
