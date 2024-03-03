@@ -37,8 +37,8 @@ use crate::error::{
 use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
-const CATALOG_NAME: &str = "catalog_name";
-const SCHEMA_NAME: &str = "schema_name";
+pub const CATALOG_NAME: &str = "catalog_name";
+pub const SCHEMA_NAME: &str = "schema_name";
 const DEFAULT_CHARACTER_SET_NAME: &str = "default_character_set_name";
 const DEFAULT_COLLATION_NAME: &str = "default_collation_name";
 const INIT_CAPACITY: usize = 42;

@@ -19,9 +19,9 @@ mod partitions;
 mod predicate;
 mod region_peers;
 mod runtime_metrics;
-mod schemata;
+pub mod schemata;
 mod table_names;
-mod tables;
+pub mod tables;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};

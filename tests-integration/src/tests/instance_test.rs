@@ -440,39 +440,27 @@ async fn test_execute_query(instance: Arc<dyn MockInstance>) {
 async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
+    let expected = "\
++--------------------+
+| Database           |
++--------------------+
+| greptime_private   |
+| information_schema |
+| public             |
++--------------------+\
+";
     let output = execute_sql(&instance, "show databases").await;
-    match output {
-        Output::RecordBatches(databases) => {
-            let databases = databases.take();
-            assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), 3);
-
-            assert_eq!(
-                *databases[0].column(0),
-                Arc::new(StringVector::from(vec![
-                    Some("greptime_private"),
-                    Some("information_schema"),
-                    Some("public")
-                ])) as VectorRef
-            );
-        }
-        _ => unreachable!(),
-    }
+    check_unordered_output_stream(output, expected).await;
 
     let output = execute_sql(&instance, "show databases like '%bl%'").await;
-    match output {
-        Output::RecordBatches(databases) => {
-            let databases = databases.take();
-            assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), 1);
-
-            assert_eq!(
-                *databases[0].column(0),
-                Arc::new(StringVector::from(vec![Some("public")])) as VectorRef
-            );
-        }
-        _ => unreachable!(),
-    }
+    let expected = "\
++----------+
+| Database |
++----------+
+| public   |
++----------+\
+";
+    check_unordered_output_stream(output, expected).await;
 
     let expected = "\
 +---------+
@@ -500,21 +488,41 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 ";
     check_unordered_output_stream(output, expected).await;
 
+    let output = execute_sql(&instance, "SHOW FULL TABLES WHERE Table_type != 'VIEW'").await;
+    let expected = "\
++---------+-----------------+
+| Tables  | Table_type      |
++---------+-----------------+
+| demo    | BASE TABLE      |
+| numbers | LOCAL TEMPORARY |
++---------+-----------------+\
+";
+    check_unordered_output_stream(output, expected).await;
+
+    let output = execute_sql(
+        &instance,
+        "SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'",
+    )
+    .await;
+    let expected = "\
++--------+------------+
+| Tables | Table_type |
++--------+------------+
+| demo   | BASE TABLE |
++--------+------------+\
+";
+    check_unordered_output_stream(output, expected).await;
+
     // show tables like [string]
     let output = execute_sql(&instance, "show tables like 'de%'").await;
-    match output {
-        Output::RecordBatches(databases) => {
-            let databases = databases.take();
-            assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), 1);
-
-            assert_eq!(
-                *databases[0].column(0),
-                Arc::new(StringVector::from(vec![Some("demo")])) as VectorRef
-            );
-        }
-        _ => unreachable!(),
-    }
+    let expected = "\
++--------+
+| Tables |
++--------+
+| demo   |
++--------+\
+";
+    check_unordered_output_stream(output, expected).await;
 }
 
 #[apply(both_instances_cases)]

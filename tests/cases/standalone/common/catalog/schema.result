@@ -13,16 +13,16 @@ Affected Rows: 1
 SHOW DATABASES LIKE '%public%';
 
 +--------------------+
-| Schemas            |
+| Database           |
 +--------------------+
 | public             |
 | test_public_schema |
 +--------------------+
 
-SHOW DATABASES WHERE Schemas='test_public_schema';
+SHOW DATABASES WHERE Database = 'test_public_schema';
 
 +--------------------+
-| Schemas            |
+| Database           |
 +--------------------+
 | test_public_schema |
 +--------------------+
@@ -81,6 +81,14 @@ SHOW TABLES;
 | hello  |
 +--------+
 
+SHOW FULL TABLES WHERE Table_type != 'VIEW';
+
++--------+------------+
+| Tables | Table_type |
++--------+------------+
+| hello  | BASE TABLE |
++--------+------------+
+
 DROP TABLE hello;
 
 Affected Rows: 0
@@ -91,10 +99,8 @@ Error: 4001(TableNotFound), Table not found: greptime.test_public_schema.hello
 
 SHOW TABLES FROM test_public_schema;
 
-+--------+
-| Tables |
-+--------+
-+--------+
+++
+++
 
 SHOW TABLES FROM public;
 
@@ -104,7 +110,7 @@ SHOW TABLES FROM public;
 | numbers |
 +---------+
 
-SHOW TABLES FROM public WHERE Tables='numbers';
+SHOW TABLES FROM public WHERE Tables = 'numbers';
 
 +---------+
 | Tables  |
