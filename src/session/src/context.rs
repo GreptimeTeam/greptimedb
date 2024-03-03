@@ -183,13 +183,6 @@ impl QueryContext {
             '`'
         }
     }
-
-    // Wrapping the column name with current dialect quote style
-    pub fn quote_identifier(&self, name: &str) -> String {
-        let quote = self.quote_style();
-
-        format!("{quote}{name}{quote}")
-    }
 }
 
 impl QueryContextBuilder {

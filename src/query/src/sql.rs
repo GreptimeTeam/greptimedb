@@ -133,7 +133,7 @@ pub async fn show_databases(
     .await
 }
 
-/// Cast a `show` statement execution into a query from tabls in  `information_schema`.
+/// Cast a `show` statement execution into a query from tables in  `information_schema`.
 /// - `table_name`: the table name in `information_schema`,
 /// - `projects`: query projection, a list of `(column, renamed_column)`,
 /// - `filters`: filter expressions for query,
@@ -206,7 +206,7 @@ async fn query_from_information_schema_table(
         }
         ShowKind::Where(filter) => {
             // Cast the results into VIEW for `where` clause,
-            // it is evaluated against the column names displayed by the SHOW statement.
+            // which is evaluated against the column names displayed by the SHOW statement.
             let view = dataframe.into_view();
             let dataframe = SessionContext::new_with_state(
                 query_engine
@@ -224,7 +224,7 @@ async fn query_from_information_schema_table(
                 .expect("Must be the datafusion planner");
 
             let filter = planner
-                .sql_to_expr(filter, dataframe.schema(), false, query_ctx.clone())
+                .sql_to_expr(filter, dataframe.schema(), false, query_ctx)
                 .await?;
 
             // Apply the `where` clause filters
@@ -255,7 +255,7 @@ pub async fn show_tables(
         query_ctx.current_schema().to_owned()
     };
 
-    // (dennis): MySQL rename `table_name` into `Tables_in_{schema}`, but we use `Tables` instead.
+    // (dennis): MySQL rename `table_name` to `Tables_in_{schema}`, but we use `Tables` instead.
     // I don't want to modify this currently, our dashboard may depend on it.
     let projects = if stmt.full {
         vec![
