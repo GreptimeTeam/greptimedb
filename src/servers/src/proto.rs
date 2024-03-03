@@ -153,6 +153,7 @@ impl prost::Message for PromTimeSeries {
             2u32 => {
                 let mut sample = Sample::default();
                 merge(WireType::LengthDelimited, &mut sample, buf, ctx)?;
+                self.samples.push(sample);
                 Ok(())
             }
             3u32 => prost::encoding::skip_field(wire_type, tag, buf, ctx),
@@ -173,8 +174,8 @@ impl prost::Message for PromTimeSeries {
 impl Default for PromTimeSeries {
     fn default() -> Self {
         PromTimeSeries {
-            labels: ::core::default::Default::default(),
-            samples: ::core::default::Default::default(),
+            labels: Default::default(),
+            samples: Default::default(),
         }
     }
 }
@@ -312,8 +313,8 @@ mod tests {
         let mut request = PromWriteRequest::default();
         request.clear();
         request.merge(buf).unwrap();
-        println!("{:?}", request.timeseries[0].labels);
-        println!("{:?}", request.timeseries.last().unwrap().labels);
+        println!("labels: {:?}", request.timeseries[0].labels);
+        println!("samples: {:?}", request.timeseries[0].samples);
         println!("{}", request.timeseries.len());
     }
 }
