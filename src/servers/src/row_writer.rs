@@ -140,16 +140,10 @@ impl MultiTableData {
 
 pub fn write_tags(
     table_data: &mut TableData,
-    kvs: impl Iterator<Item = (String, impl ToString)>,
+    kvs: impl Iterator<Item = (String, String)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
-    let ktv_iter = kvs.map(|(k, v)| {
-        (
-            k,
-            ColumnDataType::String,
-            ValueData::StringValue(v.to_string()),
-        )
-    });
+    let ktv_iter = kvs.map(|(k, v)| (k, ColumnDataType::String, ValueData::StringValue(v)));
     write_by_semantic_type(table_data, SemanticType::Tag, ktv_iter, one_row)
 }
 
@@ -209,18 +203,22 @@ fn write_by_semantic_type(
     } = table_data;
 
     for (name, datatype, value) in ktv_iter {
-        let index = column_indexes.entry(name.clone()).or_insert(schema.len());
-        if *index == schema.len() {
+        let index = column_indexes.get(&name);
+        if let Some(index) = index {
+            check_schema(datatype, semantic_type, &schema[*index])?;
+            one_row[*index].value_data = Some(value);
+        } else {
+            let index = schema.len();
             schema.push(ColumnSchema {
-                column_name: name,
+                column_name: name.clone(),
                 datatype: datatype as i32,
                 semantic_type: semantic_type as i32,
                 ..Default::default()
             });
-            one_row.push(value.into());
-        } else {
-            check_schema(datatype, semantic_type, &schema[*index])?;
-            one_row[*index].value_data = Some(value);
+            column_indexes.insert(name, index);
+            one_row.push(Value {
+                value_data: Some(value),
+            });
         }
     }
 
@@ -264,22 +262,24 @@ pub fn write_ts_precision(
         }
     };
 
-    let index = column_indexes.entry(name.clone()).or_insert(schema.len());
-    if *index == schema.len() {
-        schema.push(ColumnSchema {
-            column_name: name,
-            datatype: ColumnDataType::TimestampMillisecond as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-            ..Default::default()
-        });
-        one_row.push(ValueData::TimestampMillisecondValue(ts).into())
-    } else {
+    let index = column_indexes.get(&name);
+    if let Some(index) = index {
         check_schema(
             ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
             &schema[*index],
         )?;
         one_row[*index].value_data = Some(ValueData::TimestampMillisecondValue(ts));
+    } else {
+        let index = schema.len();
+        schema.push(ColumnSchema {
+            column_name: name.clone(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        });
+        column_indexes.insert(name, index);
+        one_row.push(ValueData::TimestampMillisecondValue(ts).into())
     }
 
     Ok(())

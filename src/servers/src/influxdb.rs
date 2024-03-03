@@ -53,7 +53,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
 
             // tags
             if let Some(tags) = tags {
-                let kvs = tags.iter().map(|(k, v)| (k.to_string(), v.as_str()));
+                let kvs = tags.iter().map(|(k, v)| (k.to_string(), v.to_string()));
                 row_writer::write_tags(table_data, kvs, &mut one_row)?;
             }
 
