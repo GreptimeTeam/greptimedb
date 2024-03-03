@@ -19,25 +19,33 @@ use base64::Engine;
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use prost::Message;
+use servers::prom_store::to_grpc_row_insert_requests;
 use servers::proto::PromWriteRequest;
 
 fn bench_decode_prom_request(c: &mut Criterion) {
     let data = base64::engine::general_purpose::STANDARD
         .decode(std::fs::read("/tmp/prom-data/1709380539690445357").unwrap())
         .unwrap();
-    let mut request = PromWriteRequest::default();
-
-    // let mut request = WriteRequest::default();
-    // let mut request = greptime_proto_bytes::prometheus::remote::WriteRequest::default();
+    let mut prom_request = PromWriteRequest::default();
+    let mut request = WriteRequest::default();
 
     let data = Bytes::from(data);
     c.benchmark_group("decode_prom")
-        .measurement_time(Duration::from_secs(1))
-        .bench_function("merge", |b| {
+        .measurement_time(Duration::from_secs(10))
+        .bench_function("decode_write_request", |b| {
             b.iter(|| {
                 let data = data.clone();
                 request.clear();
                 request.merge(data).unwrap();
+                let _ = to_grpc_row_insert_requests(&request).unwrap();
+            });
+        })
+        .bench_function("decode_prom_write_request", |b| {
+            b.iter(|| {
+                let data = data.clone();
+                prom_request.clear();
+                prom_request.merge(data).unwrap();
+                // todo: convert to RowInsertRequests.
             });
         });
 }

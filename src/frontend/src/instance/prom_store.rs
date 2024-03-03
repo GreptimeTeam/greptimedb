@@ -167,7 +167,7 @@ impl PromStoreProtocolHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
             .context(AuthSnafu)?;
 
-        let (requests, samples) = prom_store::to_grpc_row_insert_requests(request)?;
+        let (requests, samples) = prom_store::to_grpc_row_insert_requests(&request)?;
         if with_metric_engine {
             let physical_table = ctx
                 .extension(PHYSICAL_TABLE_PARAM)
@@ -265,7 +265,7 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
         ctx: QueryContextRef,
         _: bool,
     ) -> ServerResult<()> {
-        let (requests, _) = prom_store::to_grpc_row_insert_requests(request)?;
+        let (requests, _) = prom_store::to_grpc_row_insert_requests(&request)?;
         self.inserter
             .handle_metric_row_inserts(
                 requests,
