@@ -1,8 +1,10 @@
-I hereby agree to the terms of the [GreptimeDB CLA](https://gist.github.com/xtang/6378857777706e568c1949c7578592cc)
+I hereby agree to the terms of the [GreptimeDB CLA](https://github.com/GreptimeTeam/.github/blob/main/CLA.md).
+
+## Refer to a related PR or issue link (optional)
 
 ## What's changed and what's your intention?
 
-_PLEASE DO NOT LEAVE THIS EMPTY !!!_
+__!!! DO NOT LEAVE THIS BLOCK EMPTY !!!__
 
 Please explain IN DETAIL what the changes are in this PR and why they are needed:
 
@@ -16,5 +18,3 @@ Please explain IN DETAIL what the changes are in this PR and why they are needed
 - [ ]  I have written the necessary rustdoc comments.
 - [ ]  I have added the necessary unit tests and integration tests.
 - [x]  This PR does not require documentation updates.
-
-## Refer to a related PR or issue link (optional)
