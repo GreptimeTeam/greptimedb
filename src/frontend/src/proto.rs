@@ -1,0 +1,320 @@
+use core::fmt;
+use std::fmt::{Debug, Formatter};
+
+use api::prom_store::remote::Sample;
+use bytes::{Buf, Bytes};
+use object_pool::Pool;
+use prost::bytes::BufMut;
+use prost::encoding::message::merge;
+use prost::encoding::{decode_key, decode_varint, DecodeContext, WireType};
+use prost::DecodeError;
+
+// pub type Label = greptime_proto::prometheus::remote::Label;
+pub type Label = PromLabel;
+
+pub struct PromLabel {
+    pub name: Bytes,
+    pub value: Bytes,
+}
+
+impl prost::Message for PromLabel {
+    #[allow(unused_variables)]
+    fn encode_raw<B>(&self, buf: &mut B)
+    where
+        B: BufMut,
+    {
+        if self.name != b"" as &[u8] {
+            prost::encoding::bytes::encode(1u32, &self.name, buf);
+        }
+        if self.value != b"" as &[u8] {
+            prost::encoding::bytes::encode(2u32, &self.value, buf);
+        }
+    }
+
+    #[allow(unused_variables)]
+    fn merge_field<B>(
+        &mut self,
+        tag: u32,
+        wire_type: WireType,
+        buf: &mut B,
+        ctx: DecodeContext,
+    ) -> Result<(), DecodeError>
+    where
+        B: Buf,
+    {
+        const STRUCT_NAME: &'static str = "PromLabel";
+        match tag {
+            1u32 => {
+                let value = &mut self.name;
+                prost::encoding::bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
+                    error.push(STRUCT_NAME, "name");
+                    error
+                })
+            }
+            2u32 => {
+                let value = &mut self.value;
+                prost::encoding::bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
+                    error.push(STRUCT_NAME, "value");
+                    error
+                })
+            }
+            _ => prost::encoding::skip_field(wire_type, tag, buf, ctx),
+        }
+    }
+
+    #[inline]
+    fn encoded_len(&self) -> usize {
+        0 + if self.name != b"" as &[u8] {
+            prost::encoding::bytes::encoded_len(1u32, &self.name)
+        } else {
+            0
+        } + if self.value != b"" as &[u8] {
+            prost::encoding::bytes::encoded_len(2u32, &self.value)
+        } else {
+            0
+        }
+    }
+
+    fn clear(&mut self) {
+        self.name.clear();
+        self.value.clear();
+    }
+}
+
+impl Default for PromLabel {
+    fn default() -> Self {
+        PromLabel {
+            name: Default::default(),
+            value: Default::default(),
+        }
+    }
+}
+
+impl Debug for PromLabel {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut builder = f.debug_struct("PromLabel");
+        let builder = {
+            let wrapper = {
+                #[allow(non_snake_case)]
+                fn ScalarWrapper<T>(v: T) -> T {
+                    v
+                }
+                ScalarWrapper(&self.name)
+            };
+            builder.field("name", &wrapper)
+        };
+        let builder = {
+            let wrapper = {
+                #[allow(non_snake_case)]
+                fn ScalarWrapper<T>(v: T) -> T {
+                    v
+                }
+                ScalarWrapper(&self.value)
+            };
+            builder.field("value", &wrapper)
+        };
+        builder.finish()
+    }
+}
+
+pub struct PromTimeSeries {
+    pub labels: Vec<Label>,
+    pub samples: Vec<Sample>,
+}
+
+impl prost::Message for PromTimeSeries {
+    #[allow(unused_variables)]
+    fn encode_raw<B>(&self, buf: &mut B)
+    where
+        B: BufMut,
+    {
+        todo!()
+    }
+
+    #[allow(unused_variables)]
+    fn merge_field<B>(
+        &mut self,
+        tag: u32,
+        wire_type: WireType,
+        buf: &mut B,
+        ctx: DecodeContext,
+    ) -> Result<(), DecodeError>
+    where
+        B: Buf,
+    {
+        const STRUCT_NAME: &'static str = "PromTimeSeries";
+        match tag {
+            1u32 => {
+                let mut label = Label::default();
+
+                merge(WireType::LengthDelimited, &mut label, buf, ctx)?;
+                self.labels.push(label);
+                Ok(())
+            }
+            2u32 => {
+                let mut sample = Sample::default();
+                merge(WireType::LengthDelimited, &mut sample, buf, ctx)?;
+                Ok(())
+            }
+            3u32 => prost::encoding::skip_field(wire_type, tag, buf, ctx),
+            _ => prost::encoding::skip_field(wire_type, tag, buf, ctx),
+        }
+    }
+    #[inline]
+    fn encoded_len(&self) -> usize {
+        todo!()
+    }
+
+    fn clear(&mut self) {
+        self.labels.clear();
+        self.samples.clear();
+    }
+}
+
+impl Default for PromTimeSeries {
+    fn default() -> Self {
+        PromTimeSeries {
+            labels: ::core::default::Default::default(),
+            samples: ::core::default::Default::default(),
+        }
+    }
+}
+
+impl Debug for PromTimeSeries {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut builder = f.debug_struct("PromTimeSeries");
+        let builder = {
+            let wrapper = &self.labels;
+            builder.field("labels", &wrapper)
+        };
+        let builder = {
+            let wrapper = &self.samples;
+            builder.field("samples", &wrapper)
+        };
+        builder.finish()
+    }
+}
+
+pub struct PromWriteRequest {
+    pub timeseries: Vec<PromTimeSeries>,
+    timeseries_pool: Pool<PromTimeSeries>,
+}
+
+impl Debug for PromWriteRequest {
+    fn fmt(&self, _f: &mut Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+impl prost::Message for PromWriteRequest {
+    #[allow(unused_variables)]
+    fn encode_raw<B>(&self, buf: &mut B)
+    where
+        B: BufMut,
+    {
+        todo!()
+    }
+
+    #[allow(unused_variables)]
+    fn merge_field<B>(
+        &mut self,
+        tag: u32,
+        wire_type: WireType,
+        buf: &mut B,
+        ctx: DecodeContext,
+    ) -> Result<(), DecodeError>
+    where
+        B: Buf,
+    {
+        todo!()
+    }
+
+    #[inline]
+    fn encoded_len(&self) -> usize {
+        todo!()
+    }
+
+    fn merge<B>(&mut self, mut buf: B) -> Result<(), DecodeError>
+    where
+        B: Buf,
+        Self: Sized,
+    {
+        let ctx = DecodeContext::default();
+        while buf.has_remaining() {
+            let (tag, wire_type) = decode_key(&mut buf)?;
+            assert_eq!(WireType::LengthDelimited, wire_type);
+
+            match tag {
+                1u32 => {
+                    let (_, mut series) = self
+                        .timeseries_pool
+                        .pull(|| PromTimeSeries::default())
+                        .detach();
+
+                    // rewrite merge loop
+                    let len = decode_varint(&mut buf)?;
+                    let remaining = buf.remaining();
+                    if len > remaining as u64 {
+                        return Err(DecodeError::new("buffer underflow"));
+                    }
+
+                    let limit = remaining - len as usize;
+                    while buf.remaining() > limit {
+                        let (tag, wire_type) = decode_key(&mut buf)?;
+                        series.merge_field(tag, wire_type, &mut buf, ctx.clone())?;
+                    }
+                    if buf.remaining() != limit {
+                        return Err(DecodeError::new("delimited length exceeded"));
+                    }
+
+                    self.timeseries.push(series);
+                }
+                3u32 => {
+                    // we can ignore metadata now.
+                    prost::encoding::skip_field(wire_type, tag, &mut buf, ctx.clone())?;
+                }
+                _ => prost::encoding::skip_field(wire_type, tag, &mut buf, ctx.clone())?,
+            }
+        }
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        for mut ts in self.timeseries.drain(..) {
+            ts.clear();
+            self.timeseries_pool.attach(ts);
+        }
+    }
+}
+
+impl Default for PromWriteRequest {
+    fn default() -> Self {
+        PromWriteRequest {
+            timeseries: Vec::with_capacity(10000),
+            timeseries_pool: Pool::new(10000, || PromTimeSeries::default()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine;
+    use prost::Message;
+
+    use crate::proto::PromWriteRequest;
+
+    #[test]
+    fn test_decode_write_request() {
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(std::fs::read("/tmp/prom-data/1709380539690445357").unwrap())
+            .unwrap();
+
+        let buf = data.as_slice();
+        let mut request = PromWriteRequest::default();
+        request.clear();
+        request.merge(buf).unwrap();
+        println!("{:?}", request.timeseries[0].labels);
+        println!("{:?}", request.timeseries.last().unwrap().labels);
+        println!("{}", request.timeseries.len());
+    }
+}

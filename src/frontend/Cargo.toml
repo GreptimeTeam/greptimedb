@@ -20,6 +20,7 @@ async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
 auth.workspace = true
+bytes.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 client.workspace = true
@@ -77,13 +78,21 @@ table.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
+base64 = "0.21.5"
+object-pool = "0.5"
+greptime-proto-bytes.workspace = true
 
 [dev-dependencies]
 catalog.workspace = true
 common-test-util.workspace = true
+criterion = "0.4"
 datanode.workspace = true
 futures = "0.3"
 meta-srv = { workspace = true, features = ["mock"] }
 strfmt = "0.2"
 tower = "0.4"
 uuid.workspace = true
+
+[[bench]]
+name = "bench_prom"
+harness = false

@@ -12,14 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+use criterion::criterion_main;
 
-pub mod error;
-pub mod frontend;
-pub mod heartbeat;
-pub mod instance;
-pub(crate) mod metrics;
-pub mod proto;
-mod script;
-pub mod server;
-pub mod service_config;
+mod prom_decode;
+
+criterion_main! {
+    prom_decode::benches
+}
