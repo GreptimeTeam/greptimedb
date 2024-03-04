@@ -27,9 +27,7 @@ fn bench_decode_prom_request(c: &mut Criterion) {
     d.push("write_request.pb.data");
 
     let data = Bytes::from(std::fs::read(d).unwrap());
-
     let mut request = WriteRequest::default();
-    let mut prom_request = PromWriteRequest::default();
 
     c.benchmark_group("decode_prom")
         .measurement_time(Duration::from_secs(3))
@@ -44,7 +42,7 @@ fn bench_decode_prom_request(c: &mut Criterion) {
         .bench_function("decode_prom_write_request", |b| {
             b.iter(|| {
                 let data = data.clone();
-                prom_request.clear();
+                let mut prom_request = PromWriteRequest::default();
                 prom_request.merge(data).unwrap();
                 prom_request.as_row_insert_requests();
             });

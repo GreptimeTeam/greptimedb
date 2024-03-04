@@ -54,20 +54,15 @@ impl TablesBuilder {
 
     pub(crate) fn as_insert_requests(&mut self) -> (RowInsertRequests, usize) {
         let mut total_rows = 0;
-
         let inserts = self
             .tables
-            .iter_mut()
-            .map(|(name, table)| {
+            .drain()
+            .map(|(name, mut table)| {
                 total_rows += table.num_rows();
-                table.as_row_insert_request(name.clone())
+                table.as_row_insert_request(name)
             })
             .collect();
         (RowInsertRequests { inserts }, total_rows)
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.tables.clear();
     }
 }
 
@@ -122,7 +117,6 @@ impl TableBuilder {
 
     pub(crate) fn as_row_insert_request(&mut self, table_name: String) -> RowInsertRequest {
         let tag_num = self.tag_indexes.len();
-        let rows_num = self.samples.len();
 
         let samples = std::mem::take(&mut self.samples);
         let mut tag_rows = std::mem::take(&mut self.tag_rows);
@@ -130,8 +124,6 @@ impl TableBuilder {
         let mut schema = self.tag_schemas.clone();
         schema.push(VALUE_COLUMN_SCHEMA.clone());
         schema.push(TIMESTAMP_COLUMN_SCHEMA.clone());
-
-        assert_eq!(rows_num, tag_rows.len());
 
         tag_rows
             .iter_mut()
@@ -238,7 +230,7 @@ mod tests {
                     value_data: Some(ValueData::TimestampMillisecondValue(1))
                 },
             ],
-            rows[0].values
+            rows[1].values
         );
     }
 }

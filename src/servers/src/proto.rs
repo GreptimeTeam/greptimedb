@@ -188,10 +188,6 @@ impl PromWriteRequest {
         }
         Ok(())
     }
-
-    pub fn clear(&mut self) {
-        self.table_data.clear();
-    }
 }
 
 #[cfg(test)]

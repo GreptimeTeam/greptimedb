@@ -305,7 +305,7 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
 
     let mut multi_table_data = MultiTableData::new();
 
-    for series in request.timeseries {
+    for series in &request.timeseries {
         let table_name = &series
             .labels
             .iter()
@@ -329,11 +329,11 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
         );
 
         // labels
-        let kvs = series.labels.into_iter().filter_map(|label| {
+        let kvs = series.labels.iter().filter_map(|label| {
             if label.name == METRIC_NAME_LABEL {
                 None
             } else {
-                Some((label.name, label.value))
+                Some((label.name.clone(), label.value.clone()))
             }
         });
 
@@ -433,6 +433,10 @@ pub fn mock_timeseries() -> Vec<TimeSeries> {
                 Sample {
                     value: 4.0f64,
                     timestamp: 2000,
+                },
+                Sample {
+                    value: 4.1f64,
+                    timestamp: 3000,
                 },
             ],
             ..Default::default()

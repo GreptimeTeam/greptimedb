@@ -16,14 +16,14 @@ workspace = true
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }
 api.workspace = true
-arrow.workspace = true
 arrow-flight.workspace = true
 arrow-ipc.workspace = true
 arrow-schema.workspace = true
+arrow.workspace = true
 async-trait = "0.1"
 auth.workspace = true
-axum.workspace = true
 axum-macros = "0.3.8"
+axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 catalog.workspace = true
@@ -31,8 +31,8 @@ chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
-common-grpc.workspace = true
 common-grpc-expr.workspace = true
+common-grpc.workspace = true
 common-macro.workspace = true
 common-mem-prof = { workspace = true, optional = true }
 common-meta.workspace = true
@@ -42,9 +42,9 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
-datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 digest = "0.10"
@@ -95,11 +95,11 @@ snap = "1"
 sql.workspace = true
 strum.workspace = true
 table.workspace = true
-tokio.workspace = true
 tokio-rustls = "0.25"
 tokio-stream = { workspace = true, features = ["net"] }
-tonic.workspace = true
+tokio.workspace = true
 tonic-reflection = "0.10"
+tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 urlencoding = "2.1"
@@ -111,10 +111,10 @@ tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 auth = { workspace = true, features = ["testing"] }
 axum-test-helper = "0.3"
 catalog = { workspace = true, features = ["testing"] }
-criterion = "0.4"
 client.workspace = true
 common-base.workspace = true
 common-test-util.workspace = true
+criterion = "0.4"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
