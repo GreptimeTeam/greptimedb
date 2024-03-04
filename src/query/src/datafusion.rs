@@ -53,7 +53,7 @@ use crate::error::{
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
-use crate::metrics::OnDone;
+use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
@@ -102,14 +102,16 @@ impl DatafusionQueryEngine {
         dml: DmlStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        // TODO(yingwen): dml timer.
-
         ensure!(
             matches!(dml.op, WriteOp::InsertInto | WriteOp::Delete),
             UnsupportedExprSnafu {
                 name: format!("DML op {}", dml.op),
             }
         );
+
+        let _timer = QUERY_STAGE_ELAPSED
+            .with_label_values(&[dml.op.name()])
+            .start_timer();
 
         let default_catalog = &query_ctx.current_catalog().to_owned();
         let default_schema = &query_ctx.current_schema().to_owned();
@@ -305,7 +307,7 @@ impl QueryEngine for DatafusionQueryEngine {
 impl LogicalOptimizer for DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
     fn optimize(&self, context: &QueryEngineContext, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let _timer = metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED.start_timer();
+        let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
                 // Optimized by extension rules
@@ -339,7 +341,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = metrics::METRIC_CREATE_PHYSICAL_ELAPSED.start_timer();
+        let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let state = ctx.state();
@@ -373,7 +375,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = metrics::METRIC_OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
+        let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
 
         let state = ctx.state();
         let config = state.config_options();
@@ -421,7 +423,7 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let exec_timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
+        let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
         match plan.output_partitioning().partition_count() {

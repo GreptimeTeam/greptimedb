@@ -33,7 +33,7 @@ use crate::error::{
     AddSystemTimeOverflowSnafu, MultipleStatementsSnafu, ParseFloatSnafu, ParseTimestampSnafu,
     QueryParseSnafu, Result, UnimplementedSnafu,
 };
-use crate::metrics::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
+use crate::metrics::{PARSE_PROMQL_ELAPSED, PARSE_SQL_ELAPSED};
 
 const DEFAULT_LOOKBACK: u64 = 5 * 60; // 5m
 pub const DEFAULT_LOOKBACK_STRING: &str = "5m";
@@ -116,7 +116,7 @@ pub struct QueryLanguageParser {}
 impl QueryLanguageParser {
     /// Try to parse SQL with GreptimeDB dialect, return the statement when success.
     pub fn parse_sql(sql: &str, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
-        let _timer = METRIC_PARSE_SQL_ELAPSED.start_timer();
+        let _timer = PARSE_SQL_ELAPSED.start_timer();
         let mut statement =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .map_err(BoxedError::new)
@@ -133,7 +133,7 @@ impl QueryLanguageParser {
 
     /// Try to parse PromQL, return the statement when success.
     pub fn parse_promql(query: &PromQuery, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
-        let _timer = METRIC_PARSE_PROMQL_ELAPSED.start_timer();
+        let _timer = PARSE_PROMQL_ELAPSED.start_timer();
 
         let expr = promql_parser::parser::parse(&query.query)
             .map_err(|msg| BoxedError::new(PlainError::new(msg, StatusCode::InvalidArguments)))

@@ -23,47 +23,35 @@ use lazy_static::lazy_static;
 use prometheus::*;
 
 lazy_static! {
-    pub static ref METRIC_PARSE_SQL_ELAPSED: Histogram = register_histogram!(
-        "greptime_query_parse_sql_elapsed",
-        "query parse sql elapsed"
+    /// Timer of different stages in query.
+    pub static ref QUERY_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_query_stage_elapsed",
+        "query engine time elapsed during each stage",
+        &["stage"],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
-    pub static ref METRIC_PARSE_PROMQL_ELAPSED: Histogram = register_histogram!(
-        "greptime_query_parse_promql_elapsed",
-        "query parse promql elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_OPTIMIZE_LOGICAL_ELAPSED: Histogram = register_histogram!(
-        "greptime_query_optimize_logicalplan_elapsed",
-        "query optimize logicalplan elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_OPTIMIZE_PHYSICAL_ELAPSED: Histogram = register_histogram!(
-        "greptime_query_optimize_physicalplan_elapsed",
-        "query optimize physicalplan elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_CREATE_PHYSICAL_ELAPSED: Histogram = register_histogram!(
-        "greptime_query_create_physicalplan_elapsed",
-        "query create physicalplan elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_EXEC_PLAN_ELAPSED: Histogram = register_histogram!(
-        "greptime_query_execute_plan_elapsed",
-        "query execute plan elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_MERGE_SCAN_POLL_ELAPSED: Histogram = register_histogram!(
-        "greptime_query_merge_scan_poll_elapsed",
-        "query merge scan poll elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_MERGE_SCAN_REGIONS: Histogram = register_histogram!(
+    pub static ref PARSE_SQL_ELAPSED: Histogram = QUERY_STAGE_ELAPSED
+        .with_label_values(&["parse_sql"]);
+    pub static ref PARSE_PROMQL_ELAPSED: Histogram = QUERY_STAGE_ELAPSED
+        .with_label_values(&["parse_promql"]);
+    pub static ref OPTIMIZE_LOGICAL_ELAPSED: Histogram = QUERY_STAGE_ELAPSED
+        .with_label_values(&["optimize_logicalplan"]);
+    pub static ref OPTIMIZE_PHYSICAL_ELAPSED: Histogram = QUERY_STAGE_ELAPSED
+        .with_label_values(&["optimize_physicalplan"]);
+    pub static ref CREATE_PHYSICAL_ELAPSED: Histogram = QUERY_STAGE_ELAPSED
+        .with_label_values(&["create_physicalplan"]);
+    pub static ref EXEC_PLAN_ELAPSED: Histogram = QUERY_STAGE_ELAPSED
+        .with_label_values(&["execute_plan"]);
+    pub static ref MERGE_SCAN_POLL_ELAPSED: Histogram = QUERY_STAGE_ELAPSED
+        .with_label_values(&["merge_scan_poll"]);
+
+    pub static ref MERGE_SCAN_REGIONS: Histogram = register_histogram!(
         "greptime_query_merge_scan_regions",
         "query merge scan regions"
     )
     .unwrap();
-    pub static ref METRIC_MERGE_SCAN_ERRORS_TOTAL: IntCounter = register_int_counter!(
+    pub static ref MERGE_SCAN_ERRORS_TOTAL: IntCounter = register_int_counter!(
         "greptime_query_merge_scan_errors_total",
         "query merge scan errors total"
     )
