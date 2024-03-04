@@ -164,7 +164,11 @@ async fn test_on_prepare_with_no_partition_err() {
     task.partitions = vec![];
     task.create_table.create_if_not_exists = true;
     let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context);
-    procedure.on_prepare().await.unwrap();
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, Error::Unexpected { .. });
+    assert!(err
+        .to_string()
+        .contains("The number of partitions must be greater than 0"),);
 }
 
 #[derive(Clone)]

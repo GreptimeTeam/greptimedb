@@ -902,10 +902,10 @@ mod test {
             (
                 r"
 CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
-PARTITION BY RANGE COLUMNS (b) (
-  PARTITION r0 VALUES LESS THAN ('hz'),
-  PARTITION r1 VALUES LESS THAN ('sh'),
-  PARTITION r2 VALUES LESS THAN (MAXVALUE),
+PARTITION ON COLUMNS (b) (
+  b < 'hz',
+  b >= 'hz' AND b < 'sh',
+  b >= 'sh'
 )
 ENGINE=mito",
                 r#"[{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"hz\"}}"]},{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"sh\"}}"]},{"column_list":["b"],"value_list":["\"MaxValue\""]}]"#,
@@ -915,8 +915,9 @@ ENGINE=mito",
 CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
 PARTITION BY RANGE COLUMNS (b, a) (
   PARTITION r0 VALUES LESS THAN ('hz', 10),
-  PARTITION r1 VALUES LESS THAN ('sh', 20),
-  PARTITION r2 VALUES LESS THAN (MAXVALUE, MAXVALUE),
+  b < 'hz' AND a < 10,
+  b >= 'hz' AND b < 'sh' AND a >= 10 AND a < 20,
+  b >= 'sh' AND a >= 20
 )
 ENGINE=mito",
                 r#"[{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"hz\"}}","{\"Value\":{\"Int32\":10}}"]},{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"sh\"}}","{\"Value\":{\"Int32\":20}}"]},{"column_list":["b","a"],"value_list":["\"MaxValue\"","\"MaxValue\""]}]"#,

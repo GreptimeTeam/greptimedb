@@ -29,6 +29,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use meta_client::client::MetaClient;
 use partition::columns::RangeColumnsPartitionRule;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use partition::partition::{PartitionBound, PartitionDef};
 use partition::range::RangePartitionRule;
@@ -116,7 +117,11 @@ pub(crate) async fn create_partition_rule_manager(
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
-                                vec![PartitionBound::Value(10_i32.into())],
+                                vec![PartitionBound::Expr(PartitionExpr::new(
+                                    Operand::Column("a".to_string()),
+                                    RestrictedOp::Lt,
+                                    Operand::Value(datatypes::value::Value::Int32(10)),
+                                ))],
                             )
                             .try_into()
                             .unwrap(),
@@ -135,7 +140,19 @@ pub(crate) async fn create_partition_rule_manager(
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
-                                vec![PartitionBound::Value(50_i32.into())],
+                                vec![PartitionBound::Expr(PartitionExpr::new(
+                                    Operand::Expr(PartitionExpr::new(
+                                        Operand::Column("a".to_string()),
+                                        RestrictedOp::GtEq,
+                                        Operand::Value(datatypes::value::Value::Int32(10)),
+                                    )),
+                                    RestrictedOp::And,
+                                    Operand::Expr(PartitionExpr::new(
+                                        Operand::Column("a".to_string()),
+                                        RestrictedOp::Lt,
+                                        Operand::Value(datatypes::value::Value::Int32(50)),
+                                    )),
+                                ))],
                             )
                             .try_into()
                             .unwrap(),
@@ -154,7 +171,11 @@ pub(crate) async fn create_partition_rule_manager(
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
-                                vec![PartitionBound::MaxValue],
+                                vec![PartitionBound::Expr(PartitionExpr::new(
+                                    Operand::Column("a".to_string()),
+                                    RestrictedOp::GtEq,
+                                    Operand::Value(datatypes::value::Value::Int32(50)),
+                                ))],
                             )
                             .try_into()
                             .unwrap(),
