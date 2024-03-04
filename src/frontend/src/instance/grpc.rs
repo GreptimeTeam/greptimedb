@@ -32,7 +32,7 @@ use crate::error::{
     TableOperationSnafu,
 };
 use crate::instance::{attach_timer, Instance};
-use crate::metrics::{METRIC_HANDLE_PROMQL_ELAPSED, METRIC_HANDLE_SQL_ELAPSED};
+use crate::metrics::{GRPC_HANDLE_PROMQL_ELAPSED, GRPC_HANDLE_SQL_ELAPSED};
 
 #[async_trait]
 impl GrpcQueryHandler for Instance {
@@ -60,7 +60,7 @@ impl GrpcQueryHandler for Instance {
                 })?;
                 match query {
                     Query::Sql(sql) => {
-                        let timer = METRIC_HANDLE_SQL_ELAPSED.start_timer();
+                        let timer = GRPC_HANDLE_SQL_ELAPSED.start_timer();
                         let mut result = SqlQueryHandler::do_query(self, &sql, ctx.clone()).await;
                         ensure!(
                             result.len() == 1,
@@ -78,7 +78,7 @@ impl GrpcQueryHandler for Instance {
                         .fail();
                     }
                     Query::PromRangeQuery(promql) => {
-                        let timer = METRIC_HANDLE_PROMQL_ELAPSED.start_timer();
+                        let timer = GRPC_HANDLE_PROMQL_ELAPSED.start_timer();
                         let prom_query = PromQuery {
                             query: promql.query,
                             start: promql.start,
