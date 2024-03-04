@@ -17,8 +17,6 @@
 #![feature(exclusive_wrapper)]
 #![feature(let_chains)]
 
-extern crate core;
-
 use datatypes::schema::Schema;
 use query::plan::LogicalPlan;
 use serde::{Deserialize, Serialize};

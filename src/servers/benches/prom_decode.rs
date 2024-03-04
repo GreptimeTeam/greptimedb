@@ -15,7 +15,6 @@
 use std::time::Duration;
 
 use api::prom_store::remote::WriteRequest;
-use base64::Engine;
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use prost::Message;
@@ -28,7 +27,7 @@ fn bench_decode_prom_request(c: &mut Criterion) {
     d.push("write_request.pb.data");
 
     let data = Bytes::from(std::fs::read(d).unwrap());
-    
+
     let mut request = WriteRequest::default();
     let mut prom_request = PromWriteRequest::default();
     c.benchmark_group("decode")
