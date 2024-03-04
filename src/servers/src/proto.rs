@@ -1,14 +1,30 @@
-use core::fmt;
-use std::fmt::{Debug, Formatter};
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::ops::Deref;
 
 use api::prom_store::remote::Sample;
+use api::v1::RowInsertRequests;
 use bytes::{Buf, Bytes};
 use object_pool::Pool;
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, DecodeContext, WireType};
 use prost::DecodeError;
 
-// pub type Label = greptime_proto::prometheus::remote::Label;
+use crate::prom_row_builder::TablesBuilder;
+use crate::prom_store::METRIC_NAME_LABEL_BYTES;
+
 pub type Label = PromLabel;
 
 pub struct PromLabel {
@@ -62,34 +78,9 @@ impl Default for PromLabel {
     }
 }
 
-impl Debug for PromLabel {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let mut builder = f.debug_struct("PromLabel");
-        let builder = {
-            let wrapper = {
-                #[allow(non_snake_case)]
-                fn ScalarWrapper<T>(v: T) -> T {
-                    v
-                }
-                ScalarWrapper(&self.name)
-            };
-            builder.field("name", &wrapper)
-        };
-        let builder = {
-            let wrapper = {
-                #[allow(non_snake_case)]
-                fn ScalarWrapper<T>(v: T) -> T {
-                    v
-                }
-                ScalarWrapper(&self.value)
-            };
-            builder.field("value", &wrapper)
-        };
-        builder.finish()
-    }
-}
-
+#[derive(Default)]
 pub struct PromTimeSeries {
+    pub table_name: String,
     pub labels: Vec<Label>,
     pub samples: Vec<Sample>,
 }
@@ -105,11 +96,16 @@ impl PromTimeSeries {
     where
         B: Buf,
     {
+        const STRUCT_NAME: &str = "PromTimeSeries";
         match tag {
             1u32 => {
+                // decode labels
                 let mut label = Label::default();
 
-                let len = decode_varint(buf)?;
+                let len = decode_varint(buf).map_err(|mut error| {
+                    error.push(STRUCT_NAME, "labels");
+                    error
+                })?;
                 let remaining = buf.remaining();
                 if len > remaining as u64 {
                     return Err(DecodeError::new("buffer underflow"));
@@ -123,12 +119,20 @@ impl PromTimeSeries {
                 if buf.remaining() != limit {
                     return Err(DecodeError::new("delimited length exceeded"));
                 }
-                self.labels.push(label);
+                if label.name.deref() == METRIC_NAME_LABEL_BYTES {
+                    let table_name = unsafe { String::from_utf8_unchecked(label.value.to_vec()) };
+                    self.table_name = table_name;
+                } else {
+                    self.labels.push(label);
+                }
                 Ok(())
             }
             2u32 => {
                 let mut sample = Sample::default();
-                merge(WireType::LengthDelimited, &mut sample, buf, ctx)?;
+                merge(WireType::LengthDelimited, &mut sample, buf, ctx).map_err(|mut error| {
+                    error.push(STRUCT_NAME, "samples");
+                    error
+                })?;
                 self.samples.push(sample);
                 Ok(())
             }
@@ -141,63 +145,44 @@ impl PromTimeSeries {
         self.labels.clear();
         self.samples.clear();
     }
-}
 
-impl Default for PromTimeSeries {
-    fn default() -> Self {
-        PromTimeSeries {
-            labels: Default::default(),
-            samples: Default::default(),
-        }
-    }
-}
-
-impl Debug for PromTimeSeries {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let mut builder = f.debug_struct("PromTimeSeries");
-        let builder = {
-            let wrapper = &self.labels;
-            builder.field("labels", &wrapper)
-        };
-        let builder = {
-            let wrapper = &self.samples;
-            builder.field("samples", &wrapper)
-        };
-        builder.finish()
+    pub(crate) fn add_to_table_data(&mut self, table_builders: &mut TablesBuilder) {
+        let table_data =
+            table_builders.get_or_create_table_builder(std::mem::take(&mut self.table_name));
+        table_data.add_labels(std::mem::take(&mut self.labels));
+        table_data.add_samples(std::mem::take(&mut self.samples));
     }
 }
 
 pub struct PromWriteRequest {
-    pub timeseries: Vec<PromTimeSeries>,
+    table_data: TablesBuilder,
     timeseries_pool: Pool<PromTimeSeries>,
 }
 
-impl Debug for PromWriteRequest {
-    fn fmt(&self, _f: &mut Formatter<'_>) -> fmt::Result {
-        todo!()
-    }
-}
-
 impl PromWriteRequest {
+    pub fn to_row_insert_requests(&mut self) -> (RowInsertRequests, usize) {
+        self.table_data.to_insert_requests()
+    }
+
     pub fn merge<B>(&mut self, mut buf: B) -> Result<(), DecodeError>
     where
         B: Buf,
         Self: Sized,
     {
+        const STRUCT_NAME: &str = "PromWriteRequest";
         let ctx = DecodeContext::default();
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
             assert_eq!(WireType::LengthDelimited, wire_type);
-
             match tag {
                 1u32 => {
-                    let (_, mut series) = self
-                        .timeseries_pool
-                        .pull(|| PromTimeSeries::default())
-                        .detach();
-
+                    // decode TimeSeries
+                    let mut series = self.timeseries_pool.pull(|| PromTimeSeries::default());
                     // rewrite merge loop
-                    let len = decode_varint(&mut buf)?;
+                    let len = decode_varint(&mut buf).map_err(|mut e| {
+                        e.push(STRUCT_NAME, "timeseries");
+                        e
+                    })?;
                     let remaining = buf.remaining();
                     if len > remaining as u64 {
                         return Err(DecodeError::new("buffer underflow"));
@@ -211,11 +196,10 @@ impl PromWriteRequest {
                     if buf.remaining() != limit {
                         return Err(DecodeError::new("delimited length exceeded"));
                     }
-
-                    self.timeseries.push(series);
+                    series.add_to_table_data(&mut self.table_data);
                 }
                 3u32 => {
-                    // we can ignore metadata now.
+                    // we can ignore metadata for now.
                     prost::encoding::skip_field(wire_type, tag, &mut buf, ctx.clone())?;
                 }
                 _ => prost::encoding::skip_field(wire_type, tag, &mut buf, ctx.clone())?,
@@ -225,17 +209,14 @@ impl PromWriteRequest {
     }
 
     pub fn clear(&mut self) {
-        for mut ts in self.timeseries.drain(..) {
-            ts.clear();
-            self.timeseries_pool.attach(ts);
-        }
+        self.table_data.clear();
     }
 }
 
 impl Default for PromWriteRequest {
     fn default() -> Self {
         PromWriteRequest {
-            timeseries: Vec::with_capacity(10000),
+            table_data: TablesBuilder::default(),
             timeseries_pool: Pool::new(10000, || PromTimeSeries::default()),
         }
     }
@@ -243,24 +224,65 @@ impl Default for PromWriteRequest {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine;
+    use std::collections::{HashMap, HashSet};
 
+    use api::prom_store::remote::WriteRequest;
+    use bytes::Bytes;
+    use prost::Message;
+
+    use crate::prom_store::to_grpc_row_insert_requests;
     use crate::proto::PromWriteRequest;
 
+    // Ensures `WriteRequest` and `PromWriteRequest` produce the same gRPC request.
     #[test]
     fn test_decode_write_request() {
-        let data = base64::engine::general_purpose::STANDARD
-            .decode(std::fs::read("/tmp/prom-data/1709380539690445357").unwrap())
-            .unwrap();
+        let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        d.push("benches");
+        d.push("write_request.pb.data");
 
-        let buf = data.as_slice();
-        let mut request = PromWriteRequest::default();
-        request.clear();
-        request.merge(buf).unwrap();
-        assert_eq!(10000, request.timeseries.len());
+        let data = Bytes::from(std::fs::read(d).unwrap());
 
-        for ts in &request.timeseries {
-            assert_eq!(1, ts.samples.len());
+        let mut prom_write_request = PromWriteRequest::default();
+        prom_write_request.clear();
+        prom_write_request.merge(data.clone()).unwrap();
+        let (prom_rows, samples) = prom_write_request.to_row_insert_requests();
+
+        let expected_request = WriteRequest::decode(data).unwrap();
+        let (expected_rows, expected_samples) =
+            to_grpc_row_insert_requests(&expected_request).unwrap();
+
+        assert_eq!(expected_samples, samples);
+        assert_eq!(expected_rows.inserts.len(), prom_rows.inserts.len());
+
+        let schemas = expected_rows
+            .inserts
+            .iter()
+            .map(|r| {
+                (
+                    r.table_name.clone(),
+                    r.rows
+                        .as_ref()
+                        .unwrap()
+                        .schema
+                        .iter()
+                        .map(|c| (c.column_name.clone(), c.datatype, c.semantic_type))
+                        .collect::<HashSet<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        for r in &prom_rows.inserts {
+            let expected = schemas.get(&r.table_name).unwrap();
+            assert_eq!(
+                expected,
+                &r.rows
+                    .as_ref()
+                    .unwrap()
+                    .schema
+                    .iter()
+                    .map(|c| { (c.column_name.clone(), c.datatype, c.semantic_type) })
+                    .collect()
+            );
         }
     }
 }

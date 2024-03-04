@@ -18,6 +18,7 @@ use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
 use api::v1::greptime_request::Request;
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
@@ -64,6 +65,16 @@ impl PromStoreProtocolHandler for DummyInstance {
 
         Ok(())
     }
+
+    async fn write_fast(
+        &self,
+        _request: RowInsertRequests,
+        _ctx: QueryContextRef,
+        _with_metric_engine: bool,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse> {
         let _ = self
             .tx

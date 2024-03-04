@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use api::prom_store::remote::read_request::ResponseType;
 use api::prom_store::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_catalog::format_full_table_name;
@@ -190,6 +191,38 @@ impl PromStoreProtocolHandler for Instance {
         Ok(())
     }
 
+    async fn write_fast(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
+            .context(AuthSnafu)?;
+
+        if with_metric_engine {
+            let physical_table = ctx
+                .extension(PHYSICAL_TABLE_PARAM)
+                .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+                .to_string();
+            let _ = self
+                .handle_metric_row_inserts(request, ctx.clone(), physical_table.to_string())
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
+        } else {
+            let _ = self
+                .handle_row_inserts(request, ctx.clone())
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
+        }
+        Ok(())
+    }
+
     async fn read(
         &self,
         request: ReadRequest,
@@ -277,6 +310,15 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
         Ok(())
+    }
+
+    async fn write_fast(
+        &self,
+        _request: RowInsertRequests,
+        _ctx: QueryContextRef,
+        _with_metric_engine: bool,
+    ) -> ServerResult<()> {
+        unimplemented!()
     }
 
     async fn read(

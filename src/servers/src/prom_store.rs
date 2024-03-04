@@ -38,6 +38,8 @@ use crate::row_writer::{self, MultiTableData};
 
 pub const METRIC_NAME_LABEL: &str = "__name__";
 
+pub const METRIC_NAME_LABEL_BYTES: &[u8] = b"__name__";
+
 /// Metrics for push gateway protocol
 pub struct Metrics {
     pub exposition: MetricsExposition<PrometheusType, PrometheusValue>,
