@@ -18,6 +18,10 @@ pub(crate) mod jemalloc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use axum::extract::MatchedPath;
+use axum::http::Request;
+use axum::middleware::Next;
+use axum::response::IntoResponse;
 use hyper::Body;
 use lazy_static::lazy_static;
 use prometheus::{
@@ -217,12 +221,6 @@ lazy_static! {
         &[METRIC_PATH_LABEL, METRIC_CODE_LABEL]
     )
     .unwrap();
-    pub static ref HTTP_TRACK_METRICS: HistogramVec = register_histogram_vec!(
-        "greptime_http_track_metrics",
-        "http track metrics",
-        &["tag"]
-    )
-    .unwrap();
 }
 
 // Based on https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs
@@ -283,4 +281,30 @@ where
             Ok(response)
         })
     }
+}
+
+/// A middleware to record metrics for HTTP.
+// Based on https://github.com/tokio-rs/axum/blob/axum-v0.6.16/examples/prometheus-metrics/src/main.rs
+pub(crate) async fn http_metrics_layer<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
+    let start = Instant::now();
+    let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
+        matched_path.as_str().to_owned()
+    } else {
+        req.uri().path().to_owned()
+    };
+    let method = req.method().clone();
+
+    let response = next.run(req).await;
+
+    let latency = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+    let method_str = method.to_string();
+
+    let labels = [method_str.as_str(), path.as_str(), status.as_str()];
+    METRIC_HTTP_REQUESTS_TOTAL.with_label_values(&labels).inc();
+    METRIC_HTTP_REQUESTS_ELAPSED
+        .with_label_values(&labels)
+        .observe(latency);
+
+    response
 }
