@@ -188,6 +188,7 @@ impl SeqScan {
 
             // Update metrics.
             metrics.total_cost = query_start.elapsed();
+            READ_STAGE_ELAPSED.with_label_values(&["convert_rb"]).observe(metrics.convert_cost.as_secs_f64());
             READ_STAGE_ELAPSED.with_label_values(&["scan"]).observe(metrics.scan_cost.as_secs_f64());
             READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.total_cost.as_secs_f64());
             READ_ROWS_RETURN.observe(metrics.num_rows as f64);
