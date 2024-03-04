@@ -336,7 +336,12 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str
     };
     let pretty_print = sort_table(&recordbatches.pretty_print().unwrap());
     let expected = sort_table(expected);
-    assert_eq!(pretty_print, expected);
+    assert_eq!(
+        pretty_print,
+        expected,
+        "\n{}",
+        recordbatches.pretty_print().unwrap()
+    );
 }
 
 pub fn prepare_path(p: &str) -> String {

@@ -17,22 +17,28 @@ mod show_create_table;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use catalog::information_schema::{schemata, tables, SCHEMATA, TABLES};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
-    SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
+    INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY,
+    SEMANTIC_TYPE_TIME_INDEX,
 };
+use common_catalog::format_full_table_name;
 use common_datasource::file_format::{infer_schemas, FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::Output;
-use common_recordbatch::{RecordBatch, RecordBatches};
+use common_recordbatch::adapter::RecordBatchStreamAdapter;
+use common_recordbatch::RecordBatches;
 use common_time::timezone::get_timezone;
 use common_time::Timestamp;
+use datafusion::prelude::SessionContext;
+use datafusion_expr::{col, lit, Expr};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
-use datatypes::vectors::{Helper, StringVector};
+use datatypes::vectors::StringVector;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -44,11 +50,14 @@ use sql::statements::show::{ShowDatabases, ShowKind, ShowTables, ShowVariables};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
-use crate::datafusion::execute_show_with_filter;
+use crate::dataframe::DataFrame;
 use crate::error::{self, Result, UnsupportedVariableSnafu};
+use crate::planner::DfLogicalPlanner;
+use crate::QueryEngineRef;
 
-const SCHEMAS_COLUMN: &str = "Schemas";
+const SCHEMAS_COLUMN: &str = "Database";
 const TABLES_COLUMN: &str = "Tables";
+const TABLE_TYPE_COLUMN: &str = "Table_type";
 const COLUMN_NAME_COLUMN: &str = "Column";
 const COLUMN_TYPE_COLUMN: &str = "Type";
 const COLUMN_KEY_COLUMN: &str = "Key";
@@ -100,49 +109,144 @@ static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
 
 pub async fn show_databases(
     stmt: ShowDatabases,
-    catalog_manager: CatalogManagerRef,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let mut databases = catalog_manager
-        .schema_names(query_ctx.current_catalog())
+    let projects = vec![(schemata::SCHEMA_NAME, SCHEMAS_COLUMN)];
+
+    let filters = vec![col(schemata::CATALOG_NAME).eq(lit(query_ctx.current_catalog()))];
+    let like_field = Some(schemata::SCHEMA_NAME);
+    let sort = vec![col(schemata::SCHEMA_NAME).sort(true, true)];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        SCHEMATA,
+        projects,
+        filters,
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
+}
+
+/// Cast a `show` statement execution into a query from tables in  `information_schema`.
+/// - `table_name`: the table name in `information_schema`,
+/// - `projects`: query projection, a list of `(column, renamed_column)`,
+/// - `filters`: filter expressions for query,
+/// - `like_field`: the field to filter by the predicate `ShowKind::Like`,
+/// - `sort`: sort the results by the specified sorting expressions,
+/// - `kind`: the show kind
+#[allow(clippy::too_many_arguments)]
+async fn query_from_information_schema_table(
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+    table_name: &str,
+    projects: Vec<(&str, &str)>,
+    filters: Vec<Expr>,
+    like_field: Option<&str>,
+    sort: Vec<Expr>,
+    kind: ShowKind,
+) -> Result<Output> {
+    let table = catalog_manager
+        .table(
+            query_ctx.current_catalog(),
+            INFORMATION_SCHEMA_NAME,
+            table_name,
+        )
         .await
-        .context(error::CatalogSnafu)?;
+        .context(error::CatalogSnafu)?
+        .with_context(|| error::TableNotFoundSnafu {
+            table: format_full_table_name(
+                query_ctx.current_catalog(),
+                INFORMATION_SCHEMA_NAME,
+                table_name,
+            ),
+        })?;
 
-    // TODO(dennis): Specify the order of the results in catalog manager API
-    databases.sort();
+    let DataFrame::DataFusion(dataframe) = query_engine.read_table(table)?;
 
-    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-        SCHEMAS_COLUMN,
-        ConcreteDataType::string_datatype(),
-        false,
-    )]));
-    match stmt.kind {
-        ShowKind::All => {
-            let databases = Arc::new(StringVector::from(databases)) as _;
-            let records = RecordBatches::try_from_columns(schema, vec![databases])
-                .context(error::CreateRecordBatchSnafu)?;
-            Ok(Output::RecordBatches(records))
+    // Apply filters
+    let dataframe = filters.into_iter().try_fold(dataframe, |df, expr| {
+        df.filter(expr).context(error::PlanSqlSnafu)
+    })?;
+
+    // Apply `like` predicate if exists
+    let dataframe = if let (ShowKind::Like(ident), Some(field)) = (&kind, like_field) {
+        dataframe
+            .filter(col(field).like(lit(ident.value.clone())))
+            .context(error::PlanSqlSnafu)?
+    } else {
+        dataframe
+    };
+
+    // Apply sorting
+    let dataframe = dataframe
+        .sort(sort)
+        .context(error::PlanSqlSnafu)?
+        .select_columns(&projects.iter().map(|(c, _)| *c).collect::<Vec<_>>())
+        .context(error::PlanSqlSnafu)?;
+
+    // Apply projection
+    let dataframe = projects
+        .into_iter()
+        .try_fold(dataframe, |df, (column, renamed_column)| {
+            df.with_column_renamed(column, renamed_column)
+                .context(error::PlanSqlSnafu)
+        })?;
+
+    let dataframe = match kind {
+        ShowKind::All | ShowKind::Like(_) => {
+            // Like kind is processed above
+            dataframe
         }
         ShowKind::Where(filter) => {
-            let columns = vec![Arc::new(StringVector::from(databases)) as _];
-            let record_batch =
-                RecordBatch::new(schema, columns).context(error::CreateRecordBatchSnafu)?;
-            let result = execute_show_with_filter(record_batch, Some(filter)).await?;
-            Ok(result)
+            // Cast the results into VIEW for `where` clause,
+            // which is evaluated against the column names displayed by the SHOW statement.
+            let view = dataframe.into_view();
+            let dataframe = SessionContext::new_with_state(
+                query_engine
+                    .engine_context(query_ctx.clone())
+                    .state()
+                    .clone(),
+            )
+            .read_table(view)
+            .context(error::DataFusionSnafu)?;
+
+            let planner = query_engine.planner();
+            let planner = planner
+                .as_any()
+                .downcast_ref::<DfLogicalPlanner>()
+                .expect("Must be the datafusion planner");
+
+            let filter = planner
+                .sql_to_expr(filter, dataframe.schema(), false, query_ctx)
+                .await?;
+
+            // Apply the `where` clause filters
+            dataframe.filter(filter).context(error::PlanSqlSnafu)?
         }
-        ShowKind::Like(ident) => {
-            let databases = Helper::like_utf8(databases, &ident.value)
-                .context(error::VectorComputationSnafu)?;
-            let records = RecordBatches::try_from_columns(schema, vec![databases])
-                .context(error::CreateRecordBatchSnafu)?;
-            Ok(Output::RecordBatches(records))
-        }
-    }
+    };
+
+    let stream = dataframe
+        .execute_stream()
+        .await
+        .context(error::DataFusionSnafu)?;
+
+    Ok(Output::Stream(
+        Box::pin(RecordBatchStreamAdapter::try_new(stream).context(error::CreateRecordBatchSnafu)?),
+        None,
+    ))
 }
 
 pub async fn show_tables(
     stmt: ShowTables,
-    catalog_manager: CatalogManagerRef,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
     let schema_name = if let Some(database) = stmt.database {
@@ -150,85 +254,36 @@ pub async fn show_tables(
     } else {
         query_ctx.current_schema().to_owned()
     };
-    // TODO(sunng87): move this function into query_ctx
-    let mut tables = catalog_manager
-        .table_names(query_ctx.current_catalog(), &schema_name)
-        .await
-        .context(error::CatalogSnafu)?;
 
-    // TODO(dennis): Specify the order of the results in schema provider API
-    tables.sort();
-
-    let table_types: Option<Arc<dyn Vector>> = {
-        if stmt.full {
-            Some(
-                get_table_types(
-                    &tables,
-                    catalog_manager.clone(),
-                    query_ctx.clone(),
-                    &schema_name,
-                )
-                .await?,
-            )
-        } else {
-            None
-        }
+    // (dennis): MySQL rename `table_name` to `Tables_in_{schema}`, but we use `Tables` instead.
+    // I don't want to modify this currently, our dashboard may depend on it.
+    let projects = if stmt.full {
+        vec![
+            (tables::TABLE_NAME, TABLES_COLUMN),
+            (tables::TABLE_TYPE, TABLE_TYPE_COLUMN),
+        ]
+    } else {
+        vec![(tables::TABLE_NAME, TABLES_COLUMN)]
     };
+    let filters = vec![
+        col(tables::TABLE_SCHEMA).eq(lit(schema_name.clone())),
+        col(tables::TABLE_CATALOG).eq(lit(query_ctx.current_catalog())),
+    ];
+    let like_field = Some(tables::TABLE_NAME);
+    let sort = vec![col(tables::TABLE_NAME).sort(true, true)];
 
-    let mut column_schema = vec![ColumnSchema::new(
-        TABLES_COLUMN,
-        ConcreteDataType::string_datatype(),
-        false,
-    )];
-    if table_types.is_some() {
-        column_schema.push(ColumnSchema::new(
-            "Table_type",
-            ConcreteDataType::string_datatype(),
-            false,
-        ));
-    }
-
-    let schema = Arc::new(Schema::new(column_schema));
-
-    match stmt.kind {
-        ShowKind::All => {
-            let tables = Arc::new(StringVector::from(tables)) as _;
-            let mut columns = vec![tables];
-            if let Some(table_types) = table_types {
-                columns.push(table_types)
-            }
-
-            let records = RecordBatches::try_from_columns(schema, columns)
-                .context(error::CreateRecordBatchSnafu)?;
-            Ok(Output::RecordBatches(records))
-        }
-        ShowKind::Where(filter) => {
-            let mut columns = vec![Arc::new(StringVector::from(tables)) as _];
-            if let Some(table_types) = table_types {
-                columns.push(table_types)
-            }
-            let record_batch =
-                RecordBatch::new(schema, columns).context(error::CreateRecordBatchSnafu)?;
-            let result = execute_show_with_filter(record_batch, Some(filter)).await?;
-            Ok(result)
-        }
-        ShowKind::Like(ident) => {
-            let (tables, filter) = Helper::like_utf8_filter(tables, &ident.value)
-                .context(error::VectorComputationSnafu)?;
-            let mut columns = vec![tables];
-
-            if let Some(table_types) = table_types {
-                let table_types = table_types
-                    .filter(&filter)
-                    .context(error::VectorComputationSnafu)?;
-                columns.push(table_types)
-            }
-
-            let records = RecordBatches::try_from_columns(schema, columns)
-                .context(error::CreateRecordBatchSnafu)?;
-            Ok(Output::RecordBatches(records))
-        }
-    }
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        TABLES,
+        projects,
+        filters,
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
 }
 
 pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<Output> {
@@ -511,25 +566,6 @@ fn parse_file_table_format(options: &HashMap<String, String>) -> Result<Box<dyn 
             Format::Orc(format) => Box::new(format),
         },
     )
-}
-
-async fn get_table_types(
-    tables: &[String],
-    catalog_manager: CatalogManagerRef,
-    query_ctx: QueryContextRef,
-    schema_name: &str,
-) -> Result<Arc<dyn Vector>> {
-    let mut table_types = Vec::with_capacity(tables.len());
-    for table_name in tables {
-        if let Some(table) = catalog_manager
-            .table(query_ctx.current_catalog(), schema_name, table_name)
-            .await
-            .context(error::CatalogSnafu)?
-        {
-            table_types.push(table.table_type().to_string());
-        }
-    }
-    Ok(Arc::new(StringVector::from(table_types)) as _)
 }
 
 #[cfg(test)]

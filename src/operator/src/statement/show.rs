@@ -33,7 +33,7 @@ impl StatementExecutor {
         stmt: ShowDatabases,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        query::sql::show_databases(stmt, self.catalog_manager.clone(), query_ctx)
+        query::sql::show_databases(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }
@@ -44,7 +44,7 @@ impl StatementExecutor {
         stmt: ShowTables,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        query::sql::show_tables(stmt, self.catalog_manager.clone(), query_ctx)
+        query::sql::show_tables(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }

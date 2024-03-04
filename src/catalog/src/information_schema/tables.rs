@@ -39,10 +39,10 @@ use crate::error::{
 use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
-const TABLE_CATALOG: &str = "table_catalog";
-const TABLE_SCHEMA: &str = "table_schema";
-const TABLE_NAME: &str = "table_name";
-const TABLE_TYPE: &str = "table_type";
+pub const TABLE_CATALOG: &str = "table_catalog";
+pub const TABLE_SCHEMA: &str = "table_schema";
+pub const TABLE_NAME: &str = "table_name";
+pub const TABLE_TYPE: &str = "table_type";
 const TABLE_ID: &str = "table_id";
 const ENGINE: &str = "engine";
 const INIT_CAPACITY: usize = 42;
