@@ -23,28 +23,19 @@ use api::v1::{
     Value,
 };
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
-use lazy_static::lazy_static;
 
 use crate::proto::PromLabel;
-
-lazy_static! {
-    static ref TIMESTAMP_COLUMN_SCHEMA: ColumnSchema = ColumnSchema {
-        column_name: GREPTIME_TIMESTAMP.to_string(),
-        datatype: ColumnDataType::TimestampMillisecond as i32,
-        semantic_type: SemanticType::Timestamp as i32,
-        datatype_extension: None,
-    };
-    static ref VALUE_COLUMN_SCHEMA: ColumnSchema = ColumnSchema {
-        column_name: GREPTIME_VALUE.to_string(),
-        datatype: ColumnDataType::Float64 as i32,
-        semantic_type: SemanticType::Field as i32,
-        datatype_extension: None,
-    };
-}
+use crate::repeated_field::Clear;
 
 #[derive(Default)]
 pub(crate) struct TablesBuilder {
     tables: HashMap<String, TableBuilder>,
+}
+
+impl Clear for TablesBuilder {
+    fn clear(&mut self) {
+        self.tables.clear();
+    }
 }
 
 impl TablesBuilder {
@@ -66,83 +57,103 @@ impl TablesBuilder {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct TableBuilder {
-    tag_schemas: Vec<ColumnSchema>,
-    tag_rows: Vec<Row>,
-    tag_indexes: HashMap<String, usize>,
-    samples: Vec<Sample>,
+    schema: Vec<ColumnSchema>,
+    rows: Vec<Row>,
+    col_indexes: HashMap<String, usize>,
+}
+
+impl Default for TableBuilder {
+    fn default() -> Self {
+        let col_indexes = [
+            (GREPTIME_TIMESTAMP.to_string(), 0),
+            (GREPTIME_VALUE.to_string(), 1),
+        ]
+        .into_iter()
+        .collect();
+        Self {
+            schema: vec![
+                ColumnSchema {
+                    column_name: GREPTIME_TIMESTAMP.to_string(),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    datatype_extension: None,
+                },
+                ColumnSchema {
+                    column_name: GREPTIME_VALUE.to_string(),
+                    datatype: ColumnDataType::Float64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    datatype_extension: None,
+                },
+            ],
+            rows: vec![],
+            col_indexes,
+        }
+    }
 }
 
 impl TableBuilder {
-    pub(crate) fn add_labels(&mut self, labels: Vec<PromLabel>) {
-        let mut tag_row = vec![Value { value_data: None }; self.tag_indexes.len()];
+    fn num_rows(&self) -> usize {
+        self.rows.len()
+    }
+    pub(crate) fn add_labels_and_samples(&mut self, labels: &[PromLabel], samples: &[Sample]) {
+        let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
             let tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
             let tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
-
             let tag_value = Some(ValueData::StringValue(tag_value));
-            let tag_num = self.tag_indexes.len();
-            match self.tag_indexes.entry(tag_name) {
+            let tag_num = self.col_indexes.len();
+
+            match self.col_indexes.entry(tag_name) {
                 Entry::Occupied(e) => {
-                    tag_row[*e.get()].value_data = tag_value;
+                    row[*e.get()].value_data = tag_value;
                 }
                 Entry::Vacant(e) => {
                     let column_name = e.key().clone();
                     e.insert(tag_num);
-                    self.tag_schemas.push(ColumnSchema {
+                    self.schema.push(ColumnSchema {
                         column_name,
                         datatype: ColumnDataType::String as i32,
                         semantic_type: SemanticType::Tag as i32,
                         datatype_extension: None,
                     });
-                    tag_row.push(Value {
+                    row.push(Value {
                         value_data: tag_value,
                     });
                 }
             }
         }
 
-        self.tag_rows.push(Row { values: tag_row });
-    }
-
-    pub(crate) fn add_samples(&mut self, samples: Vec<Sample>) {
-        self.samples.extend(samples);
-    }
-
-    fn num_rows(&self) -> usize {
-        self.samples.len()
+        if samples.len() == 1 {
+            let sample = &samples[0];
+            row[0].value_data = Some(ValueData::TimestampMillisecondValue(sample.timestamp));
+            row[1].value_data = Some(ValueData::F64Value(sample.value));
+            self.rows.push(Row { values: row });
+            return;
+        }
+        for sample in samples {
+            row[0].value_data = Some(ValueData::TimestampMillisecondValue(sample.timestamp));
+            row[1].value_data = Some(ValueData::F64Value(sample.value));
+            self.rows.push(Row {
+                values: row.clone(),
+            });
+        }
     }
 
     pub(crate) fn as_row_insert_request(&mut self, table_name: String) -> RowInsertRequest {
-        let tag_num = self.tag_indexes.len();
-
-        let samples = std::mem::take(&mut self.samples);
-        let mut tag_rows = std::mem::take(&mut self.tag_rows);
-
-        let mut schema = self.tag_schemas.clone();
-        schema.push(VALUE_COLUMN_SCHEMA.clone());
-        schema.push(TIMESTAMP_COLUMN_SCHEMA.clone());
-
-        tag_rows
-            .iter_mut()
-            .zip(samples)
-            .for_each(|(tag_row, Sample { timestamp, value })| {
-                tag_row
-                    .values
-                    .resize(tag_num + 2, Value { value_data: None });
-                tag_row.values[tag_num].value_data = Some(ValueData::F64Value(value));
-                tag_row.values[tag_num + 1].value_data =
-                    Some(ValueData::TimestampMillisecondValue(timestamp));
-            });
+        let mut rows = std::mem::take(&mut self.rows);
+        let schema = std::mem::take(&mut self.schema);
+        let col_num = schema.len();
+        for row in &mut rows {
+            if row.values.len() < col_num {
+                row.values.resize(col_num, Value { value_data: None });
+            }
+        }
 
         RowInsertRequest {
             table_name,
-            rows: Some(Rows {
-                schema,
-                rows: tag_rows,
-            }),
+            rows: Some(Rows { schema, rows }),
         }
     }
 }
@@ -159,37 +170,39 @@ mod tests {
     #[test]
     fn test_table_builder() {
         let mut builder = TableBuilder::default();
-        builder.add_labels(vec![
-            PromLabel {
-                name: Bytes::from("tag0"),
-                value: Bytes::from("v0"),
-            },
-            PromLabel {
-                name: Bytes::from("tag1"),
-                value: Bytes::from("v1"),
-            },
-        ]);
+        builder.add_labels_and_samples(
+            &[
+                PromLabel {
+                    name: Bytes::from("tag0"),
+                    value: Bytes::from("v0"),
+                },
+                PromLabel {
+                    name: Bytes::from("tag1"),
+                    value: Bytes::from("v1"),
+                },
+            ],
+            &[Sample {
+                value: 0.0,
+                timestamp: 0,
+            }],
+        );
 
-        builder.add_samples(vec![Sample {
-            value: 0.0,
-            timestamp: 0,
-        }]);
-
-        builder.add_labels(vec![
-            PromLabel {
-                name: Bytes::from("tag0"),
-                value: Bytes::from("v0"),
-            },
-            PromLabel {
-                name: Bytes::from("tag2"),
-                value: Bytes::from("v2"),
-            },
-        ]);
-
-        builder.add_samples(vec![Sample {
-            value: 0.1,
-            timestamp: 1,
-        }]);
+        builder.add_labels_and_samples(
+            &[
+                PromLabel {
+                    name: Bytes::from("tag0"),
+                    value: Bytes::from("v0"),
+                },
+                PromLabel {
+                    name: Bytes::from("tag2"),
+                    value: Bytes::from("v2"),
+                },
+            ],
+            &[Sample {
+                value: 0.1,
+                timestamp: 1,
+            }],
+        );
 
         let request = builder.as_row_insert_request("test".to_string());
         let rows = request.rows.unwrap().rows;
@@ -198,18 +211,18 @@ mod tests {
         assert_eq!(
             vec![
                 Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(0))
+                },
+                Value {
+                    value_data: Some(ValueData::F64Value(0.0))
+                },
+                Value {
                     value_data: Some(ValueData::StringValue("v0".to_string()))
                 },
                 Value {
                     value_data: Some(ValueData::StringValue("v1".to_string()))
                 },
                 Value { value_data: None },
-                Value {
-                    value_data: Some(ValueData::F64Value(0.0))
-                },
-                Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(0))
-                },
             ],
             rows[0].values
         );
@@ -217,17 +230,17 @@ mod tests {
         assert_eq!(
             vec![
                 Value {
-                    value_data: Some(ValueData::StringValue("v0".to_string()))
-                },
-                Value { value_data: None },
-                Value {
-                    value_data: Some(ValueData::StringValue("v2".to_string()))
+                    value_data: Some(ValueData::TimestampMillisecondValue(1))
                 },
                 Value {
                     value_data: Some(ValueData::F64Value(0.1))
                 },
                 Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(1))
+                    value_data: Some(ValueData::StringValue("v0".to_string()))
+                },
+                Value { value_data: None },
+                Value {
+                    value_data: Some(ValueData::StringValue("v2".to_string()))
                 },
             ],
             rows[1].values

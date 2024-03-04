@@ -23,13 +23,23 @@ use prost::DecodeError;
 
 use crate::prom_row_builder::TablesBuilder;
 use crate::prom_store::METRIC_NAME_LABEL_BYTES;
+use crate::repeated_field::{Clear, RepeatedField};
 
-pub type Label = PromLabel;
+impl Clear for Sample {
+    fn clear(&mut self) {}
+}
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PromLabel {
     pub name: Bytes,
     pub value: Bytes,
+}
+
+impl Clear for PromLabel {
+    fn clear(&mut self) {
+        self.name.clear();
+        self.value.clear();
+    }
 }
 
 impl PromLabel {
@@ -67,8 +77,16 @@ impl PromLabel {
 #[derive(Default)]
 pub struct PromTimeSeries {
     pub table_name: String,
-    pub labels: Vec<Label>,
-    pub samples: Vec<Sample>,
+    pub labels: RepeatedField<PromLabel>,
+    pub samples: RepeatedField<Sample>,
+}
+
+impl Clear for PromTimeSeries {
+    fn clear(&mut self) {
+        self.table_name.clear();
+        self.labels.clear();
+        self.samples.clear();
+    }
 }
 
 impl PromTimeSeries {
@@ -86,7 +104,7 @@ impl PromTimeSeries {
         match tag {
             1u32 => {
                 // decode labels
-                let mut label = Label::default();
+                let label = self.labels.push_default();
 
                 let len = decode_varint(buf).map_err(|mut error| {
                     error.push(STRUCT_NAME, "labels");
@@ -108,18 +126,16 @@ impl PromTimeSeries {
                 if label.name.deref() == METRIC_NAME_LABEL_BYTES {
                     let table_name = unsafe { String::from_utf8_unchecked(label.value.to_vec()) };
                     self.table_name = table_name;
-                } else {
-                    self.labels.push(label);
+                    self.labels.truncate(self.labels.len() - 1); // remove last label
                 }
                 Ok(())
             }
             2u32 => {
-                let mut sample = Sample::default();
-                merge(WireType::LengthDelimited, &mut sample, buf, ctx).map_err(|mut error| {
+                let sample = self.samples.push_default();
+                merge(WireType::LengthDelimited, sample, buf, ctx).map_err(|mut error| {
                     error.push(STRUCT_NAME, "samples");
                     error
                 })?;
-                self.samples.push(sample);
                 Ok(())
             }
             3u32 => prost::encoding::skip_field(wire_type, tag, buf, ctx),
@@ -127,17 +143,25 @@ impl PromTimeSeries {
         }
     }
 
-    pub(crate) fn add_to_table_data(&mut self, table_builders: &mut TablesBuilder) {
+    fn add_to_table_data(&mut self, table_builders: &mut TablesBuilder) {
         let table_data =
             table_builders.get_or_create_table_builder(std::mem::take(&mut self.table_name));
-        table_data.add_labels(std::mem::take(&mut self.labels));
-        table_data.add_samples(std::mem::take(&mut self.samples));
+        table_data.add_labels_and_samples(self.labels.as_slice(), self.samples.as_slice());
+        self.labels.clear();
+        self.samples.clear();
     }
 }
 
 #[derive(Default)]
 pub struct PromWriteRequest {
     table_data: TablesBuilder,
+    series: PromTimeSeries,
+}
+
+impl Clear for PromWriteRequest {
+    fn clear(&mut self) {
+        self.table_data.clear();
+    }
 }
 
 impl PromWriteRequest {
@@ -158,8 +182,6 @@ impl PromWriteRequest {
             match tag {
                 1u32 => {
                     // decode TimeSeries
-                    let mut series = PromTimeSeries::default();
-                    // rewrite merge loop
                     let len = decode_varint(&mut buf).map_err(|mut e| {
                         e.push(STRUCT_NAME, "timeseries");
                         e
@@ -172,12 +194,13 @@ impl PromWriteRequest {
                     let limit = remaining - len as usize;
                     while buf.remaining() > limit {
                         let (tag, wire_type) = decode_key(&mut buf)?;
-                        series.merge_field(tag, wire_type, &mut buf, ctx.clone())?;
+                        self.series
+                            .merge_field(tag, wire_type, &mut buf, ctx.clone())?;
                     }
                     if buf.remaining() != limit {
                         return Err(DecodeError::new("delimited length exceeded"));
                     }
-                    series.add_to_table_data(&mut self.table_data);
+                    self.series.add_to_table_data(&mut self.table_data);
                 }
                 3u32 => {
                     // we can ignore metadata for now.
@@ -200,6 +223,7 @@ mod tests {
 
     use crate::prom_store::to_grpc_row_insert_requests;
     use crate::proto::PromWriteRequest;
+    use crate::repeated_field::Clear;
 
     // Ensures `WriteRequest` and `PromWriteRequest` produce the same gRPC request.
     #[test]
@@ -211,6 +235,7 @@ mod tests {
         let data = Bytes::from(std::fs::read(d).unwrap());
 
         let mut prom_write_request = PromWriteRequest::default();
+        prom_write_request.clear();
         prom_write_request.merge(data.clone()).unwrap();
         let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
 

@@ -141,7 +141,7 @@ async fn decode_remote_write_request_to_row_inserts(body: Body) -> Result<RowIns
 
     let mut request = PromWriteRequest::default();
     request
-        .merge(Bytes::from(buf))
+        .merge(&mut Bytes::from(buf))
         .context(error::DecodePromRemoteRequestSnafu)?;
     let (requests, samples) = request.as_row_insert_requests();
     crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_NUM_SERIES.observe(samples as f64);

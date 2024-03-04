@@ -434,10 +434,6 @@ pub fn mock_timeseries() -> Vec<TimeSeries> {
                     value: 4.0f64,
                     timestamp: 2000,
                 },
-                Sample {
-                    value: 4.1f64,
-                    timestamp: 3000,
-                },
             ],
             ..Default::default()
         },
