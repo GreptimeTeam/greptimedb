@@ -3467,7 +3467,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "auth",
- "bytes",
  "catalog",
  "chrono",
  "client",

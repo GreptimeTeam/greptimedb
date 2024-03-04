@@ -20,7 +20,6 @@ async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
 auth.workspace = true
-bytes.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 client.workspace = true
