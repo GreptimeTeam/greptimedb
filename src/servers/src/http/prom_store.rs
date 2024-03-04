@@ -24,6 +24,8 @@ use bytes::Bytes;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use hyper::Body;
+use lazy_static::lazy_static;
+use object_pool::Pool;
 use prost::Message;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,10 @@ use crate::proto::PromWriteRequest;
 use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
 
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
+lazy_static! {
+    static ref PROM_WRITE_REQUEST_POOL: Pool<PromWriteRequest> =
+        Pool::new(256, || PromWriteRequest::default());
+}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DatabaseQuery {
@@ -139,7 +145,7 @@ async fn decode_remote_write_request_to_row_inserts(body: Body) -> Result<RowIns
 
     let buf = snappy_decompress(&body[..])?;
 
-    let mut request = PromWriteRequest::default();
+    let mut request = PROM_WRITE_REQUEST_POOL.pull(|| PromWriteRequest::default());
     request
         .merge(&mut Bytes::from(buf))
         .context(error::DecodePromRemoteRequestSnafu)?;
