@@ -43,6 +43,7 @@ use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
 use crate::error::{
     AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu,
 };
+use crate::metrics::MetricsMiddlewareLayer;
 use crate::server::Server;
 
 type TonicResult<T> = std::result::Result<T, Status>;
@@ -168,7 +169,12 @@ impl Server for GrpcServer {
             (incoming, addr)
         };
 
+        let metrics_layer = tower::ServiceBuilder::new()
+            .layer(MetricsMiddlewareLayer::default())
+            .into_inner();
+
         let builder = tonic::transport::Server::builder()
+            .layer(metrics_layer)
             .add_routes(routes)
             .add_service(self.create_healthcheck_service())
             .add_service(self.create_reflection_service());
