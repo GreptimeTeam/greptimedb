@@ -72,11 +72,15 @@ pub async fn sql(
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SqlQuery>,
 ) -> HttpResponse {
-    let sql_handler = &state.sql_handler;
-
     let start = Instant::now();
-    let sql = query_params.sql.or(form_params.sql);
+    let sql_handler = &state.sql_handler;
     let db = query_ctx.get_db_string();
+
+    let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
+
+    let sql = query_params.sql.or(form_params.sql);
     let format = query_params
         .format
         .or(form_params.format)
@@ -88,10 +92,6 @@ pub async fn sql(
         .or(form_params.epoch)
         .map(|s| s.to_lowercase())
         .map(|s| Epoch::parse(s.as_str()).unwrap_or(Epoch::Millisecond));
-
-    let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
-        .with_label_values(&[db.as_str()])
-        .start_timer();
 
     let result = if let Some(sql) = &sql {
         if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
@@ -258,6 +258,7 @@ pub async fn promql(
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
+
     let _timer = crate::metrics::METRIC_HTTP_PROMQL_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
