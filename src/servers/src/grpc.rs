@@ -170,7 +170,7 @@ impl Server for GrpcServer {
         };
 
         let metrics_layer = tower::ServiceBuilder::new()
-            .layer(MetricsMiddlewareLayer::default())
+            .layer(MetricsMiddlewareLayer)
             .into_inner();
 
         let builder = tonic::transport::Server::builder()
