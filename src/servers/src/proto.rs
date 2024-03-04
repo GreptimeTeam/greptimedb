@@ -17,7 +17,6 @@ use std::ops::Deref;
 use api::prom_store::remote::Sample;
 use api::v1::RowInsertRequests;
 use bytes::{Buf, Bytes};
-use object_pool::Pool;
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, DecodeContext, WireType};
 use prost::DecodeError;
@@ -27,6 +26,7 @@ use crate::prom_store::METRIC_NAME_LABEL_BYTES;
 
 pub type Label = PromLabel;
 
+#[derive(Default)]
 pub struct PromLabel {
     pub name: Bytes,
     pub value: Bytes,
@@ -43,7 +43,7 @@ impl PromLabel {
     where
         B: Buf,
     {
-        const STRUCT_NAME: &'static str = "PromLabel";
+        const STRUCT_NAME: &str = "PromLabel";
         match tag {
             1u32 => {
                 let value = &mut self.name;
@@ -60,20 +60,6 @@ impl PromLabel {
                 })
             }
             _ => prost::encoding::skip_field(wire_type, tag, buf, ctx),
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.name.clear();
-        self.value.clear();
-    }
-}
-
-impl Default for PromLabel {
-    fn default() -> Self {
-        PromLabel {
-            name: Default::default(),
-            value: Default::default(),
         }
     }
 }
@@ -141,11 +127,6 @@ impl PromTimeSeries {
         }
     }
 
-    pub fn clear(&mut self) {
-        self.labels.clear();
-        self.samples.clear();
-    }
-
     pub(crate) fn add_to_table_data(&mut self, table_builders: &mut TablesBuilder) {
         let table_data =
             table_builders.get_or_create_table_builder(std::mem::take(&mut self.table_name));
@@ -154,14 +135,14 @@ impl PromTimeSeries {
     }
 }
 
+#[derive(Default)]
 pub struct PromWriteRequest {
     table_data: TablesBuilder,
-    timeseries_pool: Pool<PromTimeSeries>,
 }
 
 impl PromWriteRequest {
-    pub fn to_row_insert_requests(&mut self) -> (RowInsertRequests, usize) {
-        self.table_data.to_insert_requests()
+    pub fn as_row_insert_requests(&mut self) -> (RowInsertRequests, usize) {
+        self.table_data.as_insert_requests()
     }
 
     pub fn merge<B>(&mut self, mut buf: B) -> Result<(), DecodeError>
@@ -177,7 +158,7 @@ impl PromWriteRequest {
             match tag {
                 1u32 => {
                     // decode TimeSeries
-                    let mut series = self.timeseries_pool.pull(|| PromTimeSeries::default());
+                    let mut series = PromTimeSeries::default();
                     // rewrite merge loop
                     let len = decode_varint(&mut buf).map_err(|mut e| {
                         e.push(STRUCT_NAME, "timeseries");
@@ -213,15 +194,6 @@ impl PromWriteRequest {
     }
 }
 
-impl Default for PromWriteRequest {
-    fn default() -> Self {
-        PromWriteRequest {
-            table_data: TablesBuilder::default(),
-            timeseries_pool: Pool::new(10000, || PromTimeSeries::default()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -243,9 +215,8 @@ mod tests {
         let data = Bytes::from(std::fs::read(d).unwrap());
 
         let mut prom_write_request = PromWriteRequest::default();
-        prom_write_request.clear();
         prom_write_request.merge(data.clone()).unwrap();
-        let (prom_rows, samples) = prom_write_request.to_row_insert_requests();
+        let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
 
         let expected_request = WriteRequest::decode(data).unwrap();
         let (expected_rows, expected_samples) =

@@ -52,7 +52,7 @@ impl TablesBuilder {
         self.tables.entry(table_name).or_default()
     }
 
-    pub(crate) fn to_insert_requests(&mut self) -> (RowInsertRequests, usize) {
+    pub(crate) fn as_insert_requests(&mut self) -> (RowInsertRequests, usize) {
         let mut total_rows = 0;
 
         let inserts = self
@@ -60,16 +60,14 @@ impl TablesBuilder {
             .iter_mut()
             .map(|(name, table)| {
                 total_rows += table.num_rows();
-                table.to_row_insert_request(name.clone())
+                table.as_row_insert_request(name.clone())
             })
             .collect();
         (RowInsertRequests { inserts }, total_rows)
     }
 
     pub(crate) fn clear(&mut self) {
-        for (_, t) in &mut self.tables {
-            t.clear();
-        }
+        self.tables.clear();
     }
 }
 
@@ -122,7 +120,7 @@ impl TableBuilder {
         self.samples.len()
     }
 
-    pub(crate) fn to_row_insert_request(&mut self, table_name: String) -> RowInsertRequest {
+    pub(crate) fn as_row_insert_request(&mut self, table_name: String) -> RowInsertRequest {
         let tag_num = self.tag_indexes.len();
         let rows_num = self.samples.len();
 
@@ -135,16 +133,17 @@ impl TableBuilder {
 
         assert_eq!(rows_num, tag_rows.len());
 
-        tag_rows.iter_mut().zip(samples.into_iter()).for_each(
-            |(tag_row, Sample { timestamp, value })| {
+        tag_rows
+            .iter_mut()
+            .zip(samples)
+            .for_each(|(tag_row, Sample { timestamp, value })| {
                 tag_row
                     .values
                     .resize(tag_num + 2, Value { value_data: None });
                 tag_row.values[tag_num].value_data = Some(ValueData::F64Value(value));
                 tag_row.values[tag_num + 1].value_data =
                     Some(ValueData::TimestampMillisecondValue(timestamp));
-            },
-        );
+            });
 
         RowInsertRequest {
             table_name,
@@ -154,23 +153,17 @@ impl TableBuilder {
             }),
         }
     }
-
-    pub fn clear(&mut self) {
-        // self.tag_indexes.clear();
-        // self.tag_schemas.clear();
-        self.samples.clear();
-        self.tag_rows.clear();
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use api::prom_store::remote::Sample;
+    use api::v1::value::ValueData;
+    use api::v1::Value;
     use bytes::Bytes;
 
     use crate::prom_row_builder::TableBuilder;
     use crate::proto::PromLabel;
-
     #[test]
     fn test_table_builder() {
         let mut builder = TableBuilder::default();
@@ -206,11 +199,46 @@ mod tests {
             timestamp: 1,
         }]);
 
-        let request = builder.to_row_insert_request("test".to_string());
+        let request = builder.as_row_insert_request("test".to_string());
         let rows = request.rows.unwrap().rows;
         assert_eq!(2, rows.len());
-        for r in rows {
-            println!("{:?}", r);
-        }
+
+        assert_eq!(
+            vec![
+                Value {
+                    value_data: Some(ValueData::StringValue("v0".to_string()))
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue("v1".to_string()))
+                },
+                Value { value_data: None },
+                Value {
+                    value_data: Some(ValueData::F64Value(0.0))
+                },
+                Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(0))
+                },
+            ],
+            rows[0].values
+        );
+
+        assert_eq!(
+            vec![
+                Value {
+                    value_data: Some(ValueData::StringValue("v0".to_string()))
+                },
+                Value { value_data: None },
+                Value {
+                    value_data: Some(ValueData::StringValue("v2".to_string()))
+                },
+                Value {
+                    value_data: Some(ValueData::F64Value(0.1))
+                },
+                Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(1))
+                },
+            ],
+            rows[0].values
+        );
     }
 }

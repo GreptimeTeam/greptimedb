@@ -24,8 +24,6 @@ use bytes::Bytes;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use hyper::Body;
-use lazy_static::lazy_static;
-use object_pool::Pool;
 use prost::Message;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -133,11 +131,6 @@ pub async fn remote_read(
     handler.read(request, query_ctx).await
 }
 
-lazy_static! {
-    static ref PROM_WRITE_REQUEST_POOL: Pool<PromWriteRequest> =
-        Pool::new(100, || { PromWriteRequest::default() });
-}
-
 async fn decode_remote_write_request_to_row_inserts(body: Body) -> Result<RowInsertRequests> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
     let body = hyper::body::to_bytes(body)
@@ -146,12 +139,11 @@ async fn decode_remote_write_request_to_row_inserts(body: Body) -> Result<RowIns
 
     let buf = snappy_decompress(&body[..])?;
 
-    let mut request = PROM_WRITE_REQUEST_POOL.pull(|| PromWriteRequest::default());
-
+    let mut request = PromWriteRequest::default();
     request
         .merge(Bytes::from(buf))
         .context(error::DecodePromRemoteRequestSnafu)?;
-    let (requests, samples) = request.to_row_insert_requests();
+    let (requests, samples) = request.as_row_insert_requests();
     crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_NUM_SERIES.observe(samples as f64);
     Ok(requests)
 }
