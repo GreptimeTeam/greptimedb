@@ -123,7 +123,7 @@ lazy_static! {
         vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
-    /// Counter of rows read.
+    /// Counter of rows read from different source.
     pub static ref READ_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("greptime_mito_read_rows_total", "mito read rows total", &[TYPE_LABEL]).unwrap();
     /// Counter of filtered rows during merge.
@@ -137,6 +137,24 @@ lazy_static! {
         register_int_counter_vec!("greptime_mito_precise_filter_rows_total", "mito precise filter rows total", &[TYPE_LABEL]).unwrap();
     pub static ref READ_ROWS_IN_ROW_GROUP_TOTAL: IntCounterVec =
         register_int_counter_vec!("greptime_mito_read_rows_in_row_group_total", "mito read rows in row group total", &[TYPE_LABEL]).unwrap();
+    /// Histogram for the number of SSTs to scan per query.
+    pub static ref READ_SST_COUNT: Histogram = register_histogram!(
+        "greptime_mito_read_sst_count",
+        "Number of SSTs to scan in a scan task",
+        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0, 1024.0],
+    ).unwrap();
+    /// Histogram for the number of rows returned per query.
+    pub static ref READ_ROWS_RETURN: Histogram = register_histogram!(
+        "greptime_mito_read_rows_return",
+        "Number of rows returned in a scan task",
+        exponential_buckets(100.0, 10.0, 8).unwrap(),
+    ).unwrap();
+    /// Histogram for the number of batches returned per query.
+    pub static ref READ_BATCHES_RETURN: Histogram = register_histogram!(
+        "greptime_mito_read_batches_return",
+        "Number of rows returned in a scan task",
+        exponential_buckets(100.0, 10.0, 7).unwrap(),
+    ).unwrap();
     // ------- End of query metrics.
 
     // Cache related metrics.

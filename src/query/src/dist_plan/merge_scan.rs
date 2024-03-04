@@ -47,9 +47,7 @@ use store_api::storage::RegionId;
 use tokio::time::Instant;
 
 use crate::error::ConvertSchemaSnafu;
-use crate::metrics::{
-    METRIC_MERGE_SCAN_ERRORS_TOTAL, METRIC_MERGE_SCAN_POLL_ELAPSED, METRIC_MERGE_SCAN_REGIONS,
-};
+use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::region_query::RegionQueryHandlerRef;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -170,7 +168,7 @@ impl MergeScanExec {
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
 
         let stream = Box::pin(stream!({
-            METRIC_MERGE_SCAN_REGIONS.observe(regions.len() as f64);
+            MERGE_SCAN_REGIONS.observe(regions.len() as f64);
             let _finish_timer = metric.finish_time().timer();
             let mut ready_timer = metric.ready_time().timer();
             let mut first_consume_timer = Some(metric.first_consume_time().timer());
@@ -188,7 +186,7 @@ impl MergeScanExec {
                     .do_get(request)
                     .await
                     .map_err(|e| {
-                        METRIC_MERGE_SCAN_ERRORS_TOTAL.inc();
+                        MERGE_SCAN_ERRORS_TOTAL.inc();
                         BoxedError::new(e)
                     })
                     .context(ExternalSnafu)?;
@@ -227,7 +225,7 @@ impl MergeScanExec {
                     metric.record_greptime_exec_cost(value as usize);
                 }
 
-                METRIC_MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
+                MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
             }
         }));
 

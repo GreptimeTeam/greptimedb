@@ -93,8 +93,6 @@ pub async fn format_query(
     Extension(_query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<InstantQuery>,
 ) -> PrometheusJsonResponse {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_FORMAT_QUERY_ELAPSED.start_timer();
-
     let query = params.query.or(form_params.query).unwrap_or_default();
     match promql_parser::parser::parse(&query) {
         Ok(expr) => {
@@ -123,7 +121,6 @@ pub async fn instant_query(
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<InstantQuery>,
 ) -> PrometheusJsonResponse {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_INSTANT_QUERY_ELAPSED.start_timer();
     // Extract time from query string, or use current server time if not specified.
     let time = params
         .time
@@ -163,7 +160,6 @@ pub async fn range_query(
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<RangeQuery>,
 ) -> PrometheusJsonResponse {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_RANGE_QUERY_ELAPSED.start_timer();
     let prom_query = PromQuery {
         query: params.query.or(form_params.query).unwrap_or_default(),
         start: params.start.or(form_params.start).unwrap_or_default(),
@@ -232,8 +228,6 @@ pub async fn labels_query(
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<LabelsQuery>,
 ) -> PrometheusJsonResponse {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED.start_timer();
-
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
@@ -498,8 +492,6 @@ pub async fn label_values_query(
     Extension(query_ctx): Extension<QueryContextRef>,
     Query(params): Query<LabelValueQuery>,
 ) -> PrometheusJsonResponse {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED.start_timer();
-
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
@@ -624,7 +616,6 @@ pub async fn series_query(
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SeriesQuery>,
 ) -> PrometheusJsonResponse {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_SERIES_QUERY_ELAPSED.start_timer();
     let mut queries: Vec<String> = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;

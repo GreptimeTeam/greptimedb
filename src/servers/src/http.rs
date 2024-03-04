@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
@@ -24,11 +24,9 @@ use aide::OperationOutput;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::{DefaultBodyLimit, MatchedPath};
-use axum::http::Request;
-use axum::middleware::{self, Next};
+use axum::extract::DefaultBodyLimit;
 use axum::response::{Html, IntoResponse, Json, Response};
-use axum::{routing, BoxError, Extension, Router};
+use axum::{middleware, routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::status_code::StatusCode;
@@ -61,9 +59,7 @@ use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::prometheus::{
     format_query, instant_query, label_values_query, labels_query, range_query, series_query,
 };
-use crate::metrics::{
-    HTTP_TRACK_METRICS, METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL,
-};
+use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -599,7 +595,7 @@ impl HttpServer {
         }
 
         // Add a layer to collect HTTP metrics for axum.
-        router = router.route_layer(middleware::from_fn(track_metrics));
+        router = router.route_layer(middleware::from_fn(http_metrics_layer));
 
         router
     }
@@ -725,35 +721,6 @@ impl HttpServer {
             .route("/config", apirouting::get(handler::config))
             .with_state(state)
     }
-}
-
-/// A middleware to record metrics for HTTP.
-// Based on https://github.com/tokio-rs/axum/blob/axum-v0.6.16/examples/prometheus-metrics/src/main.rs
-pub(crate) async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
-    let _timer = HTTP_TRACK_METRICS
-        .with_label_values(&["value"])
-        .start_timer();
-    let start = Instant::now();
-    let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
-        matched_path.as_str().to_owned()
-    } else {
-        req.uri().path().to_owned()
-    };
-    let method = req.method().clone();
-
-    let response = next.run(req).await;
-
-    let latency = start.elapsed().as_secs_f64();
-    let status = response.status().as_u16().to_string();
-    let method_str = method.to_string();
-
-    let labels = [method_str.as_str(), path.as_str(), status.as_str()];
-    METRIC_HTTP_REQUESTS_TOTAL.with_label_values(&labels).inc();
-    METRIC_HTTP_REQUESTS_ELAPSED
-        .with_label_values(&labels)
-        .observe(latency);
-
-    response
 }
 
 pub const HTTP_SERVER: &str = "HTTP_SERVER";

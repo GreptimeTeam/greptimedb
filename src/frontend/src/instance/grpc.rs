@@ -31,7 +31,8 @@ use crate::error::{
     Error, IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, Result,
     TableOperationSnafu,
 };
-use crate::instance::Instance;
+use crate::instance::{attach_timer, Instance};
+use crate::metrics::{GRPC_HANDLE_PROMQL_ELAPSED, GRPC_HANDLE_SQL_ELAPSED};
 
 #[async_trait]
 impl GrpcQueryHandler for Instance {
@@ -59,6 +60,7 @@ impl GrpcQueryHandler for Instance {
                 })?;
                 match query {
                     Query::Sql(sql) => {
+                        let timer = GRPC_HANDLE_SQL_ELAPSED.start_timer();
                         let mut result = SqlQueryHandler::do_query(self, &sql, ctx.clone()).await;
                         ensure!(
                             result.len() == 1,
@@ -66,7 +68,8 @@ impl GrpcQueryHandler for Instance {
                                 feat: "execute multiple statements in SQL query string through GRPC interface"
                             }
                         );
-                        result.remove(0)?
+                        let output = result.remove(0)?;
+                        attach_timer(output, timer)
                     }
                     Query::LogicalPlan(_) => {
                         return NotSupportedSnafu {
@@ -75,6 +78,7 @@ impl GrpcQueryHandler for Instance {
                         .fail();
                     }
                     Query::PromRangeQuery(promql) => {
+                        let timer = GRPC_HANDLE_PROMQL_ELAPSED.start_timer();
                         let prom_query = PromQuery {
                             query: promql.query,
                             start: promql.start,
@@ -89,7 +93,8 @@ impl GrpcQueryHandler for Instance {
                                 feat: "execute multiple statements in PromQL query string through GRPC interface"
                             }
                         );
-                        result.remove(0)?
+                        let output = result.remove(0)?;
+                        attach_timer(output, timer)
                     }
                 }
             }

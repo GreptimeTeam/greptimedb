@@ -53,6 +53,7 @@ use crate::error::{
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
+use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
@@ -107,6 +108,10 @@ impl DatafusionQueryEngine {
                 name: format!("DML op {}", dml.op),
             }
         );
+
+        let _timer = QUERY_STAGE_ELAPSED
+            .with_label_values(&[dml.op.name()])
+            .start_timer();
 
         let default_catalog = &query_ctx.current_catalog().to_owned();
         let default_schema = &query_ctx.current_schema().to_owned();
@@ -302,7 +307,7 @@ impl QueryEngine for DatafusionQueryEngine {
 impl LogicalOptimizer for DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
     fn optimize(&self, context: &QueryEngineContext, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let _timer = metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED.start_timer();
+        let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
                 // Optimized by extension rules
@@ -336,7 +341,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = metrics::METRIC_CREATE_PHYSICAL_ELAPSED.start_timer();
+        let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let state = ctx.state();
@@ -370,7 +375,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = metrics::METRIC_OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
+        let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
 
         let state = ctx.state();
         let config = state.config_options();
@@ -418,16 +423,22 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let _timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
+        let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
-            1 => Ok(plan
-                .execute(0, task_ctx)
-                .context(error::ExecutePhysicalPlanSnafu)
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu))?,
+            1 => {
+                let stream = plan
+                    .execute(0, task_ctx)
+                    .context(error::ExecutePhysicalPlanSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+                let stream = OnDone::new(stream, move || {
+                    exec_timer.observe_duration();
+                });
+                Ok(Box::pin(stream))
+            }
             _ => {
                 let df_plan = Arc::new(DfPhysicalPlanAdapter(plan.clone()));
                 // merge into a single partition
@@ -444,6 +455,9 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(df_plan);
+                let stream = OnDone::new(Box::pin(stream), move || {
+                    exec_timer.observe_duration();
+                });
                 Ok(Box::pin(stream))
             }
         }

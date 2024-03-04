@@ -18,6 +18,10 @@ pub(crate) mod jemalloc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use axum::extract::MatchedPath;
+use axum::http::Request;
+use axum::middleware::Next;
+use axum::response::IntoResponse;
 use hyper::Body;
 use lazy_static::lazy_static;
 use prometheus::{
@@ -48,16 +52,20 @@ lazy_static! {
         &[METRIC_PROTOCOL_LABEL]
     )
     .unwrap();
+    /// Http SQL query duration per database.
     pub static ref METRIC_HTTP_SQL_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_sql_elapsed",
         "servers http sql elapsed",
-        &[METRIC_DB_LABEL]
+        &[METRIC_DB_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
+    /// Http pql query duration per database.
     pub static ref METRIC_HTTP_PROMQL_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_promql_elapsed",
         "servers http promql elapsed",
-        &[METRIC_DB_LABEL]
+        &[METRIC_DB_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
     pub static ref METRIC_AUTH_FAILURE: IntCounterVec = register_int_counter_vec!(
@@ -66,33 +74,41 @@ lazy_static! {
         &[METRIC_CODE_LABEL]
     )
     .unwrap();
+    /// Http influxdb write duration per database.
     pub static ref METRIC_HTTP_INFLUXDB_WRITE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_influxdb_write_elapsed",
         "servers http influxdb write elapsed",
-        &[METRIC_DB_LABEL]
+        &[METRIC_DB_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
+    /// Http prometheus write duration per database.
     pub static ref METRIC_HTTP_PROM_STORE_WRITE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_prometheus_write_elapsed",
         "servers http prometheus write elapsed",
-        &[METRIC_DB_LABEL]
+        &[METRIC_DB_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
-    pub static ref METRIC_HTTP_PROM_STORE_DECODE_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_http_prometheus_decode_elapsed",
-        "servers http prometheus decode elapsed",
+    /// Prometheus remote write codec duration.
+    pub static ref METRIC_HTTP_PROM_STORE_CODEC_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_servers_http_prometheus_codec_elapsed",
+        "servers http prometheus request codec duration",
+        &["type"],
     )
     .unwrap();
+    /// Decode duration of prometheus write request.
+    pub static ref METRIC_HTTP_PROM_STORE_DECODE_ELAPSED: Histogram = METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
+        .with_label_values(&["decode"]);
+    /// Duration to convert prometheus write request to gRPC request.
+    pub static ref METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED: Histogram = METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
+        .with_label_values(&["convert"]);
     pub static ref METRIC_HTTP_PROM_STORE_DECODE_NUM_SERIES: Histogram = register_histogram!(
         "greptime_servers_http_prometheus_decode_num_series",
         "servers http prometheus decode num series",
     )
     .unwrap();
-    pub static ref METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_http_prometheus_convert_elapsed",
-        "servers http prometheus convert to gRPC request elapsed",
-    )
-    .unwrap();
+    /// Http prometheus read duration per database.
     pub static ref METRIC_HTTP_PROM_STORE_READ_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_prometheus_read_elapsed",
         "servers http prometheus read elapsed",
@@ -116,36 +132,6 @@ lazy_static! {
     pub static ref METRIC_TCP_OPENTSDB_LINE_WRITE_ELAPSED: Histogram = register_histogram!(
         "greptime_servers_opentsdb_line_write_elapsed",
         "servers opentsdb line write elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_HTTP_PROMQL_FORMAT_QUERY_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_http_promql_format_query_elapsed",
-        "servers http promql format query elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_HTTP_PROMQL_INSTANT_QUERY_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_http_promql_instant_query_elapsed",
-        "servers http promql instant query elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_HTTP_PROMQL_RANGE_QUERY_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_http_promql_range_query_elapsed",
-        "servers http promql range query elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_http_promql_label_query_elapsed",
-        "servers http promql label query elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_HTTP_PROMQL_SERIES_QUERY_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_http_promql_series_query_elapsed",
-        "servers http promql series query elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_http_promql_label_value_query_elapsed",
-        "servers http promql label value query elapsed"
     )
     .unwrap();
     pub static ref METRIC_MYSQL_CONNECTIONS: IntGauge = register_int_gauge!(
@@ -202,7 +188,8 @@ lazy_static! {
     pub static ref METRIC_HTTP_REQUESTS_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_requests_elapsed",
         "servers http requests elapsed",
-        &[METRIC_METHOD_LABEL, METRIC_PATH_LABEL, METRIC_CODE_LABEL]
+        &[METRIC_METHOD_LABEL, METRIC_PATH_LABEL, METRIC_CODE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
     pub static ref METRIC_GRPC_REQUESTS_TOTAL: IntCounterVec = register_int_counter_vec!(
@@ -214,13 +201,8 @@ lazy_static! {
     pub static ref METRIC_GRPC_REQUESTS_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_grpc_requests_elapsed",
         "servers grpc requests elapsed",
-        &[METRIC_PATH_LABEL, METRIC_CODE_LABEL]
-    )
-    .unwrap();
-    pub static ref HTTP_TRACK_METRICS: HistogramVec = register_histogram_vec!(
-        "greptime_http_track_metrics",
-        "http track metrics",
-        &["tag"]
+        &[METRIC_PATH_LABEL, METRIC_CODE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
 }
@@ -283,4 +265,30 @@ where
             Ok(response)
         })
     }
+}
+
+/// A middleware to record metrics for HTTP.
+// Based on https://github.com/tokio-rs/axum/blob/axum-v0.6.16/examples/prometheus-metrics/src/main.rs
+pub(crate) async fn http_metrics_layer<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
+    let start = Instant::now();
+    let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
+        matched_path.as_str().to_owned()
+    } else {
+        req.uri().path().to_owned()
+    };
+    let method = req.method().clone();
+
+    let response = next.run(req).await;
+
+    let latency = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+    let method_str = method.to_string();
+
+    let labels = [method_str.as_str(), path.as_str(), status.as_str()];
+    METRIC_HTTP_REQUESTS_TOTAL.with_label_values(&labels).inc();
+    METRIC_HTTP_REQUESTS_ELAPSED
+        .with_label_values(&labels)
+        .observe(latency);
+
+    response
 }

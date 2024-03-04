@@ -47,6 +47,7 @@ mod truncate_test;
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
@@ -219,6 +220,7 @@ impl EngineInner {
 
     /// Handles the scan `request` and returns a [Scanner] for the `request`.
     fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+        let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self
             .workers
@@ -239,7 +241,8 @@ impl EngineInner {
             Some(cache_manager),
         )
         .with_parallelism(scan_parallelism)
-        .ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled());
+        .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
+        .with_start_time(query_start);
 
         scan_region.scanner()
     }

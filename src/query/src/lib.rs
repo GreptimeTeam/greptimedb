@@ -21,7 +21,7 @@ pub mod dist_plan;
 pub mod error;
 pub mod executor;
 pub mod logical_optimizer;
-mod metrics;
+pub mod metrics;
 mod optimizer;
 pub mod parser;
 pub mod physical_optimizer;
