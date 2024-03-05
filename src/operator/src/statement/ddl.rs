@@ -31,6 +31,7 @@ use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::{info, tracing};
+use common_time::Timezone;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use datatypes::value::Value;
@@ -739,7 +740,7 @@ fn find_partition_entries(
     create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
     partition_columns: &[String],
-    _query_ctx: &QueryContextRef,
+    query_ctx: &QueryContextRef,
 ) -> Result<Vec<Vec<PartitionBound>>> {
     let entries = if let Some(partitions) = partitions {
         // extract concrete data type of partition columns
@@ -767,7 +768,8 @@ fn find_partition_entries(
         // Transform parser expr to partition expr
         let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
         for partition in &partitions.exprs {
-            let partition_expr = convert_one_expr(partition, &column_name_and_type)?;
+            let partition_expr =
+                convert_one_expr(partition, &column_name_and_type, &query_ctx.timezone())?;
             partition_exprs.push(vec![PartitionBound::Expr(partition_expr)]);
         }
 
@@ -786,6 +788,7 @@ fn find_partition_entries(
 fn convert_one_expr(
     expr: &Expr,
     column_name_and_type: &HashMap<&String, ConcreteDataType>,
+    timezone: &Timezone,
 ) -> Result<PartitionExpr> {
     let Expr::BinaryOp { left, op, right } = expr else {
         return InvalidPartitionRuleSnafu {
@@ -803,18 +806,18 @@ fn convert_one_expr(
     let (lhs, op, rhs) = match (left.as_ref(), right.as_ref()) {
         (Expr::Identifier(ident), Expr::Value(value)) => {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type)?;
+            let value = convert_value(value, data_type, timezone)?;
             (Operand::Column(column_name), op, Operand::Value(value))
         }
         (Expr::Value(value), Expr::Identifier(ident)) => {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type)?;
+            let value = convert_value(value, data_type, timezone)?;
             (Operand::Value(value), op, Operand::Column(column_name))
         }
         (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
             // sub-expr must against another sub-expr
-            let lhs = convert_one_expr(left, column_name_and_type)?;
-            let rhs = convert_one_expr(right, column_name_and_type)?;
+            let lhs = convert_one_expr(left, column_name_and_type, timezone)?;
+            let rhs = convert_one_expr(right, column_name_and_type, timezone)?;
             (Operand::Expr(lhs), op, Operand::Expr(rhs))
         }
         _ => {
@@ -840,9 +843,12 @@ fn convert_identifier(
     Ok((column_name, data_type))
 }
 
-fn convert_value(value: &ParserValue, data_type: ConcreteDataType) -> Result<Value> {
-    // TODO(ruihang): pass timezone here
-    sql_value_to_value("<NONAME>", &data_type, value, None).context(ParseSqlValueSnafu)
+fn convert_value(
+    value: &ParserValue,
+    data_type: ConcreteDataType,
+    timezone: &Timezone,
+) -> Result<Value> {
+    sql_value_to_value("<NONAME>", &data_type, value, Some(timezone)).context(ParseSqlValueSnafu)
 }
 
 /// Merge table level table options with schema level table options.

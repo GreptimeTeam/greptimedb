@@ -154,6 +154,8 @@ impl PartitionRuleManager {
     ) -> Result<PartitionRuleRef> {
         let partitions = self.find_table_partitions(table_id).await?;
 
+        debug_assert!(!partitions.is_empty());
+
         let partition_columns = partitions[0].partition.partition_columns();
 
         let regions = partitions

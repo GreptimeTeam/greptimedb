@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 use sql::statements::value_to_sql_value;
 use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Ident};
 
+/// Struct for partition expression. This can be converted back to sqlparser's [Expr].
+/// by [`Self::to_parser_expr`].
+///
+/// [Expr]: sqlparser::ast::Expr
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PartitionExpr {
     pub(crate) lhs: Box<Operand>,

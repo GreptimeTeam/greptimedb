@@ -98,7 +98,7 @@ impl CreateTableExprTranslator {
                 _ => format!("{v}"),
             },
             PartitionBound::MaxValue => "MAXVALUE".to_string(),
-            PartitionBound::Expr(_) => todo!(),
+            PartitionBound::Expr(expr) => expr.to_parser_expr().to_string(),
         }
     }
 
