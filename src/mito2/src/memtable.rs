@@ -14,16 +14,12 @@
 
 //! Memtables are write buffers for regions.
 
-pub mod key_values;
-pub mod merge_tree;
-pub mod time_series;
-pub(crate) mod version;
-
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_time::Timestamp;
+use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
@@ -31,13 +27,33 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 pub use crate::memtable::key_values::KeyValues;
+use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
+
+pub mod key_values;
+pub mod merge_tree;
+pub mod time_series;
+pub(crate) mod version;
 
 /// Id for memtables.
 ///
 /// Should be unique under the same region.
 pub type MemtableId = u32;
+
+/// Config for memtables.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MemtableConfig {
+    Experimental(MergeTreeConfig),
+    TimeSeries,
+}
+
+impl Default for MemtableConfig {
+    fn default() -> Self {
+        Self::Experimental(MergeTreeConfig::default())
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct MemtableStats {
@@ -187,8 +203,29 @@ impl Drop for AllocTracker {
 
 #[cfg(test)]
 mod tests {
+    use common_base::readable_size::ReadableSize;
+
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
+
+    #[test]
+    fn test_deserialize_memtable_config() {
+        let s = r#"
+type = "experimental"
+index_max_keys_per_shard = 8192
+data_freeze_threshold = 1024
+dedup = true
+fork_dictionary_bytes = "512MiB"
+"#;
+        let config: MemtableConfig = toml::from_str(s).unwrap();
+        let MemtableConfig::Experimental(merge_tree) = config else {
+            unreachable!()
+        };
+        assert!(merge_tree.dedup);
+        assert_eq!(8192, merge_tree.index_max_keys_per_shard);
+        assert_eq!(1024, merge_tree.data_freeze_threshold);
+        assert_eq!(ReadableSize::mb(512), merge_tree.fork_dictionary_bytes);
+    }
 
     #[test]
     fn test_alloc_tracker_without_manager() {
