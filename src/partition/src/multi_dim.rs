@@ -18,9 +18,10 @@ use std::collections::HashMap;
 
 use datatypes::prelude::Value;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 use store_api::storage::RegionNumber;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 use crate::PartitionRule;
 
@@ -54,6 +55,14 @@ impl MultiDimPartitionRule {
     }
 
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
+        ensure!(
+            values.len() == self.partition_columns.len(),
+            error::RegionKeysSizeSnafu {
+                expect: self.partition_columns.len(),
+                actual: values.len(),
+            }
+        );
+
         for (region_index, expr) in self.exprs.iter().enumerate() {
             if self.evaluate_expr(expr, values)? {
                 return Ok(self.regions[region_index]);
@@ -128,5 +137,65 @@ impl PartitionRule for MultiDimPartitionRule {
         _exprs: &[crate::partition::PartitionExpr],
     ) -> Result<Vec<RegionNumber>> {
         Ok(self.regions.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use super::*;
+    use crate::error;
+
+    #[test]
+    fn test_find_region() {
+        // PARTITION ON COLUMNS (b) (
+        //     b < 'hz',
+        //     b >= 'hz' AND b < 'sh',
+        //     b >= 'sh'
+        // )
+        let rule = MultiDimPartitionRule::new(
+            vec!["b".to_string()],
+            vec![1, 2, 3],
+            vec![
+                PartitionExpr::new(
+                    Operand::Column("b".to_string()),
+                    RestrictedOp::Lt,
+                    Operand::Value(datatypes::value::Value::String("hz".into())),
+                ),
+                PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("b".to_string()),
+                        RestrictedOp::GtEq,
+                        Operand::Value(datatypes::value::Value::String("hz".into())),
+                    )),
+                    RestrictedOp::And,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("b".to_string()),
+                        RestrictedOp::Lt,
+                        Operand::Value(datatypes::value::Value::String("sh".into())),
+                    )),
+                ),
+                PartitionExpr::new(
+                    Operand::Column("b".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(datatypes::value::Value::String("sh".into())),
+                ),
+            ],
+        );
+        assert_matches!(
+            rule.find_region(&["foo".into(), 1000_i32.into()]),
+            Err(error::Error::RegionKeysSize {
+                expect: 1,
+                actual: 2,
+                ..
+            })
+        );
+        assert_matches!(rule.find_region(&["foo".into()]), Ok(1));
+        assert_matches!(rule.find_region(&["bar".into()]), Ok(1));
+        assert_matches!(rule.find_region(&["hz".into()]), Ok(2));
+        assert_matches!(rule.find_region(&["hzz".into()]), Ok(2));
+        assert_matches!(rule.find_region(&["sh".into()]), Ok(3));
+        assert_matches!(rule.find_region(&["zzzz".into()]), Ok(3));
     }
 }
