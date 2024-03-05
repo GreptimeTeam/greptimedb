@@ -186,7 +186,6 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "TODO(ruihang): WIP new partition rule"]
     async fn test_distributed_insert_delete_and_query() {
         common_telemetry::init_default_ut_logging();
 
@@ -204,11 +203,11 @@ CREATE TABLE {table_name} (
     ts TIMESTAMP,
     TIME INDEX (ts),
     PRIMARY KEY (a, b)
-) PARTITION BY RANGE COLUMNS(a) (
-    PARTITION r0 VALUES LESS THAN (10),
-    PARTITION r1 VALUES LESS THAN (20),
-    PARTITION r2 VALUES LESS THAN (50),
-    PARTITION r3 VALUES LESS THAN (MAXVALUE),
+) PARTITION ON COLUMNS(a) (
+    a < 10,
+    a >= 10 AND a < 20,
+    a >= 20 AND a < 50,
+    a >= 50
 )"
         );
         create_table(frontend, sql).await;

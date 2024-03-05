@@ -49,6 +49,7 @@ pub trait PartitionRule: Sync + Send {
 pub enum PartitionBound {
     Value(Value),
     MaxValue,
+    Expr(crate::expr::PartitionExpr),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +63,7 @@ impl Display for PartitionBound {
         match self {
             Self::Value(v) => write!(f, "{}", v),
             Self::MaxValue => write!(f, "MAXVALUE"),
+            Self::Expr(e) => write!(f, "{:?}", e),
         }
     }
 }

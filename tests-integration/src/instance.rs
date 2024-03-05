@@ -67,7 +67,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "TODO(ruihang): WIP new partition rule"]
     async fn test_distributed_exec_sql() {
         common_telemetry::init_default_ut_logging();
 
@@ -85,11 +84,11 @@ mod tests {
                 TIME INDEX (ts),
                 PRIMARY KEY(host)
             )
-            PARTITION BY RANGE COLUMNS (host) (
-                PARTITION r0 VALUES LESS THAN ('550-A'),
-                PARTITION r1 VALUES LESS THAN ('550-W'),
-                PARTITION r2 VALUES LESS THAN ('MOSS'),
-                PARTITION r3 VALUES LESS THAN (MAXVALUE),
+            PARTITION ON COLUMNS (host) (
+                host < '550-A',
+                host >= '550-A' AND host < '550-W',
+                host >= '550-W' AND host < 'MOSS',
+                host >= 'MOSS'
             )
             engine=mito"#;
         create_table(instance, sql).await;

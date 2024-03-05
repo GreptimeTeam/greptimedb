@@ -454,6 +454,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse sql value"))]
+    ParseSqlValue {
+        source: sql::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to build default value, column: {}", column))]
     ColumnDefaultValue {
         column: String,
@@ -522,6 +528,9 @@ pub enum Error {
 
     #[snafu(display("Failed to create logical tables: {}", reason))]
     CreateLogicalTables { reason: String, location: Location },
+
+    #[snafu(display("Invalid partition rule: {}", reason))]
+    InvalidPartitionRule { reason: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -643,7 +652,9 @@ impl ErrorExt for Error {
 
             Error::CreateTableWithMultiCatalogs { .. }
             | Error::CreateTableWithMultiSchemas { .. }
-            | Error::EmptyCreateTableExpr { .. } => StatusCode::InvalidArguments,
+            | Error::EmptyCreateTableExpr { .. }
+            | Error::InvalidPartitionRule { .. }
+            | Error::ParseSqlValue { .. } => StatusCode::InvalidArguments,
 
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
         }

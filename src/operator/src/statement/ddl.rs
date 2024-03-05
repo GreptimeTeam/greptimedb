@@ -31,9 +31,12 @@ use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::{info, tracing};
+use common_time::Timezone;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
+use datatypes::value::Value;
 use lazy_static::lazy_static;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::partition::{PartitionBound, PartitionDef};
 use query::sql::create_table_stmt;
 use regex::Regex;
@@ -42,6 +45,8 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, CreateTableLike, Partitions};
+use sql::statements::sql_value_to_value;
+use sqlparser::ast::{Expr, Ident, Value as ParserValue};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions};
@@ -52,9 +57,9 @@ use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, CreateTableWithMultiCatalogsSnafu,
     CreateTableWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyCreateTableExprSnafu,
-    InvalidPartitionColumnsSnafu, InvalidTableNameSnafu, Result, SchemaNotFoundSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UnrecognizedTableOptionSnafu,
+    InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
+    ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, TableAlreadyExistsSnafu,
+    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -730,13 +735,17 @@ fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>
     Ok(columns)
 }
 
+/// Parse [Partitions] into a group of partition entries.
+///
+/// Returns a list of [PartitionBound], each of which defines a partition.
 fn find_partition_entries(
     create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
     partition_columns: &[String],
-    _query_ctx: &QueryContextRef,
+    query_ctx: &QueryContextRef,
 ) -> Result<Vec<Vec<PartitionBound>>> {
-    let entries = if let Some(_partitions) = partitions {
+    let entries = if let Some(partitions) = partitions {
+        // extract concrete data type of partition columns
         let column_defs = partition_columns
             .iter()
             .map(|pc| {
@@ -748,24 +757,103 @@ fn find_partition_entries(
                     .unwrap()
             })
             .collect::<Vec<_>>();
-        let mut column_name_and_type = Vec::with_capacity(column_defs.len());
+        let mut column_name_and_type = HashMap::with_capacity(column_defs.len());
         for column in column_defs {
             let column_name = &column.name;
             let data_type = ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension.clone())
                     .context(ColumnDataTypeSnafu)?,
             );
-            column_name_and_type.push((column_name, data_type));
+            column_name_and_type.insert(column_name, data_type);
         }
 
-        // TODO(ruihang): implement the partition value parser.
-        vec![vec![PartitionBound::MaxValue]]
+        // Transform parser expr to partition expr
+        let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
+        for partition in &partitions.exprs {
+            let partition_expr =
+                convert_one_expr(partition, &column_name_and_type, &query_ctx.timezone())?;
+            partition_exprs.push(vec![PartitionBound::Expr(partition_expr)]);
+        }
+
+        // fallback for no expr
+        if partition_exprs.is_empty() {
+            partition_exprs.push(vec![PartitionBound::MaxValue]);
+        }
+
+        partition_exprs
     } else {
         vec![vec![PartitionBound::MaxValue]]
     };
     Ok(entries)
 }
 
+fn convert_one_expr(
+    expr: &Expr,
+    column_name_and_type: &HashMap<&String, ConcreteDataType>,
+    timezone: &Timezone,
+) -> Result<PartitionExpr> {
+    let Expr::BinaryOp { left, op, right } = expr else {
+        return InvalidPartitionRuleSnafu {
+            reason: "partition rule must be a binary expression",
+        }
+        .fail();
+    };
+
+    let op =
+        RestrictedOp::try_from_parser(&op.clone()).with_context(|| InvalidPartitionRuleSnafu {
+            reason: format!("unsupported operator in partition expr {op}"),
+        })?;
+
+    // convert leaf node.
+    let (lhs, op, rhs) = match (left.as_ref(), right.as_ref()) {
+        (Expr::Identifier(ident), Expr::Value(value)) => {
+            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+            let value = convert_value(value, data_type, timezone)?;
+            (Operand::Column(column_name), op, Operand::Value(value))
+        }
+        (Expr::Value(value), Expr::Identifier(ident)) => {
+            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+            let value = convert_value(value, data_type, timezone)?;
+            (Operand::Value(value), op, Operand::Column(column_name))
+        }
+        (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
+            // sub-expr must against another sub-expr
+            let lhs = convert_one_expr(left, column_name_and_type, timezone)?;
+            let rhs = convert_one_expr(right, column_name_and_type, timezone)?;
+            (Operand::Expr(lhs), op, Operand::Expr(rhs))
+        }
+        _ => {
+            return InvalidPartitionRuleSnafu {
+                reason: format!("invalid partition expr {expr}"),
+            }
+            .fail();
+        }
+    };
+
+    Ok(PartitionExpr::new(lhs, op, rhs))
+}
+
+fn convert_identifier(
+    ident: &Ident,
+    column_name_and_type: &HashMap<&String, ConcreteDataType>,
+) -> Result<(String, ConcreteDataType)> {
+    let column_name = ident.value.clone();
+    let data_type = column_name_and_type
+        .get(&column_name)
+        .cloned()
+        .with_context(|| ColumnNotFoundSnafu { msg: &column_name })?;
+    Ok((column_name, data_type))
+}
+
+fn convert_value(
+    value: &ParserValue,
+    data_type: ConcreteDataType,
+    timezone: &Timezone,
+) -> Result<Value> {
+    sql_value_to_value("<NONAME>", &data_type, value, Some(timezone)).context(ParseSqlValueSnafu)
+}
+
+/// Merge table level table options with schema level table options.
 fn merge_options(mut table_opts: TableOptions, schema_opts: SchemaNameValue) -> TableOptions {
     table_opts.ttl = table_opts.ttl.or(schema_opts.ttl);
     table_opts
@@ -821,10 +909,10 @@ mod test {
             (
                 r"
 CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
-PARTITION BY RANGE COLUMNS (b) (
-  PARTITION r0 VALUES LESS THAN ('hz'),
-  PARTITION r1 VALUES LESS THAN ('sh'),
-  PARTITION r2 VALUES LESS THAN (MAXVALUE),
+PARTITION ON COLUMNS (b) (
+  b < 'hz',
+  b >= 'hz' AND b < 'sh',
+  b >= 'sh'
 )
 ENGINE=mito",
                 r#"[{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"hz\"}}"]},{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"sh\"}}"]},{"column_list":["b"],"value_list":["\"MaxValue\""]}]"#,
@@ -834,8 +922,9 @@ ENGINE=mito",
 CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
 PARTITION BY RANGE COLUMNS (b, a) (
   PARTITION r0 VALUES LESS THAN ('hz', 10),
-  PARTITION r1 VALUES LESS THAN ('sh', 20),
-  PARTITION r2 VALUES LESS THAN (MAXVALUE, MAXVALUE),
+  b < 'hz' AND a < 10,
+  b >= 'hz' AND b < 'sh' AND a >= 10 AND a < 20,
+  b >= 'sh' AND a >= 20
 )
 ENGINE=mito",
                 r#"[{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"hz\"}}","{\"Value\":{\"Int32\":10}}"]},{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"sh\"}}","{\"Value\":{\"Int32\":20}}"]},{"column_list":["b","a"],"value_list":["\"MaxValue\"","\"MaxValue\""]}]"#,

@@ -6476,6 +6476,8 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "sql",
+ "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef)",
  "store-api",
  "table",
 ]

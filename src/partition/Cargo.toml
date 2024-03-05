@@ -28,5 +28,7 @@ prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
+sql.workspace = true
+sqlparser.workspace = true
 store-api.workspace = true
 table.workspace = true

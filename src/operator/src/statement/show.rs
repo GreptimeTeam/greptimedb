@@ -16,6 +16,7 @@ use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
 use partition::manager::PartitionInfo;
+use partition::partition::PartitionBound;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::ast::Ident;
@@ -88,10 +89,22 @@ pub(crate) fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<O
         .map(|name| name[..].into())
         .collect();
 
-    // TODO(ruihang): convert partition info back to partition expr
+    let exprs = partitions
+        .iter()
+        .filter_map(|partition| {
+            partition
+                .partition
+                .partition_bounds()
+                .first()
+                .and_then(|bound| {
+                    if let PartitionBound::Expr(expr) = bound {
+                        Some(expr.to_parser_expr())
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
 
-    Ok(Some(Partitions {
-        column_list,
-        exprs: vec![],
-    }))
+    Ok(Some(Partitions { column_list, exprs }))
 }

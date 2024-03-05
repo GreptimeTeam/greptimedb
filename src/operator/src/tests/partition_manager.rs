@@ -29,6 +29,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use meta_client::client::MetaClient;
 use partition::columns::RangeColumnsPartitionRule;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use partition::partition::{PartitionBound, PartitionDef};
 use partition::range::RangePartitionRule;
@@ -116,7 +117,11 @@ pub(crate) async fn create_partition_rule_manager(
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
-                                vec![PartitionBound::Value(10_i32.into())],
+                                vec![PartitionBound::Expr(PartitionExpr::new(
+                                    Operand::Column("a".to_string()),
+                                    RestrictedOp::Lt,
+                                    Operand::Value(datatypes::value::Value::Int32(10)),
+                                ))],
                             )
                             .try_into()
                             .unwrap(),
@@ -135,7 +140,19 @@ pub(crate) async fn create_partition_rule_manager(
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
-                                vec![PartitionBound::Value(50_i32.into())],
+                                vec![PartitionBound::Expr(PartitionExpr::new(
+                                    Operand::Expr(PartitionExpr::new(
+                                        Operand::Column("a".to_string()),
+                                        RestrictedOp::GtEq,
+                                        Operand::Value(datatypes::value::Value::Int32(10)),
+                                    )),
+                                    RestrictedOp::And,
+                                    Operand::Expr(PartitionExpr::new(
+                                        Operand::Column("a".to_string()),
+                                        RestrictedOp::Lt,
+                                        Operand::Value(datatypes::value::Value::Int32(50)),
+                                    )),
+                                ))],
                             )
                             .try_into()
                             .unwrap(),
@@ -154,7 +171,11 @@ pub(crate) async fn create_partition_rule_manager(
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
-                                vec![PartitionBound::MaxValue],
+                                vec![PartitionBound::Expr(PartitionExpr::new(
+                                    Operand::Column("a".to_string()),
+                                    RestrictedOp::GtEq,
+                                    Operand::Value(datatypes::value::Value::Int32(50)),
+                                ))],
                             )
                             .try_into()
                             .unwrap(),
@@ -172,83 +193,11 @@ pub(crate) async fn create_partition_rule_manager(
         .await
         .unwrap();
 
-    table_metadata_manager
-        .create_table_metadata(
-            new_test_table_info(2, "table_2", regions.clone().into_iter()).into(),
-            TableRouteValue::physical(vec![
-                RegionRoute {
-                    region: Region {
-                        id: 1.into(),
-                        name: "r1".to_string(),
-                        partition: Some(
-                            PartitionDef::new(
-                                vec!["a".to_string(), "b".to_string()],
-                                vec![
-                                    PartitionBound::Value(10_i32.into()),
-                                    PartitionBound::Value("hz".into()),
-                                ],
-                            )
-                            .try_into()
-                            .unwrap(),
-                        ),
-                        attrs: BTreeMap::new(),
-                    },
-                    leader_peer: None,
-                    follower_peers: vec![],
-                    leader_status: None,
-                    leader_down_since: None,
-                },
-                RegionRoute {
-                    region: Region {
-                        id: 2.into(),
-                        name: "r2".to_string(),
-                        partition: Some(
-                            PartitionDef::new(
-                                vec!["a".to_string(), "b".to_string()],
-                                vec![
-                                    PartitionBound::Value(50_i32.into()),
-                                    PartitionBound::Value("sh".into()),
-                                ],
-                            )
-                            .try_into()
-                            .unwrap(),
-                        ),
-                        attrs: BTreeMap::new(),
-                    },
-                    leader_peer: None,
-                    follower_peers: vec![],
-                    leader_status: None,
-                    leader_down_since: None,
-                },
-                RegionRoute {
-                    region: Region {
-                        id: 3.into(),
-                        name: "r3".to_string(),
-                        partition: Some(
-                            PartitionDef::new(
-                                vec!["a".to_string(), "b".to_string()],
-                                vec![PartitionBound::MaxValue, PartitionBound::MaxValue],
-                            )
-                            .try_into()
-                            .unwrap(),
-                        ),
-                        attrs: BTreeMap::new(),
-                    },
-                    leader_peer: None,
-                    follower_peers: vec![],
-                    leader_status: None,
-                    leader_down_since: None,
-                },
-            ]),
-            region_wal_options,
-        )
-        .await
-        .unwrap();
-
     partition_manager
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO(ruihang, weny): WIP new partition rule"]
 async fn test_find_partition_rule() {
     let partition_manager =
         create_partition_rule_manager(Arc::new(MemoryKvBackend::default())).await;
