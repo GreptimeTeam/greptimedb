@@ -218,6 +218,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use api::prom_store::remote::WriteRequest;
+    use api::v1::RowInsertRequests;
     use bytes::Bytes;
     use prost::Message;
 
@@ -225,23 +226,15 @@ mod tests {
     use crate::proto::PromWriteRequest;
     use crate::repeated_field::Clear;
 
-    // Ensures `WriteRequest` and `PromWriteRequest` produce the same gRPC request.
-    #[test]
-    fn test_decode_write_request() {
-        let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        d.push("benches");
-        d.push("write_request.pb.data");
-
-        let data = Bytes::from(std::fs::read(d).unwrap());
-
-        let mut prom_write_request = PromWriteRequest::default();
+    fn check_deserialized(
+        prom_write_request: &mut PromWriteRequest,
+        data: &Bytes,
+        expected_samples: usize,
+        expected_rows: &RowInsertRequests,
+    ) {
         prom_write_request.clear();
         prom_write_request.merge(data.clone()).unwrap();
         let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
-
-        let expected_request = WriteRequest::decode(data).unwrap();
-        let (expected_rows, expected_samples) =
-            to_grpc_row_insert_requests(&expected_request).unwrap();
 
         assert_eq!(expected_samples, samples);
         assert_eq!(expected_rows.inserts.len(), prom_rows.inserts.len());
@@ -274,6 +267,28 @@ mod tests {
                     .iter()
                     .map(|c| { (c.column_name.clone(), c.datatype, c.semantic_type) })
                     .collect()
+            );
+        }
+    }
+
+    // Ensures `WriteRequest` and `PromWriteRequest` produce the same gRPC request.
+    #[test]
+    fn test_decode_write_request() {
+        let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        d.push("benches");
+        d.push("write_request.pb.data");
+        let data = Bytes::from(std::fs::read(d).unwrap());
+
+        let (expected_rows, expected_samples) =
+            to_grpc_row_insert_requests(&WriteRequest::decode(data.clone()).unwrap()).unwrap();
+
+        let mut prom_write_request = PromWriteRequest::default();
+        for _ in 0..3 {
+            check_deserialized(
+                &mut prom_write_request,
+                &data,
+                expected_samples,
+                &expected_rows,
             );
         }
     }

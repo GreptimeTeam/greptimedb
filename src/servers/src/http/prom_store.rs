@@ -143,11 +143,11 @@ async fn decode_remote_write_request_to_row_inserts(body: Body) -> Result<RowIns
         .await
         .context(error::HyperSnafu)?;
 
-    let buf = snappy_decompress(&body[..])?;
+    let buf = Bytes::from(snappy_decompress(&body[..])?);
 
     let mut request = PROM_WRITE_REQUEST_POOL.pull(|| PromWriteRequest::default());
     request
-        .merge(&mut Bytes::from(buf))
+        .merge(buf)
         .context(error::DecodePromRemoteRequestSnafu)?;
     let (requests, samples) = request.as_row_insert_requests();
     crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_NUM_SERIES.observe(samples as f64);
