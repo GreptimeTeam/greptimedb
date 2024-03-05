@@ -15,8 +15,9 @@
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
-use servers::error::AuthSnafu;
+use servers::error::{AuthSnafu, Error};
 use servers::influxdb::InfluxdbRequest;
+use servers::interceptor::{LineProtocolInterceptor, LineProtocolInterceptorRef};
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -35,6 +36,9 @@ impl InfluxdbLineProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::LineProtocol)
             .context(AuthSnafu)?;
+
+        let interceptor_ref = self.plugins.get::<LineProtocolInterceptorRef<Error>>();
+        interceptor_ref.pre_execute(&request.lines, ctx.clone())?;
 
         let requests = request.try_into()?;
         let _ = self

@@ -22,6 +22,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use servers::error::{self, AuthSnafu, Result as ServerResult};
+use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
 use servers::otlp::plugin::TraceParserRef;
 use servers::query_handler::OpenTelemetryProtocolHandler;
@@ -43,6 +44,12 @@ impl OpenTelemetryProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::Otlp)
             .context(AuthSnafu)?;
+
+        let interceptor_ref = self
+            .plugins
+            .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_execute(ctx.clone())?;
+
         let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request)?;
         let _ = self
             .handle_row_inserts(requests, ctx)
@@ -69,6 +76,11 @@ impl OpenTelemetryProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::Otlp)
             .context(AuthSnafu)?;
+
+        let interceptor_ref = self
+            .plugins
+            .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_execute(ctx.clone())?;
 
         let (table_name, spans) = match self.plugins.get::<TraceParserRef>() {
             Some(parser) => (parser.table_name(), parser.parse(request)),
