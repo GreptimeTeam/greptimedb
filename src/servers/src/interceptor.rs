@@ -15,6 +15,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use api::prom_store::remote::{ReadRequest, WriteRequest};
 use api::v1::greptime_request::Request;
 use common_error::ext::ErrorExt;
 use common_query::Output;
@@ -243,6 +244,124 @@ where
             this.post_execute(output, query_ctx)
         } else {
             Ok(output)
+        }
+    }
+}
+
+/// ScriptInterceptor can track life cycle of a script request and customize or
+/// abort its execution at given point.
+pub trait ScriptInterceptor {
+    type Error: ErrorExt;
+
+    /// Called before script request is actually executed.
+    fn pre_execute(&self, _name: &str, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+pub type ScriptInterceptorRef<E> = Arc<dyn ScriptInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E: ErrorExt> ScriptInterceptor for Option<ScriptInterceptorRef<E>> {
+    type Error = E;
+
+    fn pre_execute(&self, name: &str, query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_execute(name, query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// LineProtocolInterceptor can track life cycle of a line protocol request
+/// and customize or abort its execution at given point.
+pub trait LineProtocolInterceptor {
+    type Error: ErrorExt;
+
+    fn pre_execute(&self, _line: &str, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+pub type LineProtocolInterceptorRef<E> =
+    Arc<dyn LineProtocolInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E: ErrorExt> LineProtocolInterceptor for Option<LineProtocolInterceptorRef<E>> {
+    type Error = E;
+
+    fn pre_execute(&self, line: &str, query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_execute(line, query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// OpenTelemetryProtocolInterceptor can track life cycle of an open telemetry protocol request
+/// and customize or abort its execution at given point.
+pub trait OpenTelemetryProtocolInterceptor {
+    type Error: ErrorExt;
+
+    fn pre_execute(&self, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+pub type OpenTelemetryProtocolInterceptorRef<E> =
+    Arc<dyn OpenTelemetryProtocolInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E: ErrorExt> OpenTelemetryProtocolInterceptor
+    for Option<OpenTelemetryProtocolInterceptorRef<E>>
+{
+    type Error = E;
+
+    fn pre_execute(&self, query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_execute(query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// PromStoreProtocolInterceptor can track life cycle of a prom store request
+/// and customize or abort its execution at given point.
+pub trait PromStoreProtocolInterceptor {
+    type Error: ErrorExt;
+
+    fn pre_write(
+        &self,
+        _write_req: &WriteRequest,
+        _ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn pre_read(&self, _read_req: &ReadRequest, _ctx: QueryContextRef) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+pub type PromStoreProtocolInterceptorRef<E> =
+    Arc<dyn PromStoreProtocolInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E: ErrorExt> PromStoreProtocolInterceptor for Option<PromStoreProtocolInterceptorRef<E>> {
+    type Error = E;
+
+    fn pre_write(&self, write_req: &WriteRequest, ctx: QueryContextRef) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_write(write_req, ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn pre_read(&self, read_req: &ReadRequest, ctx: QueryContextRef) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_read(read_req, ctx)
+        } else {
+            Ok(())
         }
     }
 }
