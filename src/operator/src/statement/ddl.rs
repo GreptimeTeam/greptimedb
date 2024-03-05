@@ -794,11 +794,10 @@ fn convert_one_expr(
         .fail();
     };
 
-    let op = RestrictedOp::try_from_parser(&op.clone().into()).with_context(|| {
-        InvalidPartitionRuleSnafu {
+    let op =
+        RestrictedOp::try_from_parser(&op.clone()).with_context(|| InvalidPartitionRuleSnafu {
             reason: format!("unsupported operator in partition expr {op}"),
-        }
-    })?;
+        })?;
 
     // convert leaf node.
     let (lhs, op, rhs) = match (left.as_ref(), right.as_ref()) {

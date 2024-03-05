@@ -69,12 +69,12 @@ impl MultiDimPartitionRule {
             (Operand::Column(name), Operand::Value(r)) => {
                 let index = self.name_to_index.get(name).unwrap();
                 let l = &values[*index];
-                Self::perform_op(l, &expr.op, &r)
+                Self::perform_op(l, &expr.op, r)
             }
             (Operand::Value(l), Operand::Column(name)) => {
                 let index = self.name_to_index.get(name).unwrap();
                 let r = &values[*index];
-                Self::perform_op(&l, &expr.op, r)
+                Self::perform_op(l, &expr.op, r)
             }
             (Operand::Expr(lhs), Operand::Expr(rhs)) => {
                 let lhs = self.evaluate_expr(lhs, values)?;
@@ -91,16 +91,16 @@ impl MultiDimPartitionRule {
 
     fn perform_op(lhs: &Value, op: &RestrictedOp, rhs: &Value) -> Result<bool> {
         let result = match op {
-            RestrictedOp::Eq => lhs.eq(&rhs),
-            RestrictedOp::NotEq => lhs.ne(&rhs),
-            RestrictedOp::Lt => lhs.partial_cmp(&rhs) == Some(Ordering::Less),
+            RestrictedOp::Eq => lhs.eq(rhs),
+            RestrictedOp::NotEq => lhs.ne(rhs),
+            RestrictedOp::Lt => lhs.partial_cmp(rhs) == Some(Ordering::Less),
             RestrictedOp::LtEq => {
-                let result = lhs.partial_cmp(&rhs);
+                let result = lhs.partial_cmp(rhs);
                 result == Some(Ordering::Less) || result == Some(Ordering::Equal)
             }
-            RestrictedOp::Gt => lhs.partial_cmp(&rhs) == Some(Ordering::Greater),
+            RestrictedOp::Gt => lhs.partial_cmp(rhs) == Some(Ordering::Greater),
             RestrictedOp::GtEq => {
-                let result = lhs.partial_cmp(&rhs);
+                let result = lhs.partial_cmp(rhs);
                 result == Some(Ordering::Greater) || result == Some(Ordering::Equal)
             }
             RestrictedOp::And | RestrictedOp::Or => unreachable!(),

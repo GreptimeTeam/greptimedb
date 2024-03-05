@@ -96,14 +96,13 @@ pub(crate) fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<O
                 .partition
                 .partition_bounds()
                 .first()
-                .map(|bound| {
+                .and_then(|bound| {
                     if let PartitionBound::Expr(expr) = bound {
                         Some(expr.to_parser_expr())
                     } else {
                         None
                     }
                 })
-                .flatten()
         })
         .collect();
 
