@@ -56,6 +56,7 @@ impl PromLabel {
         const STRUCT_NAME: &str = "PromLabel";
         match tag {
             1u32 => {
+                // decode label name
                 let value = &mut self.name;
                 prost::encoding::bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
                     error.push(STRUCT_NAME, "name");
@@ -63,6 +64,7 @@ impl PromLabel {
                 })
             }
             2u32 => {
+                // decode label value
                 let value = &mut self.value;
                 prost::encoding::bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
                     error.push(STRUCT_NAME, "value");
@@ -139,7 +141,7 @@ impl PromTimeSeries {
                 })?;
                 Ok(())
             }
-            // skip examplers
+            // skip exemplars
             3u32 => prost::encoding::skip_field(wire_type, tag, buf, ctx),
             _ => prost::encoding::skip_field(wire_type, tag, buf, ctx),
         }
