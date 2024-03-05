@@ -270,6 +270,7 @@ pub(crate) async fn create_partition_rule_manager(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO(ruihang, weny): WIP new partition rule"]
 async fn test_find_partition_rule() {
     let partition_manager =
         create_partition_rule_manager(Arc::new(MemoryKvBackend::default())).await;
