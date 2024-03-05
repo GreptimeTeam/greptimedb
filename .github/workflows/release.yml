@@ -288,7 +288,7 @@ jobs:
       - name: Set build windows result
         id: set-build-windows-result
         run: |
-          echo "build-windows-result=success" >> $GITHUB_OUTPUT    
+          echo "build-windows-result=success" >> $Env:GITHUB_OUTPUT
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
