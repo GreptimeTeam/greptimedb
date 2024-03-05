@@ -245,10 +245,15 @@ mem_threshold_on_create = "64M"
 intermediate_path = ""
 
 [region_engine.mito.memtable]
+# Memtable type.
+# - "experimental": experimental memtable
+# - "time_series": time-series memtable (deprecated)
 type = "experimental"
+# The max number of keys in one shard.
 index_max_keys_per_shard = 8192
+# The max rows of data inside the actively writing buffer in one shard.
 data_freeze_threshold = 32768
-dedup = true
+# Max dictionary bytes.
 fork_dictionary_bytes = "1GiB"
 
 # Log options
