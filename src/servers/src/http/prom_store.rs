@@ -40,7 +40,7 @@ use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 lazy_static! {
     static ref PROM_WRITE_REQUEST_POOL: Pool<PromWriteRequest> =
-        Pool::new(256, || PromWriteRequest::default());
+        Pool::new(256, PromWriteRequest::default);
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -145,7 +145,7 @@ async fn decode_remote_write_request_to_row_inserts(body: Body) -> Result<RowIns
 
     let buf = Bytes::from(snappy_decompress(&body[..])?);
 
-    let mut request = PROM_WRITE_REQUEST_POOL.pull(|| PromWriteRequest::default());
+    let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
     request
         .merge(buf)
         .context(error::DecodePromRemoteRequestSnafu)?;
