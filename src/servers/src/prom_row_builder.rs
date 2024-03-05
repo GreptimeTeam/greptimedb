@@ -82,7 +82,7 @@ impl Default for TableBuilder {
         Self::with_capacity(2, 0)
     }
 }
-// safety: we expect all labels are UTF-8 encoded strings.
+
 impl TableBuilder {
     pub(crate) fn with_capacity(cols: usize, rows: usize) -> Self {
         let mut col_indexes = HashMap::with_capacity(cols);
