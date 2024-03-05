@@ -27,6 +27,7 @@ use common_plugins::GREPTIME_EXEC_PREFIX;
 use common_query::physical_plan::PhysicalPlan;
 use common_query::Output;
 use common_recordbatch::util;
+use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::MetricValue;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
@@ -66,6 +67,7 @@ pub struct SqlQuery {
 
 /// Handler to execute sql
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "sql"))]
 pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
@@ -250,6 +252,7 @@ impl From<PromqlQuery> for PromQuery {
 
 /// Handler to execute promql
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "promql"))]
 pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,

@@ -23,7 +23,7 @@ use common_error::ext::BoxedError;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::logging;
+use common_telemetry::{logging, tracing};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -87,6 +87,7 @@ async fn to_query_result(table_name: &str, output: Output) -> ServerResult<Query
 }
 
 impl Instance {
+    #[tracing::instrument(skip_all)]
     async fn handle_remote_query(
         &self,
         ctx: &QueryContextRef,
@@ -126,6 +127,7 @@ impl Instance {
             .context(ExecLogicalPlanSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_remote_queries(
         &self,
         ctx: QueryContextRef,

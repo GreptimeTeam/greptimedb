@@ -21,6 +21,7 @@ use axum::response::IntoResponse;
 use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_telemetry::tracing;
 use hyper::Body;
 use prost::Message;
 use schemars::JsonSchema;
@@ -75,6 +76,10 @@ pub async fn route_write_without_metric_engine(
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "remote_write")
+)]
 pub async fn remote_write(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<DatabaseQuery>,
@@ -111,6 +116,10 @@ impl IntoResponse for PromStoreResponse {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "remote_read")
+)]
 pub async fn remote_read(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<DatabaseQuery>,

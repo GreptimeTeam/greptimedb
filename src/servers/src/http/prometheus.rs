@@ -25,6 +25,7 @@ use common_error::status_code::StatusCode;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use common_telemetry::tracing;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
@@ -87,6 +88,10 @@ pub struct FormatQuery {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "format_query")
+)]
 pub async fn format_query(
     State(_handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
@@ -115,6 +120,10 @@ pub struct InstantQuery {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "instant_query")
+)]
 pub async fn instant_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
@@ -154,6 +163,10 @@ pub struct RangeQuery {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "range_query")
+)]
 pub async fn range_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<RangeQuery>,
@@ -222,6 +235,10 @@ impl<'de> Deserialize<'de> for Matches {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "labels_query")
+)]
 pub async fn labels_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<LabelsQuery>,
@@ -486,6 +503,10 @@ pub struct LabelValueQuery {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "label_values_query")
+)]
 pub async fn label_values_query(
     State(handler): State<PrometheusHandlerRef>,
     Path(label_name): Path<String>,
@@ -610,6 +631,10 @@ pub struct SeriesQuery {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "series_query")
+)]
 pub async fn series_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<SeriesQuery>,

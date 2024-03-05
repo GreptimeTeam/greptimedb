@@ -26,7 +26,8 @@ use arrow_flight::{
 use async_trait::async_trait;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::Output;
-use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::tracing::info_span;
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use futures::Stream;
 use prost::Message;
 use snafu::ResultExt;
@@ -34,7 +35,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
-use crate::grpc::greptime_handler::GreptimeRequestHandler;
+use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
 use crate::grpc::TonicResult;
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
@@ -152,11 +153,20 @@ impl FlightCraft for GreptimeRequestHandler {
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
 
-        let output = self.handle_request(request).await?;
-
-        let stream: Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync>> =
-            to_flight_data_stream(output, TracingContext::new());
-        Ok(Response::new(stream))
+        // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
+        let span = info_span!(
+            "GreptimeRequestHandler::do_get",
+            protocol = "grpc",
+            request_type = get_request_type(&request)
+        );
+        async {
+            let output = self.handle_request(request).await?;
+            let stream: Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync>> =
+                to_flight_data_stream(output, TracingContext::from_current_span());
+            Ok(Response::new(stream))
+        }
+        .trace(span)
+        .await
     }
 }
 

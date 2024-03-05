@@ -31,6 +31,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
+use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
 pub use crate::{debug, error, info, trace, warn};
 
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
@@ -42,7 +43,7 @@ pub struct LoggingOptions {
     pub level: Option<String>,
     pub enable_otlp_tracing: bool,
     pub otlp_endpoint: Option<String>,
-    pub tracing_sample_ratio: Option<f64>,
+    pub tracing_sample_ratio: Option<TracingSampleOptions>,
     pub append_stdout: bool,
 }
 
@@ -176,8 +177,10 @@ pub fn init_global_logging(
         .expect("error parsing log level string");
     let sampler = opts
         .tracing_sample_ratio
-        .map(Sampler::TraceIdRatioBased)
-        .unwrap_or(Sampler::AlwaysOn);
+        .as_ref()
+        .map(create_sampler)
+        .map(Sampler::ParentBased)
+        .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
     // Must enable 'tokio_unstable' cfg to use this feature.
     // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
     #[cfg(feature = "tokio-console")]

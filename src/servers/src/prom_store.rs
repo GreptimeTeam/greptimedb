@@ -23,6 +23,7 @@ use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_recordbatch::{RecordBatch, RecordBatches};
+use common_telemetry::tracing;
 use common_time::timestamp::TimeUnit;
 use datafusion::prelude::{col, lit, regexp_match, Expr};
 use datafusion_common::ScalarValue;
@@ -62,6 +63,7 @@ pub fn table_name(q: &Query) -> Result<String> {
 }
 
 /// Create a DataFrame from a remote Query
+#[tracing::instrument(skip_all)]
 pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
     let DataFrame::DataFusion(dataframe) = dataframe;
 
