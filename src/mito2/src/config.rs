@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, NoneAsEmptyString};
 
 use crate::error::Result;
-use crate::memtable::merge_tree::MergeTreeConfig;
+use crate::memtable::MemtableConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 /// Default max running background job.
@@ -104,8 +104,8 @@ pub struct MitoConfig {
     /// Inverted index configs.
     pub inverted_index: InvertedIndexConfig,
 
-    /// Experimental memtable.
-    pub experimental_memtable: Option<MergeTreeConfig>,
+    /// Memtable config
+    pub memtable: MemtableConfig,
 }
 
 impl Default for MitoConfig {
@@ -131,7 +131,7 @@ impl Default for MitoConfig {
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
             inverted_index: InvertedIndexConfig::default(),
-            experimental_memtable: None,
+            memtable: MemtableConfig::default(),
         };
 
         // Adjust buffer and cache size according to system memory if we can.
@@ -318,4 +318,26 @@ fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(cores > 0);
 
     (cores + divisor - 1) / divisor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_config() {
+        let s = r#"
+[memtable]
+type = "experimental"
+index_max_keys_per_shard = 8192
+data_freeze_threshold = 1024
+dedup = true
+fork_dictionary_bytes = "512MiB"
+"#;
+        let config: MitoConfig = toml::from_str(s).unwrap();
+        let MemtableConfig::Experimental(config) = &config.memtable else {
+            unreachable!()
+        };
+        assert_eq!(1024, config.data_freeze_threshold);
+    }
 }

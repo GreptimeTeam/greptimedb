@@ -44,7 +44,7 @@ use crate::memtable::{
 };
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
-const DICTIONARY_SIZE_FACTOR: u64 = 16;
+const DICTIONARY_SIZE_FACTOR: u64 = 8;
 
 /// Id of a shard, only unique inside a partition.
 type ShardId = u32;
@@ -74,7 +74,7 @@ pub struct MergeTreeConfig {
 
 impl Default for MergeTreeConfig {
     fn default() -> Self {
-        let mut fork_dictionary_bytes = ReadableSize::mb(512);
+        let mut fork_dictionary_bytes = ReadableSize::gb(1);
         if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
             let adjust_dictionary_bytes =
                 std::cmp::min(sys_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
@@ -85,7 +85,7 @@ impl Default for MergeTreeConfig {
 
         Self {
             index_max_keys_per_shard: 8192,
-            data_freeze_threshold: 102400,
+            data_freeze_threshold: 32768,
             dedup: true,
             fork_dictionary_bytes,
         }

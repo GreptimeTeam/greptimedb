@@ -49,7 +49,7 @@ use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef
 use crate::manifest::action::RegionEdit;
 use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
-use crate::memtable::MemtableBuilderRef;
+use crate::memtable::{MemtableBuilderRef, MemtableConfig};
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
@@ -320,15 +320,15 @@ impl<S: LogStore> WorkerStarter<S> {
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
-        let memtable_builder = if let Some(config) = &self.config.experimental_memtable {
-            Arc::new(MergeTreeMemtableBuilder::new(
-                config.clone(),
+
+        let memtable_builder = match &self.config.memtable {
+            MemtableConfig::Experimental(merge_tree) => Arc::new(MergeTreeMemtableBuilder::new(
+                merge_tree.clone(),
                 Some(self.write_buffer_manager.clone()),
-            )) as _
-        } else {
-            Arc::new(TimeSeriesMemtableBuilder::new(Some(
+            )) as _,
+            MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(Some(
                 self.write_buffer_manager.clone(),
-            ))) as _
+            ))) as _,
         };
         let mut worker_thread = RegionWorkerLoop {
             id: self.id,
