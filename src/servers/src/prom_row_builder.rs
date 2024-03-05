@@ -27,6 +27,7 @@ use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
 
+/// [TablesBuilder] serves as an intermediate container to build [RowInsertRequests].
 #[derive(Default)]
 pub(crate) struct TablesBuilder {
     tables: HashMap<String, TableBuilder>,
@@ -39,10 +40,19 @@ impl Clear for TablesBuilder {
 }
 
 impl TablesBuilder {
-    pub(crate) fn get_or_create_table_builder(&mut self, table_name: String) -> &mut TableBuilder {
-        self.tables.entry(table_name).or_default()
+    /// Gets table builder with given table name. Creates an empty [TableBuilder] if not exist.
+    pub(crate) fn get_or_create_table_builder(
+        &mut self,
+        table_name: String,
+        label_num: usize,
+        row_num: usize,
+    ) -> &mut TableBuilder {
+        self.tables
+            .entry(table_name)
+            .or_insert_with(|| TableBuilder::with_capacity(label_num + 2, row_num))
     }
 
+    /// Converts [TablesBuilder] to [RowInsertRequests] and row numbers and clears inner states.
     pub(crate) fn as_insert_requests(&mut self) -> (RowInsertRequests, usize) {
         let mut total_rows = 0;
         let inserts = self
@@ -57,49 +67,61 @@ impl TablesBuilder {
     }
 }
 
+/// Builder for one table.
 pub(crate) struct TableBuilder {
+    /// Column schemas.
     schema: Vec<ColumnSchema>,
+    /// Rows written.
     rows: Vec<Row>,
+    /// Indices of columns inside `schema`.
     col_indexes: HashMap<String, usize>,
 }
 
 impl Default for TableBuilder {
     fn default() -> Self {
-        let col_indexes = [
-            (GREPTIME_TIMESTAMP.to_string(), 0),
-            (GREPTIME_VALUE.to_string(), 1),
-        ]
-        .into_iter()
-        .collect();
+        Self::with_capacity(2, 0)
+    }
+}
+// safety: we expect all labels are UTF-8 encoded strings.
+impl TableBuilder {
+    pub(crate) fn with_capacity(cols: usize, rows: usize) -> Self {
+        let mut col_indexes = HashMap::with_capacity(cols);
+        col_indexes.insert(GREPTIME_TIMESTAMP.to_string(), 0);
+        col_indexes.insert(GREPTIME_VALUE.to_string(), 1);
+
+        let mut schema = Vec::with_capacity(cols);
+        schema.push(ColumnSchema {
+            column_name: GREPTIME_TIMESTAMP.to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            datatype_extension: None,
+        });
+
+        schema.push(ColumnSchema {
+            column_name: GREPTIME_VALUE.to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            datatype_extension: None,
+        });
+
         Self {
-            schema: vec![
-                ColumnSchema {
-                    column_name: GREPTIME_TIMESTAMP.to_string(),
-                    datatype: ColumnDataType::TimestampMillisecond as i32,
-                    semantic_type: SemanticType::Timestamp as i32,
-                    datatype_extension: None,
-                },
-                ColumnSchema {
-                    column_name: GREPTIME_VALUE.to_string(),
-                    datatype: ColumnDataType::Float64 as i32,
-                    semantic_type: SemanticType::Field as i32,
-                    datatype_extension: None,
-                },
-            ],
-            rows: vec![],
+            schema,
+            rows: Vec::with_capacity(rows),
             col_indexes,
         }
     }
-}
 
-impl TableBuilder {
+    /// Total number of rows inside table builder.
     fn num_rows(&self) -> usize {
         self.rows.len()
     }
+
+    /// Adds a set of labels and samples to table builder.
     pub(crate) fn add_labels_and_samples(&mut self, labels: &[PromLabel], samples: &[Sample]) {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
+            // safety: we expect all labels are UTF-8 encoded strings.
             let tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
             let tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
             let tag_value = Some(ValueData::StringValue(tag_value));
@@ -141,6 +163,7 @@ impl TableBuilder {
         }
     }
 
+    /// Converts [TableBuilder] to [RowInsertRequest] and clears buffered data.
     pub(crate) fn as_row_insert_request(&mut self, table_name: String) -> RowInsertRequest {
         let mut rows = std::mem::take(&mut self.rows);
         let schema = std::mem::take(&mut self.schema);

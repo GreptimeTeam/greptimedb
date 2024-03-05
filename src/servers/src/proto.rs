@@ -124,6 +124,7 @@ impl PromTimeSeries {
                     return Err(DecodeError::new("delimited length exceeded"));
                 }
                 if label.name.deref() == METRIC_NAME_LABEL_BYTES {
+                    // safety: we expect all labels are UTF-8 encoded strings.
                     let table_name = unsafe { String::from_utf8_unchecked(label.value.to_vec()) };
                     self.table_name = table_name;
                     self.labels.truncate(self.labels.len() - 1); // remove last label
@@ -138,14 +139,20 @@ impl PromTimeSeries {
                 })?;
                 Ok(())
             }
+            // skip examplers
             3u32 => prost::encoding::skip_field(wire_type, tag, buf, ctx),
             _ => prost::encoding::skip_field(wire_type, tag, buf, ctx),
         }
     }
 
     fn add_to_table_data(&mut self, table_builders: &mut TablesBuilder) {
-        let table_data =
-            table_builders.get_or_create_table_builder(std::mem::take(&mut self.table_name));
+        let label_num = self.labels.len();
+        let row_num = self.samples.len();
+        let table_data = table_builders.get_or_create_table_builder(
+            std::mem::take(&mut self.table_name),
+            label_num,
+            row_num,
+        );
         table_data.add_labels_and_samples(self.labels.as_slice(), self.samples.as_slice());
         self.labels.clear();
         self.samples.clear();
