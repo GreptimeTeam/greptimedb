@@ -60,6 +60,7 @@ itertools.workspace = true
 lazy_static.workspace = true
 mime_guess = "2.0"
 notify = "6.1"
+object-pool = "0.5"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
 opensrv-mysql = "0.7.0"
@@ -114,6 +115,7 @@ catalog = { workspace = true, features = ["testing"] }
 client.workspace = true
 common-base.workspace = true
 common-test-util.workspace = true
+criterion = "0.4"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
@@ -129,3 +131,7 @@ tokio-test = "0.4"
 
 [build-dependencies]
 common-version.workspace = true
+
+[[bench]]
+name = "bench_prom"
+harness = false

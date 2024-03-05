@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::prom_store::remote::{ReadRequest, WriteRequest};
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
@@ -95,6 +96,15 @@ pub trait PromStoreProtocolHandler {
         ctx: QueryContextRef,
         with_metric_engine: bool,
     ) -> Result<()>;
+
+    /// Handling prometheus remote write requests
+    async fn write_fast(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> Result<()>;
+
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
     /// Handling push gateway requests

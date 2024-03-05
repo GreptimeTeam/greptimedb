@@ -18,6 +18,7 @@ use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
 use api::v1::greptime_request::Request;
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
@@ -64,6 +65,16 @@ impl PromStoreProtocolHandler for DummyInstance {
 
         Ok(())
     }
+
+    async fn write_fast(
+        &self,
+        _request: RowInsertRequests,
+        _ctx: QueryContextRef,
+        _with_metric_engine: bool,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse> {
         let _ = self
             .tx
@@ -141,6 +152,7 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
 
 #[tokio::test]
 async fn test_prometheus_remote_write_read() {
+    common_telemetry::init_default_ut_logging();
     let (tx, mut rx) = mpsc::channel(100);
 
     let app = make_test_app(tx);
@@ -219,28 +231,17 @@ async fn test_prometheus_remote_write_read() {
         requests.push(s);
     }
 
-    assert_eq!(4, requests.len());
+    assert_eq!(2, requests.len());
 
-    assert_eq!("public", requests[0].0);
-    assert_eq!("prometheus", requests[1].0);
-    assert_eq!("prometheus", requests[2].0);
-    assert_eq!("public", requests[3].0);
-
-    assert_eq!(
-        write_request,
-        WriteRequest::decode(&(requests[0].1)[..]).unwrap()
-    );
-    assert_eq!(
-        write_request,
-        WriteRequest::decode(&(requests[1].1)[..]).unwrap()
-    );
+    assert_eq!("prometheus", requests[0].0);
+    assert_eq!("public", requests[1].0);
 
     assert_eq!(
         read_request,
-        ReadRequest::decode(&(requests[2].1)[..]).unwrap()
+        ReadRequest::decode(&(requests[0].1)[..]).unwrap()
     );
     assert_eq!(
         read_request,
-        ReadRequest::decode(&(requests[3].1)[..]).unwrap()
+        ReadRequest::decode(&(requests[1].1)[..]).unwrap()
     );
 }
