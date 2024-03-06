@@ -68,6 +68,7 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(SET sql_mode(.*))",
         "(?i)^(SET SQL_SELECT_LIMIT(.*))",
         "(?i)^(SET @@(.*))",
+        "(?i)^(SET PROFILING(.*))",
 
         "(?i)^(SHOW COLLATION)",
         "(?i)^(SHOW CHARSET)",
