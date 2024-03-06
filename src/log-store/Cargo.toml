@@ -28,8 +28,10 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
 dashmap.workspace = true
-futures.workspace = true
 futures-util.workspace = true
+futures.workspace = true
+lazy_static.workspace = true
+prometheus.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine.workspace = true
 rskafka.workspace = true
@@ -37,8 +39,8 @@ serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 store-api.workspace = true
-tokio.workspace = true
 tokio-util.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }
