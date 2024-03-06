@@ -29,18 +29,20 @@ use store_api::storage::RegionId;
 
 use crate::metrics;
 
+/// The region used for wal benchmarker.
 pub struct Region {
-    pub id: RegionId,
+    id: RegionId,
     schema: Vec<ColumnSchema>,
-    pub wal_options: WalOptions,
+    wal_options: WalOptions,
     next_sequence: AtomicU64,
-    pub next_entry_id: AtomicU64,
+    next_entry_id: AtomicU64,
     next_timestamp: AtomicI64,
     rng: Mutex<Option<SmallRng>>,
     rows_factor: usize,
 }
 
 impl Region {
+    /// Creates a new region.
     pub fn new(
         id: RegionId,
         schema: Vec<ColumnSchema>,
@@ -60,6 +62,7 @@ impl Region {
         }
     }
 
+    /// Scrapes the region and adds the generated entry to wal.
     pub fn add_wal_entry<S: LogStore>(&self, wal_writer: &mut WalWriter<S>) {
         let num_rows = self.rows_factor * 5;
         let mutation = Mutation {
@@ -84,6 +87,7 @@ impl Region {
             .unwrap();
     }
 
+    /// Replays the region.
     pub async fn replay<S: LogStore>(&self, wal: &Arc<Wal<S>>) {
         let mut wal_stream = wal.scan(self.id, 0, &self.wal_options).unwrap();
         while let Some(res) = wal_stream.next().await {
@@ -92,6 +96,7 @@ impl Region {
         }
     }
 
+    /// Computes the estimated size in bytes of the entry.
     pub fn entry_estimated_size(entry: &WalEntry) -> usize {
         let wrapper_size = size_of::<WalEntry>()
             + entry.mutations.capacity() * size_of::<Mutation>()
@@ -118,7 +123,6 @@ impl Region {
     fn build_rows(&self, num_rows: usize) -> Rows {
         let cols = self
             .schema
-            .clone()
             .iter()
             .map(|col_schema| {
                 let col_data_type = ColumnDataType::try_from(col_schema.datatype).unwrap();
