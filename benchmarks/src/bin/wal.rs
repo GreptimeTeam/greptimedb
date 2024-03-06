@@ -119,7 +119,7 @@ struct Args {
     skip_write: bool,
 
     /// Randomly generates topic names if set to true.
-    /// Useful when you want to run the benchmarker wihtout worrying about the topics created before.
+    /// Useful when you want to run the benchmarker without worrying about the topics created before.
     #[clap(long, default_value_t = false)]
     random_topics: bool,
 
