@@ -57,7 +57,13 @@ macro_rules! impl_random {
     ($type: ident, $value:ident, $values: ident) => {
         impl<R: Rng> Random<$type, R> for $value {
             fn choose(&self, rng: &mut R, amount: usize) -> Vec<$type> {
-                $values.choose_multiple(rng, amount).cloned().collect()
+                let mut result = std::collections::BTreeSet::new();
+                while result.len() != amount {
+                    result.insert($values.choose(rng).unwrap().clone());
+                }
+                let mut result = result.into_iter().collect::<Vec<_>>();
+                result.shuffle(rng);
+                result
             }
         }
     };

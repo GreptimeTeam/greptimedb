@@ -38,4 +38,11 @@ pub enum Error {
 
     #[snafu(display("No droppable columns"))]
     DroppableColumns { location: Location },
+
+    #[snafu(display("Failed to execute query"))]
+    ExecuteQuery {
+        #[snafu(source)]
+        error: sqlx::error::Error,
+        location: Location,
+    },
 }
