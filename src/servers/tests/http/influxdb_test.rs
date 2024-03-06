@@ -141,7 +141,7 @@ async fn test_influxdb_write() {
     let result = client.get("/v1/influxdb/ping").send().await;
     assert_eq!(result.status(), 204);
 
-    // right request
+    // right request using v2 token auth
     let result = client
         .post("/v1/influxdb/write?db=public")
         .body("monitor,host=host1 cpu=1.2 1664370459457010101")
@@ -155,6 +155,19 @@ async fn test_influxdb_write() {
     let result = client
         .post("/v1/influxdb/write?db=public&p=greptime&u=greptime")
         .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // right request using basic auth
+    let result = client
+        .post("/v1/influxdb/write?db=public")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(
+            http::header::AUTHORIZATION,
+            "basic Z3JlcHRpbWU6Z3JlcHRpbWU=",
+        )
         .send()
         .await;
     assert_eq!(result.status(), 204);
@@ -224,6 +237,7 @@ async fn test_influxdb_write() {
     assert_eq!(
         metrics,
         vec![
+            ("public".to_string(), "monitor".to_string()),
             ("public".to_string(), "monitor".to_string()),
             ("public".to_string(), "monitor".to_string()),
             ("influxdb".to_string(), "monitor".to_string())
