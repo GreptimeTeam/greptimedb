@@ -134,8 +134,7 @@ jobs:
         shell: bash
         run: |
           sudo apt update && sudo apt install -y libfuzzer-12-dev
-          rustup install nightly
-          cargo +nightly install cargo-fuzz
+          cargo install cargo-fuzz
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:

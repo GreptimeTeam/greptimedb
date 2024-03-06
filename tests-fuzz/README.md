@@ -12,12 +12,12 @@ cargo install cargo-fuzz
 ## Run
 1. List all fuzz targets
 ```bash
-cargo +nightly fuzz list --fuzz-dir tests-fuzz
+cargo fuzz list --fuzz-dir tests-fuzz
 ```
 
 2. Run a fuzz target.
 ```bash
-cargo +nightly fuzz run fuzz_create_table --fuzz-dir tests-fuzz
+cargo fuzz run fuzz_create_table --fuzz-dir tests-fuzz
 ```
 
 ## Crash Reproduction
@@ -31,11 +31,11 @@ echo "Base64" > .crash
 Print the `std::fmt::Debug` output for an input.
 
 ```bash
-cargo +nightly fuzz fmt fuzz_target .crash --fuzz-dir tests-fuzz  
+cargo fuzz fmt fuzz_target .crash --fuzz-dir tests-fuzz  
 ```
 Rerun the fuzz test with the input.
 
 ```bash
-cargo +nightly fuzz run fuzz_target .crash --fuzz-dir tests-fuzz
+cargo fuzz run fuzz_target .crash --fuzz-dir tests-fuzz
 ```
 For more details, visit [cargo fuzz](https://rust-fuzz.github.io/book/cargo-fuzz/tutorial.html) or run the command `cargo fuzz --help`.
