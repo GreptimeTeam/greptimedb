@@ -874,15 +874,29 @@ dependencies = [
 name = "benchmarks"
 version = "0.7.0"
 dependencies = [
+ "api",
  "arrow",
  "chrono",
  "clap 4.4.11",
  "client",
+ "common-base",
+ "common-telemetry",
+ "common-wal",
+ "futures",
  "futures-util",
  "indicatif",
  "itertools 0.10.5",
+ "lazy_static",
+ "log-store",
+ "mito2",
+ "num_cpus",
  "parquet",
+ "prometheus",
+ "rand",
+ "rskafka",
+ "store-api",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -4918,6 +4932,8 @@ dependencies = [
  "futures",
  "futures-util",
  "itertools 0.10.5",
+ "lazy_static",
+ "prometheus",
  "protobuf",
  "protobuf-build",
  "raft-engine",
