@@ -40,12 +40,13 @@ use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use sql::statements::set_variables::SetVariables;
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
-use sqlparser::ast::{Expr, ObjectName, Value};
+use sqlparser::ast::{Expr, Ident, ObjectName, Value};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -207,6 +208,22 @@ impl StatementExecutor {
                 let var_name = set_var.variable.to_string().to_uppercase();
                 match var_name.as_str() {
                     "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
+
+                    // Some postgresql client app may submit a "SET bytea_output" stmt upon connection.
+                    // However, currently we lack the support for it (tracked in https://github.com/GreptimeTeam/greptimedb/issues/3438),
+                    // so we just ignore it here instead of returning an error to break the connection.
+                    // Since the "bytea_output" only determines the output format of binary values,
+                    // it won't cause much trouble if we do so.
+                    // TODO(#3438): Remove this temporary workaround after the feature is implemented.
+                    "BYTEA_OUTPUT" => (),
+
+                    // Same as "bytea_output", we just ignore it here.
+                    // Not harmful since it only relates to how date is viewed in client app's output.
+                    // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
+                    // TODO(#3442): Remove this temporary workaround after the feature is implemented.
+                    "DATESTYLE" => (),
+
+                    "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
                     _ => {
                         return NotSupportedSnafu {
                             feat: format!("Unsupported set variable {}", var_name),
@@ -255,6 +272,39 @@ impl StatementExecutor {
                 table_name: table_ref.to_string(),
             })
     }
+}
+
+fn validate_client_encoding(set: SetVariables) -> Result<()> {
+    let Some((encoding, [])) = set.value.split_first() else {
+        return InvalidSqlSnafu {
+            err_msg: "must provide one and only one client encoding value",
+        }
+        .fail();
+    };
+    let encoding = match encoding {
+        Expr::Value(Value::SingleQuotedString(x))
+        | Expr::Identifier(Ident {
+            value: x,
+            quote_style: _,
+        }) => x.to_uppercase(),
+        _ => {
+            return InvalidSqlSnafu {
+                err_msg: format!("client encoding must be a string, actual: {:?}", encoding),
+            }
+            .fail();
+        }
+    };
+    // For the sake of simplicity, we only support "UTF8" ("UNICODE" is the alias for it,
+    // see https://www.postgresql.org/docs/current/multibyte.html#MULTIBYTE-CHARSET-SUPPORTED).
+    // "UTF8" is universal and sufficient for almost all cases.
+    // GreptimeDB itself is always using "UTF8" as the internal encoding.
+    ensure!(
+        encoding == "UTF8" || encoding == "UNICODE",
+        NotSupportedSnafu {
+            feat: format!("client encoding of '{}'", encoding)
+        }
+    );
+    Ok(())
 }
 
 fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
