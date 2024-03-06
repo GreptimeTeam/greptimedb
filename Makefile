@@ -3,6 +3,7 @@ CARGO_PROFILE ?=
 FEATURES ?=
 TARGET_DIR ?=
 TARGET ?=
+BUILD_BIN ?= greptime
 CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
@@ -43,6 +44,10 @@ endif
 
 ifneq ($(strip $(TARGET)),)
 	CARGO_BUILD_OPTS += --target ${TARGET}
+endif
+
+ifneq ($(strip $(BUILD_BIN)),)
+	CARGO_BUILD_OPTS += --bin ${BUILD_BIN}
 endif
 
 ifneq ($(strip $(RELEASE)),)
