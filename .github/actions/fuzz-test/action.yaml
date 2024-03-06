@@ -1,0 +1,25 @@
+name: Fuzz Test
+description: 'Fuzz test given setup and service'
+inputs:
+  target:
+    description: "The fuzz target to test"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Fuzz Test
+      shell: bash
+      run: |
+        mkdir -p ./dynamic_fuzz_test &&
+        cat <<EOF >./dynamic_fuzz_test/action.yml
+        runs:
+          using: composite
+          steps:
+          - name: Run Fuzz Test
+            shell: bash
+            run: cargo +nightly fuzz run ${{ inputs.target }} --fuzz-dir tests-fuzz -- -max_total_time=120
+            env:
+              GT_MYSQL_ADDR: 127.0.0.1:4002
+        EOF
+    - name: Run
+      uses: ./dynamic_fuzz_test

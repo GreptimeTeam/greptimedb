@@ -117,6 +117,42 @@ jobs:
           artifacts-dir: bins
           version: current
 
+  fuzztest: 
+    name: Fuzz Test
+    needs: build
+    runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        target: [ "fuzz_create_table" ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt update && sudo apt install -y libfuzzer-12-dev
+          rustup install nightly
+          cargo +nightly install cargo-fuzz
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Run GreptimeDB
+        run: | 
+          ./bins/greptime standalone start&
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-12/lib/libFuzzer.a
+        with:
+          target: ${{ matrix.target }}
+
   sqlness:
     name: Sqlness Test
     needs: build
