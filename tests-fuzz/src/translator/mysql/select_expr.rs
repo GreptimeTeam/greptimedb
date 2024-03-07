@@ -25,7 +25,7 @@ impl DslTranslator<SelectExpr, String> for SelectExprTranslator {
         let columns = input
             .columns
             .iter()
-            .map(|c| c.name.as_str())
+            .map(|c| c.name.to_string())
             .collect::<Vec<_>>()
             .join(", ")
             .to_string();

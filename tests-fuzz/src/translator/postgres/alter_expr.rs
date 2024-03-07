@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use datatypes::data_type::ConcreteDataType;
 use sql::statements::concrete_data_type_to_sql_data_type;
 
@@ -41,15 +43,15 @@ impl DslTranslator<AlterTableExpr, String> for AlterTableExprTranslator {
 }
 
 impl AlterTableExprTranslator {
-    fn format_drop(name: &str, column: &str) -> String {
+    fn format_drop(name: impl Display, column: impl Display) -> String {
         format!("ALTER TABLE {name} DROP COLUMN {column};")
     }
 
-    fn format_rename(name: &str, new_name: &str) -> String {
+    fn format_rename(name: impl Display, new_name: impl Display) -> String {
         format!("ALTER TABLE {name} RENAME TO {new_name};")
     }
 
-    fn format_add_column(name: &str, column: &Column) -> String {
+    fn format_add_column(name: impl Display, column: &Column) -> String {
         format!(
             "{};",
             vec![format!(
@@ -116,10 +118,10 @@ mod tests {
     #[test]
     fn test_alter_table_expr() {
         let alter_expr = AlterTableExpr {
-            table_name: "test".to_string(),
+            table_name: "test".into(),
             alter_options: AlterTableOperation::AddColumn {
                 column: Column {
-                    name: "host".to_string(),
+                    name: "host".into(),
                     column_type: ConcreteDataType::string_datatype(),
                     options: vec![ColumnOption::PrimaryKey],
                 },
@@ -132,9 +134,9 @@ mod tests {
         assert_eq!("ALTER TABLE test ADD COLUMN host STRING;", output);
 
         let alter_expr = AlterTableExpr {
-            table_name: "test".to_string(),
+            table_name: "test".into(),
             alter_options: AlterTableOperation::RenameTable {
-                new_table_name: "foo".to_string(),
+                new_table_name: "foo".into(),
             },
         };
 
@@ -142,10 +144,8 @@ mod tests {
         assert_eq!("ALTER TABLE test RENAME TO foo;", output);
 
         let alter_expr = AlterTableExpr {
-            table_name: "test".to_string(),
-            alter_options: AlterTableOperation::DropColumn {
-                name: "foo".to_string(),
-            },
+            table_name: "test".into(),
+            alter_options: AlterTableOperation::DropColumn { name: "foo".into() },
         };
 
         let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();

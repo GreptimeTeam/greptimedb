@@ -46,3 +46,7 @@ benchmarks/data
 *.code-workspace
 
 venv/
+
+# Fuzz tests 
+tests-fuzz/artifacts/
+tests-fuzz/corpus/
