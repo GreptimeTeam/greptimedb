@@ -17,7 +17,6 @@
 use std::sync::Arc;
 
 use common_telemetry::{error, info, warn};
-use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
@@ -80,7 +79,7 @@ impl<S> RegionWorkerLoop<S> {
     /// Finds some regions to flush to reduce write buffer usage.
     fn flush_regions_on_engine_full(&mut self) -> Result<()> {
         let regions = self.regions.list_regions();
-        let now = current_time_millis();
+        let now = self.time_provider.current_time_millis();
         let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
         let mut max_mutable_size = 0;
         // Region with max mutable memtable size.
@@ -132,7 +131,7 @@ impl<S> RegionWorkerLoop<S> {
     /// Flushes regions periodically.
     pub(crate) fn flush_periodically(&mut self) -> Result<()> {
         let regions = self.regions.list_regions();
-        let now = current_time_millis();
+        let now = self.time_provider.current_time_millis();
         let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
 
         for region in &regions {

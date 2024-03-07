@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info, warn};
-use common_time::util::current_time_millis;
 use common_wal::options::WalOptions;
 use futures::StreamExt;
 use object_store::manager::ObjectStoreManagerRef;
@@ -46,6 +45,7 @@ use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::{EntryId, Wal};
 
 /// Builder to create a new [MitoRegion] or open an existing one.
@@ -60,6 +60,7 @@ pub(crate) struct RegionOpener {
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
     intermediate_manager: IntermediateManager,
+    time_provider: Option<TimeProviderRef>,
 }
 
 impl RegionOpener {
@@ -83,6 +84,7 @@ impl RegionOpener {
             cache_manager: None,
             skip_wal_replay: false,
             intermediate_manager,
+            time_provider: None,
         }
     }
 
@@ -182,6 +184,9 @@ impl RegionOpener {
             object_store,
             self.intermediate_manager,
         ));
+        let time_provider = self
+            .time_provider
+            .unwrap_or_else(|| Arc::new(StdTimeProvider));
 
         Ok(MitoRegion {
             region_id,
@@ -194,9 +199,10 @@ impl RegionOpener {
                 self.cache_manager,
             )),
             wal_options,
-            last_flush_millis: AtomicI64::new(current_time_millis()),
+            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
+            time_provider,
         })
     }
 
@@ -294,6 +300,10 @@ impl RegionOpener {
         } else {
             info!("Skip the WAL replay for region: {}", region_id);
         }
+        let time_provider = self
+            .time_provider
+            .clone()
+            .unwrap_or_else(|| Arc::new(StdTimeProvider));
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -302,9 +312,10 @@ impl RegionOpener {
             manifest_manager,
             file_purger,
             wal_options,
-            last_flush_millis: AtomicI64::new(current_time_millis()),
+            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
+            time_provider,
         };
         Ok(Some(region))
     }

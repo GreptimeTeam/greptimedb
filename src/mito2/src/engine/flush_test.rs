@@ -14,10 +14,13 @@
 
 //! Flush tests for mito engine.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
+use common_time::util::current_time_millis;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
@@ -28,6 +31,8 @@ use crate::test_util::{
     build_rows, build_rows_for_key, flush_region, put_rows, reopen_region, rows_schema,
     CreateRequestBuilder, MockWriteBufferManager, TestEnv,
 };
+use crate::time_provider::TimeProvider;
+use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
 
 #[tokio::test]
 async fn test_manual_flush() {
@@ -271,4 +276,102 @@ async fn test_flush_reopen_region() {
     let version_data = region.version_control.current();
     assert_eq!(2, version_data.last_entry_id);
     assert_eq!(5, version_data.committed_sequence);
+}
+
+#[derive(Debug)]
+struct FixedTimeProvider {
+    now: AtomicI64,
+    elapsed: AtomicI64,
+}
+
+impl TimeProvider for FixedTimeProvider {
+    fn current_time_millis(&self) -> i64 {
+        self.now.load(Ordering::Relaxed)
+    }
+
+    fn elapsed_since(&self, _current_millis: i64) -> i64 {
+        self.elapsed.load(Ordering::Relaxed)
+    }
+
+    fn wait_duration(&self, _duration: Duration) -> Duration {
+        Duration::from_millis(20)
+    }
+}
+
+impl FixedTimeProvider {
+    fn new(now: i64) -> Self {
+        Self {
+            now: AtomicI64::new(now),
+            elapsed: AtomicI64::new(0),
+        }
+    }
+
+    fn set_now(&self, now: i64) {
+        self.now.store(now, Ordering::Relaxed);
+    }
+
+    fn set_elapsed(&self, elapsed: i64) {
+        self.elapsed.store(elapsed, Ordering::Relaxed);
+    }
+}
+
+#[tokio::test]
+async fn test_auto_flush_engine() {
+    let mut env = TestEnv::new();
+    let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
+    let listener = Arc::new(FlushListener::default());
+    let now = current_time_millis();
+    let time_provider = Arc::new(FixedTimeProvider::new(now));
+    let engine = env
+        .create_engine_with_time(
+            MitoConfig {
+                auto_flush_interval: Duration::from_secs(60 * 5),
+                ..Default::default()
+            },
+            Some(write_buffer_manager.clone()),
+            Some(listener.clone()),
+            time_provider.clone(),
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Prepares rows for flush.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Sets current time to now + auto_flush_interval * 2.
+    time_provider.set_now(now + (60 * 5 * 2) * 1000);
+    // Sets elapsed time to MAX_INITIAL_CHECK_DELAY_SECS + 1.
+    time_provider.set_elapsed((MAX_INITIAL_CHECK_DELAY_SECS as i64 + 1) * 1000);
+
+    // Wait until flush is finished.
+    tokio::time::timeout(Duration::from_secs(3), listener.wait())
+        .await
+        .unwrap();
+
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id, request).unwrap();
+    assert_eq!(0, scanner.num_memtables());
+    assert_eq!(1, scanner.num_files());
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 1.0     | 1970-01-01T00:00:01 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
