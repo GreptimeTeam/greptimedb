@@ -56,7 +56,11 @@ SELECT ts, host, first_value(addon ORDER BY val ASC, ts ASC) RANGE '5s', last_va
 
 SELECT ts, host, count(val) RANGE '5s'FROM host ALIGN '5s' ORDER BY host, ts;
 
+SELECT ts, host, count(distinct val) RANGE '5s'FROM host ALIGN '5s' ORDER BY host, ts;
+
 SELECT ts, host, count(*) RANGE '5s'FROM host ALIGN '5s' ORDER BY host, ts;
+
+SELECT ts, host, count(distinct *) RANGE '5s'FROM host ALIGN '5s' ORDER BY host, ts;
 
 -- Test error first_value/last_value
 
