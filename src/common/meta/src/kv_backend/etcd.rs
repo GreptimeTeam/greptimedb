@@ -33,12 +33,6 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
-// Maximum number of operations permitted in a transaction.
-// The etcd default configuration's `--max-txn-ops` is 128.
-//
-// For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
-const MAX_TXN_SIZE: usize = 128;
-
 fn convert_key_value(kv: etcd_client::KeyValue) -> KeyValue {
     let (key, value) = kv.into_key_value();
     KeyValue { key, value }
@@ -46,10 +40,15 @@ fn convert_key_value(kv: etcd_client::KeyValue) -> KeyValue {
 
 pub struct EtcdStore {
     client: Client,
+    // Maximum number of operations permitted in a transaction.
+    // The etcd default configuration's `--max-txn-ops` is 128.
+    //
+    // For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
+    max_txn_ops: usize,
 }
 
 impl EtcdStore {
-    pub async fn with_endpoints<E, S>(endpoints: S) -> Result<KvBackendRef>
+    pub async fn with_endpoints<E, S>(endpoints: S, max_txn_ops: usize) -> Result<KvBackendRef>
     where
         E: AsRef<str>,
         S: AsRef<[E]>,
@@ -58,15 +57,18 @@ impl EtcdStore {
             .await
             .context(error::ConnectEtcdSnafu)?;
 
-        Ok(Self::with_etcd_client(client))
+        Ok(Self::with_etcd_client(client, max_txn_ops))
     }
 
-    pub fn with_etcd_client(client: Client) -> KvBackendRef {
-        Arc::new(Self { client })
+    pub fn with_etcd_client(client: Client, max_txn_ops: usize) -> KvBackendRef {
+        Arc::new(Self {
+            client,
+            max_txn_ops,
+        })
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
-        let max_txn_size = self.max_txn_size();
+        let max_txn_size = self.max_txn_ops();
         if txn_ops.len() < max_txn_size {
             // fast path
             let _timer = METRIC_META_TXN_REQUEST
@@ -311,18 +313,20 @@ impl TxnService for EtcdStore {
             .with_label_values(&["etcd", "txn"])
             .start_timer();
 
+        let max_operations = txn.max_operations();
+
         let etcd_txn: Txn = txn.into();
         let txn_res = self
             .client
             .kv_client()
             .txn(etcd_txn)
             .await
-            .context(error::EtcdFailedSnafu)?;
+            .context(error::EtcdTxnFailedSnafu { max_operations })?;
         txn_res.try_into()
     }
 
-    fn max_txn_size(&self) -> usize {
-        MAX_TXN_SIZE
+    fn max_txn_ops(&self) -> usize {
+        self.max_txn_ops
     }
 }
 

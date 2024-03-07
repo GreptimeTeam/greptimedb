@@ -79,6 +79,13 @@ pub struct MetaSrvOptions {
     pub wal: MetaSrvWalConfig,
     pub export_metrics: ExportMetricsOption,
     pub store_key_prefix: String,
+    /// The max operations per txn
+    ///
+    /// If using etcd as the store, this value should be less than or equal to the
+    /// `--max-txn-ops` option value of etcd. If using another store, this option
+    /// can be ignored.
+    /// For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
+    pub max_txn_ops: usize,
 }
 
 impl MetaSrvOptions {
@@ -112,6 +119,7 @@ impl Default for MetaSrvOptions {
             wal: MetaSrvWalConfig::default(),
             export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
+            max_txn_ops: 100,
         }
     }
 }

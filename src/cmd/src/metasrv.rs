@@ -117,10 +117,12 @@ struct StartCommand {
     /// The working home directory of this metasrv instance.
     #[clap(long)]
     data_home: Option<String>,
-
     /// If it's not empty, the metasrv will store all data with this key prefix.
     #[clap(long, default_value = "")]
     store_key_prefix: String,
+    /// The max operations per txn
+    #[clap(long)]
+    max_txn_ops: Option<usize>,
 }
 
 impl StartCommand {
@@ -179,6 +181,10 @@ impl StartCommand {
 
         if !self.store_key_prefix.is_empty() {
             opts.store_key_prefix = self.store_key_prefix.clone()
+        }
+
+        if let Some(max_txn_ops) = self.max_txn_ops {
+            opts.max_txn_ops = max_txn_ops;
         }
 
         // Disable dashboard in metasrv.

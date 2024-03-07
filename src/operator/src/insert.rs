@@ -468,8 +468,6 @@ impl Inserter {
                     &req.table_name,
                 );
 
-                info!("Logical table `{table_ref}` does not exist, try creating table");
-
                 let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
                 let mut create_table_expr = build_create_table_expr(&table_ref, request_schema)?;
 

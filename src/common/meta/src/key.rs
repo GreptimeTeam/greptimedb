@@ -464,7 +464,7 @@ impl TableMetadataManager {
     pub fn max_logical_tables_per_batch(&self) -> usize {
         // The batch size is max_txn_size / 3 because the size of the `tables_data`
         // is 3 times the size of the `tables_data`.
-        self.kv_backend.max_txn_size() / 3
+        self.kv_backend.max_txn_ops() / 3
     }
 
     /// Creates metadata for multiple logical tables and return an error if different metadata exists.
@@ -860,6 +860,7 @@ mod tests {
     use bytes::Bytes;
     use common_time::util::current_time_millis;
     use futures::TryStreamExt;
+    use store_api::storage::RegionId;
     use table::metadata::{RawTableInfo, TableInfo};
 
     use super::datanode_table::DatanodeTableKey;
@@ -1054,6 +1055,36 @@ mod tests {
                 .unwrap(),
             &region_routes
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_many_logical_tables_metadata() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(kv_backend);
+
+        let mut tables_data = vec![];
+        for i in 0..128 {
+            let table_id = i + 1;
+            let regin_number = table_id * 3;
+            let region_id = RegionId::new(table_id, regin_number);
+            let region_route = new_region_route(region_id.as_u64(), 2);
+            let region_routes = vec![region_route.clone()];
+            let table_info: RawTableInfo = test_utils::new_test_table_info_with_name(
+                table_id,
+                &format!("my_table_{}", table_id),
+                region_routes.iter().map(|r| r.region.id.region_number()),
+            )
+            .into();
+            let table_route_value = TableRouteValue::physical(region_routes.clone());
+
+            tables_data.push((table_info, table_route_value));
+        }
+
+        // creates metadata.
+        table_metadata_manager
+            .create_logical_tables_metadata(tables_data)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

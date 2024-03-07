@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::max;
+
 use common_error::ext::ErrorExt;
 
 use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
@@ -27,7 +29,7 @@ pub trait TxnService: Sync + Send {
     }
 
     /// Maximum number of operations permitted in a transaction.
-    fn max_txn_size(&self) -> usize {
+    fn max_txn_ops(&self) -> usize {
         usize::MAX
     }
 }
@@ -191,6 +193,12 @@ impl Txn {
         self.c_else = true;
         self.req.failure = operations.into();
         self
+    }
+
+    #[inline]
+    pub fn max_operations(&self) -> usize {
+        let opc = max(self.req.compare.len(), self.req.success.len());
+        max(opc, self.req.failure.len())
     }
 }
 
