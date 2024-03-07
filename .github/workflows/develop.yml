@@ -102,7 +102,7 @@ jobs:
           shared-key: "build-binaries"
       - name: Build greptime binaries
         shell: bash
-        run: cargo build
+        run: cargo build --bin greptime --bin sqlness-runner
       - name: Pack greptime binaries
         shell: bash
         run: |
