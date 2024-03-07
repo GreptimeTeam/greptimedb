@@ -19,6 +19,8 @@ pub(crate) mod create_expr;
 pub(crate) mod insert_expr;
 pub(crate) mod select_expr;
 
+use core::fmt;
+
 pub use alter_expr::AlterTableExpr;
 pub use create_expr::CreateTableExpr;
 use datatypes::data_type::ConcreteDataType;
@@ -76,7 +78,7 @@ pub struct PartibleColumnTypeGenerator;
 pub fn generate_random_value<R: Rng>(
     rng: &mut R,
     datatype: &ConcreteDataType,
-    random_str: Option<&dyn Random<String, R>>,
+    random_str: Option<&dyn Random<Ident, R>>,
 ) -> Value {
     match datatype {
         &ConcreteDataType::Boolean(_) => Value::from(rng.gen::<bool>()),
@@ -86,7 +88,7 @@ pub fn generate_random_value<R: Rng>(
         ConcreteDataType::Float32(_) => Value::from(rng.gen::<f32>()),
         ConcreteDataType::Float64(_) => Value::from(rng.gen::<f64>()),
         ConcreteDataType::String(_) => match random_str {
-            Some(random) => Value::from(random.gen(rng)),
+            Some(random) => Value::from(random.gen(rng).value),
             None => Value::from(rng.gen::<char>().to_string()),
         },
         ConcreteDataType::Date(_) => Value::from(rng.gen::<i32>()),
@@ -97,11 +99,69 @@ pub fn generate_random_value<R: Rng>(
     }
 }
 
+/// An identifier.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct Ident {
+    pub value: String,
+    pub quote_style: Option<char>,
+}
+
+impl Ident {
+    /// Creates a new identifier with the given value and no quotes.
+    pub fn new<S>(value: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Ident {
+            value: value.into(),
+            quote_style: None,
+        }
+    }
+
+    /// Creates a new quoted identifier with the given quote and value.
+    pub fn with_quote<S>(quote: char, value: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Ident {
+            value: value.into(),
+            quote_style: Some(quote),
+        }
+    }
+}
+
+impl From<&str> for Ident {
+    fn from(value: &str) -> Self {
+        Ident {
+            value: value.to_string(),
+            quote_style: None,
+        }
+    }
+}
+
+impl From<String> for Ident {
+    fn from(value: String) -> Self {
+        Ident {
+            value,
+            quote_style: None,
+        }
+    }
+}
+
+impl fmt::Display for Ident {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.quote_style {
+            Some(q) => write!(f, "{q}{}{q}", self.value),
+            None => f.write_str(&self.value),
+        }
+    }
+}
+
 /// The IR column.
 #[derive(Debug, Builder, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Column {
     #[builder(setter(into))]
-    pub name: String,
+    pub name: Ident,
     pub column_type: ConcreteDataType,
     #[builder(default, setter(into))]
     pub options: Vec<ColumnOption>,
@@ -192,7 +252,7 @@ pub fn ts_column_options_generator<R: Rng + 'static>(
 /// Generates columns with given `names`.
 pub fn generate_columns<R: Rng + 'static>(
     rng: &mut R,
-    names: impl IntoIterator<Item = String>,
+    names: impl IntoIterator<Item = Ident>,
     types: &(impl Random<ConcreteDataType, R> + ?Sized),
     options: impl Fn(&mut R, &ConcreteDataType) -> Vec<ColumnOption>,
 ) -> Vec<Column> {
@@ -218,12 +278,12 @@ mod tests {
     fn test_droppable_columns() {
         let columns = vec![
             Column {
-                name: "hi".to_string(),
+                name: "hi".into(),
                 column_type: ConcreteDataType::uint64_datatype(),
                 options: vec![ColumnOption::PrimaryKey],
             },
             Column {
-                name: "foo".to_string(),
+                name: "foo".into(),
                 column_type: ConcreteDataType::uint64_datatype(),
                 options: vec![ColumnOption::TimeIndex],
             },
@@ -233,12 +293,12 @@ mod tests {
 
         let columns = vec![
             Column {
-                name: "hi".to_string(),
+                name: "hi".into(),
                 column_type: ConcreteDataType::uint64_datatype(),
                 options: vec![],
             },
             Column {
-                name: "foo".to_string(),
+                name: "foo".into(),
                 column_type: ConcreteDataType::uint64_datatype(),
                 options: vec![],
             },

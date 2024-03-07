@@ -20,35 +20,35 @@ use crate::ir::Column;
 
 pub fn new_test_ctx() -> TableContext {
     TableContext {
-        name: "test".to_string(),
+        name: "test".into(),
         columns: vec![
             Column {
-                name: "host".to_string(),
+                name: "host".into(),
                 column_type: ConcreteDataType::string_datatype(),
                 options: vec![ColumnOption::PrimaryKey],
             },
             Column {
-                name: "idc".to_string(),
+                name: "idc".into(),
                 column_type: ConcreteDataType::string_datatype(),
                 options: vec![ColumnOption::PrimaryKey],
             },
             Column {
-                name: "cpu_util".to_string(),
+                name: "cpu_util".into(),
                 column_type: ConcreteDataType::float64_datatype(),
                 options: vec![],
             },
             Column {
-                name: "memory_util".to_string(),
+                name: "memory_util".into(),
                 column_type: ConcreteDataType::float64_datatype(),
                 options: vec![],
             },
             Column {
-                name: "disk_util".to_string(),
+                name: "disk_util".into(),
                 column_type: ConcreteDataType::float64_datatype(),
                 options: vec![],
             },
             Column {
-                name: "ts".to_string(),
+                name: "ts".into(),
                 column_type: ConcreteDataType::timestamp_millisecond_datatype(),
                 options: vec![ColumnOption::TimeIndex],
             },

@@ -62,7 +62,7 @@ macro_rules! impl_random {
                 while result.len() != amount {
                     result.insert($values.choose(rng).unwrap().clone());
                 }
-                let mut result = result.into_iter().collect::<Vec<_>>();
+                let mut result = result.into_iter().map(Into::into).collect::<Vec<_>>();
                 // Shuffles the result slice.
                 result.shuffle(rng);
                 result
