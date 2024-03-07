@@ -155,7 +155,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":"DigNissIMOS","alter_options":{"AddColumn":{"column":{"name":"sit","column_type":{"Boolean":null},"options":["PrimaryKey"]},"location":null}}}"#;
+        let expected = r#"{"table_name":"animI","alter_options":{"AddColumn":{"column":{"name":"velit","column_type":{"Int32":{}},"options":[{"DefaultValue":{"Int32":853246610}}]},"location":null}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprRenameGeneratorBuilder::default()
@@ -165,7 +165,8 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":"DigNissIMOS","alter_options":{"RenameTable":{"new_table_name":"excepturi"}}}"#;
+        let expected =
+            r#"{"table_name":"animI","alter_options":{"RenameTable":{"new_table_name":"iure"}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprDropColumnGeneratorBuilder::default()
@@ -175,8 +176,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected =
-            r#"{"table_name":"DigNissIMOS","alter_options":{"DropColumn":{"name":"INVentORE"}}}"#;
+        let expected = r#"{"table_name":"animI","alter_options":{"DropColumn":{"name":"toTAm"}}}"#;
         assert_eq!(expected, serialized);
     }
 }
