@@ -26,7 +26,7 @@ use query::parser::PromQuery;
 use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
-use servers::http::header::GREPTIME_DB_HEADER_FORMAT;
+use servers::http::header::{GREPTIME_DB_HEADER_FORMAT, GREPTIME_DB_HEADER_NAME};
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -313,11 +313,33 @@ async fn test_influxdb_write_v2() {
     assert_eq!(result.status(), 204);
     assert!(result.text().await.is_empty());
 
-    // right request with no query string
+    // right request with no query string, `public_db_client` is used otherwise the auth will fail
     let result = public_db_client
         .post("/v1/influxdb/api/v2/write")
         .body("monitor,host=host1 cpu=1.2 1664370459457010101")
         .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // right request with the 'greptime' header and 'db' query string
+    let result = client
+        .post("/v1/influxdb/api/v2/write?db=influxdbv2")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .header(GREPTIME_DB_HEADER_NAME, "influxdb")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // right request with the 'greptime' header and 'bucket' query string
+    let result = client
+        .post("/v1/influxdb/api/v2/write?bucket=influxdbv2")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .header(GREPTIME_DB_HEADER_NAME, "influxdb")
         .send()
         .await;
     assert_eq!(result.status(), 204);
@@ -335,7 +357,9 @@ async fn test_influxdb_write_v2() {
             ("public".to_string(), "monitor".to_string()),
             ("influxdb".to_string(), "monitor".to_string()),
             ("influxdb".to_string(), "monitor".to_string()),
-            ("public".to_string(), "monitor".to_string())
+            ("public".to_string(), "monitor".to_string()),
+            ("influxdb".to_string(), "monitor".to_string()),
+            ("influxdb".to_string(), "monitor".to_string()),
         ]
     );
 }

@@ -112,7 +112,7 @@ async fn do_auth<T>(
         return Ok(());
     };
 
-    let (username, password) = extract_username_and_password(false, req)
+    let (username, password) = extract_username_and_password(req)
         .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
 
     let id = auth::Identity::UserId(&username, None);
