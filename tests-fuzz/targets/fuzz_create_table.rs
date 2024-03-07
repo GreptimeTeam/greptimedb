@@ -37,6 +37,12 @@ struct FuzzContext {
     greptime: Pool<MySql>,
 }
 
+impl FuzzContext {
+    async fn close(self) {
+        self.greptime.close().await;
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FuzzInput {
     seed: u64,
@@ -82,6 +88,7 @@ async fn execute_create_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> 
         .await
         .context(error::ExecuteQuerySnafu)?;
     info!("Drop table: {}, result: {result:?}", expr.table_name);
+    ctx.close().await;
 
     Ok(())
 }
