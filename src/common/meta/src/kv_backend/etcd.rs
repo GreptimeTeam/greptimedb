@@ -68,8 +68,8 @@ impl EtcdStore {
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
-        let max_txn_size = self.max_txn_ops();
-        if txn_ops.len() < max_txn_size {
+        let max_txn_ops = self.max_txn_ops();
+        if txn_ops.len() < max_txn_ops {
             // fast path
             let _timer = METRIC_META_TXN_REQUEST
                 .with_label_values(&["etcd", "txn"])
@@ -85,7 +85,7 @@ impl EtcdStore {
         }
 
         let txns = txn_ops
-            .chunks(max_txn_size)
+            .chunks(max_txn_ops)
             .map(|part| async move {
                 let _timer = METRIC_META_TXN_REQUEST
                     .with_label_values(&["etcd", "txn"])
