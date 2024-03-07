@@ -79,14 +79,15 @@ async fn execute_create_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> 
     let result = sqlx::query(&sql)
         .execute(&ctx.greptime)
         .await
-        .context(error::ExecuteQuerySnafu)?;
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create table: {sql}, result: {result:?}");
 
     // Cleans up
-    let result = sqlx::query(&format!("DROP TABLE {}", expr.table_name))
+    let sql = format!("DROP TABLE {}", expr.table_name);
+    let result = sqlx::query(&sql)
         .execute(&ctx.greptime)
         .await
-        .context(error::ExecuteQuerySnafu)?;
+        .context(error::ExecuteQuerySnafu { sql })?;
     info!("Drop table: {}, result: {result:?}", expr.table_name);
     ctx.close().await;
 
