@@ -59,7 +59,13 @@ pub async fn inner_auth<B>(
     mut req: Request<B>,
 ) -> std::result::Result<Request<B>, Response> {
     // 1. prepare
-    let (catalog, schema) = extract_catalog_and_schema(&req);
+    let is_influxdb = req.uri().path().contains("influxdb");
+    let (catalog, schema) = if is_influxdb {
+        let dbname = parse_db_name_from_query_string(&req);
+        parse_catalog_and_schema_from_db_string(dbname)
+    } else {
+        extract_catalog_and_schema(&req)
+    };
     // TODO(ruihang): move this out of auth module
     let timezone = Arc::new(extract_timezone(&req));
     let query_ctx_builder = QueryContextBuilder::default()
@@ -69,7 +75,6 @@ pub async fn inner_auth<B>(
 
     let query_ctx = query_ctx_builder.build();
     let need_auth = need_auth(&req);
-    let is_influxdb = req.uri().path().contains("influxdb");
 
     // 2. check if auth is needed
     let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
@@ -115,6 +120,11 @@ pub async fn inner_auth<B>(
             Err(err_response(is_influxdb, e).into_response())
         }
     }
+}
+
+fn parse_db_name_from_query_string<B>(req: &Request<B>) -> &str {
+    let query_str = &req.uri().query().unwrap_or_default();
+    extract_db_from_query(query_str).unwrap_or(DEFAULT_SCHEMA_NAME)
 }
 
 pub async fn check_http_auth<B>(
@@ -295,6 +305,13 @@ fn extract_db_from_query(query: &str) -> Option<&str> {
         if let Some(db) = pair.strip_prefix("db=") {
             return if db.is_empty() { None } else { Some(db) };
         }
+        if let Some(bucket) = pair.strip_prefix("bucket=") {
+            return if bucket.is_empty() {
+                None
+            } else {
+                Some(bucket)
+            };
+        }
     }
     None
 }
@@ -422,10 +439,13 @@ mod tests {
         assert_matches!(extract_db_from_query(""), None);
         assert_matches!(extract_db_from_query("&"), None);
         assert_matches!(extract_db_from_query("db="), None);
+        assert_matches!(extract_db_from_query("bucket="), None);
         assert_matches!(extract_db_from_query("db=foo"), Some("foo"));
+        assert_matches!(extract_db_from_query("bucket=foo"), Some("foo"));
         assert_matches!(extract_db_from_query("name=bar"), None);
         assert_matches!(extract_db_from_query("db=&name=bar"), None);
         assert_matches!(extract_db_from_query("db=foo&name=bar"), Some("foo"));
+        assert_matches!(extract_db_from_query("db=foo&bucket=bar"), Some("foo"));
         assert_matches!(extract_db_from_query("name=bar&db="), None);
         assert_matches!(extract_db_from_query("name=bar&db=foo"), Some("foo"));
         assert_matches!(extract_db_from_query("name=bar&db=&name=bar"), None);
