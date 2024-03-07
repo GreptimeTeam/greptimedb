@@ -531,9 +531,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // Clear the buffer before handling next batch of requests.
             buffer.clear();
 
-            match self.receiver.recv().await {
-                Some(request) => buffer.push(request),
-                None => break,
+            match tokio::time::timeout(self.config.auto_flush_interval, self.receiver.recv()).await
+            {
+                Ok(Some(request)) => buffer.push(request),
+                // The channel is disconnected.
+                Ok(None) => break,
+                Err(_) => {
+                    // Timeout. Checks periodical tasks.
+                    self.handle_periodical_tasks();
+                    continue;
+                }
             }
 
             // Try to recv more requests from the channel.
