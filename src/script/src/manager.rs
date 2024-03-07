@@ -211,6 +211,8 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptManager<E> {
 
 #[cfg(test)]
 mod tests {
+    use common_query::OutputData;
+
     use super::*;
     use crate::test::setup_scripts_manager;
 
@@ -261,8 +263,8 @@ def test() -> vector[str]:
             .await
             .unwrap();
 
-        match output {
-            Output::RecordBatches(batches) => {
+        match output.data {
+            OutputData::RecordBatches(batches) => {
                 let expected = "\
 +-------+
 | n     |

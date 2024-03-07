@@ -19,7 +19,7 @@ use std::time::Instant;
 use catalog::kvbackend::{
     CachedMetaKvBackend, CachedMetaKvBackendBuilder, KvBackendCatalogManager,
 };
-use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_error::ext::ErrorExt;
 use common_query::Output;
@@ -184,15 +184,15 @@ impl Repl {
         }
         .context(RequestDatabaseSnafu { sql: &sql })?;
 
-        let either = match output {
-            Output::Stream(s, _) => {
+        let either = match output.data {
+            OutputData::Stream(s) => {
                 let x = RecordBatches::try_collect(s)
                     .await
                     .context(CollectRecordBatchesSnafu)?;
                 Either::Left(x)
             }
-            Output::RecordBatches(x) => Either::Left(x),
-            Output::AffectedRows(rows) => Either::Right(rows),
+            OutputData::RecordBatches(x) => Either::Left(x),
+            OutputData::AffectedRows(rows) => Either::Right(rows),
         };
 
         let end = Instant::now();

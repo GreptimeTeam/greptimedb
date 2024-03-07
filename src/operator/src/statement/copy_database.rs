@@ -15,6 +15,7 @@
 use std::path::Path;
 use std::str::FromStr;
 
+use client::OutputData;
 use common_datasource::file_format::Format;
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
@@ -96,7 +97,7 @@ impl StatementExecutor {
                 .await?;
             exported_rows += exported;
         }
-        Ok(Output::AffectedRows(exported_rows))
+        Ok(Output::new_data(OutputData::AffectedRows(exported_rows)))
     }
 
     /// Imports data to database from a given location and returns total rows imported.
@@ -169,7 +170,7 @@ impl StatementExecutor {
                 }
             }
         }
-        Ok(Output::AffectedRows(rows_inserted))
+        Ok(Output::new_data(OutputData::AffectedRows(rows_inserted)))
     }
 }
 

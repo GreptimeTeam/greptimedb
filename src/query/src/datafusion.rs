@@ -28,7 +28,7 @@ use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
 use common_query::prelude::ScalarUdf;
-use common_query::Output;
+use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
@@ -90,9 +90,9 @@ impl DatafusionQueryEngine {
             optimized_physical_plan
         };
 
-        Ok(Output::Stream(
-            self.execute_stream(&ctx, &physical_plan)?,
-            Some(physical_plan),
+        Ok(Output::new(
+            OutputData::Stream(self.execute_stream(&ctx, &physical_plan)?),
+            OutputMeta::new_with_plan(physical_plan),
         ))
     }
 
@@ -121,9 +121,9 @@ impl DatafusionQueryEngine {
         let output = self
             .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()), query_ctx.clone())
             .await?;
-        let mut stream = match output {
-            Output::RecordBatches(batches) => batches.as_stream(),
-            Output::Stream(stream, _) => stream,
+        let mut stream = match output.data {
+            OutputData::RecordBatches(batches) => batches.as_stream(),
+            OutputData::Stream(stream) => stream,
             _ => unreachable!(),
         };
 
@@ -148,7 +148,7 @@ impl DatafusionQueryEngine {
             };
             affected_rows += rows;
         }
-        Ok(Output::AffectedRows(affected_rows))
+        Ok(Output::new_data(OutputData::AffectedRows(affected_rows)))
     }
 
     #[tracing::instrument(skip_all)]
@@ -471,7 +471,6 @@ mod tests {
 
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
-    use common_query::Output;
     use common_recordbatch::util;
     use datafusion::prelude::{col, lit};
     use datatypes::prelude::ConcreteDataType;
@@ -534,8 +533,8 @@ mod tests {
 
         let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
 
-        match output {
-            Output::Stream(recordbatch, _) => {
+        match output.data {
+            OutputData::Stream(recordbatch) => {
                 let numbers = util::collect(recordbatch).await.unwrap();
                 assert_eq!(1, numbers.len());
                 assert_eq!(numbers[0].num_columns(), 1);

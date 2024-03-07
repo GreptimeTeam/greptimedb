@@ -20,7 +20,7 @@ use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
 use common_error::ext::BoxedError;
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
-use common_query::Output;
+use common_query::OutputData;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::datasource::DefaultTableSource;
 use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
@@ -79,8 +79,8 @@ async fn test_datafusion_query_engine() -> Result<()> {
 
     let output = engine.execute(plan, QueryContext::arc()).await?;
 
-    let recordbatch = match output {
-        Output::Stream(recordbatch, _) => recordbatch,
+    let recordbatch = match output.data {
+        OutputData::Stream(recordbatch) => recordbatch,
         _ => unreachable!(),
     };
 

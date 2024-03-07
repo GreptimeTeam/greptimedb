@@ -19,6 +19,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::{column_def, AlterExpr, CreateTableExpr};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
+use client::OutputData;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
@@ -338,10 +339,10 @@ impl StatementExecutor {
                 .await
                 .context(error::InvalidateTableCacheSnafu)?;
 
-            Ok(Output::AffectedRows(0))
+            Ok(Output::new_data(OutputData::AffectedRows(0)))
         } else if drop_if_exists {
             // DROP TABLE IF EXISTS meets table not found - ignored
-            Ok(Output::AffectedRows(0))
+            Ok(Output::new_data(OutputData::AffectedRows(0)))
         } else {
             Err(TableNotFoundSnafu {
                 table_name: table_name.to_string(),
@@ -367,7 +368,7 @@ impl StatementExecutor {
         let table_id = table.table_info().table_id();
         self.truncate_table_procedure(&table_name, table_id).await?;
 
-        Ok(Output::AffectedRows(0))
+        Ok(Output::new_data(OutputData::AffectedRows(0)))
     }
 
     fn verify_alter(
@@ -471,7 +472,7 @@ impl StatementExecutor {
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
-        Ok(Output::AffectedRows(0))
+        Ok(Output::new_data(OutputData::AffectedRows(0)))
     }
 
     async fn create_table_procedure(
@@ -580,7 +581,7 @@ impl StatementExecutor {
 
         if exists {
             return if create_if_not_exists {
-                Ok(Output::AffectedRows(1))
+                Ok(Output::new_data(OutputData::AffectedRows(1)))
             } else {
                 error::SchemaExistsSnafu { name: database }.fail()
             };
@@ -592,7 +593,7 @@ impl StatementExecutor {
             .await
             .context(TableMetadataManagerSnafu)?;
 
-        Ok(Output::AffectedRows(1))
+        Ok(Output::new_data(OutputData::AffectedRows(1)))
     }
 }
 

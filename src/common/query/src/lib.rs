@@ -30,35 +30,66 @@ pub mod prelude;
 mod signature;
 use sqlparser_derive::{Visit, VisitMut};
 
+#[derive(Debug)]
+pub struct Output {
+    pub data: OutputData,
+    pub meta: OutputMeta,
+}
+
 // sql output
-pub enum Output {
+pub enum OutputData {
     AffectedRows(usize),
     RecordBatches(RecordBatches),
-    Stream(SendableRecordBatchStream, Option<Arc<dyn PhysicalPlan>>),
+    Stream(SendableRecordBatchStream),
+}
+
+#[derive(Debug, Default)]
+pub struct OutputMeta {
+    pub plan: Option<Arc<dyn PhysicalPlan>>,
+    pub cost: usize,
 }
 
 impl Output {
-    // helper function to build original `Output::Stream`
-    pub fn new_stream(stream: SendableRecordBatchStream) -> Self {
-        Output::Stream(stream, None)
+    pub fn new_data(data: OutputData) -> Self {
+        Self {
+            data,
+            meta: Default::default(),
+        }
+    }
+
+    pub fn new(data: OutputData, meta: OutputMeta) -> Self {
+        Self { data, meta }
     }
 }
 
-impl Debug for Output {
+impl Debug for OutputData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Output::AffectedRows(rows) => write!(f, "Output::AffectedRows({rows})"),
-            Output::RecordBatches(recordbatches) => {
-                write!(f, "Output::RecordBatches({recordbatches:?})")
+            OutputData::AffectedRows(rows) => write!(f, "OutputData::AffectedRows({rows})"),
+            OutputData::RecordBatches(recordbatches) => {
+                write!(f, "OutputData::RecordBatches({recordbatches:?})")
             }
-            Output::Stream(_, df) => {
-                if df.is_some() {
-                    write!(f, "Output::Stream(<stream>, Some<physical_plan>)")
-                } else {
-                    write!(f, "Output::Stream(<stream>)")
-                }
+            OutputData::Stream(_) => {
+                write!(f, "OutputData::Stream(<stream>)")
             }
         }
+    }
+}
+
+impl OutputMeta {
+    pub fn new(plan: Option<Arc<dyn PhysicalPlan>>, cost: usize) -> Self {
+        Self { plan, cost }
+    }
+
+    pub fn new_with_plan(plan: Arc<dyn PhysicalPlan>) -> Self {
+        Self {
+            plan: Some(plan),
+            cost: 0,
+        }
+    }
+
+    pub fn new_with_cost(cost: usize) -> Self {
+        Self { plan: None, cost }
     }
 }
 

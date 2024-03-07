@@ -16,6 +16,7 @@ use std::borrow::Cow;
 
 use api::v1::greptime_request::Request;
 use api::v1::{InsertRequest, InsertRequests};
+use client::OutputData;
 use common_query::Output;
 use query::parser::PromQuery;
 use servers::error::{self, InternalSnafu, NotSupportedSnafu, Result};
@@ -101,8 +102,8 @@ impl PromQueryInterceptor for NoopInterceptor {
         output: Output,
         _query_ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {
-        match output {
-            Output::AffectedRows(1) => Ok(Output::AffectedRows(2)),
+        match output.data {
+            OutputData::AffectedRows(1) => Ok(Output::new_data(OutputData::AffectedRows(2))),
             _ => Ok(output),
         }
     }
@@ -121,8 +122,14 @@ fn test_prom_interceptor() {
     let fail = PromQueryInterceptor::pre_execute(&di, &query, ctx.clone());
     assert!(fail.is_err());
 
-    let output = Output::AffectedRows(1);
+    let output = Output::new_data(OutputData::AffectedRows(1));
     let two = PromQueryInterceptor::post_execute(&di, output, ctx);
     assert!(two.is_ok());
-    matches!(two.unwrap(), Output::AffectedRows(2));
+    matches!(
+        two.unwrap(),
+        Output {
+            data: OutputData::AffectedRows(2),
+            ..
+        }
+    );
 }

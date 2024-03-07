@@ -804,7 +804,7 @@ mod test {
     use axum::http::StatusCode;
     use axum::routing::get;
     use axum_test_helper::TestClient;
-    use common_query::Output;
+    use common_query::{Output, OutputData};
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -925,7 +925,9 @@ mod test {
         let schema = Arc::new(Schema::new(column_schemas));
 
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![]).unwrap();
-        let outputs = vec![Ok(Output::RecordBatches(recordbatches))];
+        let outputs = vec![Ok(Output::new_data(OutputData::RecordBatches(
+            recordbatches,
+        )))];
 
         let json_resp = GreptimedbV1Response::from_output(outputs).await;
         if let HttpResponse::GreptimedbV1(json_resp) = json_resp {
@@ -969,7 +971,9 @@ mod test {
         ] {
             let recordbatches =
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
-            let outputs = vec![Ok(Output::RecordBatches(recordbatches))];
+            let outputs = vec![Ok(Output::new_data(OutputData::RecordBatches(
+                recordbatches,
+            )))];
             let json_resp = match format {
                 ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
                 ResponseFormat::Csv => CsvResponse::from_output(outputs).await,

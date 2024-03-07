@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use common_time::timezone::system_timezone_name;
 use datatypes::prelude::ConcreteDataType;
@@ -229,7 +229,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
     let schema = Arc::new(Schema::new(fields));
     // unwrap is safe because the schema and data are definitely able to form a recordbatch, they are all string type
     let batches = RecordBatches::try_from_columns(schema, values).unwrap();
-    Some(Output::RecordBatches(batches))
+    Some(Output::new_data(OutputData::RecordBatches(batches)))
 }
 
 fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
@@ -254,13 +254,15 @@ fn check_show_variables(query: &str) -> Option<Output> {
     } else {
         None
     };
-    recordbatches.map(Output::RecordBatches)
+    recordbatches.map(|b| Output::new_data(OutputData::RecordBatches(b)))
 }
 
 // Check for SET or others query, this is the final check of the federated query.
 fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
-        return Some(Output::RecordBatches(RecordBatches::empty()));
+        return Some(Output::new_data(OutputData::RecordBatches(
+            RecordBatches::empty(),
+        )));
     }
 
     let recordbatches = if SELECT_DATABASE_PATTERN.is_match(query) {
@@ -274,7 +276,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     } else {
         None
     };
-    recordbatches.map(Output::RecordBatches)
+    recordbatches.map(|b| Output::new_data(OutputData::RecordBatches(b)))
 }
 
 // Check whether the query is a federated or driver setup command,
@@ -321,8 +323,8 @@ mod test {
         fn test(query: &str, expected: &str) {
             let session = Arc::new(Session::new(None, Channel::Mysql));
             let output = check(query, QueryContext::arc(), session.clone());
-            match output.unwrap() {
-                Output::RecordBatches(r) => {
+            match output.unwrap().data {
+                OutputData::RecordBatches(r) => {
                     assert_eq!(&r.pretty_print().unwrap(), expected)
                 }
                 _ => unreachable!(),

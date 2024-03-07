@@ -29,7 +29,7 @@ use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
 use common_query::prelude::GREPTIME_TIMESTAMP;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::RecordBatches;
 use common_time::timezone::get_timezone;
@@ -237,10 +237,9 @@ async fn query_from_information_schema_table(
         .await
         .context(error::DataFusionSnafu)?;
 
-    Ok(Output::Stream(
-        Box::pin(RecordBatchStreamAdapter::try_new(stream).context(error::CreateRecordBatchSnafu)?),
-        None,
-    ))
+    Ok(Output::new_data(OutputData::Stream(Box::pin(
+        RecordBatchStreamAdapter::try_new(stream).context(error::CreateRecordBatchSnafu)?,
+    ))))
 }
 
 pub async fn show_tables(
@@ -303,7 +302,7 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
         vec![Arc::new(StringVector::from(vec![value])) as _],
     )
     .context(error::CreateRecordBatchSnafu)?;
-    Ok(Output::RecordBatches(records))
+    Ok(Output::new_data(OutputData::RecordBatches(records)))
 }
 
 pub fn show_create_table(
@@ -329,7 +328,7 @@ pub fn show_create_table(
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
 
-    Ok(Output::RecordBatches(records))
+    Ok(Output::new_data(OutputData::RecordBatches(records)))
 }
 
 pub fn describe_table(table: TableRef) -> Result<Output> {
@@ -345,7 +344,7 @@ pub fn describe_table(table: TableRef) -> Result<Output> {
     ];
     let records = RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
-    Ok(Output::RecordBatches(records))
+    Ok(Output::new_data(OutputData::RecordBatches(records)))
 }
 
 fn describe_column_names(columns_schemas: &[ColumnSchema]) -> VectorRef {
@@ -572,7 +571,7 @@ fn parse_file_table_format(options: &HashMap<String, String>) -> Result<Box<dyn 
 mod test {
     use std::sync::Arc;
 
-    use common_query::Output;
+    use common_query::{Output, OutputData};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use common_time::timestamp::TimeUnit;
     use common_time::Timezone;
@@ -642,7 +641,7 @@ mod test {
             RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), expected_columns)
                 .context(error::CreateRecordBatchSnafu)?;
 
-        if let Output::RecordBatches(res) = describe_table(table)? {
+        if let OutputData::RecordBatches(res) = describe_table(table)?.data {
             assert_eq!(res.take(), expected.take());
         } else {
             panic!("describe table must return record batch");
@@ -690,7 +689,10 @@ mod test {
             .timezone(Arc::new(Timezone::from_tz_string(tz).unwrap()))
             .build();
         match show_variable(stmt, ctx) {
-            Ok(Output::RecordBatches(record)) => {
+            Ok(Output {
+                data: OutputData::RecordBatches(record),
+                ..
+            }) => {
                 let record = record.take().first().cloned().unwrap();
                 let data = record.column(0);
                 Ok(data.get(0).to_string())

@@ -20,7 +20,7 @@ use arrow_ipc::writer::FileWriter;
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatchStream;
 use futures::StreamExt;
 use schemars::JsonSchema;
@@ -70,12 +70,12 @@ impl ArrowResponse {
         }
 
         match outputs.remove(0) {
-            Ok(output) => match output {
-                Output::AffectedRows(_rows) => HttpResponse::Arrow(ArrowResponse {
+            Ok(output) => match output.data {
+                OutputData::AffectedRows(_rows) => HttpResponse::Arrow(ArrowResponse {
                     data: vec![],
                     execution_time_ms: 0,
                 }),
-                Output::RecordBatches(recordbatches) => {
+                OutputData::RecordBatches(recordbatches) => {
                     let schema = recordbatches.schema();
                     match write_arrow_bytes(recordbatches.as_stream(), schema.arrow_schema()).await
                     {
@@ -89,7 +89,7 @@ impl ArrowResponse {
                     }
                 }
 
-                Output::Stream(recordbatches, _) => {
+                OutputData::Stream(recordbatches) => {
                     let schema = recordbatches.schema();
                     match write_arrow_bytes(recordbatches, schema.arrow_schema()).await {
                         Ok(payload) => HttpResponse::Arrow(ArrowResponse {
