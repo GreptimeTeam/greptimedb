@@ -130,6 +130,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
