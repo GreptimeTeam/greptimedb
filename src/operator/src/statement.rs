@@ -21,13 +21,12 @@ mod dml;
 mod show;
 mod tql;
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
@@ -40,12 +39,14 @@ use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use session::table_name::table_idents_to_full_name;
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use sql::statements::set_variables::SetVariables;
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
-use sqlparser::ast::{Expr, ObjectName, Value};
+use sqlparser::ast::{Expr, Ident, ObjectName, Value};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -56,13 +57,12 @@ use crate::error::{
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
-use crate::table::table_idents_to_full_name;
 
 #[derive(Clone)]
 pub struct StatementExecutor {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
-    ddl_executor: DdlTaskExecutorRef,
+    procedure_executor: ProcedureExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
@@ -73,7 +73,7 @@ impl StatementExecutor {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
-        ddl_task_executor: DdlTaskExecutorRef,
+        procedure_executor: ProcedureExecutorRef,
         kv_backend: KvBackendRef,
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
@@ -81,7 +81,7 @@ impl StatementExecutor {
         Self {
             catalog_manager,
             query_engine,
-            ddl_executor: ddl_task_executor,
+            procedure_executor,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
             cache_invalidator,
@@ -154,6 +154,10 @@ impl StatementExecutor {
                 let _ = self.create_table(stmt, query_ctx).await?;
                 Ok(Output::AffectedRows(0))
             }
+            Statement::CreateTableLike(stmt) => {
+                let _ = self.create_table_like(stmt, query_ctx).await?;
+                Ok(Output::AffectedRows(0))
+            }
             Statement::CreateExternalTable(stmt) => {
                 let _ = self.create_external_table(stmt, query_ctx).await?;
                 Ok(Output::AffectedRows(0))
@@ -161,7 +165,7 @@ impl StatementExecutor {
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
@@ -169,13 +173,12 @@ impl StatementExecutor {
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
                 self.truncate_table(table_name).await
             }
-
             Statement::CreateDatabase(stmt) => {
                 self.create_database(
                     query_ctx.current_catalog(),
@@ -184,10 +187,9 @@ impl StatementExecutor {
                 )
                 .await
             }
-
             Statement::ShowCreateTable(show) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(&show.table_name, query_ctx.clone())
+                    table_idents_to_full_name(&show.table_name, &query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
 
@@ -206,6 +208,22 @@ impl StatementExecutor {
                 let var_name = set_var.variable.to_string().to_uppercase();
                 match var_name.as_str() {
                     "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
+
+                    // Some postgresql client app may submit a "SET bytea_output" stmt upon connection.
+                    // However, currently we lack the support for it (tracked in https://github.com/GreptimeTeam/greptimedb/issues/3438),
+                    // so we just ignore it here instead of returning an error to break the connection.
+                    // Since the "bytea_output" only determines the output format of binary values,
+                    // it won't cause much trouble if we do so.
+                    // TODO(#3438): Remove this temporary workaround after the feature is implemented.
+                    "BYTEA_OUTPUT" => (),
+
+                    // Same as "bytea_output", we just ignore it here.
+                    // Not harmful since it only relates to how date is viewed in client app's output.
+                    // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
+                    // TODO(#3442): Remove this temporary workaround after the feature is implemented.
+                    "DATESTYLE" => (),
+
+                    "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
                     _ => {
                         return NotSupportedSnafu {
                             feat: format!("Unsupported set variable {}", var_name),
@@ -256,6 +274,39 @@ impl StatementExecutor {
     }
 }
 
+fn validate_client_encoding(set: SetVariables) -> Result<()> {
+    let Some((encoding, [])) = set.value.split_first() else {
+        return InvalidSqlSnafu {
+            err_msg: "must provide one and only one client encoding value",
+        }
+        .fail();
+    };
+    let encoding = match encoding {
+        Expr::Value(Value::SingleQuotedString(x))
+        | Expr::Identifier(Ident {
+            value: x,
+            quote_style: _,
+        }) => x.to_uppercase(),
+        _ => {
+            return InvalidSqlSnafu {
+                err_msg: format!("client encoding must be a string, actual: {:?}", encoding),
+            }
+            .fail();
+        }
+    };
+    // For the sake of simplicity, we only support "UTF8" ("UNICODE" is the alias for it,
+    // see https://www.postgresql.org/docs/current/multibyte.html#MULTIBYTE-CHARSET-SUPPORTED).
+    // "UTF8" is universal and sufficient for almost all cases.
+    // GreptimeDB itself is always using "UTF8" as the internal encoding.
+    ensure!(
+        encoding == "UTF8" || encoding == "UNICODE",
+        NotSupportedSnafu {
+            feat: format!("client encoding of '{}'", encoding)
+        }
+    );
+    Ok(())
+}
+
 fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let tz_expr = exprs.first().context(NotSupportedSnafu {
         feat: "No timezone find in set variable statement",
@@ -299,9 +350,10 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         CopyTable::To(arg) => arg,
         CopyTable::From(arg) => arg,
     };
-    let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_name, query_ctx)
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
+    let (catalog_name, schema_name, table_name) =
+        table_idents_to_full_name(&table_name, &query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
 
     let pattern = with
         .get(common_datasource::file_format::FILE_PATTERN)
@@ -331,8 +383,8 @@ fn to_copy_database_request(
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
-    let start_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_START_KEY)?;
-    let end_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_END_KEY)?;
+    let start_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_START_KEY, query_ctx)?;
+    let end_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_END_KEY, query_ctx)?;
 
     let time_range = match (start_timestamp, end_timestamp) {
         (Some(start), Some(end)) => TimestampRange::new(start, end),
@@ -352,10 +404,14 @@ fn to_copy_database_request(
 }
 
 /// Extracts timestamp from a [HashMap<String, String>] with given key.
-fn extract_timestamp(map: &OptionMap, key: &str) -> Result<Option<Timestamp>> {
+fn extract_timestamp(
+    map: &OptionMap,
+    key: &str,
+    query_ctx: &QueryContextRef,
+) -> Result<Option<Timestamp>> {
     map.get(key)
         .map(|v| {
-            Timestamp::from_str(v)
+            Timestamp::from_str(v, Some(&query_ctx.timezone()))
                 .map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
         })
         .transpose()

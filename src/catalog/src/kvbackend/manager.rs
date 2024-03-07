@@ -15,9 +15,13 @@
 use std::any::Any;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use async_stream::try_stream;
-use common_catalog::consts::{DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
+};
+use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef, Context};
 use common_meta::error::Result as MetaResult;
@@ -30,6 +34,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
+use moka::future::{Cache as AsyncCache, CacheBuilder};
 use moka::sync::Cache;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use snafu::prelude::*;
@@ -38,9 +43,10 @@ use table::metadata::TableId;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
+use crate::error::Error::{GetTableCache, TableCacheNotGet};
 use crate::error::{
     self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, ListTablesSnafu,
-    Result as CatalogResult, TableMetadataManagerSnafu,
+    Result as CatalogResult, TableCacheNotGetSnafu, TableMetadataManagerSnafu,
 };
 use crate::information_schema::InformationSchemaProvider;
 use crate::CatalogManager;
@@ -60,6 +66,7 @@ pub struct KvBackendCatalogManager {
     table_metadata_manager: TableMetadataManagerRef,
     /// A sub-CatalogManager that handles system tables
     system_catalog: SystemCatalog,
+    table_cache: AsyncCache<String, TableRef>,
 }
 
 fn make_table(table_info_value: TableInfoValue) -> CatalogResult<TableRef> {
@@ -79,13 +86,24 @@ impl CacheInvalidator for KvBackendCatalogManager {
     }
 
     async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> MetaResult<()> {
+        let table_cache_key = format_full_table_name(
+            &table_name.catalog_name,
+            &table_name.schema_name,
+            &table_name.table_name,
+        );
         self.cache_invalidator
             .invalidate_table_name(ctx, table_name)
-            .await
+            .await?;
+        self.table_cache.invalidate(&table_cache_key).await;
+
+        Ok(())
     }
 }
 
-const DEFAULT_CACHED_CATALOG: u64 = 128;
+const CATALOG_CACHE_MAX_CAPACITY: u64 = 128;
+const TABLE_CACHE_MAX_CAPACITY: u64 = 65536;
+const TABLE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const TABLE_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
 impl KvBackendCatalogManager {
     pub fn new(backend: KvBackendRef, cache_invalidator: CacheInvalidatorRef) -> Arc<Self> {
@@ -95,13 +113,16 @@ impl KvBackendCatalogManager {
             cache_invalidator,
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),
-                catalog_cache: Cache::new(DEFAULT_CACHED_CATALOG),
+                catalog_cache: Cache::new(CATALOG_CACHE_MAX_CAPACITY),
                 information_schema_provider: Arc::new(InformationSchemaProvider::new(
-                    // The catalog name is not used in system_catalog, so let it empty
-                    String::default(),
+                    DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                 )),
             },
+            table_cache: CacheBuilder::new(TABLE_CACHE_MAX_CAPACITY)
+                .time_to_live(TABLE_CACHE_TTL)
+                .time_to_idle(TABLE_CACHE_TTI)
+                .build(),
         })
     }
 
@@ -216,29 +237,52 @@ impl CatalogManager for KvBackendCatalogManager {
             return Ok(Some(table));
         }
 
-        let key = TableNameKey::new(catalog, schema, table_name);
-        let Some(table_name_value) = self
-            .table_metadata_manager
-            .table_name_manager()
-            .get(key)
-            .await
-            .context(TableMetadataManagerSnafu)?
-        else {
-            return Ok(None);
-        };
-        let table_id = table_name_value.table_id();
+        let init = async {
+            let table_name_key = TableNameKey::new(catalog, schema, table_name);
+            let Some(table_name_value) = self
+                .table_metadata_manager
+                .table_name_manager()
+                .get(table_name_key)
+                .await
+                .context(TableMetadataManagerSnafu)?
+            else {
+                return TableCacheNotGetSnafu {
+                    key: table_name_key.to_string(),
+                }
+                .fail();
+            };
+            let table_id = table_name_value.table_id();
 
-        let Some(table_info_value) = self
-            .table_metadata_manager
-            .table_info_manager()
-            .get(table_id)
-            .await
-            .context(TableMetadataManagerSnafu)?
-            .map(|v| v.into_inner())
-        else {
-            return Ok(None);
+            let Some(table_info_value) = self
+                .table_metadata_manager
+                .table_info_manager()
+                .get(table_id)
+                .await
+                .context(TableMetadataManagerSnafu)?
+                .map(|v| v.into_inner())
+            else {
+                return TableCacheNotGetSnafu {
+                    key: table_name_key.to_string(),
+                }
+                .fail();
+            };
+            make_table(table_info_value)
         };
-        make_table(table_info_value).map(Some)
+
+        match self
+            .table_cache
+            .try_get_with_by_ref(&format_full_table_name(catalog, schema, table_name), init)
+            .await
+        {
+            Ok(table) => Ok(Some(table)),
+            Err(err) => match err.as_ref() {
+                TableCacheNotGet { .. } => Ok(None),
+                _ => Err(err),
+            },
+        }
+        .map_err(|err| GetTableCache {
+            err_msg: err.to_string(),
+        })
     }
 
     async fn tables<'a>(

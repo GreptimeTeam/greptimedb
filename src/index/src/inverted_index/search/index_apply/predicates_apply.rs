@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
 use std::mem::size_of;
 
 use async_trait::async_trait;
@@ -26,7 +25,7 @@ use crate::inverted_index::search::fst_apply::{
 };
 use crate::inverted_index::search::fst_values_mapper::FstValuesMapper;
 use crate::inverted_index::search::index_apply::{
-    IndexApplier, IndexNotFoundStrategy, SearchContext,
+    ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
 use crate::inverted_index::search::predicate::Predicate;
 
@@ -48,8 +47,13 @@ impl IndexApplier for PredicatesIndexApplier {
         &self,
         context: SearchContext,
         reader: &mut (dyn InvertedIndexReader + 'a),
-    ) -> Result<BTreeSet<usize>> {
+    ) -> Result<ApplyOutput> {
         let metadata = reader.metadata().await?;
+        let mut output = ApplyOutput {
+            matched_segment_ids: BitVec::EMPTY,
+            total_row_count: metadata.total_row_count as _,
+            segment_row_count: metadata.segment_row_count as _,
+        };
 
         let mut bitmap = Self::bitmap_full_range(&metadata);
         // TODO(zhongzc): optimize the order of applying to make it quicker to return empty.
@@ -61,7 +65,7 @@ impl IndexApplier for PredicatesIndexApplier {
             let Some(meta) = metadata.metas.get(name) else {
                 match context.index_not_found_strategy {
                     IndexNotFoundStrategy::ReturnEmpty => {
-                        return Ok(BTreeSet::default());
+                        return Ok(output);
                     }
                     IndexNotFoundStrategy::Ignore => {
                         continue;
@@ -81,7 +85,8 @@ impl IndexApplier for PredicatesIndexApplier {
             bitmap &= bm;
         }
 
-        Ok(bitmap.iter_ones().collect())
+        output.matched_segment_ids = bitmap;
+        Ok(output)
     }
 
     /// Returns the memory usage of the applier.
@@ -206,11 +211,14 @@ mod tests {
                 _ => unreachable!(),
             }
         });
-        let indices = applier
+        let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert_eq!(indices, BTreeSet::from_iter([0, 2, 4, 6]));
+        assert_eq!(
+            output.matched_segment_ids,
+            bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]
+        );
 
         // An index reader with a single tag "tag-0" but without value "tag-0_value-0"
         let mut mock_reader = MockInvertedIndexReader::new();
@@ -223,11 +231,11 @@ mod tests {
                 "tag-0" => Ok(FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap()),
                 _ => unreachable!(),
             });
-        let indices = applier
+        let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert!(indices.is_empty());
+        assert_eq!(output.matched_segment_ids.count_ones(), 0);
     }
 
     #[tokio::test]
@@ -260,11 +268,14 @@ mod tests {
             }
         });
 
-        let indices = applier
+        let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert_eq!(indices, BTreeSet::from_iter([0, 4, 6]));
+        assert_eq!(
+            output.matched_segment_ids,
+            bitvec![u8, Lsb0; 1, 0, 0, 0, 1, 0, 1, 0]
+        );
     }
 
     #[tokio::test]
@@ -278,11 +289,14 @@ mod tests {
             .expect_metadata()
             .returning(|| Ok(mock_metas(["tag-0"])));
 
-        let indices = applier
+        let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert_eq!(indices, BTreeSet::from_iter([0, 1, 2, 3, 4, 5, 6, 7])); // full range to scan
+        assert_eq!(
+            output.matched_segment_ids,
+            bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]
+        ); // full range to scan
     }
 
     #[tokio::test]
@@ -303,11 +317,11 @@ mod tests {
             fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
         };
 
-        let indices = applier
+        let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert!(indices.is_empty());
+        assert!(output.matched_segment_ids.is_empty());
     }
 
     #[tokio::test]
@@ -334,7 +348,7 @@ mod tests {
             .await;
         assert!(matches!(result, Err(Error::IndexNotFound { .. })));
 
-        let indices = applier
+        let output = applier
             .apply(
                 SearchContext {
                     index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
@@ -343,9 +357,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(indices.is_empty());
+        assert!(output.matched_segment_ids.is_empty());
 
-        let indices = applier
+        let output = applier
             .apply(
                 SearchContext {
                     index_not_found_strategy: IndexNotFoundStrategy::Ignore,
@@ -354,7 +368,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(indices, BTreeSet::from_iter([0, 1, 2, 3, 4, 5, 6, 7]));
+        assert_eq!(
+            output.matched_segment_ids,
+            bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]
+        );
     }
 
     #[test]

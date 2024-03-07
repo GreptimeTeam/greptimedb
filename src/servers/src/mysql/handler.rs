@@ -21,7 +21,7 @@ use std::time::Duration;
 use ::auth::{Identity, Password, UserProviderRef};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
-use common_catalog::parse_catalog_and_schema_from_db_string;
+use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{debug, error, logging, tracing, warn};
@@ -92,7 +92,7 @@ impl MysqlInstanceShim {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, name = "mysql::do_query")]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         if let Some(output) =
             crate::mysql::federated::check(query, query_ctx.clone(), self.session.clone())
@@ -335,6 +335,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let _ = guard.remove(&stmt_id);
     }
 
+    #[tracing::instrument(skip_all, fields(protocol = "mysql"))]
     async fn on_query<'a>(
         &'a mut self,
         query: &'a str,
@@ -351,9 +352,14 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(database);
+        let (catalog_from_db, schema) = parse_optional_catalog_and_schema_from_db_string(database);
+        let catalog = if let Some(catalog) = catalog_from_db {
+            catalog.to_owned()
+        } else {
+            self.session.get_catalog()
+        };
 
-        if !self.query_handler.is_valid_schema(catalog, schema).await? {
+        if !self.query_handler.is_valid_schema(&catalog, schema).await? {
             return w
                 .error(
                     ErrorKind::ER_WRONG_DB_NAME,
@@ -366,7 +372,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let user_info = &self.session.user_info();
 
         if let Some(schema_validator) = &self.user_provider {
-            if let Err(e) = schema_validator.authorize(catalog, schema, user_info).await {
+            if let Err(e) = schema_validator
+                .authorize(&catalog, schema, user_info)
+                .await
+            {
                 METRIC_AUTH_FAILURE
                     .with_label_values(&[e.status_code().as_ref()])
                     .inc();
@@ -380,7 +389,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
         }
 
-        self.session.set_catalog(catalog.into());
+        if catalog_from_db.is_some() {
+            self.session.set_catalog(catalog)
+        }
         self.session.set_schema(schema.into());
 
         w.ok().await.map_err(|e| e.into())

@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 anymap = "1.0.0-beta.2"
 async-trait = "0.1"
@@ -21,10 +24,10 @@ common-query.workspace = true
 common-recordbatch.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
-datafusion.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true

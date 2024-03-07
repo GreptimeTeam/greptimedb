@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionNumber, TableId};
 
+use self::table_meta::TableMetadataAllocatorRef;
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
 use crate::error::Result;
@@ -25,11 +26,18 @@ use crate::key::table_route::TableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 
 pub mod alter_table;
+pub mod create_logical_tables;
 pub mod create_table;
+mod create_table_template;
 pub mod drop_table;
 pub mod table_meta;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
+#[cfg(test)]
+mod tests;
 pub mod truncate_table;
 pub mod utils;
 
@@ -39,16 +47,32 @@ pub struct ExecutorContext {
     pub tracing_context: Option<W3cTrace>,
 }
 
+/// The procedure executor that accepts ddl, region migration task etc.
 #[async_trait::async_trait]
-pub trait DdlTaskExecutor: Send + Sync {
+pub trait ProcedureExecutor: Send + Sync {
+    /// Submit a ddl task
     async fn submit_ddl_task(
         &self,
         ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse>;
+
+    /// Submit a region migration task
+    async fn migrate_region(
+        &self,
+        ctx: &ExecutorContext,
+        request: MigrateRegionRequest,
+    ) -> Result<MigrateRegionResponse>;
+
+    /// Query the procedure state by its id
+    async fn query_procedure_state(
+        &self,
+        ctx: &ExecutorContext,
+        pid: &str,
+    ) -> Result<ProcedureStateResponse>;
 }
 
-pub type DdlTaskExecutorRef = Arc<dyn DdlTaskExecutor>;
+pub type ProcedureExecutorRef = Arc<dyn ProcedureExecutor>;
 
 pub struct TableMetadataAllocatorContext {
     pub cluster_id: u64,
@@ -71,4 +95,5 @@ pub struct DdlContext {
     pub cache_invalidator: CacheInvalidatorRef,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub memory_region_keeper: MemoryRegionKeeperRef,
+    pub table_metadata_allocator: TableMetadataAllocatorRef,
 }

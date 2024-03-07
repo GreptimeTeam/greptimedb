@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use catalog::kvbackend::CachedMetaKvBackend;
+use catalog::kvbackend::CachedMetaKvBackendBuilder;
 use clap::Parser;
 use client::client_manager::DatanodeClients;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -43,8 +43,16 @@ pub struct Instance {
 }
 
 impl Instance {
-    fn new(frontend: FeInstance) -> Self {
+    pub fn new(frontend: FeInstance) -> Self {
         Self { frontend }
+    }
+
+    pub fn mut_inner(&mut self) -> &mut FeInstance {
+        &mut self.frontend
+    }
+
+    pub fn inner(&self) -> &FeInstance {
+        &self.frontend
     }
 }
 
@@ -224,15 +232,27 @@ impl StartCommand {
         let meta_client_options = opts.meta_client.as_ref().context(MissingConfigSnafu {
             msg: "'meta_client'",
         })?;
+
+        let cache_max_capacity = meta_client_options.metadata_cache_max_capacity;
+        let cache_ttl = meta_client_options.metadata_cache_ttl;
+        let cache_tti = meta_client_options.metadata_cache_tti;
+
         let meta_client = FeInstance::create_meta_client(meta_client_options)
             .await
             .context(StartFrontendSnafu)?;
 
-        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
+        let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
+            .cache_max_capacity(cache_max_capacity)
+            .cache_ttl(cache_ttl)
+            .cache_tti(cache_tti)
+            .build();
+        let cached_meta_backend = Arc::new(cached_meta_backend);
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(meta_backend.clone())),
+            Arc::new(InvalidateTableCacheHandler::new(
+                cached_meta_backend.clone(),
+            )),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -242,24 +262,23 @@ impl StartCommand {
         );
 
         let mut instance = FrontendBuilder::new(
-            meta_backend.clone(),
+            cached_meta_backend.clone(),
             Arc::new(DatanodeClients::default()),
             meta_client,
         )
-        .with_cache_invalidator(meta_backend)
+        .with_cache_invalidator(cached_meta_backend)
         .with_plugin(plugins.clone())
         .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await
         .context(StartFrontendSnafu)?;
 
-        let servers = Services::new(plugins)
-            .build(opts.clone(), Arc::new(instance.clone()))
+        let servers = Services::new(opts.clone(), Arc::new(instance.clone()), plugins)
+            .build()
             .await
             .context(StartFrontendSnafu)?;
         instance
             .build_servers(opts, servers)
-            .await
             .context(StartFrontendSnafu)?;
 
         Ok(Instance::new(instance))

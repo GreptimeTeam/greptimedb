@@ -13,7 +13,7 @@ Error: 1002(Unexpected), Unexpected, violated: Invalid database name: ㊙️data
 show databases;
 
 +--------------------+
-| Schemas            |
+| Database           |
 +--------------------+
 | greptime_private   |
 | illegal-database   |

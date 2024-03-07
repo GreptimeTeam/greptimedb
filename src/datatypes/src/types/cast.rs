@@ -172,8 +172,6 @@ fn invalid_type_cast(src_value: &Value, dest_type: &ConcreteDataType) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use common_base::bytes::StringBytes;
     use common_time::time::Time;
     use common_time::timezone::set_default_timezone;
@@ -283,7 +281,7 @@ mod tests {
 
         // date -> other types
         test_can_cast!(
-            Value::Date(Date::from_str("2021-01-01").unwrap()),
+            Value::Date(Date::from_str_utc("2021-01-01").unwrap()),
             null_datatype,
             int32_datatype,
             timestamp_second_datatype,
@@ -292,7 +290,7 @@ mod tests {
 
         // datetime -> other types
         test_can_cast!(
-            Value::DateTime(DateTime::from_str("2021-01-01 00:00:00").unwrap()),
+            Value::DateTime(DateTime::from_str_system("2021-01-01 00:00:00").unwrap()),
             null_datatype,
             int64_datatype,
             timestamp_second_datatype,
@@ -301,7 +299,7 @@ mod tests {
 
         // timestamp -> other types
         test_can_cast!(
-            Value::Timestamp(Timestamp::from_str("2021-01-01 00:00:00").unwrap()),
+            Value::Timestamp(Timestamp::from_str_utc("2021-01-01 00:00:00").unwrap()),
             null_datatype,
             int64_datatype,
             date_datatype,

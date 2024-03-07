@@ -1,0 +1,64 @@
+CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+-- insert two points at 1ms and one point at 2ms
+INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
+
+Affected Rows: 3
+
+-- analyze at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+TQL ANALYZE (0, 10, '5s') test;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| Plan with Metrics | PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false], REDACTED
+|_|_PromSeriesDivideExec: tags=["k"], REDACTED
+|_|_SortExec: expr=[k@2 ASC NULLS LAST], REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- analyze verbose at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (Duration.*) REDACTED
+TQL ANALYZE VERBOSE (0, 10, '5s') test;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| Plan with Metrics_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false], REDACTED
+|_|_PromSeriesDivideExec: tags=["k"], REDACTED
+|_|_SortExec: expr=[k@2 ASC NULLS LAST], REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
+| Plan with Full Metrics | PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false], REDACTED
+|_|_PromSeriesDivideExec: tags=["k"], REDACTED
+|_|_SortExec: expr=[k@2 ASC NULLS LAST], REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
+| Output Rows_| 4_|
+| REDACTED
++-+-+
+
+DROP TABLE test;
+
+Affected Rows: 0
+

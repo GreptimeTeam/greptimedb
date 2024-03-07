@@ -37,8 +37,8 @@ use crate::worker::WorkerId;
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display(
-        "Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
-        region_id, expected_last_entry_id, replayed_last_entry_id
+    "Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
+    region_id, expected_last_entry_id, replayed_last_entry_id
     ))]
     UnexpectedReplay {
         location: Location,
@@ -388,6 +388,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Schema version doesn't match. Expect {} but gives {}", expect, actual))]
+    InvalidRegionRequestSchemaVersion {
+        expect: u64,
+        actual: u64,
+        location: Location,
+    },
+
     #[snafu(display("Region {} is read only", region_id))]
     RegionReadonly {
         region_id: RegionId,
@@ -542,6 +549,29 @@ pub enum Error {
         source: common_recordbatch::error::Error,
         location: Location,
     },
+
+    #[snafu(display("BiError, first: {first}, second: {second}"))]
+    BiError {
+        first: Box<Error>,
+        second: Box<Error>,
+        location: Location,
+    },
+
+    #[snafu(display("Encode null value"))]
+    IndexEncodeNull { location: Location },
+
+    #[snafu(display("Failed to encode memtable to Parquet bytes"))]
+    EncodeMemtable {
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to iter data part"))]
+    ReadDataPart {
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -581,7 +611,8 @@ impl ErrorExt for Error {
             | InvalidParquet { .. }
             | OperateAbortedIndex { .. }
             | PuffinBlobTypeNotFound { .. }
-            | UnexpectedReplay { .. } => StatusCode::Unexpected,
+            | UnexpectedReplay { .. }
+            | IndexEncodeNull { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
@@ -591,6 +622,9 @@ impl ErrorExt for Error {
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }
             | InvalidMetadata { .. } => StatusCode::InvalidArguments,
+
+            InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
+
             RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
@@ -640,6 +674,8 @@ impl ErrorExt for Error {
             StaleLogEntry { .. } => StatusCode::Unexpected,
             FilterRecordBatch { source, .. } => source.status_code(),
             Upload { .. } => StatusCode::StorageUnavailable,
+            BiError { .. } => StatusCode::Internal,
+            EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
         }
     }
 

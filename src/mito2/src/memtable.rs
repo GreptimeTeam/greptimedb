@@ -14,16 +14,12 @@
 
 //! Memtables are write buffers for regions.
 
-pub mod time_series;
-
-pub mod key_values;
-pub(crate) mod version;
-
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_time::Timestamp;
+use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
@@ -31,13 +27,33 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 pub use crate::memtable::key_values::KeyValues;
+use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
+
+pub mod key_values;
+pub mod merge_tree;
+pub mod time_series;
+pub(crate) mod version;
 
 /// Id for memtables.
 ///
 /// Should be unique under the same region.
 pub type MemtableId = u32;
+
+/// Config for memtables.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MemtableConfig {
+    Experimental(MergeTreeConfig),
+    TimeSeries,
+}
+
+impl Default for MemtableConfig {
+    fn default() -> Self {
+        Self::Experimental(MergeTreeConfig::default())
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct MemtableStats {
@@ -59,7 +75,7 @@ impl MemtableStats {
     }
 }
 
-pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send + Sync>;
+pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
 
 /// In memory write buffer.
 pub trait Memtable: Send + Sync + fmt::Debug {
@@ -76,16 +92,21 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> BoxedBatchIterator;
+    ) -> Result<BoxedBatchIterator>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
 
-    /// Mark the memtable as immutable.
-    fn mark_immutable(&self);
+    /// Turns a mutable memtable into an immutable memtable.
+    fn freeze(&self) -> Result<()>;
 
     /// Returns the [MemtableStats] info of Memtable.
     fn stats(&self) -> MemtableStats;
+
+    /// Forks this (immutable) memtable and returns a new mutable memtable with specific memtable `id`.
+    ///
+    /// A region must freeze the memtable before invoking this method.
+    fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -93,7 +114,7 @@ pub type MemtableRef = Arc<dyn Memtable>;
 /// Builder to build a new [Memtable].
 pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     /// Builds a new memtable instance.
-    fn build(&self, metadata: &RegionMetadataRef) -> MemtableRef;
+    fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
@@ -157,6 +178,11 @@ impl AllocTracker {
     pub(crate) fn bytes_allocated(&self) -> usize {
         self.bytes_allocated.load(Ordering::Relaxed)
     }
+
+    /// Returns the write buffer manager.
+    pub(crate) fn write_buffer_manager(&self) -> Option<WriteBufferManagerRef> {
+        self.write_buffer_manager.clone()
+    }
 }
 
 impl Drop for AllocTracker {
@@ -177,8 +203,29 @@ impl Drop for AllocTracker {
 
 #[cfg(test)]
 mod tests {
+    use common_base::readable_size::ReadableSize;
+
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
+
+    #[test]
+    fn test_deserialize_memtable_config() {
+        let s = r#"
+type = "experimental"
+index_max_keys_per_shard = 8192
+data_freeze_threshold = 1024
+dedup = true
+fork_dictionary_bytes = "512MiB"
+"#;
+        let config: MemtableConfig = toml::from_str(s).unwrap();
+        let MemtableConfig::Experimental(merge_tree) = config else {
+            unreachable!()
+        };
+        assert!(merge_tree.dedup);
+        assert_eq!(8192, merge_tree.index_max_keys_per_shard);
+        assert_eq!(1024, merge_tree.data_freeze_threshold);
+        assert_eq!(ReadableSize::mb(512), merge_tree.fork_dictionary_bytes);
+    }
 
     #[test]
     fn test_alloc_tracker_without_manager() {

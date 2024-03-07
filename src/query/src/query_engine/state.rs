@@ -19,9 +19,13 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_function::function::FunctionRef;
+use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
+use common_function::state::FunctionState;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
+use common_telemetry::warn;
 use datafusion::catalog::MemoryCatalogList;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
@@ -42,10 +46,11 @@ use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
+use crate::optimizer::ExtensionAnalyzerRule;
 use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
-use crate::table_mutation::TableMutationHandlerRef;
+use crate::QueryEngineContext;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -55,8 +60,10 @@ use crate::table_mutation::TableMutationHandlerRef;
 pub struct QueryEngineState {
     df_context: SessionContext,
     catalog_manager: CatalogManagerRef,
-    table_mutation_handler: Option<TableMutationHandlerRef>,
+    function_state: Arc<FunctionState>,
+    udf_functions: Arc<RwLock<HashMap<String, FunctionRef>>>,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
+    extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
 }
 
@@ -73,14 +80,18 @@ impl QueryEngineState {
         catalog_list: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
-        // Apply the type conversion rule first.
+        // Apply extension rules
+        let mut extension_rules = Vec::new();
+        // The [`TypeConversionRule`] must be at first
+        extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
+        // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
-        analyzer.rules.insert(0, Arc::new(TypeConversionRule));
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
         Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
         analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));
@@ -108,9 +119,14 @@ impl QueryEngineState {
         Self {
             df_context,
             catalog_manager: catalog_list,
-            table_mutation_handler,
+            function_state: Arc::new(FunctionState {
+                table_mutation_handler,
+                procedure_service_handler,
+            }),
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
+            extension_rules,
             plugins,
+            udf_functions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -118,18 +134,55 @@ impl QueryEngineState {
         rules.retain(|rule| rule.name() != name);
     }
 
-    /// Register a udf function
-    // TODO(dennis): manage UDFs by ourself.
-    pub fn register_udf(&self, udf: ScalarUdf) {
-        self.df_context.register_udf(udf.into_df_udf());
+    /// Optimize the logical plan by the extension anayzer rules.
+    pub fn optimize_by_extension_rules(
+        &self,
+        plan: DfLogicalPlan,
+        context: &QueryEngineContext,
+    ) -> DfResult<DfLogicalPlan> {
+        self.extension_rules
+            .iter()
+            .try_fold(plan, |acc_plan, rule| {
+                rule.analyze(acc_plan, context, self.session_state().config_options())
+            })
     }
 
+    /// Register an udf function.
+    /// Will override if the function with same name is already registered.
+    pub fn register_function(&self, func: FunctionRef) {
+        let name = func.name().to_string();
+        let x = self
+            .udf_functions
+            .write()
+            .unwrap()
+            .insert(name.clone(), func);
+
+        if x.is_some() {
+            warn!("Already registered udf function '{name}'");
+        }
+    }
+
+    /// Retrieve the udf function by name
+    pub fn udf_function(&self, function_name: &str) -> Option<FunctionRef> {
+        self.udf_functions
+            .read()
+            .unwrap()
+            .get(function_name)
+            .cloned()
+    }
+
+    /// Retrieve the aggregate function by name
     pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
         self.aggregate_functions
             .read()
             .unwrap()
             .get(function_name)
             .cloned()
+    }
+
+    /// Register a [`ScalarUdf`].
+    pub fn register_udf(&self, udf: ScalarUdf) {
+        self.df_context.register_udf(udf.into());
     }
 
     /// Register an aggregate function.
@@ -153,14 +206,22 @@ impl QueryEngineState {
         );
     }
 
-    #[inline]
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
 
-    #[inline]
+    pub fn function_state(&self) -> Arc<FunctionState> {
+        self.function_state.clone()
+    }
+
+    /// Returns the [`TableMutationHandlerRef`] in state.
     pub fn table_mutation_handler(&self) -> Option<&TableMutationHandlerRef> {
-        self.table_mutation_handler.as_ref()
+        self.function_state.table_mutation_handler.as_ref()
+    }
+
+    /// Returns the [`ProcedureServiceHandlerRef`] in state.
+    pub fn procedure_service_handler(&self) -> Option<&ProcedureServiceHandlerRef> {
+        self.function_state.procedure_service_handler.as_ref()
     }
 
     pub(crate) fn disallow_cross_catalog_query(&self) -> bool {

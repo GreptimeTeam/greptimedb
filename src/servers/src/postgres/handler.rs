@@ -19,6 +19,7 @@ use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
+use common_telemetry::tracing;
 use datatypes::schema::SchemaRef;
 use futures::{future, stream, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
@@ -40,6 +41,7 @@ use crate::SqlPlan;
 
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandler {
+    #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
     async fn do_query<'a, C>(
         &self,
         _client: &mut C,
@@ -73,7 +75,7 @@ fn output_to_query_response<'a>(
 ) -> PgWireResult<Response<'a>> {
     match output {
         Ok(Output::AffectedRows(rows)) => Ok(Response::Execution(Tag::new("OK").with_rows(rows))),
-        Ok(Output::Stream(record_stream)) => {
+        Ok(Output::Stream(record_stream, _)) => {
             let schema = record_stream.schema();
             recordbatches_to_query_response(record_stream, schema, field_format)
         }

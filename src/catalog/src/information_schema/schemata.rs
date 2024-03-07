@@ -37,10 +37,11 @@ use crate::error::{
 use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
-const CATALOG_NAME: &str = "catalog_name";
-const SCHEMA_NAME: &str = "schema_name";
+pub const CATALOG_NAME: &str = "catalog_name";
+pub const SCHEMA_NAME: &str = "schema_name";
 const DEFAULT_CHARACTER_SET_NAME: &str = "default_character_set_name";
 const DEFAULT_COLLATION_NAME: &str = "default_collation_name";
+const INIT_CAPACITY: usize = 42;
 
 /// The `information_schema.schemata` table implementation.
 pub(super) struct InformationSchemaSchemata {
@@ -144,11 +145,11 @@ impl InformationSchemaSchemataBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            catalog_names: StringVectorBuilder::with_capacity(42),
-            schema_names: StringVectorBuilder::with_capacity(42),
-            charset_names: StringVectorBuilder::with_capacity(42),
-            collation_names: StringVectorBuilder::with_capacity(42),
-            sql_paths: StringVectorBuilder::with_capacity(42),
+            catalog_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            schema_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            charset_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            collation_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            sql_paths: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -162,13 +163,6 @@ impl InformationSchemaSchemataBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            if !catalog_manager
-                .schema_exists(&catalog_name, &schema_name)
-                .await?
-            {
-                continue;
-            }
-
             self.add_schema(&predicates, &catalog_name, &schema_name);
         }
 

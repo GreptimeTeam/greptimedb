@@ -54,21 +54,9 @@ pub enum Error {
     #[snafu(display("Table not found: {}", table))]
     TableNotFound { table: String, location: Location },
 
-    #[snafu(display("Failed to do vector computation"))]
-    VectorComputation {
-        source: datatypes::error::Error,
-        location: Location,
-    },
-
     #[snafu(display("Failed to create RecordBatch"))]
     CreateRecordBatch {
         source: common_recordbatch::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to create Schema"))]
-    CreateSchema {
-        source: datatypes::error::Error,
         location: Location,
     },
 
@@ -114,6 +102,9 @@ pub enum Error {
         error: chrono::ParseError,
         location: Location,
     },
+
+    #[snafu(display("Invalid timestamp `{}`", raw))]
+    InvalidTimestamp { raw: String, location: Location },
 
     #[snafu(display("Failed to parse float number `{}`", raw))]
     ParseFloat {
@@ -244,7 +235,7 @@ pub enum Error {
 
     #[snafu(display("Table mutation error"))]
     TableMutation {
-        source: BoxedError,
+        source: common_query::error::Error,
         location: Location,
     },
 
@@ -271,6 +262,7 @@ impl ErrorExt for Error {
             | UnknownTable { .. }
             | TimeIndexNotFound { .. }
             | ParseTimestamp { .. }
+            | InvalidTimestamp { .. }
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }
@@ -287,9 +279,7 @@ impl ErrorExt for Error {
 
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Catalog { source, .. } => source.status_code(),
-            VectorComputation { source, .. } | ConvertDatafusionSchema { source, .. } => {
-                source.status_code()
-            }
+            ConvertDatafusionSchema { source, .. } => source.status_code(),
             CreateRecordBatch { source, .. } => source.status_code(),
             QueryExecution { source, .. } | QueryPlan { source, .. } => source.status_code(),
             DataFusion { error, .. } => match error {
@@ -302,7 +292,6 @@ impl ErrorExt for Error {
             Sql { source, .. } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
             ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),
-            CreateSchema { source, .. } => source.status_code(),
 
             RegionQuery { source, .. } => source.status_code(),
             TableMutation { source, .. } => source.status_code(),

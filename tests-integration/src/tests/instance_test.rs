@@ -68,7 +68,7 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
 
     let query_output = execute_sql(&instance, "select ts from test.demo order by ts limit 1").await;
     match query_output {
-        Output::Stream(s) => {
+        Output::Stream(s, _) => {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
@@ -91,11 +91,11 @@ async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     ts timestamp,
     TIME INDEX(ts)
 )
-PARTITION BY RANGE COLUMNS (n) (
-    PARTITION r0 VALUES LESS THAN (1),
-    PARTITION r1 VALUES LESS THAN (10),
-    PARTITION r2 VALUES LESS THAN (100),
-    PARTITION r3 VALUES LESS THAN (MAXVALUE),
+PARTITION ON COLUMNS (n) (
+    n < 1,
+    n >= 1 AND n < 10,
+    n >= 10 AND n < 100,
+    n >= 100
 )"#
     } else {
         r#"create table demo(
@@ -112,26 +112,26 @@ PARTITION BY RANGE COLUMNS (n) (
     let output = execute_sql(&frontend, "show create table demo").await;
 
     let expected = if instance.is_distributed_mode() {
-        r#"+-------+--------------------------------------------+
-| Table | Create Table                               |
-+-------+--------------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS "demo" (        |
-|       |   "n" INT NULL,                            |
-|       |   "ts" TIMESTAMP(3) NOT NULL,              |
-|       |   TIME INDEX ("ts"),                       |
-|       |   PRIMARY KEY ("n")                        |
-|       | )                                          |
-|       | PARTITION BY RANGE COLUMNS ("n") (         |
-|       |   PARTITION r0 VALUES LESS THAN (1),       |
-|       |   PARTITION r1 VALUES LESS THAN (10),      |
-|       |   PARTITION r2 VALUES LESS THAN (100),     |
-|       |   PARTITION r3 VALUES LESS THAN (MAXVALUE) |
-|       | )                                          |
-|       | ENGINE=mito                                |
-|       | WITH(                                      |
-|       |   regions = 4                              |
-|       | )                                          |
-+-------+--------------------------------------------+"#
+        r#"+-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS "demo" ( |
+|       |   "n" INT NULL,                     |
+|       |   "ts" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX ("ts"),                |
+|       |   PRIMARY KEY ("n")                 |
+|       | )                                   |
+|       | PARTITION ON COLUMNS ("n") (        |
+|       |   n < 1,                            |
+|       |   n >= 100,                         |
+|       |   n >= 1 AND n < 10,                |
+|       |   n >= 10 AND n < 100               |
+|       | )                                   |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   regions = 4                       |
+|       | )                                   |
++-------+-------------------------------------+"#
     } else {
         r#"+-------+-------------------------------------+
 | Table | Create Table                        |
@@ -299,7 +299,7 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
 async fn assert_query_result(instance: &Arc<Instance>, sql: &str, ts: i64, host: &str) {
     let query_output = execute_sql(instance, sql).await;
     match query_output {
-        Output::Stream(s) => {
+        Output::Stream(s, _) => {
             let batches = util::collect(s).await.unwrap();
             // let columns = batches[0].df_recordbatch.columns();
             assert_eq!(2, batches[0].num_columns());
@@ -421,7 +421,7 @@ async fn test_execute_query(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "select sum(number) from numbers limit 20").await;
     match output {
-        Output::Stream(recordbatch) => {
+        Output::Stream(recordbatch, _) => {
             let numbers = util::collect(recordbatch).await.unwrap();
             assert_eq!(1, numbers[0].num_columns());
             assert_eq!(numbers[0].column(0).len(), 1);
@@ -439,39 +439,27 @@ async fn test_execute_query(instance: Arc<dyn MockInstance>) {
 async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
+    let expected = "\
++--------------------+
+| Database           |
++--------------------+
+| greptime_private   |
+| information_schema |
+| public             |
++--------------------+\
+";
     let output = execute_sql(&instance, "show databases").await;
-    match output {
-        Output::RecordBatches(databases) => {
-            let databases = databases.take();
-            assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), 3);
-
-            assert_eq!(
-                *databases[0].column(0),
-                Arc::new(StringVector::from(vec![
-                    Some("greptime_private"),
-                    Some("information_schema"),
-                    Some("public")
-                ])) as VectorRef
-            );
-        }
-        _ => unreachable!(),
-    }
+    check_unordered_output_stream(output, expected).await;
 
     let output = execute_sql(&instance, "show databases like '%bl%'").await;
-    match output {
-        Output::RecordBatches(databases) => {
-            let databases = databases.take();
-            assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), 1);
-
-            assert_eq!(
-                *databases[0].column(0),
-                Arc::new(StringVector::from(vec![Some("public")])) as VectorRef
-            );
-        }
-        _ => unreachable!(),
-    }
+    let expected = "\
++----------+
+| Database |
++----------+
+| public   |
++----------+\
+";
+    check_unordered_output_stream(output, expected).await;
 
     let expected = "\
 +---------+
@@ -499,21 +487,41 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 ";
     check_unordered_output_stream(output, expected).await;
 
+    let output = execute_sql(&instance, "SHOW FULL TABLES WHERE Table_type != 'VIEW'").await;
+    let expected = "\
++---------+-----------------+
+| Tables  | Table_type      |
++---------+-----------------+
+| demo    | BASE TABLE      |
+| numbers | LOCAL TEMPORARY |
++---------+-----------------+\
+";
+    check_unordered_output_stream(output, expected).await;
+
+    let output = execute_sql(
+        &instance,
+        "SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'",
+    )
+    .await;
+    let expected = "\
++--------+------------+
+| Tables | Table_type |
++--------+------------+
+| demo   | BASE TABLE |
++--------+------------+\
+";
+    check_unordered_output_stream(output, expected).await;
+
     // show tables like [string]
     let output = execute_sql(&instance, "show tables like 'de%'").await;
-    match output {
-        Output::RecordBatches(databases) => {
-            let databases = databases.take();
-            assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), 1);
-
-            assert_eq!(
-                *databases[0].column(0),
-                Arc::new(StringVector::from(vec![Some("demo")])) as VectorRef
-            );
-        }
-        _ => unreachable!(),
-    }
+    let expected = "\
++--------+
+| Tables |
++--------+
+| demo   |
++--------+\
+";
+    check_unordered_output_stream(output, expected).await;
 }
 
 #[apply(both_instances_cases)]
@@ -1872,12 +1880,7 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
                     a int null primary key,
                     ts timestamp time index,
                 )
-                PARTITION BY RANGE COLUMNS (a) (
-                    PARTITION r0 VALUES LESS THAN (1),
-                    PARTITION r1 VALUES LESS THAN (10),
-                    PARTITION r2 VALUES LESS THAN (100),
-                    PARTITION r3 VALUES LESS THAN (MAXVALUE),
-                )
+                PARTITION ON COLUMNS (a) ()
                 with(storage='{storage_name}')
                 "#
                 )
@@ -1926,15 +1929,12 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
   TIME INDEX ("ts"),
   PRIMARY KEY ("a")
 )
-PARTITION BY RANGE COLUMNS ("a") (
-  PARTITION r0 VALUES LESS THAN (1),
-  PARTITION r1 VALUES LESS THAN (10),
-  PARTITION r2 VALUES LESS THAN (100),
-  PARTITION r3 VALUES LESS THAN (MAXVALUE)
+PARTITION ON COLUMNS ("a") (
+
 )
 ENGINE=mito
 WITH(
-  regions = 4,
+  regions = 1,
   storage = '{storage_name}'
 )"#
                 )

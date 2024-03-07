@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use proc_macro::TokenStream;
-use proc_macro2::Span;
 use quote::quote;
-use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::token::Comma;
 use syn::{
-    parse_macro_input, Attribute, AttributeArgs, FnArg, Ident, ItemFn, Meta, MetaNameValue,
-    NestedMeta, Signature, Type, TypeReference, Visibility,
+    parse_macro_input, Attribute, AttributeArgs, Ident, ItemFn, Signature, Type, TypeReference,
+    Visibility,
 };
 
-/// Internal util macro to early return on error.
+use crate::utils::{extract_arg_map, extract_input_types, get_ident};
+
 macro_rules! ok {
     ($item:expr) => {
         match $item {
@@ -87,48 +83,6 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     result.extend(calc_fn_code);
     result.extend(input_fn_code);
     result
-}
-
-/// Extract a String <-> Ident map from the attribute args.
-fn extract_arg_map(args: Vec<NestedMeta>) -> Result<HashMap<String, Ident>, syn::Error> {
-    args.into_iter()
-        .map(|meta| {
-            if let NestedMeta::Meta(Meta::NameValue(MetaNameValue { path, lit, .. })) = meta {
-                let name = path.get_ident().unwrap().to_string();
-                let ident = match lit {
-                    syn::Lit::Str(lit_str) => lit_str.parse::<Ident>(),
-                    _ => Err(syn::Error::new(
-                        lit.span(),
-                        "Unexpected attribute format. Expected `name = \"value\"`",
-                    )),
-                }?;
-                Ok((name, ident))
-            } else {
-                Err(syn::Error::new(
-                    meta.span(),
-                    "Unexpected attribute format. Expected `name = \"value\"`",
-                ))
-            }
-        })
-        .collect::<Result<HashMap<String, Ident>, syn::Error>>()
-}
-
-/// Helper function to get an Ident from the previous arg map.
-fn get_ident(map: &HashMap<String, Ident>, key: &str, span: Span) -> Result<Ident, syn::Error> {
-    map.get(key)
-        .cloned()
-        .ok_or_else(|| syn::Error::new(span, format!("Expect attribute {key} but not found")))
-}
-
-/// Extract the argument list from the annotated function.
-fn extract_input_types(inputs: &Punctuated<FnArg, Comma>) -> Result<Vec<Type>, syn::Error> {
-    inputs
-        .iter()
-        .map(|arg| match arg {
-            FnArg::Receiver(receiver) => Err(syn::Error::new(receiver.span(), "expected bool")),
-            FnArg::Typed(pat_type) => Ok(*pat_type.ty.clone()),
-        })
-        .collect()
 }
 
 fn build_struct(
@@ -214,7 +168,7 @@ fn build_calc_fn(
 
                 #( let #range_array_names = RangeArray::try_new(extract_array(&input[#param_numbers])?.to_data().into())?; )*
 
-                // TODO(ruihang): add ensure!() 
+                // TODO(ruihang): add ensure!()
 
                 let mut result_array = Vec::new();
                 for index in 0..#first_range_array_name.len(){

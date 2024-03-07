@@ -60,7 +60,7 @@ async fn test_create_database_and_insert_query(instance: Option<Box<dyn Rebuilda
 
     let query_output = execute_sql(&instance, "select ts from test.demo order by ts limit 1").await;
     match query_output {
-        Output::Stream(s) => {
+        Output::Stream(s, _) => {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(

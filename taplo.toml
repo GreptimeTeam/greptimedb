@@ -34,3 +34,7 @@ crlf = false
 [[rule]]
 keys = ["build-dependencies", "dependencies", "dev-dependencies", "workspace.dependencies"]
 formatting = { reorder_keys = true }
+
+[[rule]]
+keys = ["package", "workspace.package"]
+formatting = { reorder_keys = false }

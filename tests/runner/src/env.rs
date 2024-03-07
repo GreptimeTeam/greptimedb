@@ -57,6 +57,11 @@ pub struct Env {
     data_home: PathBuf,
     server_addr: Option<String>,
     wal: WalConfig,
+
+    /// The path to the directory that contains the pre-built GreptimeDB binary.
+    /// When running in CI, this is expected to be set.
+    /// If not set, this runner will build the GreptimeDB binary itself when needed, and set this field by then.
+    bins_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[async_trait]
@@ -78,11 +83,17 @@ impl EnvController for Env {
 }
 
 impl Env {
-    pub fn new(data_home: PathBuf, server_addr: Option<String>, wal: WalConfig) -> Self {
+    pub fn new(
+        data_home: PathBuf,
+        server_addr: Option<String>,
+        wal: WalConfig,
+        bins_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             data_home,
             server_addr,
             wal,
+            bins_dir: Arc::new(Mutex::new(bins_dir)),
         }
     }
 
@@ -90,7 +101,7 @@ impl Env {
         if let Some(server_addr) = self.server_addr.clone() {
             self.connect_db(&server_addr)
         } else {
-            Self::build_db().await;
+            self.build_db();
             self.setup_wal();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone());
@@ -116,7 +127,7 @@ impl Env {
         if let Some(server_addr) = self.server_addr.clone() {
             self.connect_db(&server_addr)
         } else {
-            Self::build_db().await;
+            self.build_db();
             self.setup_wal();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone());
@@ -249,8 +260,12 @@ impl Env {
         #[cfg(windows)]
         let program = "greptime.exe";
 
+        let bins_dir = self.bins_dir.lock().unwrap().clone().expect(
+            "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
+        );
+
         let mut process = Command::new(program)
-            .current_dir(util::get_binary_dir("debug"))
+            .current_dir(bins_dir)
             .env("TZ", "UTC")
             .args(args)
             .stdout(log_file)
@@ -347,9 +362,7 @@ impl Env {
             kafka_wal_broker_endpoints: String,
         }
 
-        let data_home = self
-            .data_home
-            .join(format!("greptimedb-{subcommand}-{}", db_ctx.time));
+        let data_home = self.data_home.join(format!("greptimedb-{subcommand}"));
         std::fs::create_dir_all(data_home.as_path()).unwrap();
 
         let wal_dir = data_home.join("wal").display().to_string();
@@ -374,7 +387,11 @@ impl Env {
     }
 
     /// Build the DB with `cargo build --bin greptime`
-    async fn build_db() {
+    fn build_db(&self) {
+        if self.bins_dir.lock().unwrap().is_some() {
+            return;
+        }
+
         println!("Going to build the DB...");
         let output = Command::new("cargo")
             .current_dir(util::get_workspace_root())
@@ -389,7 +406,12 @@ impl Env {
             io::stderr().write_all(&output.stderr).unwrap();
             panic!();
         }
-        println!("Build finished, starting...");
+
+        let _ = self
+            .bins_dir
+            .lock()
+            .unwrap()
+            .insert(util::get_binary_dir("debug"));
     }
 }
 
@@ -411,7 +433,9 @@ impl Database for GreptimeDB {
         }
 
         let mut client = self.client.lock().await;
+
         if query.trim().to_lowercase().starts_with("use ") {
+            // use [db]
             let database = query
                 .split_ascii_whitespace()
                 .nth(1)
@@ -421,9 +445,26 @@ impl Database for GreptimeDB {
             Box::new(ResultDisplayer {
                 result: Ok(Output::AffectedRows(0)),
             }) as _
+        } else if query.trim().to_lowercase().starts_with("set time_zone") {
+            // set time_zone='xxx'
+            let timezone = query
+                .split('=')
+                .nth(1)
+                .expect("Illegal `SET TIMEZONE` statement: expecting a timezone expr.")
+                .trim()
+                .strip_prefix('\'')
+                .unwrap()
+                .strip_suffix("';")
+                .unwrap();
+
+            client.set_timezone(timezone);
+
+            Box::new(ResultDisplayer {
+                result: Ok(Output::AffectedRows(0)),
+            }) as _
         } else {
             let mut result = client.sql(&query).await;
-            if let Ok(Output::Stream(stream)) = result {
+            if let Ok(Output::Stream(stream, _)) = result {
                 match RecordBatches::try_collect(stream).await {
                     Ok(recordbatches) => result = Ok(Output::RecordBatches(recordbatches)),
                     Err(e) => {
@@ -446,21 +487,26 @@ impl GreptimeDB {
     fn stop(&mut self) {
         if let Some(server_processes) = self.server_processes.clone() {
             let mut server_processes = server_processes.lock().unwrap();
-            for server_process in server_processes.iter_mut() {
-                Env::stop_server(server_process);
+            for mut server_process in server_processes.drain(..) {
+                Env::stop_server(&mut server_process);
+                println!(
+                    "Standalone or Datanode (pid = {}) is stopped",
+                    server_process.id()
+                );
             }
         }
         if let Some(mut metasrv) = self.metasrv_process.take() {
             Env::stop_server(&mut metasrv);
+            println!("Metasrv (pid = {}) is stopped", metasrv.id());
         }
-        if let Some(mut datanode) = self.frontend_process.take() {
-            Env::stop_server(&mut datanode);
+        if let Some(mut frontend) = self.frontend_process.take() {
+            Env::stop_server(&mut frontend);
+            println!("Frontend (pid = {}) is stopped", frontend.id());
         }
         if matches!(self.ctx.wal, WalConfig::Kafka { needs_kafka_cluster, .. } if needs_kafka_cluster)
         {
             util::teardown_wal();
         }
-        println!("Stopped DB.");
     }
 }
 
@@ -534,7 +580,7 @@ impl Display for ResultDisplayer {
                         }
                     }
                 }
-                Output::Stream(_) => unreachable!(),
+                Output::Stream(_, _) => unreachable!(),
             },
             Err(e) => {
                 let status_code = e.status_code();

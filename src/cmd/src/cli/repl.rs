@@ -16,7 +16,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
+use catalog::kvbackend::{
+    CachedMetaKvBackend, CachedMetaKvBackendBuilder, KvBackendCatalogManager,
+};
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_error::ext::ErrorExt;
@@ -164,12 +166,13 @@ impl Repl {
 
             let plan = query_engine
                 .planner()
-                .plan(stmt, query_ctx)
+                .plan(stmt, query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
 
-            let LogicalPlan::DfPlan(plan) =
-                query_engine.optimize(&plan).context(PlanStatementSnafu)?;
+            let LogicalPlan::DfPlan(plan) = query_engine
+                .optimize(&query_engine.engine_context(query_ctx), &plan)
+                .context(PlanStatementSnafu)?;
 
             let plan = DFLogicalSubstraitConvertor {}
                 .encode(&plan)
@@ -182,7 +185,7 @@ impl Repl {
         .context(RequestDatabaseSnafu { sql: &sql })?;
 
         let either = match output {
-            Output::Stream(s) => {
+            Output::Stream(s, _) => {
                 let x = RecordBatches::try_collect(s)
                     .await
                     .context(CollectRecordBatchesSnafu)?;
@@ -247,13 +250,15 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         .context(StartMetaClientSnafu)?;
     let meta_client = Arc::new(meta_client);
 
-    let cached_meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
+    let cached_meta_backend =
+        Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
 
     let catalog_list =
         KvBackendCatalogManager::new(cached_meta_backend.clone(), cached_meta_backend);
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(
         catalog_list,
+        None,
         None,
         None,
         false,

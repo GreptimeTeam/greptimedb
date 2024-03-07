@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
+use common_function::scalars::udf::create_udf;
 use common_query::logical_plan::create_aggregate_function;
 use datafusion::catalog::TableReference;
 use datafusion::error::Result as DfResult;
@@ -41,18 +42,23 @@ pub struct DfContextProviderAdapter {
     session_state: SessionState,
     tables: HashMap<String, Arc<dyn TableSource>>,
     table_provider: DfTableSourceProvider,
+    query_ctx: QueryContextRef,
 }
 
 impl DfContextProviderAdapter {
     pub(crate) async fn try_new(
         engine_state: Arc<QueryEngineState>,
         session_state: SessionState,
-        df_stmt: &DfStatement,
+        df_stmt: Option<&DfStatement>,
         query_ctx: QueryContextRef,
     ) -> Result<Self> {
-        let table_names = session_state
-            .resolve_table_references(df_stmt)
-            .context(DataFusionSnafu)?;
+        let table_names = if let Some(df_stmt) = df_stmt {
+            session_state
+                .resolve_table_references(df_stmt)
+                .context(DataFusionSnafu)?
+        } else {
+            vec![]
+        };
 
         let mut table_provider = DfTableSourceProvider::new(
             engine_state.catalog_manager().clone(),
@@ -67,6 +73,7 @@ impl DfContextProviderAdapter {
             session_state,
             tables,
             table_provider,
+            query_ctx,
         })
     }
 }
@@ -104,7 +111,19 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
-        self.session_state.scalar_functions().get(name).cloned()
+        self.engine_state.udf_function(name).map_or_else(
+            || self.session_state.scalar_functions().get(name).cloned(),
+            |func| {
+                Some(Arc::new(
+                    create_udf(
+                        func,
+                        self.query_ctx.clone(),
+                        self.engine_state.function_state(),
+                    )
+                    .into(),
+                ))
+            },
+        )
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {

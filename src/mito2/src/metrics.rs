@@ -28,6 +28,9 @@ lazy_static! {
     /// Global write buffer size in bytes.
     pub static ref WRITE_BUFFER_BYTES: IntGauge =
         register_int_gauge!("greptime_mito_write_buffer_bytes", "mito write buffer bytes").unwrap();
+    /// Global memtable dictionary size in bytes.
+    pub static ref MEMTABLE_DICT_BYTES: IntGauge =
+        register_int_gauge!("greptime_mito_memtable_dict_bytes", "mito memtable dictionary size in bytes").unwrap();
     /// Gauge for open regions
     pub static ref REGION_COUNT: IntGauge =
         register_int_gauge!("greptime_mito_region_count", "mito region count").unwrap();
@@ -35,7 +38,8 @@ lazy_static! {
     pub static ref HANDLE_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_handle_request_elapsed",
             "mito handle request elapsed",
-            &[TYPE_LABEL]
+            &[TYPE_LABEL],
+            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 60.0, 300.0]
         )
         .unwrap();
 
@@ -55,7 +59,8 @@ lazy_static! {
     pub static ref FLUSH_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_flush_elapsed",
             "mito flush elapsed",
-            &[TYPE_LABEL]
+            &[TYPE_LABEL],
+            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
         )
         .unwrap();
     /// Histogram of flushed bytes.
@@ -75,7 +80,8 @@ lazy_static! {
     pub static ref WRITE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_write_stage_elapsed",
             "mito write stage elapsed",
-            &[STAGE_LABEL]
+            &[STAGE_LABEL],
+            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
         )
         .unwrap();
     /// Counter of rows to write.
@@ -93,7 +99,8 @@ lazy_static! {
     pub static ref COMPACTION_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_mito_compaction_stage_elapsed",
         "mito compaction stage elapsed",
-        &[STAGE_LABEL]
+        &[STAGE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
     /// Timer of whole compaction task.
@@ -112,10 +119,11 @@ lazy_static! {
     pub static ref READ_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_mito_read_stage_elapsed",
         "mito read stage elapsed",
-        &[STAGE_LABEL]
+        &[STAGE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
-    /// Counter of rows read.
+    /// Counter of rows read from different source.
     pub static ref READ_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("greptime_mito_read_rows_total", "mito read rows total", &[TYPE_LABEL]).unwrap();
     /// Counter of filtered rows during merge.
@@ -127,6 +135,26 @@ lazy_static! {
     /// Counter of filtered rows by precise filter.
     pub static ref PRECISE_FILTER_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("greptime_mito_precise_filter_rows_total", "mito precise filter rows total", &[TYPE_LABEL]).unwrap();
+    pub static ref READ_ROWS_IN_ROW_GROUP_TOTAL: IntCounterVec =
+        register_int_counter_vec!("greptime_mito_read_rows_in_row_group_total", "mito read rows in row group total", &[TYPE_LABEL]).unwrap();
+    /// Histogram for the number of SSTs to scan per query.
+    pub static ref READ_SST_COUNT: Histogram = register_histogram!(
+        "greptime_mito_read_sst_count",
+        "Number of SSTs to scan in a scan task",
+        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0, 1024.0],
+    ).unwrap();
+    /// Histogram for the number of rows returned per query.
+    pub static ref READ_ROWS_RETURN: Histogram = register_histogram!(
+        "greptime_mito_read_rows_return",
+        "Number of rows returned in a scan task",
+        exponential_buckets(100.0, 10.0, 8).unwrap(),
+    ).unwrap();
+    /// Histogram for the number of batches returned per query.
+    pub static ref READ_BATCHES_RETURN: Histogram = register_histogram!(
+        "greptime_mito_read_batches_return",
+        "Number of rows returned in a scan task",
+        exponential_buckets(100.0, 10.0, 7).unwrap(),
+    ).unwrap();
     // ------- End of query metrics.
 
     // Cache related metrics.
@@ -176,7 +204,8 @@ lazy_static! {
     pub static ref INDEX_CREATE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_index_create_elapsed",
         "index create elapsed",
-        &[STAGE_LABEL]
+        &[STAGE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
     /// Counter of rows indexed.
@@ -191,7 +220,11 @@ lazy_static! {
         "index create bytes total",
     )
     .unwrap();
-
+    /// Gauge of index create memory usage.
+    pub static ref INDEX_CREATE_MEMORY_USAGE: IntGauge = register_int_gauge!(
+        "greptime_index_create_memory_usage",
+        "index create memory usage",
+    ).unwrap();
     /// Counter of r/w bytes on index related IO operations.
     pub static ref INDEX_IO_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
         "greptime_index_io_bytes_total",
@@ -244,4 +277,24 @@ lazy_static! {
     pub static ref INDEX_INTERMEDIATE_FLUSH_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
         .with_label_values(&["flush", "intermediate"]);
     // ------- End of index metrics.
+
+    /// Merge tree memtable data buffer freeze metrics
+    pub static ref MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_merge_tree_buffer_freeze_stage_elapsed",
+        "mito merge tree data buffer freeze stage elapsed",
+        &[STAGE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+    )
+    .unwrap();
+
+    /// Merge tree memtable read path metrics
+    pub static ref MERGE_TREE_READ_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_merge_tree_read_stage_elapsed",
+        "mito merge tree read stage elapsed",
+        &[STAGE_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+    )
+    .unwrap();
+
+    // ------- End of merge tree memtable metrics.
 }

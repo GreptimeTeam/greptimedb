@@ -147,7 +147,7 @@ mod test {
             )),
         });
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -203,11 +203,11 @@ CREATE TABLE {table_name} (
     ts TIMESTAMP,
     TIME INDEX (ts),
     PRIMARY KEY (a, b)
-) PARTITION BY RANGE COLUMNS(a) (
-    PARTITION r0 VALUES LESS THAN (10),
-    PARTITION r1 VALUES LESS THAN (20),
-    PARTITION r2 VALUES LESS THAN (50),
-    PARTITION r3 VALUES LESS THAN (MAXVALUE),
+) PARTITION ON COLUMNS(a) (
+    a < 10,
+    a >= 10 AND a < 20,
+    a >= 20 AND a < 50,
+    a >= 50
 )"
         );
         create_table(frontend, sql).await;
@@ -384,7 +384,7 @@ CREATE TABLE {table_name} (
             ))),
         });
         let output = query(instance, request.clone()).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -477,7 +477,7 @@ CREATE TABLE {table_name} (
         assert!(matches!(output, Output::AffectedRows(6)));
 
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -515,11 +515,11 @@ CREATE TABLE {table_name} (
         let table_route_value = instance
             .table_metadata_manager()
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()
-            .unwrap()
-            .into_inner();
+            .unwrap();
 
         let region_to_dn_map = region_distribution(
             table_route_value
@@ -651,7 +651,7 @@ CREATE TABLE {table_name} (
             )),
         });
         let output = query(instance, request.clone()).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -693,7 +693,7 @@ CREATE TABLE {table_name} (
         assert!(matches!(output, Output::AffectedRows(2)));
 
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -791,7 +791,7 @@ CREATE TABLE {table_name} (
             })),
         });
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let Output::Stream(stream, _) = output else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();

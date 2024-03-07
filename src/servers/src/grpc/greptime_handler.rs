@@ -27,7 +27,8 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
-use common_telemetry::logging;
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
+use common_telemetry::{logging, tracing};
 use common_time::timezone::parse_timezone;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
@@ -57,6 +58,7 @@ impl GreptimeRequestHandler {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(protocol = "grpc", request_type = get_request_type(&request)))]
     pub(crate) async fn handle_request(&self, request: GreptimeRequest) -> Result<Output> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
@@ -79,16 +81,23 @@ impl GreptimeRequestHandler {
         //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
         //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
+        let tracing_context = TracingContext::from_current_span();
         let handle = self.runtime.spawn(async move {
-            handler.do_query(query, query_ctx).await.map_err(|e| {
-                if e.status_code().should_log_error() {
-                    logging::error!(e; "Failed to handle request");
-                } else {
-                    // Currently, we still print a debug log.
-                    logging::debug!("Failed to handle request, err: {:?}", e);
-                }
-                e
-            })
+            handler
+                .do_query(query, query_ctx)
+                .trace(tracing_context.attach(tracing::info_span!(
+                    "GreptimeRequestHandler::handle_request_runtime"
+                )))
+                .await
+                .map_err(|e| {
+                    if e.status_code().should_log_error() {
+                        logging::error!(e; "Failed to handle request");
+                    } else {
+                        // Currently, we still print a debug log.
+                        logging::debug!("Failed to handle request, err: {:?}", e);
+                    }
+                    e
+                })
         });
 
         handle.await.context(JoinTaskSnafu).map_err(|e| {
@@ -96,6 +105,14 @@ impl GreptimeRequestHandler {
             e
         })?
     }
+}
+
+pub fn get_request_type(request: &GreptimeRequest) -> &'static str {
+    request
+        .request
+        .as_ref()
+        .map(request_type)
+        .unwrap_or_default()
 }
 
 pub(crate) async fn auth(

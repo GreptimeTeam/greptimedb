@@ -242,7 +242,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         outputs[1],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"rows":[]}
+            "records":{"rows":[], "schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]}}
         }))
         .unwrap()
     );
@@ -557,7 +557,8 @@ pub async fn test_metrics_api(store_type: StorageType) {
     let res = client.get("/metrics").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
-    assert!(body.contains("frontend_handle_sql_elapsed"));
+    // Comment in the metrics text.
+    assert!(body.contains("# HELP"));
     guard.remove_all().await;
 }
 
@@ -685,6 +686,7 @@ runtime_size = 2
 mode = "disable"
 cert_path = ""
 key_path = ""
+watch = false
 
 [frontend.postgres]
 enable = true
@@ -695,6 +697,7 @@ runtime_size = 2
 mode = "disable"
 cert_path = ""
 key_path = ""
+watch = false
 
 [frontend.opentsdb]
 enable = true
@@ -706,6 +709,7 @@ enable = true
 
 [frontend.prom_store]
 enable = true
+with_metric_engine = true
 
 [frontend.otlp]
 enable = true
@@ -727,7 +731,7 @@ write_interval = "30s"
 mode = "standalone"
 node_id = 0
 require_lease_before_startup = true
-initialize_region_in_background = false
+init_regions_in_background = false
 rpc_addr = "127.0.0.1:3001"
 rpc_runtime_size = 8
 rpc_max_recv_message_size = "512MiB"
@@ -780,6 +784,13 @@ apply_on_query = "auto"
 write_buffer_size = "8MiB"
 mem_threshold_on_create = "64.0MiB"
 intermediate_path = ""
+
+[datanode.region_engine.mito.memtable]
+type = "experimental"
+index_max_keys_per_shard = 8192
+data_freeze_threshold = 32768
+dedup = true
+fork_dictionary_bytes = "1GiB"
 
 [[datanode.region_engine]]
 

@@ -190,6 +190,7 @@ mod tests {
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
+    use common_time::util::current_time_millis;
     use store_api::storage::RegionId;
 
     use crate::error::Error;
@@ -285,6 +286,7 @@ mod tests {
             leader_peer: Some(Peer::empty(1)),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
             leader_status: Some(RegionStatus::Downgraded),
+            leader_down_since: Some(current_time_millis()),
         }];
 
         env.create_physical_table_metadata(table_info, region_routes)
@@ -296,6 +298,7 @@ mod tests {
             .unwrap();
 
         assert!(!new_region_routes[0].is_leader_downgraded());
+        assert!(new_region_routes[0].leader_down_since.is_none());
         assert_eq!(new_region_routes[0].follower_peers, vec![Peer::empty(3)]);
         assert_eq!(new_region_routes[0].leader_peer.as_ref().unwrap().id, 2);
     }
@@ -316,6 +319,7 @@ mod tests {
                 leader_peer: Some(Peer::empty(1)),
                 follower_peers: vec![Peer::empty(5), Peer::empty(3)],
                 leader_status: Some(RegionStatus::Downgraded),
+                leader_down_since: Some(current_time_millis()),
             },
             RegionRoute {
                 region: Region::new_test(RegionId::new(table_id, 2)),
@@ -331,7 +335,8 @@ mod tests {
         let table_metadata_manager = env.table_metadata_manager();
         let original_table_route = table_metadata_manager
             .table_route_manager()
-            .get(table_id)
+            .table_route_storage()
+            .get_raw(table_id)
             .await
             .unwrap()
             .unwrap();
@@ -377,6 +382,7 @@ mod tests {
             leader_peer: Some(leader_peer),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
             leader_status: None,
+            leader_down_since: None,
         }];
 
         env.create_physical_table_metadata(table_info, region_routes)
@@ -400,6 +406,7 @@ mod tests {
             leader_peer: Some(candidate_peer),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
             leader_status: None,
+            leader_down_since: None,
         }];
 
         env.create_physical_table_metadata(table_info, region_routes)
@@ -423,6 +430,7 @@ mod tests {
             leader_peer: Some(candidate_peer),
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
             leader_status: Some(RegionStatus::Downgraded),
+            leader_down_since: None,
         }];
 
         env.create_physical_table_metadata(table_info, region_routes)
@@ -466,11 +474,11 @@ mod tests {
 
         let table_route = table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()
-            .unwrap()
-            .into_inner();
+            .unwrap();
         let region_routes = table_route.region_routes().unwrap();
 
         assert!(ctx.volatile_ctx.table_route.is_none());

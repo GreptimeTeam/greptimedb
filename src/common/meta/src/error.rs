@@ -100,6 +100,23 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to query procedure"))]
+    QueryProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure not found: {pid}"))]
+    ProcedureNotFound { location: Location, pid: String },
+
+    #[snafu(display("Failed to parse procedure id: {key}"))]
+    ParseProcedureId {
+        location: Location,
+        key: String,
+        #[snafu(source)]
+        error: common_procedure::ParseIdError,
+    },
+
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
@@ -110,6 +127,15 @@ pub enum Error {
     WaitProcedure {
         location: Location,
         source: common_procedure::Error,
+    },
+
+    #[snafu(display(
+        "Failed to get procedure output, procedure id: {procedure_id}, error: {err_msg}"
+    ))]
+    ProcedureOutput {
+        procedure_id: String,
+        err_msg: String,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert RawTableInfo into TableInfo"))]
@@ -314,6 +340,9 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
+    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
+    ResolveKafkaEndpoint { source: common_wal::error::Error },
+
     #[snafu(display("Failed to build a Kafka controller client"))]
     BuildKafkaCtrlClient {
         location: Location,
@@ -354,6 +383,12 @@ pub enum Error {
 
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable { location: Location, err_msg: String },
+
+    #[snafu(display("The tasks of create tables cannot be empty"))]
+    EmptyCreateTableTasks { location: Location },
+
+    #[snafu(display("Metadata corruption: {}", err_msg))]
+    MetadataCorruption { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -393,10 +428,13 @@ impl ErrorExt for Error {
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
             | BuildKafkaPartitionClient { .. }
+            | ResolveKafkaEndpoint { .. }
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. }
-            | UnexpectedLogicalRouteTable { .. } => StatusCode::Unexpected,
+            | UnexpectedLogicalRouteTable { .. }
+            | ProcedureOutput { .. }
+            | MetadataCorruption { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -406,14 +444,17 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Unsupported { .. } => StatusCode::Internal,
 
-            PrimaryKeyNotFound { .. } | EmptyKey { .. } | InvalidEngineType { .. } => {
-                StatusCode::InvalidArguments
-            }
+            ProcedureNotFound { .. }
+            | PrimaryKeyNotFound { .. }
+            | EmptyKey { .. }
+            | InvalidEngineType { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
-            SubmitProcedure { source, .. } | WaitProcedure { source, .. } => source.status_code(),
+            SubmitProcedure { source, .. }
+            | QueryProcedure { source, .. }
+            | WaitProcedure { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),
@@ -422,7 +463,9 @@ impl ErrorExt for Error {
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
 
-            InvalidNumTopics { .. } => StatusCode::InvalidArguments,
+            ParseProcedureId { .. } | InvalidNumTopics { .. } | EmptyCreateTableTasks { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

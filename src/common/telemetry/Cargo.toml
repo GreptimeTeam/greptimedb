@@ -8,7 +8,11 @@ license.workspace = true
 tokio-console = ["console-subscriber", "tokio/tracing"]
 deadlock_detection = ["parking_lot/deadlock_detection"]
 
+[lints]
+workspace = true
+
 [dependencies]
+atty = "0.2"
 backtrace = "0.3"
 common-error.workspace = true
 console-subscriber = { version = "0.1", optional = true }
@@ -24,6 +28,7 @@ opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 parking_lot = { version = "0.12" }
 prometheus.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing = "0.1"
 tracing-appender = "0.2"

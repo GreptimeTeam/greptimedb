@@ -22,6 +22,7 @@ use api::v1::{
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
+use common_time::Timezone;
 use datatypes::schema::{ColumnSchema, COMMENT_KEY};
 use file_engine::FileOptions;
 use query::sql::{
@@ -29,6 +30,7 @@ use query::sql::{
     infer_file_table_schema, prepare_file_table_files,
 };
 use session::context::QueryContextRef;
+use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
@@ -44,7 +46,6 @@ use crate::error::{
     InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result,
     SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
-use crate::table::table_idents_to_full_name;
 
 #[derive(Debug, Copy, Clone)]
 pub struct CreateExprFactory;
@@ -122,7 +123,7 @@ pub(crate) async fn create_external_expr(
     query_ctx: QueryContextRef,
 ) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
-        table_idents_to_full_name(&create.name, query_ctx)
+        table_idents_to_full_name(&create.name, &query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
@@ -141,7 +142,8 @@ pub(crate) async fn create_external_expr(
         // expanded form
         let time_index = find_time_index(&create.constraints)?;
         let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
-        let column_schemas = columns_to_column_schemas(&create.columns, &time_index)?;
+        let column_schemas =
+            columns_to_column_schemas(&create.columns, &time_index, Some(&query_ctx.timezone()))?;
         (time_index, primary_keys, column_schemas)
     } else {
         // inferred form
@@ -179,10 +181,10 @@ pub(crate) async fn create_external_expr(
     Ok(expr)
 }
 
-/// Convert `CreateTable` statement to `CreateExpr` gRPC request.
+/// Convert `CreateTable` statement to [`CreateTableExpr`] gRPC request.
 pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
-        table_idents_to_full_name(&create.name, query_ctx)
+        table_idents_to_full_name(&create.name, &query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
@@ -199,7 +201,12 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
         schema_name,
         table_name,
         desc: String::default(),
-        column_defs: columns_to_expr(&create.columns, &time_index, &primary_keys)?,
+        column_defs: columns_to_expr(
+            &create.columns,
+            &time_index,
+            &primary_keys,
+            Some(&query_ctx.timezone()),
+        )?,
         time_index,
         primary_keys,
         create_if_not_exists: create.if_not_exists,
@@ -293,18 +300,23 @@ fn columns_to_expr(
     column_defs: &[ColumnDef],
     time_index: &str,
     primary_keys: &[String],
+    timezone: Option<&Timezone>,
 ) -> Result<Vec<api::v1::ColumnDef>> {
-    let column_schemas = columns_to_column_schemas(column_defs, time_index)?;
+    let column_schemas = columns_to_column_schemas(column_defs, time_index, timezone)?;
     column_schemas_to_defs(column_schemas, primary_keys)
 }
 
 fn columns_to_column_schemas(
     column_defs: &[ColumnDef],
     time_index: &str,
+    timezone: Option<&Timezone>,
 ) -> Result<Vec<ColumnSchema>> {
     column_defs
         .iter()
-        .map(|c| column_def_to_schema(c, c.name.to_string() == time_index).context(ParseSqlSnafu))
+        .map(|c| {
+            column_def_to_schema(c, c.name.to_string() == time_index, timezone)
+                .context(ParseSqlSnafu)
+        })
         .collect::<Result<Vec<ColumnSchema>>>()
 }
 
@@ -365,7 +377,7 @@ pub(crate) fn to_alter_expr(
     query_ctx: QueryContextRef,
 ) -> Result<AlterExpr> {
     let (catalog_name, schema_name, table_name) =
-        table_idents_to_full_name(alter_table.table_name(), query_ctx)
+        table_idents_to_full_name(alter_table.table_name(), &query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
@@ -382,7 +394,7 @@ pub(crate) fn to_alter_expr(
         } => Kind::AddColumns(AddColumns {
             add_columns: vec![AddColumn {
                 column_def: Some(
-                    sql_column_def_to_grpc_column_def(column_def)
+                    sql_column_def_to_grpc_column_def(column_def, Some(&query_ctx.timezone()))
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?,
                 ),
@@ -409,10 +421,12 @@ pub(crate) fn to_alter_expr(
 
 #[cfg(test)]
 mod tests {
-    use session::context::QueryContext;
+    use datatypes::value::Value;
+    use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
+    use store_api::storage::ColumnDefaultConstraint;
 
     use super::*;
 
@@ -433,6 +447,102 @@ mod tests {
         assert_eq!(
             "1.0MiB",
             expr.table_options.get("write_buffer_size").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_create_to_expr_with_default_timestamp_value() {
+        let sql = "CREATE TABLE monitor (v double,ts TIMESTAMP default '2024-01-30T00:01:01',TIME INDEX (ts)) engine=mito;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateTable(create_table) = stmt else {
+            unreachable!()
+        };
+
+        // query context with system timezone UTC.
+        let expr = create_to_expr(&create_table, QueryContext::arc()).unwrap();
+        let ts_column = &expr.column_defs[1];
+        let constraint = assert_ts_column(ts_column);
+        assert!(
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+                         if ts.to_iso8601_string() == "2024-01-30 00:01:01+0000")
+        );
+
+        // query context with timezone `+08:00`
+        let ctx = QueryContextBuilder::default()
+            .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
+            .build();
+        let expr = create_to_expr(&create_table, ctx).unwrap();
+        let ts_column = &expr.column_defs[1];
+        let constraint = assert_ts_column(ts_column);
+        assert!(
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+                         if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
+        );
+    }
+
+    fn assert_ts_column(ts_column: &api::v1::ColumnDef) -> ColumnDefaultConstraint {
+        assert_eq!("ts", ts_column.name);
+        assert_eq!(
+            ColumnDataType::TimestampMillisecond as i32,
+            ts_column.data_type
+        );
+        assert!(!ts_column.default_constraint.is_empty());
+
+        ColumnDefaultConstraint::try_from(&ts_column.default_constraint[..]).unwrap()
+    }
+
+    #[test]
+    fn test_to_alter_expr() {
+        let sql = "ALTER TABLE monitor add column ts TIMESTAMP default '2024-01-30T00:01:01';";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::Alter(alter_table) = stmt else {
+            unreachable!()
+        };
+
+        // query context with system timezone UTC.
+        let expr = to_alter_expr(alter_table.clone(), QueryContext::arc()).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let Kind::AddColumns(AddColumns { add_columns, .. }) = kind else {
+            unreachable!()
+        };
+
+        assert_eq!(1, add_columns.len());
+        let ts_column = add_columns[0].column_def.clone().unwrap();
+        let constraint = assert_ts_column(&ts_column);
+        assert!(
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+                         if ts.to_iso8601_string() == "2024-01-30 00:01:01+0000")
+        );
+
+        //
+        // query context with timezone `+08:00`
+        let ctx = QueryContextBuilder::default()
+            .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
+            .build();
+        let expr = to_alter_expr(alter_table, ctx).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let Kind::AddColumns(AddColumns { add_columns, .. }) = kind else {
+            unreachable!()
+        };
+
+        assert_eq!(1, add_columns.len());
+        let ts_column = add_columns[0].column_def.clone().unwrap();
+        let constraint = assert_ts_column(&ts_column);
+        assert!(
+            matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
+                         if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
         );
     }
 }

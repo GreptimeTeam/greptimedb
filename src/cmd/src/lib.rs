@@ -32,11 +32,11 @@ lazy_static::lazy_static! {
 }
 
 #[async_trait]
-pub trait App {
+pub trait App: Send {
     fn name(&self) -> &str;
 
     /// A hook for implementor to make something happened before actual startup. Defaults to no-op.
-    fn pre_start(&mut self) -> error::Result<()> {
+    async fn pre_start(&mut self) -> error::Result<()> {
         Ok(())
     }
 
@@ -46,22 +46,21 @@ pub trait App {
 }
 
 pub async fn start_app(mut app: Box<dyn App>) -> error::Result<()> {
-    let name = app.name().to_string();
+    info!("Starting app: {}", app.name());
 
-    tokio::select! {
-        result = app.start() => {
-            if let Err(err) = result {
-                error!(err; "Failed to start app {name}!");
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            if let Err(err) = app.stop().await {
-                error!(err; "Failed to stop app {name}!");
-            }
-            info!("Goodbye!");
-        }
+    app.pre_start().await?;
+
+    app.start().await?;
+
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        error!("Failed to listen for ctrl-c signal: {}", e);
+        // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
+        // the underlying system. So we stop the app instead of running nonetheless to let people
+        // investigate the issue.
     }
 
+    app.stop().await?;
+    info!("Goodbye!");
     Ok(())
 }
 

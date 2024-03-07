@@ -21,7 +21,7 @@ use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, tracing};
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
 use table::predicate::Predicate;
@@ -32,7 +32,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::error::Result;
 use crate::memtable::MemtableRef;
-use crate::metrics::READ_STAGE_ELAPSED;
+use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_SST_COUNT, READ_STAGE_ELAPSED};
 use crate::read::compat::{self, CompatReader};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
@@ -65,6 +65,8 @@ pub struct SeqScan {
     parallelism: ScanParallism,
     /// Index applier.
     index_applier: Option<SstIndexApplierRef>,
+    /// Start time of the query.
+    query_start: Option<Instant>,
 }
 
 impl SeqScan {
@@ -82,6 +84,7 @@ impl SeqScan {
             ignore_file_not_found: false,
             parallelism: ScanParallism::default(),
             index_applier: None,
+            query_start: None,
         }
     }
 
@@ -141,10 +144,19 @@ impl SeqScan {
         self
     }
 
+    /// Sets start time of the query.
+    #[must_use]
+    pub(crate) fn with_start_time(mut self, now: Option<Instant>) -> Self {
+        self.query_start = now;
+        self
+    }
+
     /// Builds a stream for the query.
     pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
-        let start = Instant::now();
         let mut metrics = Metrics::default();
+        let build_start = Instant::now();
+        let query_start = self.query_start.unwrap_or(build_start);
+        metrics.prepare_scan_cost = query_start.elapsed();
         let use_parallel = self.use_parallel_reader();
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let mut reader = if use_parallel {
@@ -152,9 +164,13 @@ impl SeqScan {
         } else {
             self.build_reader().await?
         };
-        let elapsed = start.elapsed();
-        metrics.build_reader_cost = elapsed;
-        metrics.scan_cost = elapsed;
+        metrics.build_reader_cost = build_start.elapsed();
+        READ_STAGE_ELAPSED
+            .with_label_values(&["prepare_scan"])
+            .observe(metrics.prepare_scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_reader"])
+            .observe(metrics.build_reader_cost.as_secs_f64());
 
         // Creates a stream to poll the batch reader and convert batch into record batch.
         let mapper = self.mapper.clone();
@@ -165,15 +181,22 @@ impl SeqScan {
             while let Some(batch) =
                 Self::fetch_record_batch(&mut reader, &mapper, cache, &mut metrics).await?
             {
+                metrics.num_batches += 1;
+                metrics.num_rows += batch.num_rows();
                 yield batch;
             }
 
+            // Update metrics.
+            metrics.total_cost = query_start.elapsed();
+            READ_STAGE_ELAPSED.with_label_values(&["convert_rb"]).observe(metrics.convert_cost.as_secs_f64());
+            READ_STAGE_ELAPSED.with_label_values(&["scan"]).observe(metrics.scan_cost.as_secs_f64());
+            READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.total_cost.as_secs_f64());
+            READ_ROWS_RETURN.observe(metrics.num_rows as f64);
+            READ_BATCHES_RETURN.observe(metrics.num_batches as f64);
             debug!(
                 "Seq scan finished, region_id: {:?}, metrics: {:?}, use_parallel: {}, parallelism: {}",
                 mapper.metadata().region_id, metrics, use_parallel, parallelism,
             );
-            // Update metrics.
-            READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.scan_cost.as_secs_f64());
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
             self.mapper.output_schema(),
@@ -213,7 +236,7 @@ impl SeqScan {
     async fn build_sources(&self) -> Result<Vec<Source>> {
         let mut sources = Vec::with_capacity(self.memtables.len() + self.files.len());
         for mem in &self.memtables {
-            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone());
+            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone())?;
             sources.push(Source::Iter(iter));
         }
         for file in &self.files {
@@ -248,6 +271,8 @@ impl SeqScan {
                 sources.push(Source::Reader(Box::new(compat_reader)));
             }
         }
+
+        READ_SST_COUNT.observe(self.files.len() as f64);
 
         Ok(sources)
     }
@@ -286,6 +311,7 @@ impl SeqScan {
     }
 
     /// Fetch a batch from the reader and convert it into a record batch.
+    #[tracing::instrument(skip_all, level = "trace")]
     async fn fetch_record_batch(
         reader: &mut dyn BatchReader,
         mapper: &ProjectionMapper,
@@ -317,12 +343,20 @@ impl SeqScan {
 /// Metrics for [SeqScan].
 #[derive(Debug, Default)]
 struct Metrics {
+    /// Duration to prepare the scan task.
+    prepare_scan_cost: Duration,
     /// Duration to build the reader.
     build_reader_cost: Duration,
     /// Duration to scan data.
     scan_cost: Duration,
     /// Duration to convert batches.
     convert_cost: Duration,
+    /// Duration of the scan.
+    total_cost: Duration,
+    /// Number of batches returned.
+    num_batches: usize,
+    /// Number of rows returned.
+    num_rows: usize,
 }
 
 #[cfg(test)]

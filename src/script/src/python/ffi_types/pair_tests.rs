@@ -88,7 +88,7 @@ async fn integrated_py_copr_test() {
             .await
             .unwrap();
         let res = match output {
-            Output::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
+            Output::Stream(s, _) => common_recordbatch::util::collect_batches(s).await.unwrap(),
             Output::RecordBatches(rbs) => rbs,
             _ => unreachable!(),
         };

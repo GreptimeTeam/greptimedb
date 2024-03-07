@@ -1,7 +1,7 @@
 show databases;
 
 +-----------------------+
-| Schemas               |
+| Database              |
 +-----------------------+
 | greptime_private      |
 | illegal-database      |
@@ -20,6 +20,7 @@ show tables;
 +---------------------------------------+
 | Tables                                |
 +---------------------------------------+
+| build_info                            |
 | character_sets                        |
 | check_constraints                     |
 | collation_character_set_applicability |
@@ -31,12 +32,15 @@ show tables;
 | events                                |
 | files                                 |
 | global_status                         |
+| greptime_region_peers                 |
 | key_column_usage                      |
 | optimizer_trace                       |
 | parameters                            |
+| partitions                            |
 | profiling                             |
 | referential_constraints               |
 | routines                              |
+| runtime_metrics                       |
 | schema_privileges                     |
 | schemata                              |
 | session_status                        |

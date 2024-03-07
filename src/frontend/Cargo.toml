@@ -9,6 +9,9 @@ default = ["python"]
 python = ["dep:script"]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 arc-swap = "1.0"
@@ -26,8 +29,8 @@ common-config.workspace = true
 common-datasource.workspace = true
 common-error.workspace = true
 common-function.workspace = true
-common-grpc-expr.workspace = true
 common-grpc.workspace = true
+common-grpc-expr.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-procedure.workspace = true
@@ -36,9 +39,9 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datafusion.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
 file-engine.workspace = true

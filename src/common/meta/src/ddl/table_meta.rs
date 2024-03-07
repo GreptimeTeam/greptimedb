@@ -23,21 +23,22 @@ use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::ddl::{TableMetadata, TableMetadataAllocatorContext};
-use crate::error::{Result, TableNotFoundSnafu, UnsupportedSnafu};
-use crate::key::table_name::TableNameKey;
+use crate::error::{self, Result, TableNotFoundSnafu, UnsupportedSnafu};
+use crate::key::table_name::{TableNameKey, TableNameManager};
 use crate::key::table_route::{LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteValue};
-use crate::key::TableMetadataManagerRef;
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{Region, RegionRoute};
 use crate::sequence::SequenceRef;
 use crate::wal_options_allocator::{allocate_region_wal_options, WalOptionsAllocatorRef};
 
+pub type TableMetadataAllocatorRef = Arc<TableMetadataAllocator>;
+
 #[derive(Clone)]
 pub struct TableMetadataAllocator {
     table_id_sequence: SequenceRef,
     wal_options_allocator: WalOptionsAllocatorRef,
-    table_metadata_manager: TableMetadataManagerRef,
+    table_name_manager: TableNameManager,
     peer_allocator: PeerAllocatorRef,
 }
 
@@ -45,12 +46,12 @@ impl TableMetadataAllocator {
     pub fn new(
         table_id_sequence: SequenceRef,
         wal_options_allocator: WalOptionsAllocatorRef,
-        table_metadata_manager: TableMetadataManagerRef,
+        table_name_manager: TableNameManager,
     ) -> Self {
         Self::with_peer_allocator(
             table_id_sequence,
             wal_options_allocator,
-            table_metadata_manager,
+            table_name_manager,
             Arc::new(NoopPeerAllocator),
         )
     }
@@ -58,18 +59,18 @@ impl TableMetadataAllocator {
     pub fn with_peer_allocator(
         table_id_sequence: SequenceRef,
         wal_options_allocator: WalOptionsAllocatorRef,
-        table_metadata_manager: TableMetadataManagerRef,
+        table_name_manager: TableNameManager,
         peer_allocator: PeerAllocatorRef,
     ) -> Self {
         Self {
             table_id_sequence,
             wal_options_allocator,
-            table_metadata_manager,
+            table_name_manager,
             peer_allocator,
         }
     }
 
-    async fn allocate_table_id(&self, task: &CreateTableTask) -> Result<TableId> {
+    pub(crate) async fn allocate_table_id(&self, task: &CreateTableTask) -> Result<TableId> {
         let table_id = if let Some(table_id) = &task.create_table.table_id {
             let table_id = table_id.id;
 
@@ -123,6 +124,12 @@ impl TableMetadataAllocator {
         task: &CreateTableTask,
     ) -> Result<TableRouteValue> {
         let regions = task.partitions.len();
+        ensure!(
+            regions > 0,
+            error::UnexpectedSnafu {
+                err_msg: "The number of partitions must be greater than 0"
+            }
+        );
 
         let table_route = if task.create_table.engine == METRIC_ENGINE
             && let Some(physical_table_name) = task
@@ -131,8 +138,7 @@ impl TableMetadataAllocator {
                 .get(LOGICAL_TABLE_METADATA_KEY)
         {
             let physical_table_id = self
-                .table_metadata_manager
-                .table_name_manager()
+                .table_name_manager
                 .get(TableNameKey::new(
                     &task.create_table.catalog_name,
                     &task.create_table.schema_name,
@@ -196,6 +202,15 @@ impl TableMetadataAllocator {
             table_route,
             region_wal_options,
         })
+    }
+
+    /// Sets table ids with all tasks.
+    pub async fn set_table_ids_on_logic_create(&self, tasks: &mut [CreateTableTask]) -> Result<()> {
+        for task in tasks {
+            let table_id = self.allocate_table_id(task).await?;
+            task.table_info.ident.table_id = table_id;
+        }
+        Ok(())
     }
 }
 

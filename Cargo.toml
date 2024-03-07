@@ -18,6 +18,7 @@ members = [
     "src/common/grpc-expr",
     "src/common/mem-prof",
     "src/common/meta",
+    "src/common/plugins",
     "src/common/procedure",
     "src/common/procedure-test",
     "src/common/query",
@@ -33,6 +34,7 @@ members = [
     "src/datanode",
     "src/datatypes",
     "src/file-engine",
+    "src/flow",
     "src/frontend",
     "src/log-store",
     "src/meta-client",
@@ -60,9 +62,15 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
+
+[workspace.lints]
+clippy.print_stdout = "warn"
+clippy.print_stderr = "warn"
+clippy.implicit_clone = "warn"
+rust.unknown_lints = "deny"
 
 [workspace.dependencies]
 ahash = { version = "0.8", features = ["compile-time-rng"] }
@@ -70,9 +78,11 @@ aquamarine = "0.3"
 arrow = { version = "47.0" }
 arrow-array = "47.0"
 arrow-flight = "47.0"
+arrow-ipc = { version = "47.0", features = ["lz4"] }
 arrow-schema = { version = "47.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
+axum = { version = "0.6", features = ["headers"] }
 base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
@@ -93,11 +103,11 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "65b008f018395f8fa917a7d3c7883b82f309cb74" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "96f1f0404f421ee560a4310c73c5071e49168168" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80b72716dcde47ec4161478416a5c6c21343364d" }
 mockall = "0.11.4"
 moka = "0.12"
 num_cpus = "1.16"
@@ -112,7 +122,7 @@ paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 prost = "0.12"
-raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "22dfb426cd994602b57725ef080287d3e53db479" }
+raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
 regex = "1.8"
 regex-automata = { version = "0.2", features = ["transducer"] }
@@ -161,7 +171,7 @@ common-grpc-expr = { path = "src/common/grpc-expr" }
 common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
-common-pprof = { path = "src/common/pprof" }
+common-plugins = { path = "src/common/plugins" }
 common-procedure = { path = "src/common/procedure" }
 common-procedure-test = { path = "src/common/procedure-test" }
 common-query = { path = "src/common/query" }
@@ -199,7 +209,7 @@ table = { path = "src/table" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "abbd357c1e193cd270ea65ee7652334a150b628f"
+rev = "80b72716dcde47ec4161478416a5c6c21343364d"
 
 [profile.release]
 debug = 1

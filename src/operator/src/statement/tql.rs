@@ -16,7 +16,10 @@ use std::collections::HashMap;
 
 use common_query::Output;
 use common_telemetry::tracing;
-use query::parser::{PromQuery, QueryLanguageParser, ANALYZE_NODE_NAME, EXPLAIN_NODE_NAME};
+use query::parser::{
+    PromQuery, QueryLanguageParser, ANALYZE_NODE_NAME, ANALYZE_VERBOSE_NODE_NAME,
+    EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME,
+};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::tql::Tql;
@@ -42,20 +45,32 @@ impl StatementExecutor {
                     query: explain.query,
                     ..PromQuery::default()
                 };
-                let params = HashMap::from([("name".to_string(), EXPLAIN_NODE_NAME.to_string())]);
+                let explain_node_name = if explain.is_verbose {
+                    EXPLAIN_VERBOSE_NODE_NAME
+                } else {
+                    EXPLAIN_NODE_NAME
+                }
+                .to_string();
+                let params = HashMap::from([("name".to_string(), explain_node_name)]);
                 QueryLanguageParser::parse_promql(&promql, &query_ctx)
                     .context(ParseQuerySnafu)?
                     .post_process(params)
                     .unwrap()
             }
-            Tql::Analyze(tql_analyze) => {
+            Tql::Analyze(analyze) => {
                 let promql = PromQuery {
-                    start: tql_analyze.start,
-                    end: tql_analyze.end,
-                    step: tql_analyze.step,
-                    query: tql_analyze.query,
+                    start: analyze.start,
+                    end: analyze.end,
+                    step: analyze.step,
+                    query: analyze.query,
                 };
-                let params = HashMap::from([("name".to_string(), ANALYZE_NODE_NAME.to_string())]);
+                let analyze_node_name = if analyze.is_verbose {
+                    ANALYZE_VERBOSE_NODE_NAME
+                } else {
+                    ANALYZE_NODE_NAME
+                }
+                .to_string();
+                let params = HashMap::from([("name".to_string(), analyze_node_name)]);
                 QueryLanguageParser::parse_promql(&promql, &query_ctx)
                     .context(ParseQuerySnafu)?
                     .post_process(params)

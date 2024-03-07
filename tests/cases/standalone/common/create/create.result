@@ -126,3 +126,60 @@ CREATE TABLE test_multiple_inline_pk_definitions ("timestamp" TIMESTAMP TIME IND
 
 Error: 1004(InvalidArguments), Illegal primary keys definition: not allowed to inline multiple primary keys in columns options
 
+CREATE TABLE neg_default_value(i INT DEFAULT -1024, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+desc TABLE neg_default_value;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  | -1024   | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE neg_default_value;
+
+Affected Rows: 0
+
+CREATE TABLE test_like_1 (PK STRING PRIMARY KEY, i INTEGER DEFAULT 7, j TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE test_like_2 LIKE test_like_1;
+
+Affected Rows: 0
+
+CREATE TABLE test_like_2 LIKE test_like_1;
+
+Error: 4000(TableAlreadyExists), Table already exists: `greptime.public.test_like_2`
+
+DESC TABLE test_like_1;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| pk     | String               | PRI | YES  |         | TAG           |
+| i      | Int32                |     | YES  | 7       | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+DESC TABLE test_like_2;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| pk     | String               | PRI | YES  |         | TAG           |
+| i      | Int32                |     | YES  | 7       | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE test_like_1;
+
+Affected Rows: 0
+
+DROP TABLE test_like_2;
+
+Affected Rows: 0
+

@@ -24,7 +24,7 @@ use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
-use crate::cluster::GreptimeDbClusterBuilder;
+use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 use crate::test_util::StorageType;
 use crate::tests::{create_distributed_instance, MockDistributedInstance};
@@ -32,7 +32,7 @@ use crate::tests::{create_distributed_instance, MockDistributedInstance};
 #[async_trait::async_trait]
 pub(crate) trait RebuildableMockInstance: MockInstance {
     // Rebuilds the instance and returns rebuilt frontend instance.
-    async fn rebuild(&mut self) -> Arc<Instance>;
+    async fn rebuild(&mut self);
 }
 
 pub(crate) trait MockInstance: Sync + Send {
@@ -68,19 +68,78 @@ pub(crate) enum MockInstanceBuilder {
     Distributed(GreptimeDbClusterBuilder),
 }
 
-impl MockInstanceBuilder {
-    async fn build(&self) -> Arc<dyn MockInstance> {
+pub(crate) enum MockInstanceImpl {
+    Standalone(GreptimeDbStandalone),
+    Distributed(GreptimeDbCluster),
+}
+
+impl MockInstance for MockInstanceImpl {
+    fn frontend(&self) -> Arc<Instance> {
         match self {
-            MockInstanceBuilder::Standalone(builder) => Arc::new(builder.clone().build().await),
+            MockInstanceImpl::Standalone(instance) => instance.frontend(),
+            MockInstanceImpl::Distributed(instance) => instance.frontend.clone(),
+        }
+    }
+
+    fn is_distributed_mode(&self) -> bool {
+        matches!(self, &MockInstanceImpl::Distributed(_))
+    }
+}
+
+impl MockInstanceBuilder {
+    async fn build(&self) -> MockInstanceImpl {
+        match self {
+            MockInstanceBuilder::Standalone(builder) => {
+                MockInstanceImpl::Standalone(builder.build().await)
+            }
             MockInstanceBuilder::Distributed(builder) => {
-                Arc::new(MockDistributedInstance(builder.clone().build().await))
+                MockInstanceImpl::Distributed(builder.build().await)
+            }
+        }
+    }
+
+    async fn rebuild(&self, instance: MockInstanceImpl) -> MockInstanceImpl {
+        match self {
+            MockInstanceBuilder::Standalone(builder) => {
+                let MockInstanceImpl::Standalone(instance) = instance else {
+                    unreachable!()
+                };
+                let GreptimeDbStandalone {
+                    mix_options,
+                    guard,
+                    kv_backend,
+                    procedure_manager,
+                    ..
+                } = instance;
+                MockInstanceImpl::Standalone(
+                    builder
+                        .build_with(kv_backend, procedure_manager, guard, mix_options)
+                        .await,
+                )
+            }
+            MockInstanceBuilder::Distributed(builder) => {
+                let MockInstanceImpl::Distributed(instance) = instance else {
+                    unreachable!()
+                };
+                let GreptimeDbCluster {
+                    storage_guards,
+                    dir_guards,
+                    datanode_options,
+                    ..
+                } = instance;
+
+                MockInstanceImpl::Distributed(
+                    builder
+                        .build_with(datanode_options, storage_guards, dir_guards)
+                        .await,
+                )
             }
         }
     }
 }
 
 pub(crate) struct TestContext {
-    instance: Arc<dyn MockInstance>,
+    instance: Option<MockInstanceImpl>,
     builder: MockInstanceBuilder,
 }
 
@@ -88,26 +147,28 @@ impl TestContext {
     async fn new(builder: MockInstanceBuilder) -> Self {
         let instance = builder.build().await;
 
-        Self { instance, builder }
+        Self {
+            instance: Some(instance),
+            builder,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl RebuildableMockInstance for TestContext {
-    async fn rebuild(&mut self) -> Arc<Instance> {
-        let instance = self.builder.build().await;
-        self.instance = instance;
-        self.instance.frontend()
+    async fn rebuild(&mut self) {
+        let instance = self.builder.rebuild(self.instance.take().unwrap()).await;
+        self.instance = Some(instance);
     }
 }
 
 impl MockInstance for TestContext {
     fn frontend(&self) -> Arc<Instance> {
-        self.instance.frontend()
+        self.instance.as_ref().unwrap().frontend()
     }
 
     fn is_distributed_mode(&self) -> bool {
-        self.instance.is_distributed_mode()
+        self.instance.as_ref().unwrap().is_distributed_mode()
     }
 }
 
@@ -269,13 +330,18 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str
     };
 
     let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        Output::Stream(stream, _) => util::collect_batches(stream).await.unwrap(),
         Output::RecordBatches(recordbatches) => recordbatches,
         _ => unreachable!(),
     };
     let pretty_print = sort_table(&recordbatches.pretty_print().unwrap());
     let expected = sort_table(expected);
-    assert_eq!(pretty_print, expected);
+    assert_eq!(
+        pretty_print,
+        expected,
+        "\n{}",
+        recordbatches.pretty_print().unwrap()
+    );
 }
 
 pub fn prepare_path(p: &str) -> String {

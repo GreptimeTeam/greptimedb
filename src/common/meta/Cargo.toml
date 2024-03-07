@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 async-recursion = "1.0"
@@ -15,11 +18,13 @@ async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
 common-grpc-expr.workspace = true
 common-macro.workspace = true
 common-procedure.workspace = true
+common-procedure-test.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
@@ -28,9 +33,11 @@ common-wal.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true
-futures-util.workspace = true
 futures.workspace = true
+futures-util.workspace = true
+hex = { version = "0.4" }
 humantime-serde.workspace = true
+itertools.workspace = true
 lazy_static.workspace = true
 prometheus.workspace = true
 prost.workspace = true

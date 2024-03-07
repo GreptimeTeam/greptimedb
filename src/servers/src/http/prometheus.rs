@@ -13,10 +13,10 @@
 // limitations under the License.
 
 //! prom supply the prometheus HTTP API Server compliance
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::{Path, Query, State};
-use axum::{Extension, Form, Json};
+use axum::{Extension, Form};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -25,10 +25,11 @@ use common_error::status_code::StatusCode;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use common_telemetry::tracing;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
-use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
+use datatypes::vectors::{Float64Vector, StringVector};
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
@@ -39,10 +40,11 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
-use snafu::{Location, OptionExt, ResultExt};
+use snafu::{Location, ResultExt};
 
+pub use super::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
-    CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedResultSnafu,
+    CollectRecordbatchSnafu, Error, InvalidQuerySnafu, Result, UnexpectedResultSnafu,
 };
 use crate::prom_store::METRIC_NAME_LABEL;
 use crate::prometheus_handler::PrometheusHandlerRef;
@@ -80,232 +82,22 @@ impl Default for PrometheusResponse {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct PrometheusJsonResponse {
-    pub status: String,
-    pub data: PrometheusResponse,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "errorType")]
-    pub error_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warnings: Option<Vec<String>>,
-}
-
-impl PrometheusJsonResponse {
-    pub fn error<S1, S2>(error_type: S1, reason: S2) -> Json<Self>
-    where
-        S1: Into<String>,
-        S2: Into<String>,
-    {
-        Json(PrometheusJsonResponse {
-            status: "error".to_string(),
-            data: PrometheusResponse::default(),
-            error: Some(reason.into()),
-            error_type: Some(error_type.into()),
-            warnings: None,
-        })
-    }
-
-    pub fn success(data: PrometheusResponse) -> Json<Self> {
-        Json(PrometheusJsonResponse {
-            status: "success".to_string(),
-            data,
-            error: None,
-            error_type: None,
-            warnings: None,
-        })
-    }
-
-    /// Convert from `Result<Output>`
-    pub async fn from_query_result(
-        result: Result<Output>,
-        metric_name: String,
-        result_type: ValueType,
-    ) -> Json<Self> {
-        let response: Result<Json<Self>> = try {
-            let json = match result? {
-                Output::RecordBatches(batches) => Self::success(Self::record_batches_to_data(
-                    batches,
-                    metric_name,
-                    result_type,
-                )?),
-                Output::Stream(stream) => {
-                    let record_batches = RecordBatches::try_collect(stream)
-                        .await
-                        .context(CollectRecordbatchSnafu)?;
-                    Self::success(Self::record_batches_to_data(
-                        record_batches,
-                        metric_name,
-                        result_type,
-                    )?)
-                }
-                Output::AffectedRows(_) => {
-                    Self::error("Unexpected", "expected data result, but got affected rows")
-                }
-            };
-
-            json
-        };
-
-        let result_type_string = result_type.to_string();
-
-        match response {
-            Ok(resp) => resp,
-            Err(err) => {
-                // Prometheus won't report error if querying nonexist label and metric
-                if err.status_code() == StatusCode::TableNotFound
-                    || err.status_code() == StatusCode::TableColumnNotFound
-                {
-                    Self::success(PrometheusResponse::PromData(PromData {
-                        result_type: result_type_string,
-                        ..Default::default()
-                    }))
-                } else {
-                    Self::error(err.status_code().to_string(), err.output_msg())
-                }
-            }
-        }
-    }
-
-    /// Convert [RecordBatches] to [PromData]
-    fn record_batches_to_data(
-        batches: RecordBatches,
-        metric_name: String,
-        result_type: ValueType,
-    ) -> Result<PrometheusResponse> {
-        // infer semantic type of each column from schema.
-        // TODO(ruihang): wish there is a better way to do this.
-        let mut timestamp_column_index = None;
-        let mut tag_column_indices = Vec::new();
-        let mut first_field_column_index = None;
-
-        for (i, column) in batches.schema().column_schemas().iter().enumerate() {
-            match column.data_type {
-                ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(_)) => {
-                    if timestamp_column_index.is_none() {
-                        timestamp_column_index = Some(i);
-                    }
-                }
-                ConcreteDataType::Float64(_) => {
-                    if first_field_column_index.is_none() {
-                        first_field_column_index = Some(i);
-                    }
-                }
-                ConcreteDataType::String(_) => {
-                    tag_column_indices.push(i);
-                }
-                _ => {}
-            }
-        }
-
-        let timestamp_column_index = timestamp_column_index.context(InternalSnafu {
-            err_msg: "no timestamp column found".to_string(),
-        })?;
-        let first_field_column_index = first_field_column_index.context(InternalSnafu {
-            err_msg: "no value column found".to_string(),
-        })?;
-
-        let metric_name = (METRIC_NAME.to_string(), metric_name);
-        let mut buffer = BTreeMap::<Vec<(String, String)>, Vec<(f64, String)>>::new();
-
-        for batch in batches.iter() {
-            // prepare things...
-            let tag_columns = tag_column_indices
-                .iter()
-                .map(|i| {
-                    batch
-                        .column(*i)
-                        .as_any()
-                        .downcast_ref::<StringVector>()
-                        .unwrap()
-                })
-                .collect::<Vec<_>>();
-            let tag_names = tag_column_indices
-                .iter()
-                .map(|c| batches.schema().column_name_by_index(*c).to_string())
-                .collect::<Vec<_>>();
-            let timestamp_column = batch
-                .column(timestamp_column_index)
-                .as_any()
-                .downcast_ref::<TimestampMillisecondVector>()
-                .unwrap();
-            let field_column = batch
-                .column(first_field_column_index)
-                .as_any()
-                .downcast_ref::<Float64Vector>()
-                .unwrap();
-
-            // assemble rows
-            for row_index in 0..batch.num_rows() {
-                // retrieve tags
-                // TODO(ruihang): push table name `__metric__`
-                let mut tags = vec![metric_name.clone()];
-                for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
-                    // TODO(ruihang): add test for NULL tag
-                    if let Some(tag_value) = tag_column.get_data(row_index) {
-                        tags.push((tag_name.to_string(), tag_value.to_string()));
-                    }
-                }
-
-                // retrieve timestamp
-                let timestamp_millis: i64 = timestamp_column.get_data(row_index).unwrap().into();
-                let timestamp = timestamp_millis as f64 / 1000.0;
-
-                // retrieve value
-                if let Some(v) = field_column.get_data(row_index) {
-                    buffer
-                        .entry(tags)
-                        .or_default()
-                        .push((timestamp, Into::<f64>::into(v).to_string()));
-                };
-            }
-        }
-
-        let result = buffer
-            .into_iter()
-            .map(|(tags, mut values)| {
-                let metric = tags.into_iter().collect();
-                match result_type {
-                    ValueType::Vector | ValueType::Scalar | ValueType::String => Ok(PromSeries {
-                        metric,
-                        value: values.pop(),
-                        ..Default::default()
-                    }),
-                    ValueType::Matrix => Ok(PromSeries {
-                        metric,
-                        values,
-                        ..Default::default()
-                    }),
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let result_type_string = result_type.to_string();
-        let data = PrometheusResponse::PromData(PromData {
-            result_type: result_type_string,
-            result,
-        });
-
-        Ok(data)
-    }
-}
-
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct FormatQuery {
     query: Option<String>,
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "format_query")
+)]
 pub async fn format_query(
     State(_handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
     Extension(_query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<InstantQuery>,
-) -> Json<PrometheusJsonResponse> {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_FORMAT_QUERY_ELAPSED.start_timer();
-
+) -> PrometheusJsonResponse {
     let query = params.query.or(form_params.query).unwrap_or_default();
     match promql_parser::parser::parse(&query) {
         Ok(expr) => {
@@ -328,13 +120,16 @@ pub struct InstantQuery {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "instant_query")
+)]
 pub async fn instant_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<InstantQuery>,
-) -> Json<PrometheusJsonResponse> {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_INSTANT_QUERY_ELAPSED.start_timer();
+) -> PrometheusJsonResponse {
     // Extract time from query string, or use current server time if not specified.
     let time = params
         .time
@@ -368,13 +163,16 @@ pub struct RangeQuery {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "range_query")
+)]
 pub async fn range_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<RangeQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<RangeQuery>,
-) -> Json<PrometheusJsonResponse> {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_RANGE_QUERY_ELAPSED.start_timer();
+) -> PrometheusJsonResponse {
     let prom_query = PromQuery {
         query: params.query.or(form_params.query).unwrap_or_default(),
         start: params.start.or(form_params.start).unwrap_or_default(),
@@ -437,14 +235,16 @@ impl<'de> Deserialize<'de> for Matches {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "labels_query")
+)]
 pub async fn labels_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<LabelsQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<LabelsQuery>,
-) -> Json<PrometheusJsonResponse> {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_LABEL_QUERY_ELAPSED.start_timer();
-
+) -> PrometheusJsonResponse {
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
@@ -541,7 +341,7 @@ async fn retrieve_series_from_query_result(
             record_batches_to_series(batches, series, table_name)?;
             Ok(())
         }
-        Output::Stream(stream) => {
+        Output::Stream(stream, _) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
@@ -565,7 +365,7 @@ async fn retrieve_labels_name_from_query_result(
             record_batches_to_labels_name(batches, labels)?;
             Ok(())
         }
-        Output::Stream(stream) => {
+        Output::Stream(stream, _) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
@@ -703,14 +503,16 @@ pub struct LabelValueQuery {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "label_values_query")
+)]
 pub async fn label_values_query(
     State(handler): State<PrometheusHandlerRef>,
     Path(label_name): Path<String>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Query(params): Query<LabelValueQuery>,
-) -> Json<PrometheusJsonResponse> {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_LABEL_VALUE_QUERY_ELAPSED.start_timer();
-
+) -> PrometheusJsonResponse {
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
@@ -771,7 +573,7 @@ async fn retrieve_label_values(
         Output::RecordBatches(batches) => {
             retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
         }
-        Output::Stream(stream) => {
+        Output::Stream(stream, _) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
@@ -829,13 +631,16 @@ pub struct SeriesQuery {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "series_query")
+)]
 pub async fn series_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<SeriesQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SeriesQuery>,
-) -> Json<PrometheusJsonResponse> {
-    let _timer = crate::metrics::METRIC_HTTP_PROMQL_SERIES_QUERY_ELAPSED.start_timer();
+) -> PrometheusJsonResponse {
     let mut queries: Vec<String> = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;

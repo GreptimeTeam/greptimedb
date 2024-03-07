@@ -39,12 +39,13 @@ use crate::error::{
 use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
-const TABLE_CATALOG: &str = "table_catalog";
-const TABLE_SCHEMA: &str = "table_schema";
-const TABLE_NAME: &str = "table_name";
-const TABLE_TYPE: &str = "table_type";
+pub const TABLE_CATALOG: &str = "table_catalog";
+pub const TABLE_SCHEMA: &str = "table_schema";
+pub const TABLE_NAME: &str = "table_name";
+pub const TABLE_TYPE: &str = "table_type";
 const TABLE_ID: &str = "table_id";
 const ENGINE: &str = "engine";
+const INIT_CAPACITY: usize = 42;
 
 pub(super) struct InformationSchemaTables {
     schema: SchemaRef,
@@ -141,12 +142,12 @@ impl InformationSchemaTablesBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            catalog_names: StringVectorBuilder::with_capacity(42),
-            schema_names: StringVectorBuilder::with_capacity(42),
-            table_names: StringVectorBuilder::with_capacity(42),
-            table_types: StringVectorBuilder::with_capacity(42),
-            table_ids: UInt32VectorBuilder::with_capacity(42),
-            engines: StringVectorBuilder::with_capacity(42),
+            catalog_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            schema_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            engines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -160,13 +161,6 @@ impl InformationSchemaTablesBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            if !catalog_manager
-                .schema_exists(&catalog_name, &schema_name)
-                .await?
-            {
-                continue;
-            }
-
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
 
             while let Some(table) = stream.try_next().await? {

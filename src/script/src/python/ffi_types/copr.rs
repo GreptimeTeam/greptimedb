@@ -403,7 +403,7 @@ impl PyQueryEngine {
                             Ok(Either::AffectedRows(cnt))
                         }
                         Ok(common_query::Output::RecordBatches(rbs)) => Ok(Either::Rb(rbs)),
-                        Ok(common_query::Output::Stream(s)) => Ok(Either::Rb(
+                        Ok(common_query::Output::Stream(s, _)) => Ok(Either::Rb(
                             common_recordbatch::util::collect_batches(s).await.unwrap(),
                         )),
                         Err(e) => Err(e),

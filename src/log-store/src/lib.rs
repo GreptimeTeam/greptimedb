@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(let_chains)]
+#![feature(io_error_more)]
 
 pub mod error;
 pub mod kafka;

@@ -28,6 +28,7 @@ use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
+use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
 use snafu::{location, Location, OptionExt, ResultExt};
 use tokio_stream::StreamExt;
@@ -122,10 +123,15 @@ impl RegionRequester {
             .fail();
         };
 
-        let metrics_str = Arc::new(ArcSwapOption::from(None));
-        let ref_str = metrics_str.clone();
+        let metrics = Arc::new(ArcSwapOption::from(None));
+        let metrics_ref = metrics.clone();
+
+        let tracing_context = TracingContext::from_current_span();
 
         let stream = Box::pin(stream!({
+            let _span = tracing_context.attach(common_telemetry::tracing::info_span!(
+                "poll_flight_data_stream"
+            ));
             while let Some(flight_message) = flight_message_stream.next().await {
                 let flight_message = flight_message
                     .map_err(BoxedError::new)
@@ -134,7 +140,8 @@ impl RegionRequester {
                 match flight_message {
                     FlightMessage::Recordbatch(record_batch) => yield Ok(record_batch),
                     FlightMessage::Metrics(s) => {
-                        ref_str.swap(Some(Arc::new(s)));
+                        let m = serde_json::from_str(&s).ok().map(Arc::new);
+                        metrics_ref.swap(m);
                         break;
                     }
                     _ => {
@@ -153,7 +160,7 @@ impl RegionRequester {
             schema,
             stream,
             output_ordering: None,
-            metrics: metrics_str,
+            metrics,
         };
         Ok(Box::pin(record_batch_stream))
     }
@@ -190,7 +197,7 @@ impl RegionRequester {
 
         check_response_header(header)?;
 
-        Ok(affected_rows)
+        Ok(affected_rows as _)
     }
 
     pub async fn handle(&self, request: RegionRequest) -> Result<AffectedRows> {

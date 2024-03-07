@@ -19,7 +19,9 @@ pub mod format;
 pub mod mock;
 pub mod status_code;
 
+pub use snafu;
+
+// HACK - these headers are here for shared in gRPC services. For common HTTP headers,
+// please define in `src/servers/src/http/header.rs`.
 pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = "x-greptime-err-code";
 pub const GREPTIME_DB_HEADER_ERROR_MSG: &str = "x-greptime-err-msg";
-
-pub use snafu;

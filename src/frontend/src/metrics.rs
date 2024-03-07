@@ -16,22 +16,32 @@ use lazy_static::lazy_static;
 use prometheus::*;
 
 lazy_static! {
-    pub static ref METRIC_HANDLE_SQL_ELAPSED: Histogram =
-        register_histogram!("greptime_frontend_handle_sql_elapsed", "frontend handle sql elapsed").unwrap();
-    pub static ref METRIC_HANDLE_PROMQL_ELAPSED: Histogram = register_histogram!(
-        "greptime_frontend_handle_promql_elapsed",
-        "frontend handle promql elapsed"
+    /// Timer of handling query in RPC handler.
+    pub static ref GRPC_HANDLE_QUERY_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_frontend_grpc_handle_query_elapsed",
+        "Elapsed time of handling queries in RPC handler",
+        &["type"],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
-    pub static ref METRIC_EXEC_PLAN_ELAPSED: Histogram =
-        register_histogram!("greptime_frontend_exec_plan_elapsed", "frontend exec plan elapsed").unwrap();
-    pub static ref METRIC_HANDLE_SCRIPTS_ELAPSED: Histogram = register_histogram!(
-        "greptime_frontend_handle_scripts_elapsed",
-        "frontend handle scripts elapsed"
+    pub static ref GRPC_HANDLE_SQL_ELAPSED: Histogram = GRPC_HANDLE_QUERY_ELAPSED
+        .with_label_values(&["sql"]);
+    pub static ref GRPC_HANDLE_PROMQL_ELAPSED: Histogram = GRPC_HANDLE_QUERY_ELAPSED
+        .with_label_values(&["promql"]);
+
+    /// Timer of handling scripts in the script handler.
+    pub static ref HANDLE_SCRIPT_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_frontend_handle_script_elapsed",
+        "Elapsed time of handling scripts in the script handler",
+        &["type"],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
-    pub static ref METRIC_RUN_SCRIPT_ELAPSED: Histogram =
-        register_histogram!("greptime_frontend_run_script_elapsed", "frontend run script elapsed").unwrap();
+    pub static ref INSERT_SCRIPTS_ELAPSED: Histogram = HANDLE_SCRIPT_ELAPSED
+        .with_label_values(&["insert"]);
+    pub static ref EXECUTE_SCRIPT_ELAPSED: Histogram = HANDLE_SCRIPT_ELAPSED
+        .with_label_values(&["execute"]);
+
     /// The samples count of Prometheus remote write.
     pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounter = register_int_counter!(
         "greptime_frontend_prometheus_remote_write_samples",

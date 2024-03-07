@@ -15,6 +15,7 @@
 //! Scans a region according to the scan request.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, warn};
@@ -124,6 +125,8 @@ pub(crate) struct ScanRegion {
     parallelism: ScanParallism,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
+    /// Start time of the scan task.
+    start_time: Option<Instant>,
 }
 
 impl ScanRegion {
@@ -141,6 +144,7 @@ impl ScanRegion {
             cache_manager,
             parallelism: ScanParallism::default(),
             ignore_inverted_index: false,
+            start_time: None,
         }
     }
 
@@ -152,8 +156,14 @@ impl ScanRegion {
     }
 
     #[must_use]
-    pub(crate) fn ignore_inverted_index(mut self, ignore: bool) -> Self {
+    pub(crate) fn with_ignore_inverted_index(mut self, ignore: bool) -> Self {
         self.ignore_inverted_index = ignore;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_start_time(mut self, now: Instant) -> Self {
+        self.start_time = Some(now);
         self
     }
 
@@ -223,7 +233,8 @@ impl ScanRegion {
             .with_files(files)
             .with_cache(self.cache_manager)
             .with_index_applier(index_applier)
-            .with_parallelism(self.parallelism);
+            .with_parallelism(self.parallelism)
+            .with_start_time(self.start_time);
 
         Ok(seq_scan)
     }
@@ -259,6 +270,14 @@ impl ScanRegion {
             self.access_layer.object_store().clone(),
             file_cache,
             self.version.metadata.as_ref(),
+            self.version
+                .options
+                .index_options
+                .inverted_index
+                .ignore_column_ids
+                .iter()
+                .copied()
+                .collect(),
         )
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build index applier"))

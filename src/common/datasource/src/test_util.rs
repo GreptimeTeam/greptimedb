@@ -113,6 +113,7 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
         tmp_store.clone(),
         &output_path,
         threshold(size),
+        8
     )
     .await
     .is_ok());
@@ -150,6 +151,7 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
         tmp_store.clone(),
         &output_path,
         threshold(size),
+        8
     )
     .await
     .is_ok());

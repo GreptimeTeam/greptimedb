@@ -19,10 +19,9 @@ use partition::manager::PartitionInfo;
 use partition::partition::PartitionBound;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use sql::ast::{Ident, Value as SqlValue};
-use sql::statements::create::{PartitionEntry, Partitions};
+use sql::ast::Ident;
+use sql::statements::create::Partitions;
 use sql::statements::show::{ShowDatabases, ShowTables, ShowVariables};
-use sql::{statements, MAXVALUE};
 use table::TableRef;
 
 use crate::error::{self, ExecuteStatementSnafu, Result};
@@ -35,7 +34,7 @@ impl StatementExecutor {
         stmt: ShowDatabases,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        query::sql::show_databases(stmt, self.catalog_manager.clone(), query_ctx)
+        query::sql::show_databases(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }
@@ -46,7 +45,7 @@ impl StatementExecutor {
         stmt: ShowTables,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        query::sql::show_tables(stmt, self.catalog_manager.clone(), query_ctx)
+        query::sql::show_tables(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }
@@ -78,7 +77,7 @@ impl StatementExecutor {
     }
 }
 
-fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {
+pub(crate) fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {
     if partitions.is_empty() {
         return Ok(None);
     }
@@ -90,30 +89,22 @@ fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Parti
         .map(|name| name[..].into())
         .collect();
 
-    let entries = partitions
-        .into_iter()
-        .map(|info| {
-            // Generated the partition name from id
-            let name = &format!("r{}", info.id.region_number());
-            let bounds = info.partition.partition_bounds();
-            let value_list = bounds
-                .iter()
-                .map(|b| match b {
-                    PartitionBound::Value(v) => statements::value_to_sql_value(v)
-                        .with_context(|_| error::ConvertSqlValueSnafu { value: v.clone() }),
-                    PartitionBound::MaxValue => Ok(SqlValue::Number(MAXVALUE.to_string(), false)),
+    let exprs = partitions
+        .iter()
+        .filter_map(|partition| {
+            partition
+                .partition
+                .partition_bounds()
+                .first()
+                .and_then(|bound| {
+                    if let PartitionBound::Expr(expr) = bound {
+                        Some(expr.to_parser_expr())
+                    } else {
+                        None
+                    }
                 })
-                .collect::<Result<Vec<_>>>()?;
-
-            Ok(PartitionEntry {
-                name: name[..].into(),
-                value_list,
-            })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
-    Ok(Some(Partitions {
-        column_list,
-        entries,
-    }))
+    Ok(Some(Partitions { column_list, exprs }))
 }

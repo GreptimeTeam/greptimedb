@@ -504,7 +504,7 @@ async fn do_query(num_iter: usize, db: &Database, table_name: &str) {
             let res = db.sql(&query).await.unwrap();
             match res {
                 Output::AffectedRows(_) | Output::RecordBatches(_) => (),
-                Output::Stream(stream) => {
+                Output::Stream(stream, _) => {
                     stream.try_collect::<Vec<_>>().await.unwrap();
                 }
             }

@@ -56,6 +56,7 @@ pub mod table_region;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
+mod txn_helper;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
@@ -84,7 +85,7 @@ use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
-use crate::kv_backend::txn::Txn;
+use crate::kv_backend::txn::{Txn, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
 use crate::DatanodeId;
@@ -277,7 +278,7 @@ impl<T: Serialize + DeserializeOwned + TableMetaValue> DeserializedValueWithByte
     }
 
     /// Returns original `bytes`
-    pub fn into_bytes(&self) -> Vec<u8> {
+    pub fn get_raw_bytes(&self) -> Vec<u8> {
         self.bytes.to_vec()
     }
 
@@ -362,8 +363,10 @@ impl TableMetadataManager {
         Option<DeserializedValueWithBytes<TableInfoValue>>,
         Option<DeserializedValueWithBytes<TableRouteValue>>,
     )> {
-        let (get_table_route_txn, table_route_decoder) =
-            self.table_route_manager.build_get_txn(table_id);
+        let (get_table_route_txn, table_route_decoder) = self
+            .table_route_manager
+            .table_route_storage()
+            .build_get_txn(table_id);
 
         let (get_table_info_txn, table_info_decoder) =
             self.table_info_manager.build_get_txn(table_id);
@@ -413,6 +416,7 @@ impl TableMetadataManager {
 
         let (create_table_route_txn, on_create_table_route_failure) = self
             .table_route_manager()
+            .table_route_storage()
             .build_create_txn(table_id, &table_route_value)?;
 
         let mut txn = Txn::merge_all(vec![
@@ -457,6 +461,93 @@ impl TableMetadataManager {
         Ok(())
     }
 
+    pub fn max_logical_tables_per_batch(&self) -> usize {
+        // The batch size is max_txn_size / 3 because the size of the `tables_data`
+        // is 3 times the size of the `tables_data`.
+        self.kv_backend.max_txn_size() / 3
+    }
+
+    /// Creates metadata for multiple logical tables and return an error if different metadata exists.
+    pub async fn create_logical_tables_metadata(
+        &self,
+        tables_data: Vec<(RawTableInfo, TableRouteValue)>,
+    ) -> Result<()> {
+        let len = tables_data.len();
+        let mut txns = Vec::with_capacity(3 * len);
+        struct OnFailure<F1, R1, F2, R2>
+        where
+            F1: FnOnce(&Vec<TxnOpResponse>) -> R1,
+            F2: FnOnce(&Vec<TxnOpResponse>) -> R2,
+        {
+            table_info_value: TableInfoValue,
+            on_create_table_info_failure: F1,
+            table_route_value: TableRouteValue,
+            on_create_table_route_failure: F2,
+        }
+        let mut on_failures = Vec::with_capacity(len);
+        for (mut table_info, table_route_value) in tables_data {
+            table_info.meta.region_numbers = table_route_value.region_numbers();
+            let table_id = table_info.ident.table_id;
+
+            // Creates table name.
+            let table_name = TableNameKey::new(
+                &table_info.catalog_name,
+                &table_info.schema_name,
+                &table_info.name,
+            );
+            let create_table_name_txn = self
+                .table_name_manager()
+                .build_create_txn(&table_name, table_id)?;
+            txns.push(create_table_name_txn);
+
+            // Creates table info.
+            let table_info_value = TableInfoValue::new(table_info);
+            let (create_table_info_txn, on_create_table_info_failure) =
+                self.table_info_manager()
+                    .build_create_txn(table_id, &table_info_value)?;
+            txns.push(create_table_info_txn);
+
+            let (create_table_route_txn, on_create_table_route_failure) = self
+                .table_route_manager()
+                .table_route_storage()
+                .build_create_txn(table_id, &table_route_value)?;
+            txns.push(create_table_route_txn);
+
+            on_failures.push(OnFailure {
+                table_info_value,
+                on_create_table_info_failure,
+                table_route_value,
+                on_create_table_route_failure,
+            });
+        }
+
+        let txn = Txn::merge_all(txns);
+        let r = self.kv_backend.txn(txn).await?;
+
+        // Checks whether metadata was already created.
+        if !r.succeeded {
+            for on_failure in on_failures {
+                let remote_table_info = (on_failure.on_create_table_info_failure)(&r.responses)?
+                    .context(error::UnexpectedSnafu {
+                        err_msg: "Reads the empty table info during the create table metadata",
+                    })?
+                    .into_inner();
+
+                let remote_table_route = (on_failure.on_create_table_route_failure)(&r.responses)?
+                    .context(error::UnexpectedSnafu {
+                        err_msg: "Reads the empty table route during the create table metadata",
+                    })?
+                    .into_inner();
+
+                let op_name = "the creating logical tables metadata";
+                ensure_values!(remote_table_info, on_failure.table_info_value, op_name);
+                ensure_values!(remote_table_route, on_failure.table_route_value, op_name);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Deletes metadata for table.
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn delete_table_metadata(
@@ -492,6 +583,7 @@ impl TableMetadataManager {
         // Deletes table route.
         let delete_table_route_txn = self
             .table_route_manager()
+            .table_route_storage()
             .build_delete_txn(table_id, table_route_value)?;
 
         let txn = Txn::merge_all(vec![
@@ -626,6 +718,7 @@ impl TableMetadataManager {
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
+            .table_route_storage()
             .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
         let txn = Txn::merge_all(vec![update_datanode_table_txn, update_table_route_txn]);
@@ -678,6 +771,7 @@ impl TableMetadataManager {
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
+            .table_route_storage()
             .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
         let r = self.kv_backend.txn(update_table_route_txn).await?;
@@ -764,6 +858,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use common_time::util::current_time_millis;
     use futures::TryStreamExt;
     use table::metadata::{RawTableInfo, TableInfo};
 
@@ -830,6 +925,7 @@ mod tests {
             leader_peer: Some(Peer::new(datanode, "a2")),
             follower_peers: vec![],
             leader_status: None,
+            leader_down_since: None,
         }
     }
 
@@ -908,6 +1004,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_logic_tables_metadata() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv);
+        let region_route = new_test_region_route();
+        let region_routes = vec![region_route.clone()];
+        let table_info: RawTableInfo =
+            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_id = table_info.ident.table_id;
+        let table_route_value = TableRouteValue::physical(region_routes.clone());
+
+        let tables_data = vec![(table_info.clone(), table_route_value.clone())];
+        // creates metadata.
+        table_metadata_manager
+            .create_logical_tables_metadata(tables_data.clone())
+            .await
+            .unwrap();
+
+        // if metadata was already created, it should be ok.
+        assert!(table_metadata_manager
+            .create_logical_tables_metadata(tables_data)
+            .await
+            .is_ok());
+
+        let mut modified_region_routes = region_routes.clone();
+        modified_region_routes.push(new_region_route(2, 3));
+        let modified_table_route_value = TableRouteValue::physical(modified_region_routes.clone());
+        let modified_tables_data = vec![(table_info.clone(), modified_table_route_value)];
+        // if remote metadata was exists, it should return an error.
+        assert!(table_metadata_manager
+            .create_logical_tables_metadata(modified_tables_data)
+            .await
+            .is_err());
+
+        let (remote_table_info, remote_table_route) = table_metadata_manager
+            .get_full_table_info(table_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            remote_table_info.unwrap().into_inner().table_info,
+            table_info
+        );
+        assert_eq!(
+            remote_table_route
+                .unwrap()
+                .into_inner()
+                .region_routes()
+                .unwrap(),
+            &region_routes
+        );
+    }
+
+    #[tokio::test]
     async fn test_delete_table_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
@@ -954,6 +1103,7 @@ mod tests {
 
         assert!(table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()
@@ -978,7 +1128,8 @@ mod tests {
 
         let removed_table_route = table_metadata_manager
             .table_route_manager()
-            .get_removed(table_id)
+            .table_route_storage()
+            .get_raw_removed(table_id)
             .await
             .unwrap()
             .unwrap()
@@ -1130,6 +1281,7 @@ mod tests {
                 leader_peer: Some(Peer::new(datanode, "a2")),
                 leader_status: Some(RegionStatus::Downgraded),
                 follower_peers: vec![],
+                leader_down_since: Some(current_time_millis()),
             },
             RegionRoute {
                 region: Region {
@@ -1141,6 +1293,7 @@ mod tests {
                 leader_peer: Some(Peer::new(datanode, "a1")),
                 leader_status: None,
                 follower_peers: vec![],
+                leader_down_since: None,
             },
         ];
         let table_info: RawTableInfo =
@@ -1172,6 +1325,7 @@ mod tests {
 
         let updated_route_value = table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()
@@ -1181,10 +1335,18 @@ mod tests {
             updated_route_value.region_routes().unwrap()[0].leader_status,
             Some(RegionStatus::Downgraded)
         );
+
+        assert!(updated_route_value.region_routes().unwrap()[0]
+            .leader_down_since
+            .is_some());
+
         assert_eq!(
             updated_route_value.region_routes().unwrap()[1].leader_status,
             Some(RegionStatus::Downgraded)
         );
+        assert!(updated_route_value.region_routes().unwrap()[1]
+            .leader_down_since
+            .is_some());
     }
 
     async fn assert_datanode_table(

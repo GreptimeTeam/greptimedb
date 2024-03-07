@@ -133,6 +133,10 @@ To write and query data, GreptimeDB is compatible with multiple [protocols and c
 - [GreptimeDB Rust Client](https://github.com/GreptimeTeam/greptimedb-client-rust)
 - [GreptimeDB JavaScript Client](https://github.com/GreptimeTeam/greptime-js-sdk)
 
+### Grafana Dashboard
+
+Our official Grafana dashboard is available at [grafana](./grafana/README.md) directory.
+
 ## Project Status
 
 This project is in its early stage and under heavy development. We move fast and
@@ -171,7 +175,7 @@ Please refer to [contribution guidelines](CONTRIBUTING.md) for more information.
 ## Acknowledgement
 
 - GreptimeDB uses [Apache Arrow™](https://arrow.apache.org/) as the memory model and [Apache Parquet™](https://parquet.apache.org/) as the persistent file format.
-- GreptimeDB's query engine is powered by [Apache Arrow DataFusion™](https://github.com/apache/arrow-datafusion).
+- GreptimeDB's query engine is powered by [Apache Arrow DataFusion™](https://arrow.apache.org/datafusion/).
 - [Apache OpenDAL™](https://opendal.apache.org) gives GreptimeDB a very general and elegant data access abstraction layer.
 - GreptimeDB's meta service is based on [etcd](https://etcd.io/).
 - GreptimeDB uses [RustPython](https://github.com/RustPython/RustPython) for experimental embedded python scripting.

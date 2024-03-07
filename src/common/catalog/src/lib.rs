@@ -56,11 +56,22 @@ pub fn build_db_string(catalog: &str, schema: &str) -> String {
 /// - if `[<catalog>-]` is provided, we split database name with `-` and use
 /// `<catalog>` and `<schema>`.
 pub fn parse_catalog_and_schema_from_db_string(db: &str) -> (&str, &str) {
+    match parse_optional_catalog_and_schema_from_db_string(db) {
+        (Some(catalog), schema) => (catalog, schema),
+        (None, schema) => (DEFAULT_CATALOG_NAME, schema),
+    }
+}
+
+/// Attempt to parse catalog and schema from given database name
+///
+/// Similar to [`parse_catalog_and_schema_from_db_string`] but returns an optional
+/// catalog if it's not provided in the database name.
+pub fn parse_optional_catalog_and_schema_from_db_string(db: &str) -> (Option<&str>, &str) {
     let parts = db.splitn(2, '-').collect::<Vec<&str>>();
     if parts.len() == 2 {
-        (parts[0], parts[1])
+        (Some(parts[0]), parts[1])
     } else {
-        (DEFAULT_CATALOG_NAME, db)
+        (None, db)
     }
 }
 
@@ -89,6 +100,21 @@ mod tests {
         assert_eq!(
             ("catalog", "schema1-schema2"),
             parse_catalog_and_schema_from_db_string("catalog-schema1-schema2")
+        );
+
+        assert_eq!(
+            (None, "fullschema"),
+            parse_optional_catalog_and_schema_from_db_string("fullschema")
+        );
+
+        assert_eq!(
+            (Some("catalog"), "schema"),
+            parse_optional_catalog_and_schema_from_db_string("catalog-schema")
+        );
+
+        assert_eq!(
+            (Some("catalog"), "schema1-schema2"),
+            parse_optional_catalog_and_schema_from_db_string("catalog-schema1-schema2")
         );
     }
 }

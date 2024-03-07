@@ -16,10 +16,11 @@
 
 mod format;
 pub(crate) mod helper;
-mod metadata;
+pub(crate) mod metadata;
 mod page_reader;
 pub mod reader;
 pub mod row_group;
+mod row_selection;
 mod stats;
 pub mod writer;
 
@@ -88,7 +89,8 @@ mod tests {
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::test_util::sst_util::{
-        new_batch_by_range, new_source, sst_file_handle, sst_region_metadata,
+        assert_parquet_metadata_eq, new_batch_by_range, new_source, sst_file_handle,
+        sst_region_metadata,
     };
     use crate::test_util::{check_reader_result, TestEnv};
 
@@ -258,34 +260,7 @@ mod tests {
         let reader = builder.build().await.unwrap();
         let reader_metadata = reader.parquet_metadata();
 
-        // Because ParquetMetaData doesn't implement PartialEq,
-        // check all fields manually
-        macro_rules! assert_metadata {
-            ( $writer:expr, $reader:expr, $($method:ident,)+ ) => {
-                $(
-                    assert_eq!($writer.$method(), $reader.$method());
-                )+
-            }
-        }
-
-        assert_metadata!(
-            writer_metadata.file_metadata(),
-            reader_metadata.file_metadata(),
-            version,
-            num_rows,
-            created_by,
-            key_value_metadata,
-            schema_descr,
-            column_orders,
-        );
-
-        assert_metadata!(
-            writer_metadata,
-            reader_metadata,
-            row_groups,
-            column_index,
-            offset_index,
-        );
+        assert_parquet_metadata_eq(writer_metadata, reader_metadata)
     }
 
     #[tokio::test]

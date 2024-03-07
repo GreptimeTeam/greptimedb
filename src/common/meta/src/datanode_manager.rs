@@ -15,23 +15,25 @@
 use std::sync::Arc;
 
 use api::v1::region::{QueryRequest, RegionRequest};
+pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::error::Result;
 use crate::peer::Peer;
 
-pub type AffectedRows = u64;
-
+/// The trait for handling requests to datanode.
 #[async_trait::async_trait]
 pub trait Datanode: Send + Sync {
     /// Handles DML, and DDL requests.
     async fn handle(&self, request: RegionRequest) -> Result<AffectedRows>;
 
+    /// Handles query requests
     async fn handle_query(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
 }
 
 pub type DatanodeRef = Arc<dyn Datanode>;
 
+/// Datanode manager
 #[async_trait::async_trait]
 pub trait DatanodeManager: Send + Sync {
     /// Retrieves a target `datanode`.

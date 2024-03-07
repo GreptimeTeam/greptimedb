@@ -19,14 +19,12 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
 use common_datasource::file_format::json::{JsonFormat, JsonOpener};
-use common_datasource::file_format::orc::{
-    infer_orc_schema, new_orc_stream_reader, OrcArrowStreamReaderAdapter,
-};
+use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
-use common_recordbatch::adapter::ParquetRecordBatchStreamAdapter;
+use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
 use common_recordbatch::DfSendableRecordBatchStream;
 use common_telemetry::{debug, tracing};
 use datafusion::datasource::listing::PartitionedFile;
@@ -206,44 +204,76 @@ impl StatementExecutor {
 
     async fn build_read_stream(
         &self,
-        schema: SchemaRef,
+        compat_schema: SchemaRef,
         object_store: &ObjectStore,
         file_metadata: &FileMetadata,
         projection: Vec<usize>,
     ) -> Result<DfSendableRecordBatchStream> {
         match file_metadata {
-            FileMetadata::Csv { format, path, .. } => {
+            FileMetadata::Csv {
+                format,
+                path,
+                schema,
+            } => {
+                let projected_schema = Arc::new(
+                    compat_schema
+                        .project(&projection)
+                        .context(error::ProjectSchemaSnafu)?,
+                );
                 let csv_conf = CsvConfigBuilder::default()
                     .batch_size(DEFAULT_BATCH_SIZE)
                     .file_schema(schema.clone())
-                    .file_projection(Some(projection))
+                    .file_projection(Some(projection.clone()))
                     .build()
                     .context(error::BuildCsvConfigSnafu)?;
 
-                self.build_file_stream(
-                    CsvOpener::new(csv_conf, object_store.clone(), format.compression_type),
-                    path,
-                    schema,
-                )
-                .await
+                let stream = self
+                    .build_file_stream(
+                        CsvOpener::new(csv_conf, object_store.clone(), format.compression_type),
+                        path,
+                        schema.clone(),
+                    )
+                    .await?;
+
+                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
+                    projected_schema,
+                    stream,
+                    Some(projection),
+                )))
             }
-            FileMetadata::Json { format, path, .. } => {
-                let projected_schema = Arc::new(
+            FileMetadata::Json {
+                format,
+                path,
+                schema,
+            } => {
+                let projected_file_schema = Arc::new(
                     schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
-                self.build_file_stream(
-                    JsonOpener::new(
-                        DEFAULT_BATCH_SIZE,
-                        projected_schema,
-                        object_store.clone(),
-                        format.compression_type,
-                    ),
-                    path,
-                    schema,
-                )
-                .await
+                let projected_schema = Arc::new(
+                    compat_schema
+                        .project(&projection)
+                        .context(error::ProjectSchemaSnafu)?,
+                );
+                let stream = self
+                    .build_file_stream(
+                        JsonOpener::new(
+                            DEFAULT_BATCH_SIZE,
+                            projected_file_schema,
+                            object_store.clone(),
+                            format.compression_type,
+                        ),
+                        path,
+                        schema.clone(),
+                    )
+                    .await?;
+
+                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
+                    projected_schema,
+                    stream,
+                    Some(projection),
+                )))
             }
             FileMetadata::Parquet { metadata, path, .. } => {
                 let reader = object_store
@@ -253,13 +283,18 @@ impl StatementExecutor {
                     .context(error::ReadObjectSnafu { path })?;
                 let builder =
                     ParquetRecordBatchStreamBuilder::new_with_metadata(reader, metadata.clone());
-                let upstream = builder
+                let stream = builder
                     .build()
                     .context(error::BuildParquetRecordBatchStreamSnafu)?;
 
-                Ok(Box::pin(ParquetRecordBatchStreamAdapter::new(
-                    schema,
-                    upstream,
+                let projected_schema = Arc::new(
+                    compat_schema
+                        .project(&projection)
+                        .context(error::ProjectSchemaSnafu)?,
+                );
+                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
+                    projected_schema,
+                    stream,
                     Some(projection),
                 )))
             }
@@ -272,9 +307,18 @@ impl StatementExecutor {
                 let stream = new_orc_stream_reader(reader)
                     .await
                     .context(error::ReadOrcSnafu)?;
-                let stream = OrcArrowStreamReaderAdapter::new(schema, stream, Some(projection));
 
-                Ok(Box::pin(stream))
+                let projected_schema = Arc::new(
+                    compat_schema
+                        .project(&projection)
+                        .context(error::ProjectSchemaSnafu)?,
+                );
+
+                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
+                    projected_schema,
+                    stream,
+                    Some(projection),
+                )))
             }
         }
     }
@@ -420,7 +464,10 @@ fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     }
 }
 
-/// Allows the file schema is a subset of table
+/// Generates a maybe compatible schema of the file schema.
+///
+/// If there is a field is found in table schema,
+/// copy the field data type to maybe compatible schema(`compatible_fields`).
 fn generated_schema_projection_and_compatible_file_schema(
     file: &SchemaRef,
     table: &SchemaRef,

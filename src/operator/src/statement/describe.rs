@@ -16,6 +16,7 @@ use common_error::ext::BoxedError;
 use common_query::Output;
 use common_telemetry::tracing;
 use session::context::QueryContextRef;
+use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
 use sql::util::format_raw_object_name;
@@ -24,7 +25,6 @@ use crate::error::{
     CatalogSnafu, DescribeStatementSnafu, ExternalSnafu, Result, TableNotFoundSnafu,
 };
 use crate::statement::StatementExecutor;
-use crate::table::table_idents_to_full_name;
 
 impl StatementExecutor {
     #[tracing::instrument(skip_all)]
@@ -33,7 +33,7 @@ impl StatementExecutor {
         stmt: DescribeTable,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
+        let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), &query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 

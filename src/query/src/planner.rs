@@ -12,30 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
+use datafusion::common::DFSchema;
 use datafusion::execution::context::SessionState;
+use datafusion::sql::planner::PlannerContext;
+use datafusion_expr::Expr as DfExpr;
 use datafusion_sql::planner::{ParserOptions, SqlToRel};
 use promql::planner::PromPlanner;
 use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use sql::ast::Expr as SqlExpr;
 use sql::statements::statement::Statement;
 
-use crate::error::{PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
+use crate::error::{DataFusionSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
 use crate::parser::QueryStatement;
 use crate::plan::LogicalPlan;
 use crate::query_engine::QueryEngineState;
 use crate::range_select::plan_rewrite::RangePlanRewriter;
-use crate::DfContextProviderAdapter;
+use crate::{DfContextProviderAdapter, QueryEngineContext};
 
 #[async_trait]
 pub trait LogicalPlanner: Send + Sync {
     async fn plan(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub struct DfLogicalPlanner {
@@ -65,8 +72,8 @@ impl DfLogicalPlanner {
         let context_provider = DfContextProviderAdapter::try_new(
             self.engine_state.clone(),
             self.session_state.clone(),
-            &df_stmt,
-            query_ctx,
+            Some(&df_stmt),
+            query_ctx.clone(),
         )
         .await?;
 
@@ -81,10 +88,48 @@ impl DfLogicalPlanner {
         let result = sql_to_rel
             .statement_to_plan(df_stmt)
             .context(PlanSqlSnafu)?;
-        let plan = RangePlanRewriter::new(table_provider)
+        let plan = RangePlanRewriter::new(table_provider, query_ctx.clone())
             .rewrite(result)
             .await?;
+
+        // Optimize logical plan by extension rules
+        let context = QueryEngineContext::new(self.session_state.clone(), query_ctx);
+        let plan = self
+            .engine_state
+            .optimize_by_extension_rules(plan, &context)
+            .context(DataFusionSnafu)?;
+
         Ok(LogicalPlan::DfPlan(plan))
+    }
+
+    /// Generate a relational expression from a SQL expression
+    #[tracing::instrument(skip_all)]
+    pub(crate) async fn sql_to_expr(
+        &self,
+        sql: SqlExpr,
+        schema: &DFSchema,
+        normalize_ident: bool,
+        query_ctx: QueryContextRef,
+    ) -> Result<DfExpr> {
+        let context_provider = DfContextProviderAdapter::try_new(
+            self.engine_state.clone(),
+            self.session_state.clone(),
+            None,
+            query_ctx,
+        )
+        .await?;
+
+        let config_options = self.session_state.config().options();
+        let parser_options = ParserOptions {
+            enable_ident_normalization: normalize_ident,
+            parse_float_as_decimal: config_options.sql_parser.parse_float_as_decimal,
+        };
+
+        let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);
+
+        sql_to_rel
+            .sql_to_expr(sql.into(), schema, &mut PlannerContext::new())
+            .context(DataFusionSnafu)
     }
 
     #[tracing::instrument(skip_all)]
@@ -110,5 +155,9 @@ impl LogicalPlanner for DfLogicalPlanner {
             QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
             QueryStatement::Promql(stmt) => self.plan_pql(stmt, query_ctx).await,
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

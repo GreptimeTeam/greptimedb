@@ -84,11 +84,11 @@ mod tests {
                 TIME INDEX (ts),
                 PRIMARY KEY(host)
             )
-            PARTITION BY RANGE COLUMNS (host) (
-                PARTITION r0 VALUES LESS THAN ('550-A'),
-                PARTITION r1 VALUES LESS THAN ('550-W'),
-                PARTITION r2 VALUES LESS THAN ('MOSS'),
-                PARTITION r3 VALUES LESS THAN (MAXVALUE),
+            PARTITION ON COLUMNS (host) (
+                host < '550-A',
+                host >= '550-A' AND host < '550-W',
+                host >= '550-W' AND host < 'MOSS',
+                host >= 'MOSS'
             )
             engine=mito"#;
         create_table(instance, sql).await;
@@ -173,7 +173,7 @@ mod tests {
 
         let sql = "SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host"; // use nanoseconds as where condition
         let output = query(instance, sql).await;
-        let Output::Stream(s) = output else {
+        let Output::Stream(s, _) = output else {
             unreachable!()
         };
         let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
@@ -210,11 +210,11 @@ mod tests {
 
         let table_route_value = manager
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()
-            .unwrap()
-            .into_inner();
+            .unwrap();
 
         let region_to_dn_map = region_distribution(
             table_route_value

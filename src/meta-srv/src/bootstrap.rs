@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use api::v1::meta::cluster_server::ClusterServer;
-use api::v1::meta::ddl_task_server::DdlTaskServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::lock_server::LockServer;
+use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -26,6 +26,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use etcd_client::Client;
+use futures::future;
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
@@ -33,7 +34,6 @@ use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
-use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tonic::transport::server::{Router, TcpIncoming};
 
@@ -110,12 +110,14 @@ impl MetaSrvInstance {
         let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
             addr: &self.opts.http.addr,
         })?;
-        let http_srv = self.http_srv.start(addr);
-        select! {
-            v = meta_srv => v?,
-            v = http_srv => v.map(|_| ()).context(error::StartHttpSnafu)?,
-        }
-
+        let http_srv = async {
+            self.http_srv
+                .start(addr)
+                .await
+                .map(|_| ())
+                .context(error::StartHttpSnafu)
+        };
+        future::try_join(meta_srv, http_srv).await?;
         Ok(())
     }
 
@@ -172,7 +174,7 @@ pub fn router(meta_srv: MetaSrv) -> Router {
         .add_service(StoreServer::new(meta_srv.clone()))
         .add_service(ClusterServer::new(meta_srv.clone()))
         .add_service(LockServer::new(meta_srv.clone()))
-        .add_service(DdlTaskServer::new(meta_srv.clone()))
+        .add_service(ProcedureServiceServer::new(meta_srv.clone()))
         .add_service(admin::make_admin_service(meta_srv))
 }
 

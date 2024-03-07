@@ -22,13 +22,14 @@ use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::WalOptionsAllocator;
 use common_procedure::options::ProcedureConfig;
+use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
-use datanode::config::DatanodeOptions;
 use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
@@ -39,12 +40,13 @@ use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, Test
 
 pub struct GreptimeDbStandalone {
     pub instance: Arc<Instance>,
-    pub datanode_opts: DatanodeOptions,
     pub mix_options: MixOptions,
     pub guard: TestGuard,
+    // Used in rebuild.
+    pub kv_backend: KvBackendRef,
+    pub procedure_manager: ProcedureManagerRef,
 }
 
-#[derive(Clone)]
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
     wal_config: DatanodeWalConfig,
@@ -104,31 +106,16 @@ impl GreptimeDbStandaloneBuilder {
         self
     }
 
-    pub async fn build(self) -> GreptimeDbStandalone {
-        let default_store_type = self.default_store.unwrap_or(StorageType::File);
-        let store_types = self.store_providers.unwrap_or_default();
+    pub async fn build_with(
+        &self,
+        kv_backend: KvBackendRef,
+        procedure_manager: ProcedureManagerRef,
+        guard: TestGuard,
+        mix_options: MixOptions,
+    ) -> GreptimeDbStandalone {
+        let plugins = self.plugin.clone().unwrap_or_default();
 
-        let (opts, guard) = create_tmp_dir_and_datanode_opts(
-            Mode::Standalone,
-            default_store_type,
-            store_types,
-            &self.instance_name,
-            self.wal_config.clone(),
-        );
-
-        let procedure_config = ProcedureConfig::default();
-        let kv_backend_config = KvBackendConfig::default();
-        let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
-            format!("{}/kv", &opts.storage.data_home),
-            kv_backend_config.clone(),
-            procedure_config.clone(),
-        )
-        .await
-        .unwrap();
-
-        let plugins = self.plugin.unwrap_or_default();
-
-        let datanode = DatanodeBuilder::new(opts.clone(), plugins.clone())
+        let datanode = DatanodeBuilder::new(mix_options.datanode.clone(), plugins.clone())
             .with_kv_backend(kv_backend.clone())
             .build()
             .await
@@ -145,16 +132,15 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        let wal_meta = self.meta_wal_config.clone();
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            wal_meta.clone(),
+            mix_options.wal_meta.clone(),
             kv_backend.clone(),
         ));
-        let table_meta_allocator = TableMetadataAllocator::new(
+        let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
-            table_metadata_manager.clone(),
-        );
+            table_metadata_manager.table_name_manager().clone(),
+        ));
 
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(
@@ -168,11 +154,12 @@ impl GreptimeDbStandaloneBuilder {
             .unwrap(),
         );
 
-        let instance = FrontendBuilder::new(kv_backend, datanode_manager, ddl_task_executor)
-            .with_plugin(plugins)
-            .try_build()
-            .await
-            .unwrap();
+        let instance =
+            FrontendBuilder::new(kv_backend.clone(), datanode_manager, ddl_task_executor)
+                .with_plugin(plugins)
+                .try_build()
+                .await
+                .unwrap();
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();
@@ -183,17 +170,47 @@ impl GreptimeDbStandaloneBuilder {
 
         GreptimeDbStandalone {
             instance: Arc::new(instance),
-            datanode_opts: opts.clone(),
-            mix_options: MixOptions {
-                data_home: opts.storage.data_home.to_string(),
-                procedure: procedure_config,
-                metadata_store: kv_backend_config,
-                frontend: FrontendOptions::default(),
-                datanode: opts,
-                logging: LoggingOptions::default(),
-                wal_meta,
-            },
+            mix_options,
             guard,
+            kv_backend,
+            procedure_manager,
         }
+    }
+
+    pub async fn build(&self) -> GreptimeDbStandalone {
+        let default_store_type = self.default_store.unwrap_or(StorageType::File);
+        let store_types = self.store_providers.clone().unwrap_or_default();
+
+        let (opts, guard) = create_tmp_dir_and_datanode_opts(
+            Mode::Standalone,
+            default_store_type,
+            store_types,
+            &self.instance_name,
+            self.wal_config.clone(),
+        );
+
+        let kv_backend_config = KvBackendConfig::default();
+        let procedure_config = ProcedureConfig::default();
+        let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
+            format!("{}/kv", &opts.storage.data_home),
+            kv_backend_config.clone(),
+            procedure_config.clone(),
+        )
+        .await
+        .unwrap();
+
+        let wal_meta = self.meta_wal_config.clone();
+        let mix_options = MixOptions {
+            data_home: opts.storage.data_home.to_string(),
+            procedure: procedure_config,
+            metadata_store: kv_backend_config,
+            frontend: FrontendOptions::default(),
+            datanode: opts,
+            logging: LoggingOptions::default(),
+            wal_meta,
+        };
+
+        self.build_with(kv_backend, procedure_manager, guard, mix_options)
+            .await
     }
 }

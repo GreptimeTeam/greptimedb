@@ -16,34 +16,34 @@ use std::sync::Arc;
 
 use partition::partition::PartitionDef;
 
-use crate::ir::{Column, CreateTableExpr};
+use crate::ir::{Column, CreateTableExpr, Ident};
 
 pub type TableContextRef = Arc<TableContext>;
 
 /// TableContext stores table info.
 pub struct TableContext {
-    pub name: String,
+    pub name: Ident,
     pub columns: Vec<Column>,
 
     // GreptimeDB specific options
-    pub partitions: Vec<PartitionDef>,
+    pub partition: Option<PartitionDef>,
     pub primary_keys: Vec<usize>,
 }
 
 impl From<&CreateTableExpr> for TableContext {
     fn from(
         CreateTableExpr {
-            name,
+            table_name: name,
             columns,
-            partitions,
+            partition,
             primary_keys,
             ..
         }: &CreateTableExpr,
     ) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.clone(),
             columns: columns.clone(),
-            partitions: partitions.clone(),
+            partition: partition.clone(),
             primary_keys: primary_keys.clone(),
         }
     }

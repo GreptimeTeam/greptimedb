@@ -7,14 +7,15 @@ license.workspace = true
 [features]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait.workspace = true
-axum = "0.6"
-axum-macros = "0.3"
 bytes.workspace = true
 catalog.workspace = true
 client.workspace = true
@@ -25,8 +26,8 @@ common-datasource.workspace = true
 common-error.workspace = true
 common-function.workspace = true
 common-greptimedb-telemetry.workspace = true
-common-grpc-expr.workspace = true
 common-grpc.workspace = true
+common-grpc-expr.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-procedure.workspace = true
@@ -37,9 +38,9 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
 dashmap.workspace = true
+datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datafusion.workspace = true
 datatypes.workspace = true
 file-engine.workspace = true
 futures = "0.3"
@@ -67,8 +68,8 @@ sql.workspace = true
 store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
@@ -77,7 +78,6 @@ url = "2.3.1"
 uuid.workspace = true
 
 [dev-dependencies]
-axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 client.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-query.workspace = true

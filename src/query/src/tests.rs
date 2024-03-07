@@ -40,10 +40,10 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
     let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
     let plan = engine
         .planner()
-        .plan(stmt, QueryContext::arc())
+        .plan(stmt, query_ctx.clone())
         .await
         .unwrap();
-    let Output::Stream(stream) = engine.execute(plan, query_ctx).await.unwrap() else {
+    let Output::Stream(stream, _) = engine.execute(plan, query_ctx).await.unwrap() else {
         unreachable!()
     };
     util::collect(stream).await.unwrap()
@@ -52,5 +52,5 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
 pub fn new_query_engine_with_table(table: TableRef) -> QueryEngineRef {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
 
-    QueryEngineFactory::new(catalog_manager, None, None, false).query_engine()
+    QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine()
 }

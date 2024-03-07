@@ -138,6 +138,7 @@ async fn get_leader_peer_ids(
 ) -> Result<Vec<u64>> {
     table_metadata_manager
         .table_route_manager()
+        .table_route_storage()
         .get(table_id)
         .await
         .context(error::TableMetadataManagerSnafu)

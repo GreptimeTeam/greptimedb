@@ -18,7 +18,7 @@ mod eq_list;
 mod in_list;
 mod regex_match;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
 use common_query::logical_plan::Expr;
@@ -54,6 +54,9 @@ pub(crate) struct SstIndexApplierBuilder<'a> {
     /// Metadata of the region, used to get metadata like column type.
     metadata: &'a RegionMetadata,
 
+    /// Column ids to ignore.
+    ignore_column_ids: HashSet<ColumnId>,
+
     /// Stores predicates during traversal on the Expr tree.
     output: HashMap<ColumnId, Vec<Predicate>>,
 }
@@ -65,12 +68,14 @@ impl<'a> SstIndexApplierBuilder<'a> {
         object_store: ObjectStore,
         file_cache: Option<FileCacheRef>,
         metadata: &'a RegionMetadata,
+        ignore_column_ids: HashSet<ColumnId>,
     ) -> Self {
         Self {
             region_dir,
             object_store,
             file_cache,
             metadata,
+            ignore_column_ids,
             output: HashMap::default(),
         }
     }
@@ -138,7 +143,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
     }
 
     /// Helper function to get the column id and the column type of a tag column.
-    /// Returns `None` if the column is not a tag column.
+    /// Returns `None` if the column is not a tag column or if the column is ignored.
     fn tag_column_id_and_type(
         &self,
         column_name: &str,
@@ -150,8 +155,18 @@ impl<'a> SstIndexApplierBuilder<'a> {
                 column: column_name,
             })?;
 
-        Ok((column.semantic_type == SemanticType::Tag)
-            .then(|| (column.column_id, column.column_schema.data_type.clone())))
+        if self.ignore_column_ids.contains(&column.column_id) {
+            return Ok(None);
+        }
+
+        if column.semantic_type != SemanticType::Tag {
+            return Ok(None);
+        }
+
+        Ok(Some((
+            column.column_id,
+            column.column_schema.data_type.clone(),
+        )))
     }
 
     /// Helper function to get a non-null literal.
@@ -175,7 +190,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let value = Value::try_from(lit.clone()).context(ConvertValueSnafu)?;
         let mut bytes = vec![];
         let field = SortField::new(data_type);
-        IndexValueCodec::encode_value(value.as_value_ref(), &field, &mut bytes)?;
+        IndexValueCodec::encode_nonnull_value(value.as_value_ref(), &field, &mut bytes)?;
         Ok(bytes)
     }
 }
@@ -270,7 +285,7 @@ mod tests {
 
     pub(crate) fn encoded_string(s: impl Into<String>) -> Vec<u8> {
         let mut bytes = vec![];
-        IndexValueCodec::encode_value(
+        IndexValueCodec::encode_nonnull_value(
             Value::from(s.into()).as_value_ref(),
             &SortField::new(ConcreteDataType::string_datatype()),
             &mut bytes,
@@ -281,7 +296,7 @@ mod tests {
 
     pub(crate) fn encoded_int64(s: impl Into<i64>) -> Vec<u8> {
         let mut bytes = vec![];
-        IndexValueCodec::encode_value(
+        IndexValueCodec::encode_nonnull_value(
             Value::from(s.into()).as_value_ref(),
             &SortField::new(ConcreteDataType::int64_datatype()),
             &mut bytes,
@@ -293,8 +308,13 @@ mod tests {
     #[test]
     fn test_collect_and_basic() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let expr = DfExpr::BinaryExpr(BinaryExpr {
             left: Box::new(DfExpr::BinaryExpr(BinaryExpr {

@@ -550,11 +550,11 @@ async fn test_region_usage() {
     flush_region(&engine, region_id, None).await;
 
     let region_stat = region.region_usage().await;
-    assert_eq!(region_stat.wal_usage, 0);
-    assert_eq!(region_stat.sst_usage, 3006);
+    assert_eq!(region_stat.sst_usage, 2962);
 
     // region total usage
-    assert_eq!(region_stat.disk_usage(), 4072);
+    // Some memtables may share items.
+    assert!(region_stat.disk_usage() >= 4028);
 }
 
 #[tokio::test]

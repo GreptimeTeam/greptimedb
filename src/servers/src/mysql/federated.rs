@@ -37,8 +37,8 @@ static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))").unwrap());
 static SHOW_COLLATION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(show collation where(.*))").unwrap());
-static SHOW_VARIABLES_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES(.*))").unwrap());
+static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES( LIKE (.*))?)").unwrap());
 
 static SELECT_DATABASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(SELECT DATABASE\(\s*\))").unwrap());
@@ -68,6 +68,7 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(SET sql_mode(.*))",
         "(?i)^(SET SQL_SELECT_LIMIT(.*))",
         "(?i)^(SET @@(.*))",
+        "(?i)^(SET PROFILING(.*))",
 
         "(?i)^(SHOW COLLATION)",
         "(?i)^(SHOW CHARSET)",
@@ -247,7 +248,8 @@ fn check_show_variables(query: &str) -> Option<Output> {
         Some(show_variables("sql_mode", "ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION"))
     } else if SHOW_LOWER_CASE_PATTERN.is_match(query) {
         Some(show_variables("lower_case_table_names", "0"))
-    } else if SHOW_COLLATION_PATTERN.is_match(query) || SHOW_VARIABLES_PATTERN.is_match(query) {
+    } else if SHOW_COLLATION_PATTERN.is_match(query) || SHOW_VARIABLES_LIKE_PATTERN.is_match(query)
+    {
         Some(show_variables("", ""))
     } else {
         None

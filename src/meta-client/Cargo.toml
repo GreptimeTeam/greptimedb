@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 async-trait = "0.1"
@@ -20,8 +23,8 @@ serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 table.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 
 [dev-dependencies]

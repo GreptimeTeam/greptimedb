@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::stream::BoxStream;
@@ -26,11 +27,11 @@ use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::RangeRequest;
+use crate::rpc::store::{BatchGetRequest, RangeRequest};
 use crate::rpc::KeyValue;
 use crate::table_name::TableName;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableNameKey<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,
@@ -143,6 +144,7 @@ impl TableNameValue {
     }
 }
 
+#[derive(Clone)]
 pub struct TableNameManager {
     kv_backend: KvBackendRef,
 }
@@ -218,6 +220,31 @@ impl TableNameManager {
             .await?
             .map(|x| TableNameValue::try_from_raw_value(&x.value))
             .transpose()
+    }
+
+    pub async fn batch_get(
+        &self,
+        keys: Vec<TableNameKey<'_>>,
+    ) -> Result<Vec<Option<TableNameValue>>> {
+        let raw_keys = keys
+            .into_iter()
+            .map(|key| key.as_raw_key())
+            .collect::<Vec<_>>();
+        let req = BatchGetRequest::new().with_keys(raw_keys.clone());
+        let res = self.kv_backend.batch_get(req).await?;
+        let kvs = res
+            .kvs
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<HashMap<_, _>>();
+        let mut array = vec![None; raw_keys.len()];
+        for (i, key) in raw_keys.into_iter().enumerate() {
+            let v = kvs.get(&key);
+            array[i] = v
+                .map(|v| TableNameValue::try_from_raw_value(v))
+                .transpose()?;
+        }
+        Ok(array)
     }
 
     pub async fn exists(&self, key: TableNameKey<'_>) -> Result<bool> {

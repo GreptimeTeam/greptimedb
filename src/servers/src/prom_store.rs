@@ -23,6 +23,7 @@ use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_recordbatch::{RecordBatch, RecordBatches};
+use common_telemetry::tracing;
 use common_time::timestamp::TimeUnit;
 use datafusion::prelude::{col, lit, regexp_match, Expr};
 use datafusion_common::ScalarValue;
@@ -37,6 +38,8 @@ use crate::error::{self, Result};
 use crate::row_writer::{self, MultiTableData};
 
 pub const METRIC_NAME_LABEL: &str = "__name__";
+
+pub const METRIC_NAME_LABEL_BYTES: &[u8] = b"__name__";
 
 /// Metrics for push gateway protocol
 pub struct Metrics {
@@ -62,6 +65,7 @@ pub fn table_name(q: &Query) -> Result<String> {
 }
 
 /// Create a DataFrame from a remote Query
+#[tracing::instrument(skip_all)]
 pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
     let DataFrame::DataFusion(dataframe) = dataframe;
 
@@ -298,7 +302,9 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
     Ok(timeseries_map.into_values().collect())
 }
 
-pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRequests, usize)> {
+pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertRequests, usize)> {
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
+
     let mut multi_table_data = MultiTableData::new();
 
     for series in &request.timeseries {
@@ -324,29 +330,54 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
             series.samples.len(),
         );
 
-        for Sample { value, timestamp } in &series.samples {
+        // labels
+        let kvs = series.labels.iter().filter_map(|label| {
+            if label.name == METRIC_NAME_LABEL {
+                None
+            } else {
+                Some((label.name.clone(), label.value.clone()))
+            }
+        });
+
+        if series.samples.len() == 1 {
             let mut one_row = table_data.alloc_one_row();
 
-            // labels
-            let kvs = series.labels.iter().filter_map(|label| {
-                if label.name == METRIC_NAME_LABEL {
-                    None
-                } else {
-                    Some((label.name.to_string(), label.value.as_str()))
-                }
-            });
             row_writer::write_tags(table_data, kvs, &mut one_row)?;
             // value
-            row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
+            row_writer::write_f64(
+                table_data,
+                GREPTIME_VALUE,
+                series.samples[0].value,
+                &mut one_row,
+            )?;
             // timestamp
             row_writer::write_ts_millis(
                 table_data,
                 GREPTIME_TIMESTAMP,
-                Some(*timestamp),
+                Some(series.samples[0].timestamp),
                 &mut one_row,
             )?;
 
             table_data.add_row(one_row);
+        } else {
+            for Sample { value, timestamp } in &series.samples {
+                let mut one_row = table_data.alloc_one_row();
+
+                // labels
+                let kvs = kvs.clone();
+                row_writer::write_tags(table_data, kvs, &mut one_row)?;
+                // value
+                row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
+                // timestamp
+                row_writer::write_ts_millis(
+                    table_data,
+                    GREPTIME_TIMESTAMP,
+                    Some(*timestamp),
+                    &mut one_row,
+                )?;
+
+                table_data.add_row(one_row);
+            }
         }
     }
 
@@ -620,7 +651,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut exprs = to_grpc_row_insert_requests(write_request)
+        let mut exprs = to_grpc_row_insert_requests(&write_request)
             .unwrap()
             .0
             .inserts;

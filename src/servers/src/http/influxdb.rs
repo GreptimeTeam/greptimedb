@@ -20,6 +20,7 @@ use axum::response::IntoResponse;
 use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
+use common_telemetry::tracing;
 use session::context::QueryContextRef;
 
 use crate::error::{Result, TimePrecisionSnafu};
@@ -39,6 +40,7 @@ pub async fn influxdb_health() -> Result<impl IntoResponse> {
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "influxdb", request_type = "write_v1"))]
 pub async fn influxdb_write_v1(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
@@ -58,6 +60,7 @@ pub async fn influxdb_write_v1(
 }
 
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "influxdb", request_type = "write_v2"))]
 pub async fn influxdb_write_v2(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,

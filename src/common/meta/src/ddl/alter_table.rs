@@ -21,6 +21,8 @@ use api::v1::region::{
 };
 use api::v1::{AlterExpr, RenameTable};
 use async_trait::async_trait;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_grpc_expr::alter_expr_to_request;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
@@ -38,7 +40,7 @@ use table::requests::AlterKind;
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::handle_operate_region_error;
+use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
 use crate::error::{self, ConvertAlterTableRequestSnafu, Error, InvalidProtoMsgSnafu, Result};
 use crate::key::table_info::TableInfoValue;
@@ -218,8 +220,14 @@ impl AlterTableProcedure {
                 let requester = requester.clone();
 
                 alter_region_tasks.push(async move {
-                    if let Err(e) = requester.handle(request).await {
-                        return Err(handle_operate_region_error(datanode)(e));
+                    if let Err(err) = requester.handle(request).await {
+                        if err.status_code() != StatusCode::RequestOutdated {
+                            // Treat request outdated as success.
+                            // The engine will throw this code when the schema version not match.
+                            // As this procedure has locked the table, the only reason for this error
+                            // is procedure is succeeded before and is retrying.
+                            return Err(add_peer_context_if_needed(datanode)(err));
+                        }
                     }
                     Ok(())
                 });

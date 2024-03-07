@@ -12,6 +12,9 @@ path = "src/bin/greptime.rs"
 [features]
 tokio-console = ["common-telemetry/tokio-console"]
 
+[lints]
+workspace = true
+
 [dependencies]
 anymap = "1.0.0-beta.2"
 async-trait.workspace = true

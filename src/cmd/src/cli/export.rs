@@ -58,8 +58,8 @@ pub struct ExportCommand {
     #[clap(long)]
     output_dir: String,
 
-    /// The name of the catalog to export. Default to "greptime-*"".
-    #[clap(long, default_value = "")]
+    /// The name of the catalog to export.
+    #[clap(long, default_value = "greptime-*")]
     database: String,
 
     /// Parallelism of the export.
@@ -142,7 +142,7 @@ impl Export {
                     .with_context(|_| RequestDatabaseSnafu {
                         sql: "show databases".to_string(),
                     })?;
-            let Output::Stream(stream) = result else {
+            let Output::Stream(stream, _) = result else {
                 NotDataFromOutputSnafu.fail()?
             };
             let record_batch = collect(stream)
@@ -183,7 +183,7 @@ impl Export {
             .sql(&sql)
             .await
             .with_context(|_| RequestDatabaseSnafu { sql })?;
-        let Output::Stream(stream) = result else {
+        let Output::Stream(stream, _) = result else {
             NotDataFromOutputSnafu.fail()?
         };
         let Some(record_batch) = collect(stream)
@@ -235,7 +235,7 @@ impl Export {
             .sql(&sql)
             .await
             .with_context(|_| RequestDatabaseSnafu { sql })?;
-        let Output::Stream(stream) = result else {
+        let Output::Stream(stream, _) = result else {
             NotDataFromOutputSnafu.fail()?
         };
         let record_batch = collect(stream)

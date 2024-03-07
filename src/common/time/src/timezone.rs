@@ -15,8 +15,8 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use chrono::FixedOffset;
-use chrono_tz::Tz;
+use chrono::{FixedOffset, NaiveDateTime, TimeZone};
+use chrono_tz::{OffsetComponents, Tz};
 use once_cell::sync::OnceCell;
 use snafu::{OptionExt, ResultExt};
 
@@ -108,6 +108,21 @@ impl Timezone {
             ParseTimezoneNameSnafu { raw: tz_string }.fail()
         }
     }
+
+    /// Returns the number of seconds to add to convert from UTC to the local time.
+    pub fn local_minus_utc(&self) -> i64 {
+        match self {
+            Self::Offset(offset) => offset.local_minus_utc().into(),
+            Self::Named(tz) => {
+                let datetime = NaiveDateTime::from_timestamp_opt(0, 0).unwrap();
+                let datetime = tz.from_utc_datetime(&datetime);
+                let utc_offset = datetime.offset().base_utc_offset();
+                let dst_offset = datetime.offset().dst_offset();
+                let total_offset = utc_offset + dst_offset;
+                total_offset.num_seconds()
+            }
+        }
+    }
 }
 
 impl Display for Timezone {
@@ -128,6 +143,31 @@ pub fn system_timezone_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_local_minus_utc() {
+        assert_eq!(
+            28800,
+            Timezone::from_tz_string("+8:00").unwrap().local_minus_utc()
+        );
+        assert_eq!(
+            28800,
+            Timezone::from_tz_string("Asia/Shanghai")
+                .unwrap()
+                .local_minus_utc()
+        );
+        assert_eq!(
+            -14400,
+            Timezone::from_tz_string("America/Aruba")
+                .unwrap()
+                .local_minus_utc()
+        );
+
+        assert_eq!(
+            -36000,
+            Timezone::from_tz_string("HST").unwrap().local_minus_utc()
+        );
+    }
 
     #[test]
     fn test_from_tz_string() {

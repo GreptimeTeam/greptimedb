@@ -177,6 +177,7 @@ impl RegionMigrationManager {
             .context_factory
             .table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(region_id.table_id())
             .await
             .context(error::TableMetadataManagerSnafu)?
@@ -184,7 +185,7 @@ impl RegionMigrationManager {
                 table_id: region_id.table_id(),
             })?;
 
-        Ok(table_route.into_inner())
+        Ok(table_route)
     }
 
     /// Verifies the type of region migration table route.

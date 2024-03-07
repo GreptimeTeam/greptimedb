@@ -15,8 +15,9 @@
 mod statistics;
 mod temp_provider;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::warn;
@@ -32,7 +33,7 @@ use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu,
+    BiSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu,
     PushIndexValueSnafu, Result,
 };
 use crate::metrics::{
@@ -40,14 +41,18 @@ use crate::metrics::{
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
-use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
+use crate::sst::index::codec::{ColumnId, IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::creator::statistics::Statistics;
 use crate::sst::index::creator::temp_provider::TempFileProvider;
 use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
 use crate::sst::index::store::InstrumentedStore;
-use crate::sst::index::{
-    INDEX_BLOB_TYPE, MIN_MEMORY_USAGE_THRESHOLD, PIPE_BUFFER_SIZE_FOR_SENDING_BLOB,
-};
+use crate::sst::index::INDEX_BLOB_TYPE;
+
+/// The minimum memory usage threshold for one column.
+const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
+
+/// The buffer size for the pipe used to send index data to the puffin blob.
+const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 
 type ByteCount = usize;
 type RowCount = usize;
@@ -72,6 +77,12 @@ pub struct SstIndexCreator {
     stats: Statistics,
     /// Whether the index creation is aborted.
     aborted: bool,
+
+    /// Ignore column IDs for index creation.
+    ignore_column_ids: HashSet<ColumnId>,
+
+    /// The memory usage of the index creator.
+    memory_usage: Arc<AtomicUsize>,
 }
 
 impl SstIndexCreator {
@@ -84,19 +95,22 @@ impl SstIndexCreator {
         index_store: ObjectStore,
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
-        row_group_size: NonZeroUsize,
+        segment_row_count: NonZeroUsize,
     ) -> Self {
-        // `memory_usage_threshold` is the total memory usage threshold of the index creation,
-        // so we need to divide it by the number of columns
-        let memory_threshold = memory_usage_threshold.map(|threshold| {
-            (threshold / metadata.primary_key.len()).max(MIN_MEMORY_USAGE_THRESHOLD)
-        });
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&metadata.region_id, &sst_file_id),
             intermediate_manager,
         ));
-        let sorter = ExternalSorter::factory(temp_file_provider.clone() as _, memory_threshold);
-        let index_creator = Box::new(SortIndexCreator::new(sorter, row_group_size));
+
+        let memory_usage = Arc::new(AtomicUsize::new(0));
+
+        let sorter = ExternalSorter::factory(
+            temp_file_provider.clone() as _,
+            Some(MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN),
+            memory_usage.clone(),
+            memory_usage_threshold,
+        );
+        let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
         Self {
@@ -110,12 +124,21 @@ impl SstIndexCreator {
 
             stats: Statistics::default(),
             aborted: false,
+
+            ignore_column_ids: HashSet::default(),
+            memory_usage,
         }
     }
 
     /// Sets the write buffer size of the store.
     pub fn with_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
         self.store = self.store.with_write_buffer_size(write_buffer_size);
+        self
+    }
+
+    /// Sets the ignore column IDs for index creation.
+    pub fn with_ignore_column_ids(mut self, ignore_column_ids: HashSet<ColumnId>) -> Self {
+        self.ignore_column_ids = ignore_column_ids;
         self
     }
 
@@ -189,9 +212,17 @@ impl SstIndexCreator {
         guard.inc_row_count(n);
 
         for (column_id, field, value) in self.codec.decode(batch.primary_key())? {
+            if self.ignore_column_ids.contains(column_id) {
+                continue;
+            }
+
             if let Some(value) = value.as_ref() {
                 self.value_buf.clear();
-                IndexValueCodec::encode_value(value.as_value_ref(), field, &mut self.value_buf)?;
+                IndexValueCodec::encode_nonnull_value(
+                    value.as_value_ref(),
+                    field,
+                    &mut self.value_buf,
+                )?;
             }
 
             // non-null value -> Some(encoded_bytes), null value -> None
@@ -249,8 +280,21 @@ impl SstIndexCreator {
             self.index_creator.finish(&mut index_writer),
             puffin_writer.add_blob(blob)
         );
-        index_finish.context(IndexFinishSnafu)?;
-        puffin_add_blob.context(PuffinAddBlobSnafu)?;
+
+        match (
+            puffin_add_blob.context(PuffinAddBlobSnafu),
+            index_finish.context(IndexFinishSnafu),
+        ) {
+            (Err(e1), Err(e2)) => BiSnafu {
+                first: Box::new(e1),
+                second: Box::new(e2),
+            }
+            .fail()?,
+
+            (Ok(_), e @ Err(_)) => e?,
+            (e @ Err(_), Ok(_)) => e?,
+            _ => {}
+        }
 
         let byte_count = puffin_writer.finish().await.context(PuffinFinishSnafu)?;
         guard.inc_byte_count(byte_count);
@@ -262,11 +306,323 @@ impl SstIndexCreator {
 
         self.temp_file_provider.cleanup().await
     }
+
+    pub fn memory_usage(&self) -> usize {
+        self.memory_usage.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    // TODO(zhongzc): This PR has grown quite large, and the SstIndexCreator deserves
-    // a significant number of unit tests. These unit tests are substantial enough to
-    // make up a large PR on their own. I will bring them in with the next PR.
+    use std::collections::BTreeSet;
+    use std::iter;
+
+    use api::v1::SemanticType;
+    use datafusion_expr::{binary_expr, col, lit, Expr as DfExpr, Operator};
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::value::ValueRef;
+    use datatypes::vectors::{UInt64Vector, UInt8Vector};
+    use futures::future::BoxFuture;
+    use object_store::services::Memory;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+    use crate::sst::index::applier::builder::SstIndexApplierBuilder;
+    use crate::sst::location;
+
+    fn mock_object_store() -> ObjectStore {
+        ObjectStore::new(Memory::default()).unwrap().finish()
+    }
+
+    fn mock_intm_mgr() -> IntermediateManager {
+        IntermediateManager::new(mock_object_store())
+    }
+
+    fn mock_region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_str",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_i32",
+                    ConcreteDataType::int32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 3,
+            })
+            .primary_key(vec![1, 2]);
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn new_batch(num_rows: usize, str_tag: impl AsRef<str>, i32_tag: impl Into<i32>) -> Batch {
+        let fields = vec![
+            SortField::new(ConcreteDataType::string_datatype()),
+            SortField::new(ConcreteDataType::int32_datatype()),
+        ];
+        let codec = McmpRowCodec::new(fields);
+        let row: [ValueRef; 2] = [str_tag.as_ref().into(), i32_tag.into().into()];
+        let primary_key = codec.encode(row.into_iter()).unwrap();
+
+        Batch::new(
+            primary_key,
+            Arc::new(UInt64Vector::from_iter_values(
+                iter::repeat(0).take(num_rows),
+            )),
+            Arc::new(UInt64Vector::from_iter_values(
+                iter::repeat(0).take(num_rows),
+            )),
+            Arc::new(UInt8Vector::from_iter_values(
+                iter::repeat(1).take(num_rows),
+            )),
+            vec![],
+        )
+        .unwrap()
+    }
+
+    async fn build_applier_factory(
+        tags: BTreeSet<(&'static str, i32)>,
+    ) -> impl Fn(DfExpr) -> BoxFuture<'static, Vec<usize>> {
+        let region_dir = "region0".to_string();
+        let sst_file_id = FileId::random();
+        let file_path = location::index_file_path(&region_dir, sst_file_id);
+        let object_store = mock_object_store();
+        let region_metadata = mock_region_metadata();
+        let intm_mgr = mock_intm_mgr();
+        let memory_threshold = None;
+        let segment_row_count = 2;
+
+        let mut creator = SstIndexCreator::new(
+            file_path,
+            sst_file_id,
+            &region_metadata,
+            object_store.clone(),
+            intm_mgr,
+            memory_threshold,
+            NonZeroUsize::new(segment_row_count).unwrap(),
+        );
+
+        for (str_tag, i32_tag) in &tags {
+            let batch = new_batch(segment_row_count, str_tag, *i32_tag);
+            creator.update(&batch).await.unwrap();
+        }
+
+        let (row_count, _) = creator.finish().await.unwrap();
+        assert_eq!(row_count, tags.len() * segment_row_count);
+
+        move |expr| {
+            let applier = SstIndexApplierBuilder::new(
+                region_dir.clone(),
+                object_store.clone(),
+                None,
+                &region_metadata,
+                Default::default(),
+            )
+            .build(&[expr.into()])
+            .unwrap()
+            .unwrap();
+            Box::pin(async move {
+                applier
+                    .apply(sst_file_id)
+                    .await
+                    .unwrap()
+                    .matched_segment_ids
+                    .iter_ones()
+                    .collect()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_and_query_get_key() {
+        let tags = BTreeSet::from_iter([
+            ("aaa", 1),
+            ("aaa", 2),
+            ("aaa", 3),
+            ("aab", 1),
+            ("aab", 2),
+            ("aab", 3),
+            ("abc", 1),
+            ("abc", 2),
+            ("abc", 3),
+        ]);
+
+        let applier_factory = build_applier_factory(tags).await;
+
+        let expr = col("tag_str").eq(lit("aaa"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2]);
+
+        let expr = col("tag_i32").eq(lit(2));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![1, 4, 7]);
+
+        let expr = col("tag_str").eq(lit("aaa")).and(col("tag_i32").eq(lit(2)));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![1]);
+
+        let expr = col("tag_str")
+            .eq(lit("aaa"))
+            .or(col("tag_str").eq(lit("abc")));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2, 6, 7, 8]);
+
+        let expr = col("tag_str").in_list(vec![lit("aaa"), lit("abc")], false);
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2, 6, 7, 8]);
+    }
+
+    #[tokio::test]
+    async fn test_create_and_query_range() {
+        let tags = BTreeSet::from_iter([
+            ("aaa", 1),
+            ("aaa", 2),
+            ("aaa", 3),
+            ("aab", 1),
+            ("aab", 2),
+            ("aab", 3),
+            ("abc", 1),
+            ("abc", 2),
+            ("abc", 3),
+        ]);
+
+        let applier_factory = build_applier_factory(tags).await;
+
+        let expr = col("tag_str").between(lit("aaa"), lit("aab"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2, 3, 4, 5]);
+
+        let expr = col("tag_i32").between(lit(2), lit(3));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![1, 2, 4, 5, 7, 8]);
+
+        let expr = col("tag_str").between(lit("aaa"), lit("aaa"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2]);
+
+        let expr = col("tag_i32").between(lit(2), lit(2));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![1, 4, 7]);
+    }
+
+    #[tokio::test]
+    async fn test_create_and_query_comparison() {
+        let tags = BTreeSet::from_iter([
+            ("aaa", 1),
+            ("aaa", 2),
+            ("aaa", 3),
+            ("aab", 1),
+            ("aab", 2),
+            ("aab", 3),
+            ("abc", 1),
+            ("abc", 2),
+            ("abc", 3),
+        ]);
+
+        let applier_factory = build_applier_factory(tags).await;
+
+        let expr = col("tag_str").lt(lit("aab"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2]);
+
+        let expr = col("tag_i32").lt(lit(2));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 3, 6]);
+
+        let expr = col("tag_str").gt(lit("aab"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![6, 7, 8]);
+
+        let expr = col("tag_i32").gt(lit(2));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![2, 5, 8]);
+
+        let expr = col("tag_str").lt_eq(lit("aab"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2, 3, 4, 5]);
+
+        let expr = col("tag_i32").lt_eq(lit(2));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 3, 4, 6, 7]);
+
+        let expr = col("tag_str").gt_eq(lit("aab"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![3, 4, 5, 6, 7, 8]);
+
+        let expr = col("tag_i32").gt_eq(lit(2));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![1, 2, 4, 5, 7, 8]);
+
+        let expr = col("tag_str")
+            .gt(lit("aaa"))
+            .and(col("tag_str").lt(lit("abc")));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![3, 4, 5]);
+
+        let expr = col("tag_i32").gt(lit(1)).and(col("tag_i32").lt(lit(3)));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![1, 4, 7]);
+    }
+
+    #[tokio::test]
+    async fn test_create_and_query_regex() {
+        let tags = BTreeSet::from_iter([
+            ("aaa", 1),
+            ("aaa", 2),
+            ("aaa", 3),
+            ("aab", 1),
+            ("aab", 2),
+            ("aab", 3),
+            ("abc", 1),
+            ("abc", 2),
+            ("abc", 3),
+        ]);
+
+        let applier_factory = build_applier_factory(tags).await;
+
+        let expr = binary_expr(col("tag_str"), Operator::RegexMatch, lit(".*"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let expr = binary_expr(col("tag_str"), Operator::RegexMatch, lit("a.*c"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![6, 7, 8]);
+
+        let expr = binary_expr(col("tag_str"), Operator::RegexMatch, lit("a.*b$"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![3, 4, 5]);
+
+        let expr = binary_expr(col("tag_str"), Operator::RegexMatch, lit("\\w"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let expr = binary_expr(col("tag_str"), Operator::RegexMatch, lit("\\d"));
+        let res = applier_factory(expr).await;
+        assert!(res.is_empty());
+
+        let expr = binary_expr(col("tag_str"), Operator::RegexMatch, lit("^aaa$"));
+        let res = applier_factory(expr).await;
+        assert_eq!(res, vec![0, 1, 2]);
+    }
 }

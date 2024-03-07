@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 arc-swap = "1.6"
@@ -34,10 +37,12 @@ parking_lot = "0.12"
 prometheus.workspace = true
 prost.workspace = true
 rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 session.workspace = true
 snafu.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 
 [dev-dependencies]

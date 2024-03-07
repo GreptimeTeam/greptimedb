@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -40,7 +41,9 @@ pub struct QueryContext {
     current_user: ArcSwap<Option<UserInfoRef>>,
     #[builder(setter(custom))]
     timezone: ArcSwap<Timezone>,
-    sql_dialect: Box<dyn Dialect + Send + Sync>,
+    sql_dialect: Arc<dyn Dialect + Send + Sync>,
+    #[builder(default)]
+    extension: HashMap<String, String>,
 }
 
 impl QueryContextBuilder {
@@ -61,6 +64,19 @@ impl Display for QueryContext {
     }
 }
 
+impl Clone for QueryContext {
+    fn clone(&self) -> Self {
+        Self {
+            current_catalog: self.current_catalog.clone(),
+            current_schema: self.current_schema.clone(),
+            current_user: self.current_user.load().clone().into(),
+            timezone: self.timezone.load().clone().into(),
+            sql_dialect: self.sql_dialect.clone(),
+            extension: self.extension.clone(),
+        }
+    }
+}
+
 impl From<&RegionRequestHeader> for QueryContext {
     fn from(value: &RegionRequestHeader) -> Self {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(&value.dbname);
@@ -70,7 +86,8 @@ impl From<&RegionRequestHeader> for QueryContext {
             current_user: Default::default(),
             // for request send to datanode, all timestamp have converted to UTC, so timezone is not important
             timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
-            sql_dialect: Box::new(GreptimeDbDialect {}),
+            sql_dialect: Arc::new(GreptimeDbDialect {}),
+            extension: Default::default(),
         }
     }
 }
@@ -139,12 +156,31 @@ impl QueryContext {
         let _ = self.timezone.swap(Arc::new(timezone));
     }
 
+    pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
+        self.extension.insert(key.into(), value.into());
+    }
+
+    pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
+        self.extension.get(key.as_ref()).map(|v| v.as_str())
+    }
+
     /// SQL like `set variable` may change timezone or other info in `QueryContext`.
     /// We need persist these change in `Session`.
     pub fn update_session(&self, session: &SessionRef) {
         let tz = self.timezone();
         if *session.timezone() != *tz {
             session.set_timezone(tz.as_ref().clone())
+        }
+    }
+
+    /// Default to double quote and fallback to back quote
+    pub fn quote_style(&self) -> char {
+        if self.sql_dialect().is_delimited_identifier_start('"') {
+            '"'
+        } else if self.sql_dialect().is_delimited_identifier_start('\'') {
+            '\''
+        } else {
+            '`'
         }
     }
 }
@@ -166,8 +202,16 @@ impl QueryContextBuilder {
                 .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None).clone()))),
             sql_dialect: self
                 .sql_dialect
-                .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),
+                .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
+            extension: self.extension.unwrap_or_default(),
         })
+    }
+
+    pub fn set_extension(mut self, key: String, value: String) -> Self {
+        self.extension
+            .get_or_insert_with(HashMap::new)
+            .insert(key, value);
+        self
     }
 }
 
@@ -207,10 +251,10 @@ pub enum Channel {
 }
 
 impl Channel {
-    pub fn dialect(&self) -> Box<dyn Dialect + Send + Sync> {
+    pub fn dialect(&self) -> Arc<dyn Dialect + Send + Sync> {
         match self {
-            Channel::Mysql => Box::new(MySqlDialect {}),
-            Channel::Postgres => Box::new(PostgreSqlDialect {}),
+            Channel::Mysql => Arc::new(MySqlDialect {}),
+            Channel::Postgres => Arc::new(PostgreSqlDialect {}),
         }
     }
 }

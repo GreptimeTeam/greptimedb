@@ -24,6 +24,7 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
 use common_function::function_registry::FUNCTION_REGISTRY;
+use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
@@ -39,7 +40,6 @@ use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
-use crate::table_mutation::TableMutationHandlerRef;
 
 /// Describe statement result
 #[derive(Debug)]
@@ -56,22 +56,40 @@ pub trait QueryEngine: Send + Sync {
     /// so that it can be downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
+    /// Returns the logical planner
     fn planner(&self) -> Arc<dyn LogicalPlanner>;
 
+    /// Returns the query engine name.
     fn name(&self) -> &str;
 
-    async fn describe(&self, plan: LogicalPlan) -> Result<DescribeResult>;
+    /// Describe the given [`LogicalPlan`].
+    async fn describe(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<DescribeResult>;
 
+    /// Execute the given [`LogicalPlan`].
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output>;
 
+    /// Register a [`ScalarUdf`].
     fn register_udf(&self, udf: ScalarUdf);
 
+    /// Register an aggregate function.
+    ///
+    /// # Panics
+    /// Will panic if the function with same name is already registered.
     fn register_aggregate_function(&self, func: AggregateFunctionMetaRef);
 
+    /// Register a SQL function.
+    /// Will override if the function with same name is already registered.
     fn register_function(&self, func: FunctionRef);
 
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
+
+    /// Create a [`QueryEngineContext`].
+    fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext;
 }
 
 pub struct QueryEngineFactory {
@@ -83,12 +101,14 @@ impl QueryEngineFactory {
         catalog_manager: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         with_dist_planner: bool,
     ) -> Self {
         Self::new_with_plugins(
             catalog_manager,
             region_query_handler,
             table_mutation_handler,
+            procedure_service_handler,
             with_dist_planner,
             Default::default(),
         )
@@ -98,6 +118,7 @@ impl QueryEngineFactory {
         catalog_manager: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
     ) -> Self {
@@ -105,6 +126,7 @@ impl QueryEngineFactory {
             catalog_manager,
             region_query_handler,
             table_mutation_handler,
+            procedure_service_handler,
             with_dist_planner,
             plugins.clone(),
         ));
@@ -118,6 +140,7 @@ impl QueryEngineFactory {
     }
 }
 
+/// Register all functions implemented by GreptimeDB
 fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
     for func in FUNCTION_REGISTRY.functions() {
         query_engine.register_function(func);
@@ -137,7 +160,7 @@ mod tests {
     #[test]
     fn test_query_engine_factory() {
         let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list, None, None, false);
+        let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
 
         let engine = factory.query_engine();
 

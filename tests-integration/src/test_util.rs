@@ -50,6 +50,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 use servers::server::Server;
+use servers::tls::ReloadableTlsServerConfig;
 use servers::Mode;
 use session::context::QueryContext;
 
@@ -387,12 +388,12 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         ..Default::default()
     };
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(
-            instance.instance.clone(),
-        ))
+        .with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
+            None,
+        )
         .with_metrics_handler(MetricsHandler)
-        .with_greptime_config_options(instance.datanode_opts.to_toml_string())
+        .with_greptime_config_options(instance.mix_options.datanode.to_toml_string())
         .build();
     (http_server.build(http_server.make_app()), instance.guard)
 }
@@ -420,16 +421,15 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     let mut http_server = HttpServerBuilder::new(http_opts);
 
-    http_server
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(
-            instance.instance.clone(),
-        ))
-        .with_script_handler(instance.instance.clone())
+    http_server = http_server
+        .with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
+            Some(instance.instance.clone()),
+        )
         .with_greptime_config_options(instance.mix_options.to_toml().unwrap());
 
     if let Some(user_provider) = user_provider {
-        http_server.with_user_provider(user_provider);
+        http_server = http_server.with_user_provider(user_provider);
     }
 
     let http_server = http_server.build();
@@ -458,12 +458,13 @@ pub async fn setup_test_prom_app_with_frontend(
     };
     let frontend_ref = instance.instance.clone();
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(frontend_ref.clone()))
-        .with_script_handler(frontend_ref.clone())
-        .with_prom_handler(frontend_ref.clone())
+        .with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()),
+            Some(frontend_ref.clone()),
+        )
+        .with_prom_handler(frontend_ref.clone(), true)
         .with_prometheus_handler(frontend_ref)
-        .with_greptime_config_options(instance.datanode_opts.to_toml_string())
+        .with_greptime_config_options(instance.mix_options.datanode.to_toml_string())
         .build();
     let app = http_server.build(http_server.make_app());
     (app, instance.guard)
@@ -568,7 +569,10 @@ pub async fn setup_mysql_server_with_user_provider(
         )),
         Arc::new(MysqlSpawnConfig::new(
             false,
-            opts.tls.setup().unwrap().map(Arc::new),
+            Arc::new(
+                ReloadableTlsServerConfig::try_new(opts.tls.clone())
+                    .expect("Failed to load certificates and keys"),
+            ),
             opts.reject_no_database.unwrap_or(false),
         )),
     ));
@@ -614,9 +618,15 @@ pub async fn setup_pg_server_with_user_provider(
         addr: fe_pg_addr.clone(),
         ..Default::default()
     };
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(opts.tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
     let fe_pg_server = Arc::new(Box::new(PostgresServer::new(
         ServerSqlQueryHandlerAdapter::arc(fe_instance_ref),
-        opts.tls.clone(),
+        opts.tls.should_force_tls(),
+        tls_server_config,
         runtime,
         user_provider,
     )) as Box<dyn Server>);

@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -22,13 +23,19 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_plugins::GREPTIME_EXEC_PREFIX;
+use common_query::physical_plan::PhysicalPlan;
 use common_query::Output;
 use common_recordbatch::util;
+use common_telemetry::tracing;
+use datafusion::physical_plan::metrics::MetricValue;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use session::context::QueryContextRef;
 
+use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
@@ -60,17 +67,22 @@ pub struct SqlQuery {
 
 /// Handler to execute sql
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "sql"))]
 pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SqlQuery>,
 ) -> HttpResponse {
-    let sql_handler = &state.sql_handler;
-
     let start = Instant::now();
-    let sql = query_params.sql.or(form_params.sql);
+    let sql_handler = &state.sql_handler;
     let db = query_ctx.get_db_string();
+
+    let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
+
+    let sql = query_params.sql.or(form_params.sql);
     let format = query_params
         .format
         .or(form_params.format)
@@ -82,10 +94,6 @@ pub async fn sql(
         .or(form_params.epoch)
         .map(|s| s.to_lowercase())
         .map(|s| Epoch::parse(s.as_str()).unwrap_or(Epoch::Millisecond));
-
-    let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
-        .with_label_values(&[db.as_str()])
-        .start_timer();
 
     let result = if let Some(sql) = &sql {
         if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
@@ -111,6 +119,7 @@ pub async fn sql(
     };
 
     let resp = match format {
+        ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
         ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
         ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
         ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
@@ -123,22 +132,23 @@ pub async fn sql(
 pub async fn from_output(
     ty: ResponseFormat,
     outputs: Vec<crate::error::Result<Output>>,
-) -> Result<Vec<GreptimeQueryOutput>, ErrorResponse> {
+) -> Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
     // TODO(sunng87): this api response structure cannot represent error well.
     //  It hides successful execution results from error response
     let mut results = Vec::with_capacity(outputs.len());
+    let mut merge_map = HashMap::new();
+
     for out in outputs {
         match out {
             Ok(Output::AffectedRows(rows)) => {
                 results.push(GreptimeQueryOutput::AffectedRows(rows));
             }
-            Ok(Output::Stream(stream)) => {
+            Ok(Output::Stream(stream, physical_plan)) => {
+                let schema = stream.schema().clone();
                 // TODO(sunng87): streaming response
-                match util::collect(stream).await {
-                    Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                        Ok(rows) => {
-                            results.push(GreptimeQueryOutput::Records(rows));
-                        }
+                let mut http_record_output = match util::collect(stream).await {
+                    Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
+                        Ok(rows) => rows,
                         Err(err) => {
                             return Err(ErrorResponse::from_error(ty, err));
                         }
@@ -146,23 +156,78 @@ pub async fn from_output(
                     Err(err) => {
                         return Err(ErrorResponse::from_error(ty, err));
                     }
+                };
+                if let Some(physical_plan) = physical_plan {
+                    let mut result_map = HashMap::new();
+
+                    let mut tmp = vec![&mut merge_map, &mut result_map];
+                    collect_plan_metrics(physical_plan, &mut tmp);
+                    let re = result_map
+                        .into_iter()
+                        .map(|(k, v)| (k, Value::from(v)))
+                        .collect();
+                    http_record_output.metrics = re;
+                }
+                results.push(GreptimeQueryOutput::Records(http_record_output))
+            }
+            Ok(Output::RecordBatches(rbs)) => {
+                match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
+                    Ok(rows) => {
+                        results.push(GreptimeQueryOutput::Records(rows));
+                    }
+                    Err(err) => {
+                        return Err(ErrorResponse::from_error(ty, err));
+                    }
                 }
             }
-            Ok(Output::RecordBatches(rbs)) => match HttpRecordsOutput::try_from(rbs.take()) {
-                Ok(rows) => {
-                    results.push(GreptimeQueryOutput::Records(rows));
-                }
-                Err(err) => {
-                    return Err(ErrorResponse::from_error(ty, err));
-                }
-            },
             Err(err) => {
                 return Err(ErrorResponse::from_error(ty, err));
             }
         }
     }
 
-    Ok(results)
+    let merge_map = merge_map
+        .into_iter()
+        .map(|(k, v)| (k, Value::from(v)))
+        .collect();
+
+    Ok((results, merge_map))
+}
+
+fn collect_into_maps(name: &str, value: u64, maps: &mut [&mut HashMap<String, u64>]) {
+    if name.starts_with(GREPTIME_EXEC_PREFIX) && value > 0 {
+        maps.iter_mut().for_each(|map| {
+            map.entry(name.to_string())
+                .and_modify(|v| *v += value)
+                .or_insert(value);
+        });
+    }
+}
+
+pub fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, maps: &mut [&mut HashMap<String, u64>]) {
+    if let Some(m) = plan.metrics() {
+        m.iter().for_each(|m| match m.value() {
+            MetricValue::Count { name, count } => {
+                collect_into_maps(name, count.value() as u64, maps);
+            }
+            MetricValue::Gauge { name, gauge } => {
+                collect_into_maps(name, gauge.value() as u64, maps);
+            }
+            MetricValue::Time { name, time } => {
+                if name.starts_with(GREPTIME_EXEC_PREFIX) {
+                    // override
+                    maps.iter_mut().for_each(|map| {
+                        map.insert(name.to_string(), time.value() as u64);
+                    });
+                }
+            }
+            _ => {}
+        });
+    }
+
+    for c in plan.children() {
+        collect_plan_metrics(c, maps);
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -187,6 +252,7 @@ impl From<PromqlQuery> for PromQuery {
 
 /// Handler to execute promql
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "promql"))]
 pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
@@ -195,6 +261,7 @@ pub async fn promql(
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
+
     let _timer = crate::metrics::METRIC_HTTP_PROMQL_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();

@@ -28,7 +28,7 @@ use query::dataframe::DataFrame;
 use query::plan::LogicalPlan;
 use query::planner::LogicalPlanner;
 use query::query_engine::DescribeResult;
-use query::QueryEngine;
+use query::{QueryEngine, QueryEngineContext};
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
@@ -57,7 +57,11 @@ impl QueryEngine for MockQueryEngine {
         "MockQueryEngine"
     }
 
-    async fn describe(&self, _plan: LogicalPlan) -> query::error::Result<DescribeResult> {
+    async fn describe(
+        &self,
+        _plan: LogicalPlan,
+        _query_ctx: QueryContextRef,
+    ) -> query::error::Result<DescribeResult> {
         unimplemented!()
     }
 
@@ -76,6 +80,10 @@ impl QueryEngine for MockQueryEngine {
     fn register_function(&self, _func: FunctionRef) {}
 
     fn read_table(&self, _table: TableRef) -> query::error::Result<DataFrame> {
+        unimplemented!()
+    }
+
+    fn engine_context(&self, _query_ctx: QueryContextRef) -> QueryEngineContext {
         unimplemented!()
     }
 }

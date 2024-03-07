@@ -150,7 +150,7 @@ impl Function for PyUDF {
 
     fn eval(
         &self,
-        _func_ctx: common_function::function::FunctionContext,
+        func_ctx: common_function::function::FunctionContext,
         columns: &[datatypes::vectors::VectorRef],
     ) -> common_query::error::Result<datatypes::vectors::VectorRef> {
         // FIXME(discord9): exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
@@ -158,15 +158,17 @@ impl Function for PyUDF {
         let columns = columns.to_vec();
         let rb = Some(RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?);
 
-        // FIXME(dennis): Create EvalContext from FunctionContext.
-        let res = exec_parsed(&self.copr, &rb, &HashMap::new(), &EvalContext::default()).map_err(
-            |err| {
-                PyUdfSnafu {
-                    msg: format!("{err:#?}"),
-                }
-                .build()
+        let res = exec_parsed(
+            &self.copr,
+            &rb,
+            &HashMap::new(),
+            &EvalContext {
+                query_ctx: func_ctx.query_ctx.clone(),
             },
-        )?;
+        )
+        .map_err(BoxedError::new)
+        .context(common_query::error::ExecuteSnafu)?;
+
         let len = res.columns().len();
         if len == 0 {
             return PyUdfSnafu {
@@ -310,7 +312,7 @@ impl Script for PyScript {
                 .context(DatabaseQuerySnafu)?;
             let copr = self.copr.clone();
             match res {
-                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream::try_new(
+                Output::Stream(stream, _) => Ok(Output::new_stream(Box::pin(CoprStream::try_new(
                     stream, copr, params, ctx,
                 )?))),
                 _ => unreachable!(),
@@ -383,7 +385,7 @@ mod tests {
         let catalog_manager =
             MemoryCatalogManager::new_with_table(NumbersTable::table(NUMBERS_TABLE_ID));
         let query_engine =
-            QueryEngineFactory::new(catalog_manager, None, None, false).query_engine();
+            QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine();
 
         PyEngine::new(query_engine.clone())
     }
@@ -409,7 +411,7 @@ def test(number) -> vector[u32]:
             .await
             .unwrap();
         let res = common_recordbatch::util::collect_batches(match output {
-            Output::Stream(s) => s,
+            Output::Stream(s, _) => s,
             _ => unreachable!(),
         })
         .await
@@ -470,7 +472,7 @@ def test(number) -> vector[u32]:
             .await
             .unwrap();
         let res = common_recordbatch::util::collect_batches(match _output {
-            Output::Stream(s) => s,
+            Output::Stream(s, _) => s,
             _ => todo!(),
         })
         .await
@@ -502,7 +504,7 @@ def test(a, b, c) -> vector[f64]:
             .await
             .unwrap();
         match output {
-            Output::Stream(stream) => {
+            Output::Stream(stream, _) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());
@@ -540,7 +542,7 @@ def test(a) -> vector[i64]:
             .await
             .unwrap();
         match output {
-            Output::Stream(stream) => {
+            Output::Stream(stream, _) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());

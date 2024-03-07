@@ -28,7 +28,7 @@ pub struct KeyValues {
     /// must not be `None`.
     mutation: Mutation,
     /// Key value read helper.
-    helper: ReadRowHelper,
+    helper: SparseReadRowHelper,
 }
 
 impl KeyValues {
@@ -37,7 +37,7 @@ impl KeyValues {
     /// Returns `None` if `rows` of the `mutation` is `None`.
     pub fn new(metadata: &RegionMetadata, mutation: Mutation) -> Option<KeyValues> {
         let rows = mutation.rows.as_ref()?;
-        let helper = ReadRowHelper::new(metadata, rows);
+        let helper = SparseReadRowHelper::new(metadata, rows);
 
         Some(KeyValues { mutation, helper })
     }
@@ -75,7 +75,7 @@ impl KeyValues {
 pub struct KeyValue<'a> {
     row: &'a Row,
     schema: &'a Vec<ColumnSchema>,
-    helper: &'a ReadRowHelper,
+    helper: &'a SparseReadRowHelper,
     sequence: SequenceNumber,
     op_type: OpType,
 }
@@ -85,11 +85,12 @@ impl<'a> KeyValue<'a> {
     pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[..self.helper.num_primary_key_column]
             .iter()
-            .map(|idx| {
-                api::helper::pb_value_to_value_ref(
-                    &self.row.values[*idx],
-                    &self.schema[*idx].datatype_extension,
-                )
+            .map(|idx| match idx {
+                Some(i) => api::helper::pb_value_to_value_ref(
+                    &self.row.values[*i],
+                    &self.schema[*i].datatype_extension,
+                ),
+                None => ValueRef::Null,
             })
     }
 
@@ -97,18 +98,19 @@ impl<'a> KeyValue<'a> {
     pub fn fields(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[self.helper.num_primary_key_column + 1..]
             .iter()
-            .map(|idx| {
-                api::helper::pb_value_to_value_ref(
-                    &self.row.values[*idx],
-                    &self.schema[*idx].datatype_extension,
-                )
+            .map(|idx| match idx {
+                Some(i) => api::helper::pb_value_to_value_ref(
+                    &self.row.values[*i],
+                    &self.schema[*i].datatype_extension,
+                ),
+                None => ValueRef::Null,
             })
     }
 
     /// Get timestamp.
     pub fn timestamp(&self) -> ValueRef {
         // Timestamp is primitive, we clone it.
-        let index = self.helper.indices[self.helper.num_primary_key_column];
+        let index = self.helper.indices[self.helper.num_primary_key_column].unwrap();
         api::helper::pb_value_to_value_ref(
             &self.row.values[index],
             &self.schema[index].datatype_extension,
@@ -122,7 +124,7 @@ impl<'a> KeyValue<'a> {
 
     /// Get number of field columns.
     pub fn num_fields(&self) -> usize {
-        self.row.values.len() - self.helper.num_primary_key_column - 1
+        self.helper.indices.len() - self.helper.num_primary_key_column - 1
     }
 
     /// Get sequence.
@@ -136,33 +138,24 @@ impl<'a> KeyValue<'a> {
     }
 }
 
-/// Helper to read rows in key, value order.
+/// Helper to read rows in key, value order for sparse data.
 #[derive(Debug)]
-struct ReadRowHelper {
+struct SparseReadRowHelper {
     /// Key and value column indices.
     ///
     /// `indices[..num_primary_key_column]` are primary key columns, `indices[num_primary_key_column]`
     /// is the timestamp column and remainings are field columns.
-    indices: Vec<usize>,
+    indices: Vec<Option<usize>>,
     /// Number of primary key columns.
     num_primary_key_column: usize,
 }
 
-impl ReadRowHelper {
-    /// Creates a [ReadRowHelper] for specific `rows`.
+impl SparseReadRowHelper {
+    /// Creates a [SparseReadRowHelper] for specific `rows`.
     ///
     /// # Panics
-    /// The `rows` must fill their missing columns first and have same columns with `metadata`.
-    /// Otherwise this method will panic.
-    fn new(metadata: &RegionMetadata, rows: &Rows) -> ReadRowHelper {
-        assert_eq!(
-            metadata.column_metadatas.len(),
-            rows.schema.len(),
-            "Length mismatch, column_metas: {:?}, rows_schema: {:?}",
-            metadata.column_metadatas,
-            rows.schema
-        );
-
+    /// Time index column must exist.
+    fn new(metadata: &RegionMetadata, rows: &Rows) -> SparseReadRowHelper {
         // Build a name to index mapping for rows.
         let name_to_index: HashMap<_, _> = rows
             .schema
@@ -173,25 +166,27 @@ impl ReadRowHelper {
         let mut indices = Vec::with_capacity(metadata.column_metadatas.len());
 
         // Get primary key indices.
-        for pk_id in &metadata.primary_key {
+        for pk_column_id in &metadata.primary_key {
             // Safety: Id comes from primary key.
-            let column = metadata.column_by_id(*pk_id).unwrap();
-            let index = name_to_index.get(&column.column_schema.name).unwrap();
-            indices.push(*index);
+            let column = metadata.column_by_id(*pk_column_id).unwrap();
+            let index = name_to_index.get(&column.column_schema.name);
+            indices.push(index.copied());
         }
         // Get timestamp index.
+        // Safety: time index must exist
         let ts_index = name_to_index
             .get(&metadata.time_index_column().column_schema.name)
             .unwrap();
-        indices.push(*ts_index);
+        indices.push(Some(*ts_index));
+
         // Iterate columns and find field columns.
         for column in metadata.field_columns() {
             // Get index in request for each field column.
-            let index = name_to_index.get(&column.column_schema.name).unwrap();
-            indices.push(*index);
+            let index = name_to_index.get(&column.column_schema.name);
+            indices.push(index.copied());
         }
 
-        ReadRowHelper {
+        SparseReadRowHelper {
             indices,
             num_primary_key_column: metadata.primary_key.len(),
         }
@@ -266,7 +261,13 @@ mod tests {
         }
     }
 
-    fn check_key_values(kvs: &KeyValues, num_rows: usize, keys: &[i64], ts: i64, values: &[i64]) {
+    fn check_key_values(
+        kvs: &KeyValues,
+        num_rows: usize,
+        keys: &[Option<i64>],
+        ts: i64,
+        values: &[Option<i64>],
+    ) {
         assert_eq!(num_rows, kvs.num_rows());
         let mut expect_seq = START_SEQ;
         let expect_ts = ValueRef::Int64(ts);
@@ -278,10 +279,10 @@ mod tests {
             assert_eq!(values.len(), kv.num_fields());
 
             assert_eq!(expect_ts, kv.timestamp());
-            let expect_keys: Vec<_> = keys.iter().map(|k| ValueRef::Int64(*k)).collect();
+            let expect_keys: Vec<_> = keys.iter().map(|k| ValueRef::from(*k)).collect();
             let actual_keys: Vec<_> = kv.primary_keys().collect();
             assert_eq!(expect_keys, actual_keys);
-            let expect_values: Vec<_> = values.iter().map(|v| ValueRef::Int64(*v)).collect();
+            let expect_values: Vec<_> = values.iter().map(|v| ValueRef::from(*v)).collect();
             let actual_values: Vec<_> = kv.fields().collect();
             assert_eq!(expect_values, actual_values);
         }
@@ -317,7 +318,7 @@ mod tests {
         // KeyValues
         // keys: [k0=2, k1=0]
         // ts: 1,
-        check_key_values(&kvs, 3, &[2, 0], 1, &[]);
+        check_key_values(&kvs, 3, &[Some(2), Some(0)], 1, &[]);
     }
 
     #[test]
@@ -330,7 +331,7 @@ mod tests {
         // KeyValues (note that v0 is in front of v1 in region schema)
         // ts: 2,
         // fields: [v0=1, v1=0]
-        check_key_values(&kvs, 3, &[], 2, &[1, 0]);
+        check_key_values(&kvs, 3, &[], 2, &[Some(1), Some(0)]);
     }
 
     #[test]
@@ -344,6 +345,34 @@ mod tests {
         // keys: [k0=0, k1=3]
         // ts: 2,
         // fields: [v0=1, v1=4]
-        check_key_values(&kvs, 3, &[0, 3], 2, &[1, 4]);
+        check_key_values(&kvs, 3, &[Some(0), Some(3)], 2, &[Some(1), Some(4)]);
+    }
+
+    #[test]
+    fn test_sparse_field() {
+        let meta = new_region_metadata(2, 2);
+        // The value of each row:
+        // k0=0, v0=1, ts=2, k1=3, (v1 will be null)
+        let mutation = new_mutation(&["k0", "v0", "ts", "k1"], 3);
+        let kvs = KeyValues::new(&meta, mutation).unwrap();
+        // KeyValues
+        // keys: [k0=0, k1=3]
+        // ts: 2,
+        // fields: [v0=1, v1=null]
+        check_key_values(&kvs, 3, &[Some(0), Some(3)], 2, &[Some(1), None]);
+    }
+
+    #[test]
+    fn test_sparse_tag_field() {
+        let meta = new_region_metadata(2, 2);
+        // The value of each row:
+        // k0 = 0, v0=1, ts=2, (k1, v1 will be null)
+        let mutation = new_mutation(&["k0", "v0", "ts"], 3);
+        let kvs = KeyValues::new(&meta, mutation).unwrap();
+        // KeyValues
+        // keys: [k0=0, k1=null]
+        // ts: 2,
+        // fields: [v0=1, v1=null]
+        check_key_values(&kvs, 3, &[Some(0), None], 2, &[Some(1), None]);
     }
 }

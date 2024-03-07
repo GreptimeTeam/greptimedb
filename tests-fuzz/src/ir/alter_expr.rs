@@ -16,11 +16,11 @@ use common_query::AddColumnLocation;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::ir::Column;
+use crate::ir::{Column, Ident};
 
-#[derive(Debug, Builder, Clone)]
+#[derive(Debug, Builder, Clone, Serialize, Deserialize)]
 pub struct AlterTableExpr {
-    pub name: String,
+    pub table_name: Ident,
     pub alter_options: AlterTableOperation,
 }
 
@@ -32,7 +32,7 @@ pub enum AlterTableOperation {
         location: Option<AddColumnLocation>,
     },
     /// `DROP COLUMN <name>`
-    DropColumn { name: String },
+    DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
-    RenameTable { new_table_name: String },
+    RenameTable { new_table_name: Ident },
 }

@@ -28,7 +28,7 @@ pub async fn execute_and_check_output(db: &Database, sql: &str, expected: Expect
             assert_eq!(*x, y, "actual: \n{}", x)
         }
         (Output::RecordBatches(_), ExpectedOutput::QueryResult(x))
-        | (Output::Stream(_), ExpectedOutput::QueryResult(x)) => {
+        | (Output::Stream(_, _), ExpectedOutput::QueryResult(x)) => {
             check_output_stream(output, x).await
         }
         _ => panic!(),
@@ -37,7 +37,7 @@ pub async fn execute_and_check_output(db: &Database, sql: &str, expected: Expect
 
 pub async fn check_output_stream(output: Output, expected: &str) {
     let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        Output::Stream(stream, _) => util::collect_batches(stream).await.unwrap(),
         Output::RecordBatches(recordbatches) => recordbatches,
         _ => unreachable!(),
     };

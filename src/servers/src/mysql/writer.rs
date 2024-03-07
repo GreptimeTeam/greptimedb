@@ -81,7 +81,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         // a local variable.
         match output {
             Ok(output) => match output {
-                Output::Stream(stream) => {
+                Output::Stream(stream, _) => {
                     let query_result = QueryResult {
                         schema: stream.schema(),
                         stream,

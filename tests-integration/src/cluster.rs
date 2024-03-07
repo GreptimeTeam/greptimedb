@@ -20,7 +20,7 @@ use std::time::Duration;
 use api::v1::meta::Role;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
-use catalog::kvbackend::{CachedMetaKvBackend, MetaKvBackend};
+use catalog::kvbackend::{CachedMetaKvBackendBuilder, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
@@ -53,6 +53,7 @@ use servers::Mode;
 use tempfile::TempDir;
 use tonic::transport::Server;
 use tower::service_fn;
+use uuid::Uuid;
 
 use crate::test_util::{
     self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard,
@@ -61,7 +62,8 @@ use crate::test_util::{
 
 pub struct GreptimeDbCluster {
     pub storage_guards: Vec<StorageGuard>,
-    pub _dir_guards: Vec<FileDirGuard>,
+    pub dir_guards: Vec<FileDirGuard>,
+    pub datanode_options: Vec<DatanodeOptions>,
 
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
     pub kv_backend: KvBackendRef,
@@ -69,7 +71,6 @@ pub struct GreptimeDbCluster {
     pub frontend: Arc<FeInstance>,
 }
 
-#[derive(Clone)]
 pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
     kv_backend: KvBackendRef,
@@ -96,7 +97,9 @@ impl GreptimeDbClusterBuilder {
             let backend = EtcdStore::with_endpoints(endpoints)
                 .await
                 .expect("malformed endpoints");
-            Arc::new(ChrootKvBackend::new(cluster_name.into(), backend))
+            // Each retry requires a new isolation namespace.
+            let chroot = format!("{}{}", cluster_name, Uuid::new_v4());
+            Arc::new(ChrootKvBackend::new(chroot.into(), backend))
         };
 
         Self {
@@ -154,9 +157,13 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
-    pub async fn build(self) -> GreptimeDbCluster {
-        let datanodes = self.datanodes.unwrap_or(4);
-
+    pub async fn build_with(
+        &self,
+        datanode_options: Vec<DatanodeOptions>,
+        storage_guards: Vec<StorageGuard>,
+        dir_guards: Vec<FileDirGuard>,
+    ) -> GreptimeDbCluster {
+        let datanodes = datanode_options.len();
         let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
         let datanode_clients = Arc::new(DatanodeClients::new(channel_config));
 
@@ -179,8 +186,9 @@ impl GreptimeDbClusterBuilder {
         )
         .await;
 
-        let (datanode_instances, storage_guards, dir_guards) =
-            self.build_datanodes(meta_srv.clone(), datanodes).await;
+        let datanode_instances = self
+            .build_datanodes_with_options(&meta_srv, &datanode_options)
+            .await;
 
         build_datanode_clients(datanode_clients.clone(), &datanode_instances, datanodes).await;
 
@@ -196,8 +204,9 @@ impl GreptimeDbClusterBuilder {
         frontend.start().await.unwrap();
 
         GreptimeDbCluster {
+            datanode_options,
             storage_guards,
-            _dir_guards: dir_guards,
+            dir_guards,
             datanode_instances,
             kv_backend: self.kv_backend.clone(),
             meta_srv: meta_srv.meta_srv,
@@ -205,16 +214,19 @@ impl GreptimeDbClusterBuilder {
         }
     }
 
-    async fn build_datanodes(
+    pub async fn build(&self) -> GreptimeDbCluster {
+        let datanodes = self.datanodes.unwrap_or(4);
+        let (datanode_options, storage_guards, dir_guards) =
+            self.build_datanode_options_and_guards(datanodes).await;
+        self.build_with(datanode_options, storage_guards, dir_guards)
+            .await
+    }
+
+    async fn build_datanode_options_and_guards(
         &self,
-        meta_srv: MockInfo,
         datanodes: u32,
-    ) -> (
-        HashMap<DatanodeId, Datanode>,
-        Vec<StorageGuard>,
-        Vec<FileDirGuard>,
-    ) {
-        let mut instances = HashMap::with_capacity(datanodes as usize);
+    ) -> (Vec<DatanodeOptions>, Vec<StorageGuard>, Vec<FileDirGuard>) {
+        let mut options = Vec::with_capacity(datanodes as usize);
         let mut storage_guards = Vec::with_capacity(datanodes as usize);
         let mut dir_guards = Vec::with_capacity(datanodes as usize);
 
@@ -255,28 +267,41 @@ impl GreptimeDbClusterBuilder {
             };
             opts.node_id = Some(datanode_id);
 
-            let datanode = self.create_datanode(opts, meta_srv.clone()).await;
-
-            instances.insert(datanode_id, datanode);
+            options.push(opts);
         }
         (
-            instances,
+            options,
             storage_guards.into_iter().flatten().collect(),
             dir_guards,
         )
     }
 
+    async fn build_datanodes_with_options(
+        &self,
+        meta_srv: &MockInfo,
+        options: &[DatanodeOptions],
+    ) -> HashMap<DatanodeId, Datanode> {
+        let mut instances = HashMap::with_capacity(options.len());
+
+        for opts in options {
+            let datanode = self.create_datanode(opts.clone(), meta_srv.clone()).await;
+            instances.insert(opts.node_id.unwrap(), datanode);
+        }
+
+        instances
+    }
+
     async fn wait_datanodes_alive(
         &self,
         meta_peer_client: &MetaPeerClientRef,
-        expected_datanodes: u32,
+        expected_datanodes: usize,
     ) {
         for _ in 0..10 {
             let alive_datanodes =
                 meta_srv::lease::filter_datanodes(1000, meta_peer_client, |_, _| true)
                     .await
                     .unwrap()
-                    .len() as u32;
+                    .len();
             if alive_datanodes == expected_datanodes {
                 return;
             }
@@ -320,16 +345,19 @@ impl GreptimeDbClusterBuilder {
             .enable_store()
             .enable_heartbeat()
             .channel_manager(meta_srv.channel_manager)
-            .enable_ddl()
+            .enable_procedure()
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
-        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
+        let cached_meta_backend =
+            Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(meta_backend.clone())),
+            Arc::new(InvalidateTableCacheHandler::new(
+                cached_meta_backend.clone(),
+            )),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -338,12 +366,13 @@ impl GreptimeDbClusterBuilder {
             Arc::new(handlers_executor),
         );
 
-        let instance = FrontendBuilder::new(meta_backend.clone(), datanode_clients, meta_client)
-            .with_cache_invalidator(meta_backend)
-            .with_heartbeat_task(heartbeat_task)
-            .try_build()
-            .await
-            .unwrap();
+        let instance =
+            FrontendBuilder::new(cached_meta_backend.clone(), datanode_clients, meta_client)
+                .with_cache_invalidator(cached_meta_backend)
+                .with_heartbeat_task(heartbeat_task)
+                .try_build()
+                .await
+                .unwrap();
 
         Arc::new(instance)
     }
@@ -352,7 +381,7 @@ impl GreptimeDbClusterBuilder {
 async fn build_datanode_clients(
     clients: Arc<DatanodeClients>,
     instances: &HashMap<DatanodeId, Datanode>,
-    datanodes: u32,
+    datanodes: usize,
 ) {
     for i in 0..datanodes {
         let datanode_id = i as u64 + 1;

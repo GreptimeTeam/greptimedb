@@ -134,10 +134,17 @@ impl From<Status> for Error {
 
 impl Error {
     pub fn should_retry(&self) -> bool {
-        !matches!(
+        // TODO(weny): figure out each case of these codes.
+        matches!(
             self,
             Self::RegionServer {
-                code: Code::InvalidArgument,
+                code: Code::Cancelled,
+                ..
+            } | Self::RegionServer {
+                code: Code::DeadlineExceeded,
+                ..
+            } | Self::RegionServer {
+                code: Code::Unavailable,
                 ..
             }
         )

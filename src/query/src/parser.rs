@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime};
 use chrono::DateTime;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
+use common_telemetry::tracing;
 use promql_parser::parser::ast::{Extension as NodeExtension, ExtensionExpr};
 use promql_parser::parser::Expr::Extension;
 use promql_parser::parser::{EvalStmt, Expr, ValueType};
@@ -33,12 +34,14 @@ use crate::error::{
     AddSystemTimeOverflowSnafu, MultipleStatementsSnafu, ParseFloatSnafu, ParseTimestampSnafu,
     QueryParseSnafu, Result, UnimplementedSnafu,
 };
-use crate::metrics::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
+use crate::metrics::{PARSE_PROMQL_ELAPSED, PARSE_SQL_ELAPSED};
 
 const DEFAULT_LOOKBACK: u64 = 5 * 60; // 5m
 pub const DEFAULT_LOOKBACK_STRING: &str = "5m";
 pub const EXPLAIN_NODE_NAME: &str = "EXPLAIN";
+pub const EXPLAIN_VERBOSE_NODE_NAME: &str = "EXPLAIN VERBOSE";
 pub const ANALYZE_NODE_NAME: &str = "ANALYZE";
+pub const ANALYZE_VERBOSE_NODE_NAME: &str = "ANALYZE VERBOSE";
 
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
@@ -75,8 +78,14 @@ impl QueryStatement {
             ANALYZE_NODE_NAME => Some(NodeExtension {
                 expr: Arc::new(AnalyzeExpr { expr: expr.clone() }),
             }),
+            ANALYZE_VERBOSE_NODE_NAME => Some(NodeExtension {
+                expr: Arc::new(AnalyzeVerboseExpr { expr: expr.clone() }),
+            }),
             EXPLAIN_NODE_NAME => Some(NodeExtension {
                 expr: Arc::new(ExplainExpr { expr: expr.clone() }),
+            }),
+            EXPLAIN_VERBOSE_NODE_NAME => Some(NodeExtension {
+                expr: Arc::new(ExplainVerboseExpr { expr: expr.clone() }),
             }),
             _ => None,
         }
@@ -108,7 +117,7 @@ pub struct QueryLanguageParser {}
 impl QueryLanguageParser {
     /// Try to parse SQL with GreptimeDB dialect, return the statement when success.
     pub fn parse_sql(sql: &str, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
-        let _timer = METRIC_PARSE_SQL_ELAPSED.start_timer();
+        let _timer = PARSE_SQL_ELAPSED.start_timer();
         let mut statement =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .map_err(BoxedError::new)
@@ -124,8 +133,9 @@ impl QueryLanguageParser {
     }
 
     /// Try to parse PromQL, return the statement when success.
+    #[tracing::instrument(skip_all)]
     pub fn parse_promql(query: &PromQuery, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
-        let _timer = METRIC_PARSE_PROMQL_ELAPSED.start_timer();
+        let _timer = PARSE_PROMQL_ELAPSED.start_timer();
 
         let expr = promql_parser::parser::parse(&query.query)
             .map_err(|msg| BoxedError::new(PlainError::new(msg, StatusCode::InvalidArguments)))
@@ -168,7 +178,6 @@ impl QueryLanguageParser {
     }
 
     fn parse_promql_timestamp(timestamp: &str) -> Result<SystemTime> {
-        // FIXME(dennis): aware of timezone
         // try rfc3339 format
         let rfc3339_result = DateTime::parse_from_rfc3339(timestamp)
             .context(ParseTimestampSnafu { raw: timestamp })
@@ -236,7 +245,19 @@ macro_rules! define_node_ast_extension {
 }
 
 define_node_ast_extension!(Analyze, AnalyzeExpr, Expr, ANALYZE_NODE_NAME);
+define_node_ast_extension!(
+    AnalyzeVerbose,
+    AnalyzeVerboseExpr,
+    Expr,
+    ANALYZE_VERBOSE_NODE_NAME
+);
 define_node_ast_extension!(Explain, ExplainExpr, Expr, EXPLAIN_NODE_NAME);
+define_node_ast_extension!(
+    ExplainVerbose,
+    ExplainVerboseExpr,
+    Expr,
+    EXPLAIN_VERBOSE_NODE_NAME
+);
 
 #[cfg(test)]
 mod test {

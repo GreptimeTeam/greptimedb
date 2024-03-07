@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod context;
+pub mod table_name;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -96,6 +97,11 @@ impl Session {
     #[inline]
     pub fn set_catalog(&self, catalog: String) {
         self.catalog.store(Arc::new(catalog));
+    }
+
+    #[inline]
+    pub fn get_catalog(&self) -> String {
+        self.catalog.load().as_ref().clone()
     }
 
     #[inline]

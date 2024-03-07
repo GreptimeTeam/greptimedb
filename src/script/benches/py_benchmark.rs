@@ -52,7 +52,8 @@ where
 pub(crate) fn sample_script_engine() -> PyEngine {
     let catalog_manager =
         MemoryCatalogManager::new_with_table(NumbersTable::table(NUMBERS_TABLE_ID));
-    let query_engine = QueryEngineFactory::new(catalog_manager, None, None, false).query_engine();
+    let query_engine =
+        QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine();
 
     PyEngine::new(query_engine.clone())
 }
@@ -69,7 +70,7 @@ async fn run_compiled(script: &PyScript) {
         .await
         .unwrap();
     let _res = match output {
-        Output::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
+        Output::Stream(s, _) => common_recordbatch::util::collect_batches(s).await.unwrap(),
         Output::RecordBatches(rbs) => rbs,
         _ => unreachable!(),
     };

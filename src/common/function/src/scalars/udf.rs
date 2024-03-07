@@ -21,22 +21,30 @@ use common_query::prelude::{
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::*;
 use datatypes::vectors::Helper;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::function::{FunctionContext, FunctionRef};
+use crate::state::FunctionState;
 
-/// Create a ScalarUdf from function.
-pub fn create_udf(func: FunctionRef) -> ScalarUdf {
+/// Create a ScalarUdf from function, query context and state.
+pub fn create_udf(
+    func: FunctionRef,
+    query_ctx: QueryContextRef,
+    state: Arc<FunctionState>,
+) -> ScalarUdf {
     let func_cloned = func.clone();
     let return_type: ReturnTypeFunction = Arc::new(move |input_types: &[ConcreteDataType]| {
         Ok(Arc::new(func_cloned.return_type(input_types)?))
     });
 
     let func_cloned = func.clone();
+
     let fun: ScalarFunctionImplementation = Arc::new(move |args: &[ColumnarValue]| {
-        // FIXME(dennis): set the timezone into function context
-        // Question: how to get the timezone from the query context?
-        let func_ctx = FunctionContext::default();
+        let func_ctx = FunctionContext {
+            query_ctx: query_ctx.clone(),
+            state: state.clone(),
+        };
 
         let len = args
             .iter()
@@ -72,6 +80,7 @@ mod tests {
     use datatypes::prelude::{ScalarVector, Vector, VectorRef};
     use datatypes::value::Value;
     use datatypes::vectors::{BooleanVector, ConstantVector};
+    use session::context::QueryContextBuilder;
 
     use super::*;
     use crate::function::Function;
@@ -80,6 +89,7 @@ mod tests {
     #[test]
     fn test_create_udf() {
         let f = Arc::new(TestAndFunction);
+        let query_ctx = QueryContextBuilder::default().build();
 
         let args: Vec<VectorRef> = vec![
             Arc::new(ConstantVector::new(
@@ -97,7 +107,7 @@ mod tests {
         }
 
         // create a udf and test it again
-        let udf = create_udf(f.clone());
+        let udf = create_udf(f.clone(), query_ctx, Arc::new(FunctionState::default()));
 
         assert_eq!("test_and", udf.name);
         assert_eq!(f.signature(), udf.signature);

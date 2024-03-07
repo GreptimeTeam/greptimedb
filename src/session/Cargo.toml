@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 arc-swap = "1.5"
@@ -15,4 +18,5 @@ common-catalog.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 derive_builder.workspace = true
+snafu.workspace = true
 sql.workspace = true

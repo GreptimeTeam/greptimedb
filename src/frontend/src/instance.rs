@@ -32,21 +32,23 @@ use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::error;
 use common_telemetry::logging::info;
+use common_telemetry::{error, tracing};
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
-use operator::table::table_idents_to_full_name;
+use prometheus::HistogramTimer;
+use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -66,8 +68,9 @@ use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
-use servers::server::{start_server, ServerHandlers};
+use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
+use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
@@ -84,7 +87,6 @@ use crate::error::{
 };
 use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::heartbeat::HeartbeatTask;
-use crate::metrics;
 use crate::script::ScriptExecutor;
 
 #[async_trait]
@@ -114,11 +116,12 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
-    servers: Arc<ServerHandlers>,
+    servers: ServerHandlers,
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
     export_metrics_task: Option<ExportMetricsTask>,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl Instance {
@@ -145,7 +148,7 @@ impl Instance {
             .enable_router()
             .enable_store()
             .enable_heartbeat()
-            .enable_ddl()
+            .enable_procedure()
             .channel_manager(channel_manager)
             .ddl_channel_manager(ddl_channel_manager)
             .build();
@@ -186,7 +189,7 @@ impl Instance {
         Ok((kv_backend, procedure_manager))
     }
 
-    pub async fn build_servers(
+    pub fn build_servers(
         &mut self,
         opts: impl Into<FrontendOptions> + TomlSerializable,
         servers: ServerHandlers,
@@ -196,8 +199,7 @@ impl Instance {
             ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
-        self.servers = Arc::new(servers);
-
+        self.servers = servers;
         Ok(())
     }
 
@@ -210,14 +212,22 @@ impl Instance {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        futures::future::try_join_all(self.servers.values().map(|server| server.0.shutdown()))
+        self.servers
+            .shutdown_all()
             .await
             .context(error::ShutdownServerSnafu)
-            .map(|_| ())
+    }
+
+    pub fn server_handlers(&self) -> &ServerHandlers {
+        &self.servers
     }
 
     pub fn statement_executor(&self) -> Arc<StatementExecutor> {
         self.statement_executor.clone()
+    }
+
+    pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
+        &self.table_metadata_manager
     }
 }
 
@@ -242,13 +252,7 @@ impl FrontendInstance for Instance {
             }
         }
 
-        futures::future::try_join_all(self.servers.iter().map(|(name, handler)| async move {
-            info!("Starting service: {name}");
-            start_server(handler).await
-        }))
-        .await
-        .context(error::StartServerSnafu)
-        .map(|_| ())
+        self.servers.start_all().await.context(StartServerSnafu)
     }
 }
 
@@ -272,8 +276,8 @@ impl Instance {
 impl SqlQueryHandler for Instance {
     type Error = Error;
 
+    #[tracing::instrument(skip_all)]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let _timer = metrics::METRIC_HANDLE_SQL_ELAPSED.start_timer();
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -333,7 +337,6 @@ impl SqlQueryHandler for Instance {
     }
 
     async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
-        let _timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
         // plan should be prepared before exec
         // we'll do check there
         self.query_engine
@@ -342,6 +345,7 @@ impl SqlQueryHandler for Instance {
             .context(ExecLogicalPlanSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn do_promql_query(
         &self,
         query: &PromQuery,
@@ -374,11 +378,11 @@ impl SqlQueryHandler for Instance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(QueryStatement::Sql(stmt), query_ctx)
+                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
             self.query_engine
-                .describe(plan)
+                .describe(plan, query_ctx)
                 .await
                 .map(Some)
                 .context(error::DescribeStatementSnafu)
@@ -395,14 +399,27 @@ impl SqlQueryHandler for Instance {
     }
 }
 
+/// Attaches a timer to the output and observes it once the output is exhausted.
+pub fn attach_timer(output: Output, timer: HistogramTimer) -> Output {
+    match output {
+        Output::AffectedRows(_) | Output::RecordBatches(_) => output,
+        Output::Stream(stream, plan) => {
+            let stream = OnDone::new(stream, move || {
+                timer.observe_duration();
+            });
+            Output::Stream(Box::pin(stream), plan)
+        }
+    }
+}
+
 #[async_trait]
 impl PrometheusHandler for Instance {
+    #[tracing::instrument(skip_all)]
     async fn do_query(
         &self,
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        let _timer = metrics::METRIC_HANDLE_PROMQL_ELAPSED.start_timer();
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
@@ -468,6 +485,10 @@ pub fn check_permission(
         Statement::CreateTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }
+        Statement::CreateTableLike(stmt) => {
+            validate_param(&stmt.table_name, query_ctx)?;
+            validate_param(&stmt.source_name, query_ctx)?;
+        }
         Statement::DropTable(drop_stmt) => {
             validate_param(drop_stmt.table_name(), query_ctx)?;
         }
@@ -501,7 +522,7 @@ pub fn check_permission(
 }
 
 fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> {
-    let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx.clone())
+    let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 

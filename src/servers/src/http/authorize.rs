@@ -60,12 +60,14 @@ pub async fn inner_auth<B>(
 ) -> std::result::Result<Request<B>, Response> {
     // 1. prepare
     let (catalog, schema) = extract_catalog_and_schema(&req);
-    let timezone = extract_timezone(&req);
-    let query_ctx = QueryContextBuilder::default()
+    // TODO(ruihang): move this out of auth module
+    let timezone = Arc::new(extract_timezone(&req));
+    let query_ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
-        .timezone(Arc::new(timezone))
-        .build();
+        .timezone(timezone);
+
+    let query_ctx = query_ctx_builder.build();
     let need_auth = need_auth(&req);
     let is_influxdb = req.uri().path().contains("influxdb");
 
@@ -165,24 +167,27 @@ fn extract_timezone<B>(request: &Request<B>) -> Timezone {
 fn get_influxdb_credentials<B>(request: &Request<B>) -> Result<Option<(Username, Password)>> {
     // compat with influxdb v2 and v1
     if let Some(header) = request.headers().get(http::header::AUTHORIZATION) {
-        // try v2 first
+        // try header
         let (auth_scheme, credential) = header
             .to_str()
             .context(InvisibleASCIISnafu)?
             .split_once(' ')
             .context(InvalidAuthorizationHeaderSnafu)?;
-        ensure!(
-            auth_scheme.to_lowercase() == "token",
-            UnsupportedAuthSchemeSnafu { name: auth_scheme }
-        );
 
-        let (username, password) = credential
-            .split_once(':')
-            .context(InvalidAuthorizationHeaderSnafu)?;
+        let (username, password) = match auth_scheme.to_lowercase().as_str() {
+            "token" => {
+                let (u, p) = credential
+                    .split_once(':')
+                    .context(InvalidAuthorizationHeaderSnafu)?;
+                (u.to_string(), p.to_string().into())
+            }
+            "basic" => decode_basic(credential)?,
+            _ => UnsupportedAuthSchemeSnafu { name: auth_scheme }.fail()?,
+        };
 
-        Ok(Some((username.to_string(), password.to_string().into())))
+        Ok(Some((username, password)))
     } else {
-        // try v1
+        // try u and p in query
         let Some(query_str) = request.uri().query() else {
             return Ok(None);
         };

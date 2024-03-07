@@ -7,14 +7,16 @@ license.workspace = true
 [features]
 testing = []
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 arc-swap = "1.0"
-arrow-schema.workspace = true
 arrow.workspace = true
+arrow-schema.workspace = true
 async-stream.workspace = true
 async-trait = "0.1"
-build-data = "0.1"
 common-catalog.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
@@ -25,6 +27,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+common-version.workspace = true
 dashmap.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
@@ -33,7 +36,7 @@ futures-util.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true
-moka = { workspace = true, features = ["future"] }
+moka = { workspace = true, features = ["future", "sync"] }
 parking_lot = "0.12"
 partition.workspace = true
 paste = "1.0"

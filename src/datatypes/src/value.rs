@@ -14,7 +14,6 @@
 
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
-use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
@@ -26,7 +25,7 @@ use common_time::datetime::DateTime;
 use common_time::interval::IntervalUnit;
 use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
-use common_time::{Duration, Interval};
+use common_time::{Duration, Interval, Timezone};
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -125,37 +124,45 @@ impl Display for Value {
     }
 }
 
-impl Value {
-    /// Returns data type of the value.
-    ///
-    /// # Panics
-    /// Panics if the data type is not supported.
-    pub fn data_type(&self) -> ConcreteDataType {
-        match self {
-            Value::Null => ConcreteDataType::null_datatype(),
-            Value::Boolean(_) => ConcreteDataType::boolean_datatype(),
-            Value::UInt8(_) => ConcreteDataType::uint8_datatype(),
-            Value::UInt16(_) => ConcreteDataType::uint16_datatype(),
-            Value::UInt32(_) => ConcreteDataType::uint32_datatype(),
-            Value::UInt64(_) => ConcreteDataType::uint64_datatype(),
-            Value::Int8(_) => ConcreteDataType::int8_datatype(),
-            Value::Int16(_) => ConcreteDataType::int16_datatype(),
-            Value::Int32(_) => ConcreteDataType::int32_datatype(),
-            Value::Int64(_) => ConcreteDataType::int64_datatype(),
-            Value::Float32(_) => ConcreteDataType::float32_datatype(),
-            Value::Float64(_) => ConcreteDataType::float64_datatype(),
-            Value::String(_) => ConcreteDataType::string_datatype(),
-            Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            Value::Date(_) => ConcreteDataType::date_datatype(),
-            Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
-            Value::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
-            Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-            Value::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
-            Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
-            Value::Duration(d) => ConcreteDataType::duration_datatype(d.unit()),
-            Value::Decimal128(d) => ConcreteDataType::decimal128_datatype(d.precision(), d.scale()),
+macro_rules! define_data_type_func {
+    ($struct: ident) => {
+        /// Returns data type of the value.
+        ///
+        /// # Panics
+        /// Panics if the data type is not supported.
+        pub fn data_type(&self) -> ConcreteDataType {
+            match self {
+                $struct::Null => ConcreteDataType::null_datatype(),
+                $struct::Boolean(_) => ConcreteDataType::boolean_datatype(),
+                $struct::UInt8(_) => ConcreteDataType::uint8_datatype(),
+                $struct::UInt16(_) => ConcreteDataType::uint16_datatype(),
+                $struct::UInt32(_) => ConcreteDataType::uint32_datatype(),
+                $struct::UInt64(_) => ConcreteDataType::uint64_datatype(),
+                $struct::Int8(_) => ConcreteDataType::int8_datatype(),
+                $struct::Int16(_) => ConcreteDataType::int16_datatype(),
+                $struct::Int32(_) => ConcreteDataType::int32_datatype(),
+                $struct::Int64(_) => ConcreteDataType::int64_datatype(),
+                $struct::Float32(_) => ConcreteDataType::float32_datatype(),
+                $struct::Float64(_) => ConcreteDataType::float64_datatype(),
+                $struct::String(_) => ConcreteDataType::string_datatype(),
+                $struct::Binary(_) => ConcreteDataType::binary_datatype(),
+                $struct::Date(_) => ConcreteDataType::date_datatype(),
+                $struct::DateTime(_) => ConcreteDataType::datetime_datatype(),
+                $struct::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
+                $struct::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+                $struct::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
+                $struct::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
+                $struct::Duration(d) => ConcreteDataType::duration_datatype(d.unit()),
+                $struct::Decimal128(d) => {
+                    ConcreteDataType::decimal128_datatype(d.precision(), d.scale())
+                }
+            }
         }
-    }
+    };
+}
+
+impl Value {
+    define_data_type_func!(Value);
 
     /// Returns true if this is a null value.
     pub fn is_null(&self) -> bool {
@@ -247,6 +254,17 @@ impl Value {
         match self {
             Value::Int64(v) => Some(Time::new_millisecond(*v)),
             Value::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to u64. Return None if value is not a valid uint64 data type.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            Value::UInt64(v) => Some(*v),
             _ => None,
         }
     }
@@ -428,11 +446,15 @@ pub fn duration_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue
     }
 }
 
-/// Convert [ScalarValue] to [Timestamp].
+/// Convert [`ScalarValue`] to [`Timestamp`].
+/// If it's `ScalarValue::Utf8`, try to parse it with the given timezone.
 /// Return `None` if given scalar value cannot be converted to a valid timestamp.
-pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
+pub fn scalar_value_to_timestamp(
+    scalar: &ScalarValue,
+    timezone: Option<&Timezone>,
+) -> Option<Timestamp> {
     match scalar {
-        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s) {
+        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s, timezone) {
             Ok(t) => Some(t),
             Err(e) => {
                 logging::error!(e;"Failed to convert string literal {s} to timestamp");
@@ -935,6 +957,8 @@ macro_rules! impl_as_for_value_ref {
 }
 
 impl<'a> ValueRef<'a> {
+    define_data_type_func!(ValueRef);
+
     /// Returns true if this is null.
     pub fn is_null(&self) -> bool {
         matches!(self, ValueRef::Null)
@@ -1138,6 +1162,14 @@ impl<'a> ListValueRef<'a> {
         match self {
             ListValueRef::Indexed { vector, idx } => vector.get(idx),
             ListValueRef::Ref { val } => Value::List(val.clone()),
+        }
+    }
+
+    /// Returns the inner element's data type.
+    fn datatype(&self) -> ConcreteDataType {
+        match self {
+            ListValueRef::Indexed { vector, .. } => vector.data_type(),
+            ListValueRef::Ref { val } => val.datatype().clone(),
         }
     }
 }

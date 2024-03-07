@@ -35,6 +35,12 @@ use tonic::Code;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Arrow error"))]
+    Arrow {
+        #[snafu(source)]
+        error: arrow_schema::ArrowError,
+    },
+
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
 
@@ -430,6 +436,17 @@ pub enum Error {
 
     #[snafu(display("Missing query context"))]
     MissingQueryContext { location: Location },
+
+    #[snafu(display(
+        "Invalid parameter, physical_table is not expected when metric engine is disabled"
+    ))]
+    UnexpectedPhysicalTable { location: Location },
+
+    #[snafu(display("Failed to initialize a watcher for file"))]
+    FileWatch {
+        #[snafu(source)]
+        error: notify::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -450,7 +467,9 @@ impl ErrorExt for Error {
             | TcpIncoming { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildHttpResponse { .. } => StatusCode::Internal,
+            | BuildHttpResponse { .. }
+            | Arrow { .. }
+            | FileWatch { .. } => StatusCode::Internal,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 
@@ -488,7 +507,8 @@ impl ErrorExt for Error {
             | UrlDecode { .. }
             | IncompatibleSchema { .. }
             | MissingQueryContext { .. }
-            | MysqlValueConversion { .. } => StatusCode::InvalidArguments,
+            | MysqlValueConversion { .. }
+            | UnexpectedPhysicalTable { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }
@@ -552,7 +572,9 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::Internal
         | StatusCode::PlanQuery
         | StatusCode::EngineExecuteQuery => Code::Internal,
-        StatusCode::InvalidArguments | StatusCode::InvalidSyntax => Code::InvalidArgument,
+        StatusCode::InvalidArguments | StatusCode::InvalidSyntax | StatusCode::RequestOutdated => {
+            Code::InvalidArgument
+        }
         StatusCode::Cancelled => Code::Cancelled,
         StatusCode::TableAlreadyExists
         | StatusCode::TableColumnExists
@@ -581,9 +603,11 @@ macro_rules! define_into_tonic_status {
     ($Error: ty) => {
         impl From<$Error> for tonic::Status {
             fn from(err: $Error) -> Self {
-                use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
                 use tonic::codegen::http::{HeaderMap, HeaderValue};
                 use tonic::metadata::MetadataMap;
+                use $crate::http::header::constants::{
+                    GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG,
+                };
 
                 let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
 
