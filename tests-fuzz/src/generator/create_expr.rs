@@ -26,7 +26,7 @@ use crate::ir::create_expr::CreateTableExprBuilder;
 use crate::ir::{
     column_options_generator, generate_columns, generate_random_value,
     partible_column_options_generator, ts_column_options_generator, ColumnTypeGenerator,
-    CreateTableExpr, PartibleColumnTypeGenerator, TsColumnTypeGenerator,
+    CreateTableExpr, Ident, PartibleColumnTypeGenerator, TsColumnTypeGenerator,
 };
 
 #[derive(Builder)]
@@ -39,7 +39,7 @@ pub struct CreateTableExprGenerator<R: Rng + 'static> {
     if_not_exists: bool,
     #[builder(setter(into))]
     name: String,
-    name_generator: Box<dyn Random<String, R>>,
+    name_generator: Box<dyn Random<Ident, R>>,
     ts_column_type_generator: ConcreteDataTypeGenerator<R>,
     column_type_generator: ConcreteDataTypeGenerator<R>,
     partible_column_type_generator: ConcreteDataTypeGenerator<R>,
@@ -93,7 +93,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
             let name = column_names.pop().unwrap();
             let column = generate_columns(
                 rng,
-                vec![name.to_string()],
+                vec![name.clone()],
                 self.ts_column_type_generator.as_ref(),
                 self.ts_column_options_generator.as_ref(),
             )
@@ -111,7 +111,10 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
                     partition_bounds.sort();
                 }
                 partition_bounds.push(PartitionBound::MaxValue);
-                builder.partition(PartitionDef::new(vec![name], partition_bounds));
+                builder.partition(PartitionDef::new(
+                    vec![name.value.to_string()],
+                    partition_bounds,
+                ));
             }
 
             columns.push(column);
@@ -122,7 +125,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
                 let name = column_names.pop().unwrap();
                 let column = generate_columns(
                     rng,
-                    vec![name.to_string()],
+                    vec![name.clone()],
                     self.partible_column_type_generator.as_ref(),
                     self.partible_column_options_generator.as_ref(),
                 )
@@ -139,7 +142,10 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
                     partition_bounds.sort();
                 }
                 partition_bounds.push(PartitionBound::MaxValue);
-                builder.partition(PartitionDef::new(vec![name], partition_bounds));
+                builder.partition(PartitionDef::new(
+                    vec![name.value.to_string()],
+                    partition_bounds,
+                ));
                 columns.push(column);
             }
             // Generates the ts column.
@@ -230,7 +236,7 @@ mod tests {
             .unwrap();
 
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":"tEmporIbUS","columns":[{"name":"IMpEdIT","column_type":{"String":null},"options":["PrimaryKey","NotNull"]},{"name":"natuS","column_type":{"Timestamp":{"Nanosecond":null}},"options":["TimeIndex"]},{"name":"ADIPisCI","column_type":{"Int16":{}},"options":[{"DefaultValue":{"Int16":4864}}]},{"name":"EXpEdita","column_type":{"Int64":{}},"options":["PrimaryKey"]},{"name":"cUlpA","column_type":{"Float64":{}},"options":["NotNull"]},{"name":"MOLeStIAs","column_type":{"Boolean":null},"options":["Null"]},{"name":"cUmquE","column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.21569687}}]},{"name":"toTAm","column_type":{"Float64":{}},"options":["NotNull"]},{"name":"deBitIs","column_type":{"Float32":{}},"options":["Null"]},{"name":"QUi","column_type":{"Int64":{}},"options":["Null"]}],"if_not_exists":true,"partition":{"partition_columns":["IMpEdIT"],"partition_bounds":[{"Value":{"String":"򟘲"}},{"Value":{"String":"򴥫"}},"MaxValue"]},"engine":"mito2","options":{},"primary_keys":[0,3]}"#;
+        let expected = r#"{"table_name":{"value":"tEmporIbUS","quote_style":null},"columns":[{"name":{"value":"IMpEdIT","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey","NotNull"]},{"name":{"value":"natuS","quote_style":null},"column_type":{"Timestamp":{"Nanosecond":null}},"options":["TimeIndex"]},{"name":{"value":"ADIPisCI","quote_style":null},"column_type":{"Int16":{}},"options":[{"DefaultValue":{"Int16":4864}}]},{"name":{"value":"EXpEdita","quote_style":null},"column_type":{"Int64":{}},"options":["PrimaryKey"]},{"name":{"value":"cUlpA","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"MOLeStIAs","quote_style":null},"column_type":{"Boolean":null},"options":["Null"]},{"name":{"value":"cUmquE","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.21569687}}]},{"name":{"value":"toTAm","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"deBitIs","quote_style":null},"column_type":{"Float32":{}},"options":["Null"]},{"name":{"value":"QUi","quote_style":null},"column_type":{"Int64":{}},"options":["Null"]}],"if_not_exists":true,"partition":{"partition_columns":["IMpEdIT"],"partition_bounds":[{"Value":{"String":"򟘲"}},{"Value":{"String":"򴥫"}},"MaxValue"]},"engine":"mito2","options":{},"primary_keys":[0,3]}"#;
         assert_eq!(expected, serialized);
     }
 }
