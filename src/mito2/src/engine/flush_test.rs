@@ -279,12 +279,12 @@ async fn test_flush_reopen_region() {
 }
 
 #[derive(Debug)]
-struct FixedTimeProvider {
+struct MockTimeProvider {
     now: AtomicI64,
     elapsed: AtomicI64,
 }
 
-impl TimeProvider for FixedTimeProvider {
+impl TimeProvider for MockTimeProvider {
     fn current_time_millis(&self) -> i64 {
         self.now.load(Ordering::Relaxed)
     }
@@ -298,7 +298,7 @@ impl TimeProvider for FixedTimeProvider {
     }
 }
 
-impl FixedTimeProvider {
+impl MockTimeProvider {
     fn new(now: i64) -> Self {
         Self {
             now: AtomicI64::new(now),
@@ -321,7 +321,7 @@ async fn test_auto_flush_engine() {
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushListener::default());
     let now = current_time_millis();
-    let time_provider = Arc::new(FixedTimeProvider::new(now));
+    let time_provider = Arc::new(MockTimeProvider::new(now));
     let engine = env
         .create_engine_with_time(
             MitoConfig {
