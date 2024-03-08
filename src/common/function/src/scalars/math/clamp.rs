@@ -95,8 +95,7 @@ impl Function for ClampFunction {
         );
 
         with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
-
-            let input_array = columns[1].to_arrow_array();
+            let input_array = columns[0].to_arrow_array();
             let input = input_array
                     .as_any()
                     .downcast_ref::<PrimitiveArray<<$S as LogicalPrimitiveType>::ArrowPrimitive>>()
@@ -144,6 +143,8 @@ fn clamp_impl<T: LogicalPrimitiveType, const CLAMP_MIN: bool, const CLAMP_MAX: b
     min: T::Native,
     max: T::Native,
 ) -> Result<VectorRef> {
+    common_telemetry::info!("[DEBUG] min {min:?}, max {max:?}");
+
     let iter = ArrayIter::new(input);
     let result = iter.map(|x| {
         x.map(|x| {
@@ -307,7 +308,7 @@ mod test {
 
     #[test]
     fn clamp_const_i32() {
-        let input = vec![Some(1)];
+        let input = vec![Some(5)];
         let min = 2;
         let max = 4;
 
@@ -320,7 +321,7 @@ mod test {
         let result = func
             .eval(FunctionContext::default(), args.as_slice())
             .unwrap();
-        let expected: VectorRef = Arc::new(Int64Vector::from(vec![Some(2)]));
+        let expected: VectorRef = Arc::new(Int64Vector::from(vec![Some(4)]));
         assert_eq!(expected, result);
     }
 
