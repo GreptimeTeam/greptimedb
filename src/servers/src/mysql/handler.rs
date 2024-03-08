@@ -239,13 +239,27 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         debug_assert_eq!(params.len(), param_num - 1);
 
+        let columns = schema
+            .as_ref()
+            .map(|schema| {
+                schema
+                    .column_schemas()
+                    .iter()
+                    .map(|column_schema| {
+                        create_mysql_column(&column_schema.data_type, &column_schema.name)
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
         let stmt_id = self.save_plan(SqlPlan {
             query: query.to_string(),
             plan,
             schema,
         });
 
-        w.reply(stmt_id, &params, &[]).await?;
+        w.reply(stmt_id, &params, &columns).await?;
         crate::metrics::METRIC_MYSQL_PREPARED_COUNT
             .with_label_values(&[query_ctx.get_db_string().as_str()])
             .inc();

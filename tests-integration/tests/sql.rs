@@ -167,10 +167,10 @@ pub async fn test_mysql_crud(store_type: StorageType) {
     assert_eq!(rows.len(), 10);
 
     for (i, row) in rows.iter().enumerate() {
-        let ret: i64 = row.get(0);
-        let d: NaiveDate = row.get(1);
-        let dt: DateTime<Utc> = row.get(2);
-        let bytes: Vec<u8> = row.get(3);
+        let ret: i64 = row.get("i");
+        let d: NaiveDate = row.get("d");
+        let dt: DateTime<Utc> = row.get("dt");
+        let bytes: Vec<u8> = row.get("b");
         assert_eq!(ret, i as i64);
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
@@ -193,7 +193,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
     assert_eq!(rows.len(), 1);
 
     for row in rows {
-        let ret: i64 = row.get(0);
+        let ret: i64 = row.get("i");
         assert_eq!(ret, 6);
     }
 
@@ -358,9 +358,9 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     assert_eq!(rows.len(), 10);
 
     for (i, row) in rows.iter().enumerate() {
-        let ret: i64 = row.get(0);
-        let d: NaiveDate = row.get(1);
-        let dt: NaiveDateTime = row.get(2);
+        let ret: i64 = row.get("i");
+        let d: NaiveDate = row.get("d");
+        let dt: NaiveDateTime = row.get("dt");
 
         assert_eq!(ret, i as i64);
 
@@ -381,7 +381,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     assert_eq!(rows.len(), 1);
 
     for row in rows {
-        let ret: i64 = row.get(0);
+        let ret: i64 = row.get("i");
         assert_eq!(ret, 6);
     }
 
@@ -709,13 +709,13 @@ pub async fn test_mysql_prepare_stmt_insert_timestamp(store_type: StorageType) {
         .unwrap();
     assert_eq!(rows.len(), 3);
 
-    let x: DateTime<Utc> = rows[0].get(1);
+    let x: DateTime<Utc> = rows[0].get("ts");
     assert_eq!(x.to_string(), "2023-12-19 00:00:00 UTC");
 
-    let x: DateTime<Utc> = rows[1].get(1);
+    let x: DateTime<Utc> = rows[1].get("ts");
     assert_eq!(x.to_string(), "2023-12-19 13:19:01 UTC");
 
-    let x: DateTime<Utc> = rows[2].get(1);
+    let x: DateTime<Utc> = rows[2].get("ts");
     assert_eq!(x.to_string(), "2023-12-19 13:20:01.123 UTC");
 
     let _ = server.shutdown().await;
