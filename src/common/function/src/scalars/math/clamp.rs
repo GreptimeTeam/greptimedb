@@ -20,8 +20,9 @@ use common_query::prelude::Signature;
 use datafusion::arrow::array::{ArrayIter, PrimitiveArray};
 use datafusion::logical_expr::Volatility;
 use datatypes::data_type::{ConcreteDataType, DataType};
-use datatypes::prelude::{ScalarVector, VectorRef};
+use datatypes::prelude::VectorRef;
 use datatypes::types::LogicalPrimitiveType;
+use datatypes::value::TryAsPrimitive;
 use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
 use snafu::{ensure, OptionExt};
@@ -94,26 +95,20 @@ impl Function for ClampFunction {
         );
 
         with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
-            let input = columns[0]
-                .as_any()
-                .downcast_ref::<PrimitiveVector<$S>>()
-                .unwrap()
-                .as_arrow();
-            let min = columns[1]
-                .as_any()
-                .downcast_ref::<PrimitiveVector<$S>>()
-                .unwrap()
-                .get_data(0)
+
+            let input_array = columns[1].to_arrow_array();
+            let input = input_array
+                    .as_any()
+                    .downcast_ref::<PrimitiveArray<<$S as LogicalPrimitiveType>::ArrowPrimitive>>()
+                    .unwrap();
+
+            let min = TryAsPrimitive::<$S>::try_as_primitive(&columns[1].get(0))
                 .with_context(|| {
                     InvalidFuncArgsSnafu {
                         err_msg: "The second arg should not be none",
                     }
                 })?;
-            let max = columns[2]
-                .as_any()
-                .downcast_ref::<PrimitiveVector<$S>>()
-                .unwrap()
-                .get_data(0)
+            let max = TryAsPrimitive::<$S>::try_as_primitive(&columns[2].get(0))
                 .with_context(|| {
                     InvalidFuncArgsSnafu {
                         err_msg: "The third arg should not be none",
@@ -168,7 +163,12 @@ fn clamp_impl<T: LogicalPrimitiveType, const CLAMP_MIN: bool, const CLAMP_MAX: b
 #[cfg(test)]
 mod test {
 
-    use datatypes::vectors::{Float64Vector, Int64Vector, StringVector, UInt64Vector};
+    use std::sync::Arc;
+
+    use datatypes::prelude::ScalarVector;
+    use datatypes::vectors::{
+        ConstantVector, Float64Vector, Int64Vector, StringVector, UInt64Vector,
+    };
 
     use super::*;
     use crate::function::FunctionContext;
@@ -303,6 +303,25 @@ mod test {
             let expected: VectorRef = Arc::new(Float64Vector::from(expected));
             assert_eq!(expected, result);
         }
+    }
+
+    #[test]
+    fn clamp_const_i32() {
+        let input = vec![Some(1)];
+        let min = 2;
+        let max = 4;
+
+        let func = ClampFunction;
+        let args = [
+            Arc::new(ConstantVector::new(Arc::new(Int64Vector::from(input)), 1)) as _,
+            Arc::new(Int64Vector::from_vec(vec![min])) as _,
+            Arc::new(Int64Vector::from_vec(vec![max])) as _,
+        ];
+        let result = func
+            .eval(FunctionContext::default(), args.as_slice())
+            .unwrap();
+        let expected: VectorRef = Arc::new(Int64Vector::from(vec![Some(2)]));
+        assert_eq!(expected, result);
     }
 
     #[test]

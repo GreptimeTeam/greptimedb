@@ -20,6 +20,7 @@ mod rate;
 use std::fmt;
 use std::sync::Arc;
 
+pub use clamp::ClampFunction;
 use common_query::error::{GeneralDataFusionSnafu, Result};
 use common_query::prelude::Signature;
 use datafusion::error::DataFusionError;
@@ -41,7 +42,8 @@ impl MathFunction {
         registry.register(Arc::new(ModuloFunction));
         registry.register(Arc::new(PowFunction));
         registry.register(Arc::new(RateFunction));
-        registry.register(Arc::new(RangeFunction))
+        registry.register(Arc::new(RangeFunction));
+        registry.register(Arc::new(ClampFunction));
     }
 }
 
