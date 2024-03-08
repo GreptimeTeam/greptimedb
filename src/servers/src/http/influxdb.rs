@@ -67,9 +67,11 @@ pub async fn influxdb_write_v2(
     Extension(query_ctx): Extension<QueryContextRef>,
     lines: String,
 ) -> Result<impl IntoResponse> {
-    let db = params
-        .remove("bucket")
-        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+    let db = match (params.remove("db"), params.remove("bucket")) {
+        (_, Some(bucket)) => bucket.clone(),
+        (Some(db), None) => db.clone(),
+        _ => DEFAULT_SCHEMA_NAME.to_string(),
+    };
 
     let precision = params
         .get("precision")

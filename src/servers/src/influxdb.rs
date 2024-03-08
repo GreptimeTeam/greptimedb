@@ -15,14 +15,27 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use common_grpc::writer::Precision;
+use hyper::Request;
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
 
 use crate::error::{Error, InfluxdbLineProtocolSnafu};
 use crate::row_writer::{self, MultiTableData};
 
-pub const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
-pub const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
+const INFLUXDB_API_PATH_NAME: &str = "influxdb";
+const INFLUXDB_API_V2_PATH_NAME: &str = "influxdb/api/v2";
+const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
+const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
+
+#[inline]
+pub(crate) fn is_influxdb_request<T>(req: &Request<T>) -> bool {
+    req.uri().path().contains(INFLUXDB_API_PATH_NAME)
+}
+
+#[inline]
+pub(crate) fn is_influxdb_v2_request<T>(req: &Request<T>) -> bool {
+    req.uri().path().contains(INFLUXDB_API_V2_PATH_NAME)
+}
 
 #[derive(Debug)]
 pub struct InfluxdbRequest {
