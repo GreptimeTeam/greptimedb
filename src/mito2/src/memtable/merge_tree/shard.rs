@@ -15,6 +15,7 @@
 //! Shard in a partition.
 
 use std::cmp::Ordering;
+use std::time::{Duration, Instant};
 
 use store_api::metadata::RegionMetadataRef;
 
@@ -25,8 +26,10 @@ use crate::memtable::merge_tree::data::{
 };
 use crate::memtable::merge_tree::dict::KeyDictRef;
 use crate::memtable::merge_tree::merger::{Merger, Node};
+use crate::memtable::merge_tree::partition::PrimaryKeyFilter;
 use crate::memtable::merge_tree::shard_builder::ShardBuilderReader;
-use crate::memtable::merge_tree::{PkId, ShardId};
+use crate::memtable::merge_tree::{PkId, PkIndex, ShardId};
+use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 
 /// Shard stores data related to the same key dictionary.
 pub struct Shard {
@@ -131,18 +134,15 @@ pub struct ShardReaderBuilder {
 }
 
 impl ShardReaderBuilder {
-    pub(crate) fn build(self) -> Result<ShardReader> {
+    pub(crate) fn build(self, key_filter: Option<PrimaryKeyFilter>) -> Result<ShardReader> {
         let ShardReaderBuilder {
             shard_id,
             key_dict,
             inner,
         } = self;
+        let now = Instant::now();
         let parts_reader = inner.build()?;
-        Ok(ShardReader {
-            shard_id,
-            key_dict,
-            parts_reader,
-        })
+        ShardReader::new(shard_id, key_dict, parts_reader, key_filter, now.elapsed())
     }
 }
 
@@ -151,15 +151,46 @@ pub struct ShardReader {
     shard_id: ShardId,
     key_dict: Option<KeyDictRef>,
     parts_reader: DataPartsReader,
+    key_filter: Option<PrimaryKeyFilter>,
+    last_yield_pk_index: Option<PkIndex>,
+    keys_before_pruning: usize,
+    keys_after_pruning: usize,
+    prune_pk_cost: Duration,
+    data_build_cost: Duration,
 }
 
 impl ShardReader {
+    fn new(
+        shard_id: ShardId,
+        key_dict: Option<KeyDictRef>,
+        parts_reader: DataPartsReader,
+        key_filter: Option<PrimaryKeyFilter>,
+        data_build_cost: Duration,
+    ) -> Result<Self> {
+        let has_pk = key_dict.is_some();
+        let mut reader = Self {
+            shard_id,
+            key_dict,
+            parts_reader,
+            key_filter: if has_pk { key_filter } else { None },
+            last_yield_pk_index: None,
+            keys_before_pruning: 0,
+            keys_after_pruning: 0,
+            prune_pk_cost: Duration::default(),
+            data_build_cost,
+        };
+        reader.prune_batch_by_key()?;
+
+        Ok(reader)
+    }
+
     fn is_valid(&self) -> bool {
         self.parts_reader.is_valid()
     }
 
     fn next(&mut self) -> Result<()> {
-        self.parts_reader.next()
+        self.parts_reader.next()?;
+        self.prune_batch_by_key()
     }
 
     fn current_key(&self) -> Option<&[u8]> {
@@ -179,6 +210,54 @@ impl ShardReader {
 
     fn current_data_batch(&self) -> DataBatch {
         self.parts_reader.current_data_batch()
+    }
+
+    fn prune_batch_by_key(&mut self) -> Result<()> {
+        let Some(key_filter) = &mut self.key_filter else {
+            return Ok(());
+        };
+
+        while self.parts_reader.is_valid() {
+            let pk_index = self.parts_reader.current_data_batch().pk_index();
+            if let Some(yield_pk_index) = self.last_yield_pk_index {
+                if pk_index == yield_pk_index {
+                    break;
+                }
+            }
+            self.keys_before_pruning += 1;
+            // Safety: `key_filter` is some so the shard has primary keys.
+            let key = self.key_dict.as_ref().unwrap().key_by_pk_index(pk_index);
+            let now = Instant::now();
+            if key_filter.prune_primary_key(key) {
+                self.prune_pk_cost += now.elapsed();
+                self.last_yield_pk_index = Some(pk_index);
+                self.keys_after_pruning += 1;
+                break;
+            }
+            self.prune_pk_cost += now.elapsed();
+            self.parts_reader.next()?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for ShardReader {
+    fn drop(&mut self) {
+        let shard_prune_pk = self.prune_pk_cost.as_secs_f64();
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["shard_prune_pk"])
+            .observe(shard_prune_pk);
+        if self.keys_before_pruning > 0 {
+            common_telemetry::debug!(
+                "ShardReader metrics, data parts: {}, before pruning: {}, after pruning: {}, prune cost: {}s, build cost: {}s",
+                self.parts_reader.num_parts(),
+                self.keys_before_pruning,
+                self.keys_after_pruning,
+                shard_prune_pk,
+                self.data_build_cost.as_secs_f64(),
+            );
+        }
     }
 }
 
@@ -422,7 +501,7 @@ mod tests {
         }
         assert!(!shard.is_empty());
 
-        let mut reader = shard.read().unwrap().build().unwrap();
+        let mut reader = shard.read().unwrap().build(None).unwrap();
         let mut timestamps = Vec::new();
         while reader.is_valid() {
             let rb = reader.current_data_batch().slice_record_batch();
