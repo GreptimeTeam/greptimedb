@@ -678,8 +678,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        println!("try to flush periodically");
-
         if let Err(e) = self.flush_periodically() {
             error!(e; "Failed to flush regions periodically");
         }
