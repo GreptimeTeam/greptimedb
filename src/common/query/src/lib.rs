@@ -30,19 +30,22 @@ pub mod prelude;
 mod signature;
 use sqlparser_derive::{Visit, VisitMut};
 
+/// new Output struct with output data(previously Output) and output meta
 #[derive(Debug)]
 pub struct Output {
     pub data: OutputData,
     pub meta: OutputMeta,
 }
 
-// sql output
+/// Original Output struct
+/// carrying result data to response/client/user interface
 pub enum OutputData {
     AffectedRows(usize),
     RecordBatches(RecordBatches),
     Stream(SendableRecordBatchStream),
 }
 
+/// OutputMeta stores meta information produced/generated during the execution
 #[derive(Debug, Default)]
 pub struct OutputMeta {
     pub plan: Option<Arc<dyn PhysicalPlan>>,
