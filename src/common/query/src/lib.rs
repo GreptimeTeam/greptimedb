@@ -48,6 +48,7 @@ pub enum OutputData {
 /// OutputMeta stores meta information produced/generated during the execution
 #[derive(Debug, Default)]
 pub struct OutputMeta {
+    /// May exist for query output. One can retrieve execution metrics from this plan.
     pub plan: Option<Arc<dyn PhysicalPlan>>,
     pub cost: usize,
 }
