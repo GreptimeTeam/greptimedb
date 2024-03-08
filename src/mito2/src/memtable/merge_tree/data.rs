@@ -957,6 +957,18 @@ impl DataParts {
         self.active.write_row(pk_index, kv)
     }
 
+    /// Returns the number of rows in the active buffer.
+    pub fn num_active_rows(&self) -> usize {
+        self.active.num_rows()
+    }
+
+    /// Freezes active buffer and creates a new active buffer.
+    pub fn freeze(&mut self) -> Result<()> {
+        let part = self.active.freeze(None, false)?;
+        self.frozen.push(part);
+        Ok(())
+    }
+
     /// Reads data from all parts including active and frozen parts.
     /// The returned iterator yields a record batch of one primary key at a time.
     /// The order of yielding primary keys is determined by provided weights.

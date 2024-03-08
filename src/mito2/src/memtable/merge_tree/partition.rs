@@ -78,7 +78,7 @@ impl Partition {
 
         // Finds key in shards, now we ensure one key only exists in one shard.
         if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
-            inner.write_to_shard(pk_id, &key_value);
+            inner.write_to_shard(pk_id, &key_value)?;
             inner.num_rows += 1;
             return Ok(());
         }
@@ -106,7 +106,7 @@ impl Partition {
     }
 
     /// Writes to the partition without a primary key.
-    pub fn write_no_key(&self, key_value: KeyValue) {
+    pub fn write_no_key(&self, key_value: KeyValue) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
         // If no primary key, always write to the first shard.
         debug_assert!(!inner.shards.is_empty());
@@ -117,8 +117,10 @@ impl Partition {
             shard_id: 0,
             pk_index: 0,
         };
-        inner.shards[0].write_with_pk_id(pk_id, &key_value);
+        inner.shards[0].write_with_pk_id(pk_id, &key_value)?;
         inner.num_rows += 1;
+
+        Ok(())
     }
 
     /// Scans data in the partition.
@@ -549,7 +551,16 @@ impl Inner {
     fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
         let (shards, current_shard_id) = if metadata.primary_key.is_empty() {
             let data_parts = DataParts::new(metadata.clone(), DATA_INIT_CAP, config.dedup);
-            (vec![Shard::new(0, None, data_parts, config.dedup)], 1)
+            (
+                vec![Shard::new(
+                    0,
+                    None,
+                    data_parts,
+                    config.dedup,
+                    config.data_freeze_threshold,
+                )],
+                1,
+            )
         } else {
             (Vec::new(), 0)
         };
@@ -569,18 +580,22 @@ impl Inner {
         self.pk_to_pk_id.get(primary_key).copied()
     }
 
-    fn write_to_shard(&mut self, pk_id: PkId, key_value: &KeyValue) {
+    fn write_to_shard(&mut self, pk_id: PkId, key_value: &KeyValue) -> Result<()> {
         if pk_id.shard_id == self.shard_builder.current_shard_id() {
             self.shard_builder.write_with_pk_id(pk_id, key_value);
-            return;
+            return Ok(());
         }
-        for shard in &mut self.shards {
-            if shard.shard_id == pk_id.shard_id {
-                shard.write_with_pk_id(pk_id, key_value);
-                self.num_rows += 1;
-                return;
-            }
-        }
+
+        // Safety: We find the shard by shard id.
+        let shard = self
+            .shards
+            .iter_mut()
+            .find(|shard| shard.shard_id == pk_id.shard_id)
+            .unwrap();
+        shard.write_with_pk_id(pk_id, key_value)?;
+        self.num_rows += 1;
+
+        Ok(())
     }
 
     fn freeze_active_shard(&mut self) -> Result<()> {

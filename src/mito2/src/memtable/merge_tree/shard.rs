@@ -39,6 +39,8 @@ pub struct Shard {
     /// Data in the shard.
     data_parts: DataParts,
     dedup: bool,
+    /// Number of rows to freeze a data part.
+    data_freeze_threshold: usize,
 }
 
 impl Shard {
@@ -48,20 +50,29 @@ impl Shard {
         key_dict: Option<KeyDictRef>,
         data_parts: DataParts,
         dedup: bool,
+        data_freeze_threshold: usize,
     ) -> Shard {
         Shard {
             shard_id,
             key_dict,
             data_parts,
             dedup,
+            data_freeze_threshold,
         }
     }
 
     /// Writes a key value into the shard.
-    pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: &KeyValue) {
+    ///
+    /// It will freezes the active buffer if it is full.
+    pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: &KeyValue) -> Result<()> {
         debug_assert_eq!(self.shard_id, pk_id.shard_id);
 
+        if self.data_parts.num_active_rows() >= self.data_freeze_threshold {
+            self.data_parts.freeze()?;
+        }
+
         self.data_parts.write_row(pk_id.pk_index, key_value);
+        Ok(())
     }
 
     /// Scans the shard.
@@ -83,6 +94,7 @@ impl Shard {
             key_dict: self.key_dict.clone(),
             data_parts: DataParts::new(metadata, DATA_INIT_CAP, self.dedup),
             dedup: self.dedup,
+            data_freeze_threshold: self.data_freeze_threshold,
         }
     }
 
@@ -467,6 +479,7 @@ mod tests {
         shard_id: ShardId,
         metadata: RegionMetadataRef,
         input: &[(KeyValues, PkIndex)],
+        data_freeze_threshold: usize,
     ) -> Shard {
         let mut dict_builder = KeyDictBuilder::new(1024);
         let mut metrics = WriteMetrics::default();
@@ -481,14 +494,20 @@ mod tests {
         let dict = dict_builder.finish(&mut BTreeMap::new()).unwrap();
         let data_parts = DataParts::new(metadata, DATA_INIT_CAP, true);
 
-        Shard::new(shard_id, Some(Arc::new(dict)), data_parts, true)
+        Shard::new(
+            shard_id,
+            Some(Arc::new(dict)),
+            data_parts,
+            true,
+            data_freeze_threshold,
+        )
     }
 
     #[test]
     fn test_write_read_shard() {
         let metadata = metadata_for_test();
         let input = input_with_key(&metadata);
-        let mut shard = new_shard_with_dict(8, metadata, &input);
+        let mut shard = new_shard_with_dict(8, metadata, &input, 100);
         assert!(shard.is_empty());
         for (key_values, pk_index) in &input {
             for kv in key_values.iter() {
@@ -496,7 +515,7 @@ mod tests {
                     shard_id: shard.shard_id,
                     pk_index: *pk_index,
                 };
-                shard.write_with_pk_id(pk_id, &kv);
+                shard.write_with_pk_id(pk_id, &kv).unwrap();
             }
         }
         assert!(!shard.is_empty());
