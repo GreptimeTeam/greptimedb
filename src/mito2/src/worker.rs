@@ -311,7 +311,7 @@ async fn write_cache_from_config(
     Ok(Some(Arc::new(cache)))
 }
 
-/// Computes a inital check delay for a worker.
+/// Computes a initial check delay for a worker.
 pub(crate) fn worker_init_check_delay() -> Duration {
     let init_check_delay = thread_rng().gen_range(0..MAX_INITIAL_CHECK_DELAY_SECS);
     Duration::from_secs(init_check_delay)
