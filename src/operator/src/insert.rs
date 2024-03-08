@@ -22,7 +22,6 @@ use api::v1::{
     RowInsertRequests, SemanticType,
 };
 use catalog::CatalogManagerRef;
-use client::OutputData;
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
@@ -112,9 +111,7 @@ impl Inserter {
         .await?;
 
         let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(Output::new_data(OutputData::AffectedRows(
-            affected_rows as _,
-        )))
+        Ok(Output::new_with_affectedrows(affected_rows))
     }
 
     /// Handle row inserts request with metric engine.
@@ -152,9 +149,7 @@ impl Inserter {
                 .await?;
 
         let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(Output::new_data(OutputData::AffectedRows(
-            affected_rows as _,
-        )))
+        Ok(Output::new_with_affectedrows(affected_rows))
     }
 
     pub async fn handle_table_insert(
@@ -190,9 +185,7 @@ impl Inserter {
                 .await?;
 
         let affected_rows = self.do_request(inserts, ctx).await?;
-        Ok(Output::new_data(OutputData::AffectedRows(
-            affected_rows as _,
-        )))
+        Ok(Output::new_with_affectedrows(affected_rows))
     }
 }
 

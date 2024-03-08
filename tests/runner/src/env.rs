@@ -443,7 +443,7 @@ impl Database for GreptimeDB {
                 .trim_end_matches(';');
             client.set_schema(database);
             Box::new(ResultDisplayer {
-                result: Ok(Output::new_data(OutputData::AffectedRows(0))),
+                result: Ok(Output::new_with_affectedrows(0)),
             }) as _
         } else if query.trim().to_lowercase().starts_with("set time_zone") {
             // set time_zone='xxx'
@@ -460,7 +460,7 @@ impl Database for GreptimeDB {
             client.set_timezone(timezone);
 
             Box::new(ResultDisplayer {
-                result: Ok(Output::new_data(OutputData::AffectedRows(0))),
+                result: Ok(Output::new_with_affectedrows(0)),
             }) as _
         } else {
             let mut result = client.sql(&query).await;
@@ -471,7 +471,7 @@ impl Database for GreptimeDB {
             {
                 match RecordBatches::try_collect(stream).await {
                     Ok(recordbatches) => {
-                        result = Ok(Output::new_data(OutputData::RecordBatches(recordbatches)));
+                        result = Ok(Output::new_with_recordbatches(recordbatches));
                     }
                     Err(e) => {
                         let status_code = e.status_code();

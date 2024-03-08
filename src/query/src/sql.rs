@@ -29,7 +29,7 @@ use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
 use common_query::prelude::GREPTIME_TIMESTAMP;
-use common_query::{Output, OutputData};
+use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::RecordBatches;
 use common_time::timezone::get_timezone;
@@ -237,9 +237,9 @@ async fn query_from_information_schema_table(
         .await
         .context(error::DataFusionSnafu)?;
 
-    Ok(Output::new_data(OutputData::Stream(Box::pin(
+    Ok(Output::new_with_stream(Box::pin(
         RecordBatchStreamAdapter::try_new(stream).context(error::CreateRecordBatchSnafu)?,
-    ))))
+    )))
 }
 
 pub async fn show_tables(
@@ -302,7 +302,7 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
         vec![Arc::new(StringVector::from(vec![value])) as _],
     )
     .context(error::CreateRecordBatchSnafu)?;
-    Ok(Output::new_data(OutputData::RecordBatches(records)))
+    Ok(Output::new_with_recordbatches(records))
 }
 
 pub fn show_create_table(
@@ -328,7 +328,7 @@ pub fn show_create_table(
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
 
-    Ok(Output::new_data(OutputData::RecordBatches(records)))
+    Ok(Output::new_with_recordbatches(records))
 }
 
 pub fn describe_table(table: TableRef) -> Result<Output> {
@@ -344,7 +344,7 @@ pub fn describe_table(table: TableRef) -> Result<Output> {
     ];
     let records = RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
-    Ok(Output::new_data(OutputData::RecordBatches(records)))
+    Ok(Output::new_with_recordbatches(records))
 }
 
 fn describe_column_names(columns_schemas: &[ColumnSchema]) -> VectorRef {

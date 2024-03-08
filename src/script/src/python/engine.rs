@@ -312,9 +312,9 @@ impl Script for PyScript {
                 .context(DatabaseQuerySnafu)?;
             let copr = self.copr.clone();
             match res.data {
-                OutputData::Stream(stream) => Ok(Output::new_data(OutputData::Stream(Box::pin(
+                OutputData::Stream(stream) => Ok(Output::new_with_stream(Box::pin(
                     CoprStream::try_new(stream, copr, params, ctx)?,
-                )))),
+                ))),
                 _ => unreachable!(),
             }
         } else {
@@ -324,7 +324,7 @@ impl Script for PyScript {
                 .await
                 .context(TokioJoinSnafu)??;
             let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
-            Ok(Output::new_data(OutputData::RecordBatches(batches)))
+            Ok(Output::new_with_recordbatches(batches))
         }
     }
 }

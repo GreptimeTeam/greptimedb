@@ -50,9 +50,23 @@ pub struct OutputMeta {
 }
 
 impl Output {
-    pub fn new_data(data: OutputData) -> Self {
+    pub fn new_with_affectedrows(affected_rows: usize) -> Self {
         Self {
-            data,
+            data: OutputData::AffectedRows(affected_rows),
+            meta: Default::default(),
+        }
+    }
+
+    pub fn new_with_recordbatches(recordbatches: RecordBatches) -> Self {
+        Self {
+            data: OutputData::RecordBatches(recordbatches),
+            meta: Default::default(),
+        }
+    }
+
+    pub fn new_with_stream(stream: SendableRecordBatchStream) -> Self {
+        Self {
+            data: OutputData::Stream(stream),
             meta: Default::default(),
         }
     }

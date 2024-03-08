@@ -24,7 +24,6 @@ mod tql;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
-use client::OutputData;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
@@ -124,11 +123,11 @@ impl StatementExecutor {
                     CopyDirection::Export => self
                         .copy_table_to(req, query_ctx)
                         .await
-                        .map(|u| Output::new_data(OutputData::AffectedRows(u))),
+                        .map(Output::new_with_affectedrows),
                     CopyDirection::Import => self
                         .copy_table_from(req, query_ctx)
                         .await
-                        .map(|u| Output::new_data(OutputData::AffectedRows(u))),
+                        .map(Output::new_with_affectedrows),
                 }
             }
 
@@ -153,15 +152,15 @@ impl StatementExecutor {
 
             Statement::CreateTable(stmt) => {
                 let _ = self.create_table(stmt, query_ctx).await?;
-                Ok(Output::new_data(OutputData::AffectedRows(0)))
+                Ok(Output::new_with_affectedrows(0))
             }
             Statement::CreateTableLike(stmt) => {
                 let _ = self.create_table_like(stmt, query_ctx).await?;
-                Ok(Output::new_data(OutputData::AffectedRows(0)))
+                Ok(Output::new_with_affectedrows(0))
             }
             Statement::CreateExternalTable(stmt) => {
                 let _ = self.create_external_table(stmt, query_ctx).await?;
-                Ok(Output::new_data(OutputData::AffectedRows(0)))
+                Ok(Output::new_with_affectedrows(0))
             }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
@@ -232,7 +231,7 @@ impl StatementExecutor {
                         .fail()
                     }
                 }
-                Ok(Output::new_data(OutputData::AffectedRows(0)))
+                Ok(Output::new_with_affectedrows(0))
             }
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
         }

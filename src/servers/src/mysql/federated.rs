@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_query::{Output, OutputData};
+use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_time::timezone::system_timezone_name;
 use datatypes::prelude::ConcreteDataType;
@@ -229,7 +229,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
     let schema = Arc::new(Schema::new(fields));
     // unwrap is safe because the schema and data are definitely able to form a recordbatch, they are all string type
     let batches = RecordBatches::try_from_columns(schema, values).unwrap();
-    Some(Output::new_data(OutputData::RecordBatches(batches)))
+    Some(Output::new_with_recordbatches(batches))
 }
 
 fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
@@ -254,15 +254,13 @@ fn check_show_variables(query: &str) -> Option<Output> {
     } else {
         None
     };
-    recordbatches.map(|b| Output::new_data(OutputData::RecordBatches(b)))
+    recordbatches.map(Output::new_with_recordbatches)
 }
 
 // Check for SET or others query, this is the final check of the federated query.
 fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
-        return Some(Output::new_data(OutputData::RecordBatches(
-            RecordBatches::empty(),
-        )));
+        return Some(Output::new_with_recordbatches(RecordBatches::empty()));
     }
 
     let recordbatches = if SELECT_DATABASE_PATTERN.is_match(query) {
@@ -276,7 +274,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     } else {
         None
     };
-    recordbatches.map(|b| Output::new_data(OutputData::RecordBatches(b)))
+    recordbatches.map(Output::new_with_recordbatches)
 }
 
 // Check whether the query is a federated or driver setup command,
@@ -303,6 +301,7 @@ pub(crate) fn check(
 #[cfg(test)]
 mod test {
 
+    use common_query::OutputData;
     use common_time::timezone::set_default_timezone;
     use session::context::{Channel, QueryContext};
     use session::Session;

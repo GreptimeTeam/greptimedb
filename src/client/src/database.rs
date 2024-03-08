@@ -25,7 +25,7 @@ use arrow_flight::Ticket;
 use async_stream::stream;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::{FlightDecoder, FlightMessage};
-use common_query::{Output, OutputData};
+use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
 use common_telemetry::logging;
@@ -307,7 +307,7 @@ impl Database {
                         reason: "Expect 'AffectedRows' Flight messages to be the one and the only!"
                     }
                 );
-                Ok(Output::new_data(OutputData::AffectedRows(rows)))
+                Ok(Output::new_with_affectedrows(rows))
             }
             FlightMessage::Recordbatch(_) | FlightMessage::Metrics(_) => {
                 IllegalFlightMessagesSnafu {
@@ -340,9 +340,7 @@ impl Database {
                     output_ordering: None,
                     metrics: Default::default(),
                 };
-                Ok(Output::new_data(OutputData::Stream(Box::pin(
-                    record_batch_stream,
-                ))))
+                Ok(Output::new_with_stream(Box::pin(record_batch_stream)))
             }
         }
     }

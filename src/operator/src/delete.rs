@@ -19,7 +19,6 @@ use std::{iter, mem};
 use api::v1::region::{DeleteRequests as RegionDeleteRequests, RegionRequestHeader};
 use api::v1::{DeleteRequests, RowDeleteRequests};
 use catalog::CatalogManagerRef;
-use client::OutputData;
 use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
@@ -92,9 +91,8 @@ impl Deleter {
         .await?;
 
         let affected_rows = self.do_request(deletes, &ctx).await?;
-        Ok(Output::new_data(OutputData::AffectedRows(
-            affected_rows as _,
-        )))
+
+        Ok(Output::new_with_affectedrows(affected_rows))
     }
 
     pub async fn handle_table_delete(

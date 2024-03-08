@@ -18,7 +18,6 @@ use api::v1::query_request::Query;
 use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use client::OutputData;
 use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
@@ -114,7 +113,7 @@ impl GrpcQueryHandler for Instance {
                             .statement_executor
                             .create_table_inner(&mut expr, None, &ctx)
                             .await?;
-                        Output::new_data(OutputData::AffectedRows(0))
+                        Output::new_with_affectedrows(0)
                     }
                     DdlExpr::Alter(expr) => self.statement_executor.alter_table_inner(expr).await?,
                     DdlExpr::CreateDatabase(expr) => {

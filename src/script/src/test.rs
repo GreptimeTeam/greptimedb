@@ -17,7 +17,7 @@ use std::sync::Arc;
 use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
-use common_query::{Output, OutputData};
+use common_query::Output;
 use common_recordbatch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -73,6 +73,6 @@ impl GrpcQueryHandler for MockGrpcQueryHandler {
     type Error = Error;
 
     async fn do_query(&self, _query: Request, _ctx: QueryContextRef) -> Result<Output> {
-        Ok(Output::new_data(OutputData::AffectedRows(1)))
+        Ok(Output::new_with_affectedrows(1))
     }
 }
