@@ -50,7 +50,11 @@ SELECT ts, host, first_value(val) RANGE '5s', last_value(val) RANGE '5s' FROM ho
 
 SELECT ts, host, first_value(addon ORDER BY val DESC) RANGE '5s', last_value(addon ORDER BY val DESC) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 
+SELECT ts, host, first_value(addon ORDER BY val DESC NULLS LAST) RANGE '5s', last_value(addon ORDER BY val DESC NULLS LAST) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
+
 SELECT ts, host, first_value(addon ORDER BY val ASC) RANGE '5s', last_value(addon ORDER BY val ASC) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
+
+SELECT ts, host, first_value(addon ORDER BY val ASC NULLS FIRST) RANGE '5s', last_value(addon ORDER BY val ASC NULLS FIRST) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 
 SELECT ts, host, first_value(addon ORDER BY val ASC, ts ASC) RANGE '5s', last_value(addon ORDER BY val ASC, ts ASC) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 
@@ -65,5 +69,23 @@ SELECT ts, host, count(distinct *) RANGE '5s'FROM host ALIGN '5s' ORDER BY host,
 -- Test error first_value/last_value
 
 SELECT ts, host, first_value(val, val) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
+
+DROP TABLE host;
+
+-- Test first_value/last_value will execute sort
+
+CREATE TABLE host (
+  ts timestamp(3) time index,
+  host STRING PRIMARY KEY,
+  val BIGINT,
+  addon BIGINT,
+);
+
+INSERT INTO TABLE host VALUES
+    (0,     'host1', 0, 3),
+    (1000,  'host1', 1, 2),
+    (2000,  'host1', 2, 1);
+
+SELECT ts, first_value(val ORDER BY addon ASC) RANGE '5s', last_value(val ORDER BY addon ASC) RANGE '5s' FROM host ALIGN '5s';
 
 DROP TABLE host;

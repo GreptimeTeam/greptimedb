@@ -86,14 +86,7 @@ impl PartialEq<dyn Any> for RangeFirstListValue {
     fn eq(&self, other: &dyn Any) -> bool {
         down_cast_any_ref(other)
             .downcast_ref::<Self>()
-            .map(|x| {
-                self.expr.eq(&x.expr)
-                    && self
-                        .order_bys
-                        .iter()
-                        .zip(x.order_bys.iter())
-                        .all(|(x, y)| x.eq(y))
-            })
+            .map(|x| self.expr.eq(&x.expr) && self.order_bys.iter().eq(x.order_bys.iter()))
             .unwrap_or(false)
     }
 }
