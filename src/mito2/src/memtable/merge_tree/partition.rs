@@ -125,6 +125,7 @@ impl Partition {
 
     /// Scans data in the partition.
     pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
+        let start = Instant::now();
         let key_filter = if context.need_prune_key {
             Some(PrimaryKeyFilter::new(
                 context.metadata.clone(),
@@ -152,7 +153,7 @@ impl Partition {
             (builder_reader, shard_source)
         };
 
-        context.metrics.num_shards = shard_reader_builders.len();
+        context.metrics.num_shards += shard_reader_builders.len();
         let mut nodes = shard_reader_builders
             .into_iter()
             .map(|builder| {
@@ -163,7 +164,7 @@ impl Partition {
             .collect::<Result<Vec<_>>>()?;
 
         if let Some(builder) = builder_source {
-            context.metrics.read_builder = true;
+            context.metrics.num_builder += 1;
             // Move the initialization of ShardBuilderReader out of read lock.
             let shard_builder_reader =
                 builder.build(Some(&context.pk_weights), key_filter.clone())?;
@@ -174,8 +175,10 @@ impl Partition {
         let merger = ShardMerger::try_new(nodes)?;
         if self.dedup {
             let source = DedupReader::try_new(merger)?;
+            context.metrics.build_partition_reader += start.elapsed();
             PartitionReader::new(context, Box::new(source))
         } else {
+            context.metrics.build_partition_reader += start.elapsed();
             PartitionReader::new(context, Box::new(merger))
         }
     }
@@ -284,9 +287,10 @@ pub(crate) struct PartitionStats {
 
 #[derive(Default)]
 struct PartitionReaderMetrics {
+    build_partition_reader: Duration,
     read_source: Duration,
     data_batch_to_batch: Duration,
-    read_builder: bool,
+    num_builder: usize,
     num_shards: usize,
 }
 
@@ -442,8 +446,8 @@ impl Drop for ReadPartitionContext {
             .observe(partition_data_batch_to_batch);
 
         common_telemetry::debug!(
-            "TreeIter partitions metrics, read_builder: {}, num_shards: {}, partition_read_source: {}s, partition_data_batch_to_batch: {}s",
-            self.metrics.read_builder,
+            "TreeIter partitions metrics, num_builder: {}, num_shards: {}, partition_read_source: {}s, partition_data_batch_to_batch: {}s",
+            self.metrics.num_builder,
             self.metrics.num_shards,
             partition_read_source,
             partition_data_batch_to_batch,
