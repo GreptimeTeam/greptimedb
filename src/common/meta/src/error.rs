@@ -67,6 +67,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to execute {} txn operations via Etcd", max_operations))]
+    EtcdTxnFailed {
+        max_operations: usize,
+        #[snafu(source)]
+        error: etcd_client::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to get sequence: {}", err_msg))]
     NextSequence { err_msg: String, location: Location },
 
@@ -400,6 +408,7 @@ impl ErrorExt for Error {
             IllegalServerState { .. }
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
+            | EtcdTxnFailed { .. }
             | ConnectEtcd { .. } => StatusCode::Internal,
 
             SerdeJson { .. }

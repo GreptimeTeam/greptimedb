@@ -94,7 +94,7 @@ impl GreptimeDbClusterBuilder {
                 .split(',')
                 .map(|s| s.to_string())
                 .collect::<Vec<String>>();
-            let backend = EtcdStore::with_endpoints(endpoints)
+            let backend = EtcdStore::with_endpoints(endpoints, 128)
                 .await
                 .expect("malformed endpoints");
             // Each retry requires a new isolation namespace.
