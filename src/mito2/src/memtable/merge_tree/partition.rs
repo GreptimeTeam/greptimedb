@@ -446,9 +446,15 @@ impl Drop for ReadPartitionContext {
             .observe(partition_data_batch_to_batch);
 
         common_telemetry::debug!(
-            "TreeIter partitions metrics, num_builder: {}, num_shards: {}, partition_read_source: {}s, partition_data_batch_to_batch: {}s",
+            "TreeIter partitions metrics, \
+            num_builder: {}, \
+            num_shards: {}, \
+            build_partition_reader: {}s, \
+            partition_read_source: {}s, \
+            partition_data_batch_to_batch: {}s",
             self.metrics.num_builder,
             self.metrics.num_shards,
+            self.metrics.build_partition_reader.as_secs_f64(),
             partition_read_source,
             partition_data_batch_to_batch,
         );
