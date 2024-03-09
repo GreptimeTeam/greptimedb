@@ -158,7 +158,7 @@ impl CacheManager {
         }
     }
 
-    /// Gets the the write cache.
+    /// Gets the write cache.
     pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
         self.write_cache.as_ref()
     }

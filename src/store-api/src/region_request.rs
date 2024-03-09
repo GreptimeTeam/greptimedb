@@ -353,7 +353,7 @@ pub enum AlterKind {
 }
 
 impl AlterKind {
-    /// Returns an error if the the alter kind is invalid.
+    /// Returns an error if the alter kind is invalid.
     ///
     /// It allows adding column if not exists and dropping column if exists.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
