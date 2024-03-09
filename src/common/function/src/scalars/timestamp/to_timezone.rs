@@ -12,8 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
+use std::sync::Arc;
+
+use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
+use common_query::prelude::Signature;
 use common_time::{Timestamp, Timezone};
+use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::VectorRef;
+use datatypes::types::TimestampType;
 use datatypes::value::Value;
+use datatypes::vectors::{
+    StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, Vector,
+};
+use snafu::{ensure, OptionExt};
+
+use crate::function::{Function, FunctionContext};
+use crate::helper;
 
 #[derive(Clone, Debug, Default)]
 pub struct ToTimezoneFunction;
@@ -29,11 +45,6 @@ fn convert_to_timezone(arg: &str) -> Option<Timezone> {
 
 fn convert_to_timestamp(arg: &Value) -> Option<Timestamp> {
     match arg {
-        Value::Int64(ts) => Some(Timestamp::from(*ts)),
-        Value::String(ts) => match Timestamp::from_str(ts.as_utf8(), None) {
-            Ok(ts) => Some(ts),
-            Err(_) => None,
-        },
         Value::Timestamp(ts) => Some(*ts),
         _ => None,
     }
@@ -51,4 +62,113 @@ fn process_to_timezone(
             _ => None,
         })
         .collect::<Vec<Option<String>>>()
+}
+
+impl fmt::Display for ToTimezoneFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TO_TIMEZONE")
+    }
+}
+
+impl Function for ToTimezoneFunction {
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn return_type(
+        &self,
+        input_types: &[ConcreteDataType],
+    ) -> common_query::error::Result<ConcreteDataType> {
+        // type checked by signature - MUST BE timestamp
+        Ok(input_types[0].clone())
+    }
+
+    fn signature(&self) -> Signature {
+        helper::one_of_sigs2(
+            vec![
+                ConcreteDataType::timestamp_second_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ],
+            vec![ConcreteDataType::string_datatype()],
+        )
+    }
+
+    fn eval(&self, _ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 2,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect exactly 2, have: {}",
+                    columns.len()
+                ),
+            }
+        );
+
+        let ts = columns[0]
+            .data_type()
+            .as_timestamp()
+            .context(UnsupportedInputDataTypeSnafu {
+                function: NAME,
+                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+            })?;
+        let array = columns[0].to_arrow_array();
+        let times = match ts {
+            TimestampType::Second(_) => {
+                let vector =
+                    paste::expr!(TimestampSecondVector::try_from_arrow_array(array).unwrap());
+                Ok((0..vector.len())
+                    .map(|i| convert_to_timestamp(&vector.get(i)))
+                    .collect::<Vec<_>>())
+            }
+            TimestampType::Millisecond(_) => {
+                let vector =
+                    paste::expr!(TimestampMillisecondVector::try_from_arrow_array(array).unwrap());
+                Ok((0..vector.len())
+                    .map(|i| convert_to_timestamp(&vector.get(i)))
+                    .collect::<Vec<_>>())
+            }
+            TimestampType::Microsecond(_) => {
+                let vector =
+                    paste::expr!(TimestampMicrosecondVector::try_from_arrow_array(array).unwrap());
+                Ok((0..vector.len())
+                    .map(|i| convert_to_timestamp(&vector.get(i)))
+                    .collect::<Vec<_>>())
+            }
+            TimestampType::Nanosecond(_) => {
+                let vector =
+                    paste::expr!(TimestampNanosecondVector::try_from_arrow_array(array).unwrap());
+                Ok((0..vector.len())
+                    .map(|i| convert_to_timestamp(&vector.get(i)))
+                    .collect::<Vec<_>>())
+            }
+        };
+
+        let tzs = match columns[1].data_type() {
+            ConcreteDataType::String(_) => {
+                let array = columns[1].to_arrow_array();
+                let vector = StringVector::try_from_arrow_array(&array).unwrap();
+                Ok((0..vector.len())
+                    .map(|i| convert_to_timezone(&vector.get(i).to_string()))
+                    .collect::<Vec<_>>())
+            }
+            _ => UnsupportedInputDataTypeSnafu {
+                function: NAME,
+                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+            }
+            .fail(),
+        };
+
+        match (times, tzs) {
+            (Ok(times), Ok(tzs)) => Ok(Arc::new(StringVector::from(process_to_timezone(
+                times, tzs,
+            )))),
+            _ => UnsupportedInputDataTypeSnafu {
+                function: NAME,
+                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+            }
+            .fail(),
+        }
+    }
 }
