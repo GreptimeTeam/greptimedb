@@ -23,7 +23,6 @@ use to_unixtime::ToUnixtimeFunction;
 
 use crate::function_registry::FunctionRegistry;
 
-
 pub(crate) struct TimestampFunction;
 
 impl TimestampFunction {
