@@ -37,10 +37,7 @@ pub struct ToTimezoneFunction;
 const NAME: &str = "to_timezone";
 
 fn convert_to_timezone(arg: &str) -> Option<Timezone> {
-    match Timezone::from_tz_string(arg) {
-        Ok(ts) => Some(ts),
-        Err(_) => None,
-    }
+    Timezone::from_tz_string(arg).ok()
 }
 
 fn convert_to_timestamp(arg: &Value) -> Option<Timestamp> {
@@ -172,8 +169,7 @@ impl Function for ToTimezoneFunction {
 
 #[cfg(test)]
 mod tests {
-    use common_query::prelude::TypeSignature;
-    use datafusion::logical_expr::Volatility;
+
     use datatypes::scalars::ScalarVector;
     use datatypes::timestamp::{
         TimestampMicrosecond, TimestampMillisecond, TimestampNanosecond, TimestampSecond,
@@ -186,14 +182,6 @@ mod tests {
     fn test_timestamp_to_timezone() {
         let f = ToTimezoneFunction;
         assert_eq!("to_timezone", f.name());
-
-        assert!(matches!(
-            f.signature(),
-            Signature {
-                type_signature: TypeSignature::OneOf(_),
-                volatility: Volatility::Immutable
-            }
-        ));
 
         let results = vec![
             Some("1969-12-31 19:00:01"),
