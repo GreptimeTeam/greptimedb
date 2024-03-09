@@ -800,7 +800,7 @@ mod test {
             .unwrap();
         // only retain sum result
         let mfp = mfp.project(vec![4]).unwrap();
-        // accept only if if the sum is greater than 10
+        // accept only if the sum is greater than 10
         let mfp = mfp
             .filter(vec![ScalarExpr::Column(0).call_binary(
                 ScalarExpr::Literal(Value::from(10i32), ConcreteDataType::int32_datatype()),

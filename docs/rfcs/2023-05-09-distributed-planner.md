@@ -79,7 +79,7 @@ This RFC proposes to add a new expression node `MergeScan` to merge result from 
 │               │    │                             │
 └─Frontend──────┘    └─Remote-Sources──────────────┘
 ```
-This merge operation simply chains all the the underlying remote data sources and return `RecordBatch`, just like a coalesce op. And each remote sources is a gRPC query to datanode via the substrait logical plan interface. The plan is transformed and divided from the original query that comes to frontend.
+This merge operation simply chains all the underlying remote data sources and return `RecordBatch`, just like a coalesce op. And each remote sources is a gRPC query to datanode via the substrait logical plan interface. The plan is transformed and divided from the original query that comes to frontend.
 
 ## Commutativity of MergeScan
 

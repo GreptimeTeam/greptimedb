@@ -152,7 +152,7 @@ impl Runner {
             guard.key_guards.push(key_guard);
         }
 
-        // Execute the procedure. We need to release the lock whenever the the execution
+        // Execute the procedure. We need to release the lock whenever the execution
         // is successful or fail.
         self.execute_procedure_in_loop().await;
 
