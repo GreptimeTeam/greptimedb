@@ -75,10 +75,7 @@ impl Function for ToTimezoneFunction {
         NAME
     }
 
-    fn return_type(
-        &self,
-        input_types: &[ConcreteDataType],
-    ) -> common_query::error::Result<ConcreteDataType> {
+    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
         // type checked by signature - MUST BE timestamp
         Ok(input_types[0].clone())
     }
@@ -114,7 +111,7 @@ impl Function for ToTimezoneFunction {
                 datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
             })?;
         let array = columns[0].to_arrow_array();
-        let times = match ts {
+        let times: Result<Vec<Option<Timestamp>>> = match ts {
             TimestampType::Second(_) => {
                 let vector =
                     paste::expr!(TimestampSecondVector::try_from_arrow_array(array).unwrap());
@@ -170,5 +167,127 @@ impl Function for ToTimezoneFunction {
             }
             .fail(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_query::prelude::TypeSignature;
+    use datafusion::logical_expr::Volatility;
+    use datatypes::scalars::ScalarVector;
+    use datatypes::timestamp::{
+        TimestampMicrosecond, TimestampMillisecond, TimestampNanosecond, TimestampSecond,
+    };
+    use datatypes::vectors::StringVector;
+
+    use super::*;
+
+    #[test]
+    fn test_timestamp_to_timezone() {
+        let f = ToTimezoneFunction;
+        assert_eq!("to_timezone", f.name());
+
+        assert!(matches!(
+            f.signature(),
+            Signature {
+                type_signature: TypeSignature::OneOf(_),
+                volatility: Volatility::Immutable
+            }
+        ));
+
+        let results = vec![
+            Some("1969-12-31 19:00:01"),
+            None,
+            Some("1970-01-01 03:00:01"),
+            None,
+        ];
+        let times: Vec<Option<TimestampSecond>> = vec![
+            Some(TimestampSecond::new(1)),
+            None,
+            Some(TimestampSecond::new(1)),
+            None,
+        ];
+        let ts_vector: TimestampSecondVector =
+            TimestampSecondVector::from_owned_iterator(times.into_iter());
+        let tzs = vec![Some("America/New_York"), None, Some("Europe/Moscow"), None];
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ts_vector),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
+
+        let results = vec![
+            Some("1969-12-31 19:00:00.001"),
+            None,
+            Some("1970-01-01 03:00:00.001"),
+            None,
+        ];
+        let times: Vec<Option<TimestampMillisecond>> = vec![
+            Some(TimestampMillisecond::new(1)),
+            None,
+            Some(TimestampMillisecond::new(1)),
+            None,
+        ];
+        let ts_vector: TimestampMillisecondVector =
+            TimestampMillisecondVector::from_owned_iterator(times.into_iter());
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ts_vector),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
+
+        let results = vec![
+            Some("1969-12-31 19:00:00.000001"),
+            None,
+            Some("1970-01-01 03:00:00.000001"),
+            None,
+        ];
+        let times: Vec<Option<TimestampMicrosecond>> = vec![
+            Some(TimestampMicrosecond::new(1)),
+            None,
+            Some(TimestampMicrosecond::new(1)),
+            None,
+        ];
+        let ts_vector: TimestampMicrosecondVector =
+            TimestampMicrosecondVector::from_owned_iterator(times.into_iter());
+
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ts_vector),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
+
+        let results = vec![
+            Some("1969-12-31 19:00:00.000000001"),
+            None,
+            Some("1970-01-01 03:00:00.000000001"),
+            None,
+        ];
+        let times: Vec<Option<TimestampNanosecond>> = vec![
+            Some(TimestampNanosecond::new(1)),
+            None,
+            Some(TimestampNanosecond::new(1)),
+            None,
+        ];
+        let ts_vector: TimestampNanosecondVector =
+            TimestampNanosecondVector::from_owned_iterator(times.into_iter());
+
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ts_vector),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
     }
 }
