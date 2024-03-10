@@ -229,6 +229,7 @@ pub struct CreateTableLike {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use crate::dialect::GreptimeDbDialect;
     use crate::error::Error::InvalidTableOption;
     use crate::parser::{ParseOptions, ParserContext};
@@ -344,7 +345,7 @@ ENGINE=mito
     fn test_validate_table_options() {
         let sql = r"create table if not exists demo(
             host string,
-            ts bigint,
+            ts timestamp,
             cpu double default 0,
             memory double,
             TIME INDEX (ts),
@@ -356,6 +357,6 @@ ENGINE=mito
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(matches!(result, Err(InvalidTableOption { .. })))
+        assert_matches!(result, Err(InvalidTableOption { .. }))
     }
 }
