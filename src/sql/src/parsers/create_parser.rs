@@ -62,12 +62,14 @@ impl<'a> ParserContext<'a> {
         let _ = self.parser.next_token();
         self.parser
             .expect_keyword(Keyword::TABLE)
-            .context(error::SyntaxSnafu)?;
+            .context(SyntaxSnafu)?;
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
         let table_name = self.intern_parse_table_name()?;
         let (columns, constraints) = self.parse_columns()?;
+        validate_time_index(&columns, &constraints)?;
+
         let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
         let options = self
             .parser
@@ -140,8 +142,12 @@ impl<'a> ParserContext<'a> {
         }
 
         let (columns, constraints) = self.parse_columns()?;
+        validate_time_index(&columns, &constraints)?;
 
         let partitions = self.parse_partitions()?;
+        if let Some(partitions) = &partitions {
+            validate_partitions(&columns, partitions)?;
+        }
 
         let engine = self.parse_table_engine(default_engine())?;
         let options = self
@@ -168,7 +174,6 @@ impl<'a> ParserContext<'a> {
             table_id: 0, // table id is assigned by catalog manager
             partitions,
         };
-        validate_create(&create_table)?;
 
         Ok(Statement::CreateTable(create_table))
     }
@@ -553,18 +558,8 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-fn validate_create(create_table: &CreateTable) -> Result<()> {
-    if let Some(partitions) = &create_table.partitions {
-        validate_partitions(&create_table.columns, partitions)?;
-    }
-    validate_time_index(create_table)?;
-
-    Ok(())
-}
-
-fn validate_time_index(create_table: &CreateTable) -> Result<()> {
-    let time_index_constraints: Vec<_> = create_table
-        .constraints
+fn validate_time_index(columns: &[ColumnDef], constraints: &[TableConstraint]) -> Result<()> {
+    let time_index_constraints: Vec<_> = constraints
         .iter()
         .filter_map(|c| {
             if let TableConstraint::Unique {
@@ -605,8 +600,7 @@ fn validate_time_index(create_table: &CreateTable) -> Result<()> {
     // It's safe to use time_index_constraints[0][0],
     // we already check the bound above.
     let time_index_column_ident = &time_index_constraints[0][0];
-    let time_index_column = create_table
-        .columns
+    let time_index_column = columns
         .iter()
         .find(|c| c.name.value == *time_index_column_ident.value)
         .with_context(|| InvalidTimeIndexSnafu {
