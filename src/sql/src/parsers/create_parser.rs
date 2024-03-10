@@ -68,13 +68,15 @@ impl<'a> ParserContext<'a> {
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
         let table_name = self.intern_parse_table_name()?;
         let (columns, constraints) = self.parse_columns()?;
-        validate_time_index(&columns, &constraints)?;
+        if !columns.is_empty() {
+            validate_time_index(&columns, &constraints)?;
+        }
 
         let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
         let options = self
             .parser
             .parse_options(Keyword::WITH)
-            .context(error::SyntaxSnafu)?
+            .context(SyntaxSnafu)?
             .into_iter()
             .filter_map(|option| {
                 if let Some(v) = parse_option_string(option.value) {
@@ -747,7 +749,7 @@ mod tests {
     fn test_validate_external_table_options() {
         let sql = "CREATE EXTERNAL TABLE city (
             host string,
-            ts int64,
+            ts timestamp,
             cpu float64 default 0,
             memory float64,
             TIME INDEX (ts),
@@ -819,7 +821,7 @@ mod tests {
     fn test_parse_create_external_table_with_schema() {
         let sql = "CREATE EXTERNAL TABLE city (
             host string,
-            ts int64,
+            ts timestamp,
             cpu float32 default 0,
             memory float64,
             TIME INDEX (ts),
@@ -842,7 +844,7 @@ mod tests {
 
                 let columns = &c.columns;
                 assert_column_def(&columns[0], "host", "STRING");
-                assert_column_def(&columns[1], "ts", "BIGINT");
+                assert_column_def(&columns[1], "ts", "TIMESTAMP");
                 assert_column_def(&columns[2], "cpu", "FLOAT");
                 assert_column_def(&columns[3], "memory", "DOUBLE");
 
@@ -921,7 +923,7 @@ ENGINE=mito";
         let _ = result.unwrap();
 
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( ts TIMESTAMP TIME INDEX, a INT, b STRING, c INT )
 PARTITION ON COLUMNS(x) ()
 ENGINE=mito";
         let result =
@@ -1309,7 +1311,7 @@ ENGINE=mito";
     #[test]
     fn test_parse_partitions_with_error_syntax() {
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( ts TIMESTAMP TIME INDEX, a INT, b STRING, c INT )
 PARTITION COLUMNS(c, a) (
     a < 10,
     a > 10 AND a < 20,
@@ -1338,7 +1340,7 @@ ENGINE=mito";
     #[test]
     fn test_parse_partitions_unreferenced_column() {
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( ts TIMESTAMP TIME INDEX, a INT, b STRING, c INT )
 PARTITION ON COLUMNS(c, a) (
     b = 'foo'
 )
@@ -1354,7 +1356,7 @@ ENGINE=mito";
     #[test]
     fn test_parse_partitions_not_binary_expr() {
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( ts TIMESTAMP TIME INDEX, a INT, b STRING, c INT )
 PARTITION ON COLUMNS(c, a) (
     b
 )
