@@ -1,5 +1,3 @@
-// Copyright 2023 Greptime Team
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -12,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::http::HeaderValue;
+use axum::http::{HeaderValue, StatusCode as HttpStatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_error::ext::ErrorExt;
@@ -93,6 +91,39 @@ impl IntoResponse for ErrorResponse {
             &GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),
         );
-        resp
+        let status = StatusCode::from_u32(code).unwrap_or(StatusCode::Unknown);
+        let status_code = match status {
+            StatusCode::Success | StatusCode::Cancelled => HttpStatusCode::OK,
+            StatusCode::Unsupported
+            | StatusCode::InvalidArguments
+            | StatusCode::InvalidSyntax
+            | StatusCode::RequestOutdated
+            | StatusCode::RegionAlreadyExists
+            | StatusCode::TableColumnExists
+            | StatusCode::TableAlreadyExists
+            | StatusCode::RegionNotFound
+            | StatusCode::DatabaseNotFound
+            | StatusCode::TableNotFound
+            | StatusCode::TableColumnNotFound => HttpStatusCode::BAD_REQUEST,
+            StatusCode::PermissionDenied
+            | StatusCode::AuthHeaderNotFound
+            | StatusCode::InvalidAuthHeader
+            | StatusCode::UserNotFound
+            | StatusCode::UnsupportedPasswordType
+            | StatusCode::UserPasswordMismatch
+            | StatusCode::RegionReadonly => HttpStatusCode::UNAUTHORIZED,
+            StatusCode::AccessDenied => HttpStatusCode::FORBIDDEN,
+            StatusCode::Internal
+            | StatusCode::Unexpected
+            | StatusCode::Unknown
+            | StatusCode::RegionNotReady
+            | StatusCode::RegionBusy
+            | StatusCode::RateLimited
+            | StatusCode::StorageUnavailable
+            | StatusCode::RuntimeResourcesExhausted
+            | StatusCode::PlanQuery
+            | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status_code, resp).into_response()
     }
 }

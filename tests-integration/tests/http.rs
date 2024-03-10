@@ -124,7 +124,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app);
     let res = client.get("/v1/sql").send().await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), 1004);
@@ -252,11 +252,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?sql=select cpu, ts from demo limit 1;select cpu, ts from demo2 where ts > 0;")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-    let _body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     // TODO(shuiyisong): fix this when return source err msg to client side
-    // assert!(body.error().contains("Table not found"));
+    assert!(body.error().contains("Table not found"));
+    assert_eq!(body.code(), ErrorCode::PlanQuery as u32);
 
     // test database given
     let res = client
@@ -280,7 +281,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?db=notfound&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
@@ -306,7 +307,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?db=notfound2-schema&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
@@ -315,7 +316,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?db=greptime-schema&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
