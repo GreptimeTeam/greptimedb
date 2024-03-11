@@ -49,6 +49,7 @@ datatypes.workspace = true
 derive_builder.workspace = true
 digest = "0.10"
 futures = "0.3"
+hashbrown = "0.14"
 headers = "0.3"
 hex = { version = "0.4" }
 hostname = "0.3.1"
