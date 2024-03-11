@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::expr::error::{InternalSnafu, OverflowSnafu, TryFromValueSnafu, TypeMismatchSnafu};
+use crate::expr::relation::func::GenericFn;
 use crate::expr::{AggregateFunc, EvalError};
 use crate::repr::Diff;
 
@@ -223,15 +224,7 @@ impl Accumulator for SimpleNumber {
             (AggregateFunc::SumUInt32, Value::UInt32(x)) => i128::from(x),
             (AggregateFunc::SumUInt64, Value::UInt64(x)) => i128::from(x),
             (f, v) => {
-                let expected_datatype = match f {
-                    AggregateFunc::SumInt16 => ConcreteDataType::int16_datatype(),
-                    AggregateFunc::SumInt32 => ConcreteDataType::int32_datatype(),
-                    AggregateFunc::SumInt64 => ConcreteDataType::int64_datatype(),
-                    AggregateFunc::SumUInt16 => ConcreteDataType::uint16_datatype(),
-                    AggregateFunc::SumUInt32 => ConcreteDataType::uint32_datatype(),
-                    AggregateFunc::SumUInt64 => ConcreteDataType::uint64_datatype(),
-                    _ => unreachable!(),
-                };
+                let expected_datatype = f.signature().input;
                 return Err(TypeMismatchSnafu {
                     expected: expected_datatype,
                     actual: v.data_type(),
@@ -354,11 +347,7 @@ impl Accumulator for Float {
             (AggregateFunc::SumFloat32, Value::Float32(x)) => OrderedF64::from(*x as f64),
             (AggregateFunc::SumFloat64, Value::Float64(x)) => OrderedF64::from(x),
             (f, v) => {
-                let expected_datatype = match f {
-                    AggregateFunc::SumFloat32 => ConcreteDataType::float32_datatype(),
-                    AggregateFunc::SumFloat64 => ConcreteDataType::float64_datatype(),
-                    _ => unreachable!(),
-                };
+                let expected_datatype = f.signature().input;
                 return Err(TypeMismatchSnafu {
                     expected: expected_datatype,
                     actual: v.data_type(),
@@ -461,44 +450,55 @@ impl Accumulator for OrdValue {
             }.build());
         }
 
-        if let Some(v) = &self.val {
-            if v.data_type() != value.data_type() && !value.is_null() {
-                return Err(TypeMismatchSnafu {
-                    expected: v.data_type(),
-                    actual: value.data_type(),
-                }
-                .build());
+        // if aggr_fn is count, the incoming value type doesn't matter in type checking
+        // otherwise, type need to be the same or value can be null
+        let check_type_aggr_fn_and_arg_value =
+            ty_eq_without_precision(value.data_type(), aggr_fn.signature().input)
+                || matches!(aggr_fn, AggregateFunc::Count)
+                || value.is_null();
+        let check_type_aggr_fn_and_self_val = self
+            .val
+            .as_ref()
+            .map(|zelf| ty_eq_without_precision(zelf.data_type(), aggr_fn.signature().input))
+            .unwrap_or(true)
+            || matches!(aggr_fn, AggregateFunc::Count);
+
+        if !check_type_aggr_fn_and_arg_value {
+            return Err(TypeMismatchSnafu {
+                expected: aggr_fn.signature().input,
+                actual: value.data_type(),
             }
+            .build());
+        } else if !check_type_aggr_fn_and_self_val {
+            return Err(TypeMismatchSnafu {
+                expected: aggr_fn.signature().input,
+                actual: self
+                    .val
+                    .as_ref()
+                    .map(|v| v.data_type())
+                    .unwrap_or(ConcreteDataType::null_datatype()),
+            }
+            .build());
         }
-        #[derive(Debug, PartialEq, Eq)]
-        enum FnType {
-            Max,
-            Min,
-            Count,
-        }
-        let fn_type = if aggr_fn.is_max() {
-            FnType::Max
-        } else if aggr_fn.is_min() {
-            FnType::Min
-        } else if matches!(aggr_fn, AggregateFunc::Count) {
-            FnType::Count
-        } else {
-            unreachable!("already checked by ensure!")
-        };
+
         let is_null = value.is_null();
+        if is_null {
+            return Ok(());
+        }
+
         if !is_null {
             self.non_nulls += diff;
         }
 
-        match (fn_type, is_null) {
-            (FnType::Max, false) => {
+        match (aggr_fn.signature().generic_fn, is_null) {
+            (GenericFn::Max, false) => {
                 self.val = self
                     .val
                     .clone()
                     .map(|v| v.max(value.clone()))
                     .or_else(|| Some(value))
             }
-            (FnType::Min, false) => {
+            (GenericFn::Min, false) => {
                 self.val = self
                     .val
                     .clone()
@@ -506,10 +506,11 @@ impl Accumulator for OrdValue {
                     .or_else(|| Some(value))
             }
             // min/max ignore nulls
-            (FnType::Min, true) | (FnType::Max, true) => (),
+            (GenericFn::Min, true) | (GenericFn::Max, true) => (),
             // compile count(*) to count(true) to include null/non-nulls
             // the counts of non-null values are already updated
-            (FnType::Count, _) => (),
+            (GenericFn::Count, _) => (),
+            (_, _) => unreachable!("already checked by ensure!"),
         };
 
         Ok(())
@@ -635,6 +636,19 @@ fn err_try_from_val<T: Display>(reason: T) -> EvalError {
         msg: reason.to_string(),
     }
     .build()
+}
+
+/// compare type while ignore their precision, including `TimeStamp`, `Time`,
+/// `Duration`, `Interval`
+fn ty_eq_without_precision(left: ConcreteDataType, right: ConcreteDataType) -> bool {
+    left == right
+        || matches!(left, ConcreteDataType::Timestamp(..))
+            && matches!(right, ConcreteDataType::Timestamp(..))
+        || matches!(left, ConcreteDataType::Time(..)) && matches!(right, ConcreteDataType::Time(..))
+        || matches!(left, ConcreteDataType::Duration(..))
+            && matches!(right, ConcreteDataType::Duration(..))
+        || matches!(left, ConcreteDataType::Interval(..))
+            && matches!(right, ConcreteDataType::Interval(..))
 }
 
 #[cfg(test)]
@@ -924,6 +938,15 @@ mod test {
             accum
                 .update(&AggregateFunc::MaxInt16, Value::Null, 1)
                 .unwrap();
+        }
+
+        // insert uint64 into max_int64 should fail
+        {
+            let mut accum = OrdValue::try_from(vec![Value::Null, 0i64.into()]).unwrap();
+            assert!(matches!(
+                accum.update(&AggregateFunc::MaxInt64, 0u64.into(), 1),
+                Err(EvalError::TypeMismatch { .. })
+            ));
         }
     }
 }
