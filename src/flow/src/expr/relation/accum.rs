@@ -581,21 +581,20 @@ impl Accum {
                 nans: 0,
                 non_nulls: 0,
             }),
+            f if f.is_max() || f.is_min() || matches!(f, AggregateFunc::Count) => {
+                Self::from(OrdValue {
+                    val: None,
+                    non_nulls: 0,
+                })
+            }
             f => {
-                if f.is_max() || f.is_min() || matches!(f, AggregateFunc::Count) {
-                    Self::from(OrdValue {
-                        val: None,
-                        non_nulls: 0,
-                    })
-                } else {
-                    return Err(InternalSnafu {
-                        reason: format!(
-                            "Accumulator does not support this aggregation function: {:?}",
-                            f
-                        ),
-                    }
-                    .build());
+                return Err(InternalSnafu {
+                    reason: format!(
+                        "Accumulator does not support this aggregation function: {:?}",
+                        f
+                    ),
                 }
+                .build());
             }
         })
     }
