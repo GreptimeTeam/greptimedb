@@ -380,6 +380,10 @@ impl TxnService for LeaderCachedKvBackend {
 
         Ok(res)
     }
+
+    fn max_txn_ops(&self) -> usize {
+        self.store.max_txn_ops()
+    }
 }
 
 impl ResettableKvBackend for LeaderCachedKvBackend {
