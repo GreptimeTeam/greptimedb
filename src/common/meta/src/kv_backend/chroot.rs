@@ -45,6 +45,10 @@ impl TxnService for ChrootKvBackend {
         let txn_res = self.inner.txn(txn).await?;
         Ok(self.chroot_txn_response(txn_res))
     }
+
+    fn max_txn_ops(&self) -> usize {
+        self.inner.max_txn_ops()
+    }
 }
 
 #[async_trait::async_trait]
