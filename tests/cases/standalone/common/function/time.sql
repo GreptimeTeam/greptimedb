@@ -10,5 +10,5 @@ select to_timezone('2022-09-20T14:16:43.012345+08:00'::Timestamp, 'Europe/Berlin
 select to_timezone('2024-03-29T14:16:43.012345Z', 'Asia/Shanghai');
 select to_timezone('2024-03-29T14:16:43.012345Z'::Timestamp, 'Asia/Shanghai');
 
--- TODO: maybe support epoch timestamp?
+-- TODO: maybe support epoch timestamp? https://github.com/GreptimeTeam/greptimedb/issues/3477
 select to_timezone(1709992225, 'Asia/Shanghai');
