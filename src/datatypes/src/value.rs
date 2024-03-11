@@ -2417,4 +2417,12 @@ mod tests {
         );
         check_value_ref_size_eq(&ValueRef::Decimal128(Decimal128::new(1234, 3, 1)), 32)
     }
+
+    #[test]
+    fn test_incorrect_default_value_issue_3479() {
+        let value = OrderedF64::from(0.047318541668048164);
+        let serialized = serde_json::to_string(&value).unwrap();
+        let deserialized: OrderedF64 = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value, deserialized);
+    }
 }
