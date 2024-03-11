@@ -26,8 +26,8 @@ use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
 
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
-    self, InvalidColumnOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
-    SyntaxSnafu,
+    self, InvalidColumnOptionSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu,
+    MissingTimeIndexSnafu, Result, SyntaxSnafu,
 };
 use crate::parser::ParserContext;
 use crate::statements::create::{
@@ -81,6 +81,14 @@ impl<'a> ParserContext<'a> {
                 }
             })
             .collect::<HashMap<String, String>>();
+        for key in options.keys() {
+            ensure!(
+                valid_table_option(key),
+                InvalidTableOptionSnafu {
+                    key: key.to_string()
+                }
+            );
+        }
         Ok(Statement::CreateExternalTable(CreateExternalTable {
             name: table_name,
             columns,
@@ -139,6 +147,14 @@ impl<'a> ParserContext<'a> {
             .parser
             .parse_options(Keyword::WITH)
             .context(error::SyntaxSnafu)?;
+        for option in options.iter() {
+            ensure!(
+                valid_table_option(&option.name.value),
+                InvalidTableOptionSnafu {
+                    key: option.name.value.to_string()
+                }
+            );
+        }
         // Sorts options so that `test_display_create_table` can always pass.
         let options = options.into_iter().sorted().collect();
         let create_table = CreateTable {
@@ -733,6 +749,25 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_external_table_options() {
+        let sql = "CREATE EXTERNAL TABLE city (
+            host string,
+            ts int64,
+            cpu float64 default 0,
+            memory float64,
+            TIME INDEX (ts),
+            PRIMARY KEY(ts, host)
+        ) with(location='/var/data/city.csv',format='csv',foo='bar');";
+
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(matches!(
+            result,
+            Err(error::Error::InvalidTableOption { .. })
+        ));
+    }
+
+    #[test]
     fn test_parse_create_external_table() {
         struct Test<'a> {
             sql: &'a str,
@@ -764,12 +799,12 @@ mod tests {
                 expected_if_not_exist: true,
             },
             Test {
-                sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv','foo.foo'='bar');",
+                sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv','compaction.type'='bar');",
                 expected_table_name: "city",
                 expected_options: HashMap::from([
                     ("location".to_string(), "/var/data/city.csv".to_string()),
                     ("format".to_string(), "csv".to_string()),
-                    ("foo.foo".to_string(), "bar".to_string()),
+                    ("compaction.type".to_string(), "bar".to_string()),
                 ]),
                 expected_engine: "foo",
                 expected_if_not_exist: true,

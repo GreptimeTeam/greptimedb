@@ -19,11 +19,13 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use serde::{Deserialize, Serialize};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::storage::RegionNumber;
 
 use crate::error;
@@ -35,6 +37,28 @@ pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";
 pub const FILE_TABLE_PATTERN_KEY: &str = "pattern";
 pub const FILE_TABLE_FORMAT_KEY: &str = "format";
+
+pub fn valid_table_option(key: &str) -> bool {
+    if is_supported_in_s3(key) {
+        return true;
+    }
+
+    [
+        // common keys:
+        WRITE_BUFFER_SIZE_KEY,
+        TTL_KEY,
+        REGIONS_KEY,
+        STORAGE_KEY,
+        // file engine keys:
+        FILE_TABLE_LOCATION_KEY,
+        FILE_TABLE_FORMAT_KEY,
+        FILE_TABLE_PATTERN_KEY,
+        // metric engine keys:
+        PHYSICAL_TABLE_METADATA_KEY,
+        LOGICAL_TABLE_METADATA_KEY,
+    ]
+    .contains(&key)
+}
 
 #[derive(Debug, Clone)]
 pub struct CreateDatabaseRequest {
@@ -326,6 +350,18 @@ pub struct CopyDatabaseRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_table_option() {
+        assert!(valid_table_option(FILE_TABLE_LOCATION_KEY));
+        assert!(valid_table_option(FILE_TABLE_FORMAT_KEY));
+        assert!(valid_table_option(FILE_TABLE_PATTERN_KEY));
+        assert!(valid_table_option(TTL_KEY));
+        assert!(valid_table_option(REGIONS_KEY));
+        assert!(valid_table_option(WRITE_BUFFER_SIZE_KEY));
+        assert!(valid_table_option(STORAGE_KEY));
+        assert!(!valid_table_option("foo"));
+    }
 
     #[test]
     fn test_serialize_table_options() {

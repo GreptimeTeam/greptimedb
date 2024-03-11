@@ -27,6 +27,18 @@ const SESSION_TOKEN: &str = "session_token";
 const REGION: &str = "region";
 const ENABLE_VIRTUAL_HOST_STYLE: &str = "enable_virtual_host_style";
 
+pub fn is_supported_in_s3(key: &str) -> bool {
+    [
+        ENDPOINT,
+        ACCESS_KEY_ID,
+        SECRET_ACCESS_KEY,
+        SESSION_TOKEN,
+        REGION,
+        ENABLE_VIRTUAL_HOST_STYLE,
+    ]
+    .contains(&key)
+}
+
 pub fn build_s3_backend(
     host: &str,
     path: &str,
@@ -84,4 +96,19 @@ pub fn build_s3_backend(
         .layer(object_store::layers::TracingLayer)
         .layer(object_store::layers::PrometheusMetricsLayer)
         .finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_is_supported_in_s3() {
+        assert!(is_supported_in_s3(ENDPOINT));
+        assert!(is_supported_in_s3(ACCESS_KEY_ID));
+        assert!(is_supported_in_s3(SECRET_ACCESS_KEY));
+        assert!(is_supported_in_s3(SESSION_TOKEN));
+        assert!(is_supported_in_s3(REGION));
+        assert!(is_supported_in_s3(ENABLE_VIRTUAL_HOST_STYLE));
+        assert!(!is_supported_in_s3("foo"))
+    }
 }

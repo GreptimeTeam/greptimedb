@@ -178,8 +178,8 @@ async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
           ) WITH (foo='bar', location='{location}', format='{format}');"#,
     );
 
-    let output = execute_sql(&frontend, sql).await.data;
-    assert!(matches!(output, OutputData::AffectedRows(0)));
+    let result = try_execute_sql(&frontend, sql).await;
+    assert!(matches!(result, Err(Error::ParseSql { .. })));
 }
 
 #[apply(both_instances_cases)]

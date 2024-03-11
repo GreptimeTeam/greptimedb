@@ -117,6 +117,9 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Unrecognized table option key: {}", key))]
+    InvalidTableOption { key: String, location: Location },
+
     #[snafu(display("Failed to serialize column default constraint"))]
     SerializeColumnDefaultConstraint {
         location: Location,
@@ -180,6 +183,7 @@ impl ErrorExt for Error {
             | InvalidTableName { .. }
             | InvalidSqlValue { .. }
             | TimestampOverflow { .. }
+            | InvalidTableOption { .. }
             | InvalidCast { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),

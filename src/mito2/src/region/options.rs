@@ -13,6 +13,8 @@
 // limitations under the License.
 
 //! Options for a region.
+//!
+//! If we add options in this mod, we also need to modify [store_api::mito_engine_options].
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -358,6 +360,7 @@ mod tests {
             ("compaction.type", "twcs"),
             ("storage", "S3"),
             ("index.inverted_index.ignore_column_ids", "1,2,3"),
+            ("index.inverted_index.segment_row_count", "512"),
             (
                 WAL_OPTIONS_KEY,
                 &serde_json::to_string(&wal_options).unwrap(),
@@ -376,7 +379,7 @@ mod tests {
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
                     ignore_column_ids: vec![1, 2, 3],
-                    segment_row_count: 1024,
+                    segment_row_count: 512,
                 },
             },
         };
