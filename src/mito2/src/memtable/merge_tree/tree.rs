@@ -124,7 +124,7 @@ impl MergeTree {
 
             if !has_pk {
                 // No primary key.
-                self.write_no_key(kv);
+                self.write_no_key(kv)?;
                 continue;
             }
 
@@ -299,7 +299,7 @@ impl MergeTree {
         )
     }
 
-    fn write_no_key(&self, key_value: KeyValue) {
+    fn write_no_key(&self, key_value: KeyValue) -> Result<()> {
         let partition_key = Partition::get_partition_key(&key_value, self.is_partitioned);
         let partition = self.get_or_create_partition(partition_key);
 
