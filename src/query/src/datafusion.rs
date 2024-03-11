@@ -148,7 +148,7 @@ impl DatafusionQueryEngine {
             };
             affected_rows += rows;
         }
-        Ok(Output::new_with_affectedrows(affected_rows))
+        Ok(Output::new_with_affected_rows(affected_rows))
     }
 
     #[tracing::instrument(skip_all)]

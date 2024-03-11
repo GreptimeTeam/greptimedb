@@ -324,7 +324,7 @@ impl Script for PyScript {
                 .await
                 .context(TokioJoinSnafu)??;
             let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
-            Ok(Output::new_with_recordbatches(batches))
+            Ok(Output::new_with_record_batches(batches))
         }
     }
 }

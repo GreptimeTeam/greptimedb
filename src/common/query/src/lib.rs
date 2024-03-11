@@ -54,14 +54,14 @@ pub struct OutputMeta {
 }
 
 impl Output {
-    pub fn new_with_affectedrows(affected_rows: usize) -> Self {
+    pub fn new_with_affected_rows(affected_rows: usize) -> Self {
         Self {
             data: OutputData::AffectedRows(affected_rows),
             meta: Default::default(),
         }
     }
 
-    pub fn new_with_recordbatches(recordbatches: RecordBatches) -> Self {
+    pub fn new_with_record_batches(recordbatches: RecordBatches) -> Self {
         Self {
             data: OutputData::RecordBatches(recordbatches),
             meta: Default::default(),

@@ -96,7 +96,7 @@ impl StatementExecutor {
                 .await?;
             exported_rows += exported;
         }
-        Ok(Output::new_with_affectedrows(exported_rows))
+        Ok(Output::new_with_affected_rows(exported_rows))
     }
 
     /// Imports data to database from a given location and returns total rows imported.
@@ -169,7 +169,7 @@ impl StatementExecutor {
                 }
             }
         }
-        Ok(Output::new_with_affectedrows(rows_inserted))
+        Ok(Output::new_with_affected_rows(rows_inserted))
     }
 }
 

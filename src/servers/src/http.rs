@@ -925,7 +925,7 @@ mod test {
         let schema = Arc::new(Schema::new(column_schemas));
 
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![]).unwrap();
-        let outputs = vec![Ok(Output::new_with_recordbatches(recordbatches))];
+        let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
 
         let json_resp = GreptimedbV1Response::from_output(outputs).await;
         if let HttpResponse::GreptimedbV1(json_resp) = json_resp {
@@ -969,7 +969,7 @@ mod test {
         ] {
             let recordbatches =
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
-            let outputs = vec![Ok(Output::new_with_recordbatches(recordbatches))];
+            let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
             let json_resp = match format {
                 ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
                 ResponseFormat::Csv => CsvResponse::from_output(outputs).await,

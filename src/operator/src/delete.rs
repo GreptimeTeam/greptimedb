@@ -92,7 +92,7 @@ impl Deleter {
 
         let affected_rows = self.do_request(deletes, &ctx).await?;
 
-        Ok(Output::new_with_affectedrows(affected_rows))
+        Ok(Output::new_with_affected_rows(affected_rows))
     }
 
     pub async fn handle_table_delete(

@@ -302,7 +302,7 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
         vec![Arc::new(StringVector::from(vec![value])) as _],
     )
     .context(error::CreateRecordBatchSnafu)?;
-    Ok(Output::new_with_recordbatches(records))
+    Ok(Output::new_with_record_batches(records))
 }
 
 pub fn show_create_table(
@@ -328,7 +328,7 @@ pub fn show_create_table(
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
 
-    Ok(Output::new_with_recordbatches(records))
+    Ok(Output::new_with_record_batches(records))
 }
 
 pub fn describe_table(table: TableRef) -> Result<Output> {
@@ -344,7 +344,7 @@ pub fn describe_table(table: TableRef) -> Result<Output> {
     ];
     let records = RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
-    Ok(Output::new_with_recordbatches(records))
+    Ok(Output::new_with_record_batches(records))
 }
 
 fn describe_column_names(columns_schemas: &[ColumnSchema]) -> VectorRef {
