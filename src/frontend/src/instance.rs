@@ -28,6 +28,7 @@ use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
+use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
@@ -401,13 +402,13 @@ impl SqlQueryHandler for Instance {
 
 /// Attaches a timer to the output and observes it once the output is exhausted.
 pub fn attach_timer(output: Output, timer: HistogramTimer) -> Output {
-    match output {
-        Output::AffectedRows(_) | Output::RecordBatches(_) => output,
-        Output::Stream(stream, plan) => {
+    match output.data {
+        OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
+        OutputData::Stream(stream) => {
             let stream = OnDone::new(stream, move || {
                 timer.observe_duration();
             });
-            Output::Stream(Box::pin(stream), plan)
+            Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
         }
     }
 }

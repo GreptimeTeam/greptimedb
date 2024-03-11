@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use catalog::memory::MemoryCatalogManager;
-use common_query::Output;
+use common_query::OutputData;
 use common_recordbatch::{util, RecordBatch};
 use session::context::QueryContext;
 use table::TableRef;
@@ -43,7 +43,7 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
         .plan(stmt, query_ctx.clone())
         .await
         .unwrap();
-    let Output::Stream(stream, _) = engine.execute(plan, query_ctx).await.unwrap() else {
+    let OutputData::Stream(stream) = engine.execute(plan, query_ctx).await.unwrap().data else {
         unreachable!()
     };
     util::collect(stream).await.unwrap()

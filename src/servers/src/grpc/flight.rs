@@ -25,7 +25,7 @@ use arrow_flight::{
 };
 use async_trait::async_trait;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_telemetry::tracing::info_span;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use futures::Stream;
@@ -174,16 +174,16 @@ fn to_flight_data_stream(
     output: Output,
     tracing_context: TracingContext,
 ) -> TonicStream<FlightData> {
-    match output {
-        Output::Stream(stream, _) => {
+    match output.data {
+        OutputData::Stream(stream) => {
             let stream = FlightRecordBatchStream::new(stream, tracing_context);
             Box::pin(stream) as _
         }
-        Output::RecordBatches(x) => {
+        OutputData::RecordBatches(x) => {
             let stream = FlightRecordBatchStream::new(x.as_stream(), tracing_context);
             Box::pin(stream) as _
         }
-        Output::AffectedRows(rows) => {
+        OutputData::AffectedRows(rows) => {
             let stream = tokio_stream::once(Ok(
                 FlightEncoder::default().encode(FlightMessage::AffectedRows(rows))
             ));

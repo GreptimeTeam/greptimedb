@@ -73,6 +73,6 @@ impl GrpcQueryHandler for MockGrpcQueryHandler {
     type Error = Error;
 
     async fn do_query(&self, _query: Request, _ctx: QueryContextRef) -> Result<Output> {
-        Ok(Output::AffectedRows(1))
+        Ok(Output::new_with_affected_rows(1))
     }
 }

@@ -25,7 +25,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_PREFIX;
 use common_query::physical_plan::PhysicalPlan;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::MetricValue;
@@ -140,46 +140,49 @@ pub async fn from_output(
 
     for out in outputs {
         match out {
-            Ok(Output::AffectedRows(rows)) => {
-                results.push(GreptimeQueryOutput::AffectedRows(rows));
-            }
-            Ok(Output::Stream(stream, physical_plan)) => {
-                let schema = stream.schema().clone();
-                // TODO(sunng87): streaming response
-                let mut http_record_output = match util::collect(stream).await {
-                    Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
-                        Ok(rows) => rows,
+            Ok(o) => match o.data {
+                OutputData::AffectedRows(rows) => {
+                    results.push(GreptimeQueryOutput::AffectedRows(rows));
+                }
+                OutputData::Stream(stream) => {
+                    let schema = stream.schema().clone();
+                    // TODO(sunng87): streaming response
+                    let mut http_record_output = match util::collect(stream).await {
+                        Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
+                            Ok(rows) => rows,
+                            Err(err) => {
+                                return Err(ErrorResponse::from_error(ty, err));
+                            }
+                        },
                         Err(err) => {
                             return Err(ErrorResponse::from_error(ty, err));
                         }
-                    },
-                    Err(err) => {
-                        return Err(ErrorResponse::from_error(ty, err));
-                    }
-                };
-                if let Some(physical_plan) = physical_plan {
-                    let mut result_map = HashMap::new();
+                    };
+                    if let Some(physical_plan) = o.meta.plan {
+                        let mut result_map = HashMap::new();
 
-                    let mut tmp = vec![&mut merge_map, &mut result_map];
-                    collect_plan_metrics(physical_plan, &mut tmp);
-                    let re = result_map
-                        .into_iter()
-                        .map(|(k, v)| (k, Value::from(v)))
-                        .collect();
-                    http_record_output.metrics = re;
-                }
-                results.push(GreptimeQueryOutput::Records(http_record_output))
-            }
-            Ok(Output::RecordBatches(rbs)) => {
-                match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
-                    Ok(rows) => {
-                        results.push(GreptimeQueryOutput::Records(rows));
+                        let mut tmp = vec![&mut merge_map, &mut result_map];
+                        collect_plan_metrics(physical_plan, &mut tmp);
+                        let re = result_map
+                            .into_iter()
+                            .map(|(k, v)| (k, Value::from(v)))
+                            .collect();
+                        http_record_output.metrics = re;
                     }
-                    Err(err) => {
-                        return Err(ErrorResponse::from_error(ty, err));
+                    results.push(GreptimeQueryOutput::Records(http_record_output))
+                }
+                OutputData::RecordBatches(rbs) => {
+                    match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
+                        Ok(rows) => {
+                            results.push(GreptimeQueryOutput::Records(rows));
+                        }
+                        Err(err) => {
+                            return Err(ErrorResponse::from_error(ty, err));
+                        }
                     }
                 }
-            }
+            },
+
             Err(err) => {
                 return Err(ErrorResponse::from_error(ty, err));
             }

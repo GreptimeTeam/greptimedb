@@ -24,7 +24,7 @@ use api::v1::{
 };
 use catalog::error::CompileScriptInternalSnafu;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_query::Output;
+use common_query::OutputData;
 use common_recordbatch::{util as record_util, RecordBatch, SendableRecordBatchStream};
 use common_telemetry::logging;
 use common_time::util;
@@ -230,9 +230,9 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             .execute(LogicalPlan::DfPlan(plan), query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
-        let stream = match output {
-            Output::Stream(stream, _) => stream,
-            Output::RecordBatches(record_batches) => record_batches.as_stream(),
+        let stream = match output.data {
+            OutputData::Stream(stream) => stream,
+            OutputData::RecordBatches(record_batches) => record_batches.as_stream(),
             _ => unreachable!(),
         };
 
@@ -285,9 +285,9 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             .execute(LogicalPlan::DfPlan(plan), query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
-        let stream = match output {
-            Output::Stream(stream, _) => stream,
-            Output::RecordBatches(record_batches) => record_batches.as_stream(),
+        let stream = match output.data {
+            OutputData::Stream(stream) => stream,
+            OutputData::RecordBatches(record_batches) => record_batches.as_stream(),
             _ => unreachable!(),
         };
         Ok(stream)
