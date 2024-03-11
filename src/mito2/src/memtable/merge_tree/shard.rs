@@ -503,6 +503,20 @@ mod tests {
         )
     }
 
+    fn collect_timestamps(shard: &Shard) -> Vec<i64> {
+        let mut reader = shard.read().unwrap().build(None).unwrap();
+        let mut timestamps = Vec::new();
+        while reader.is_valid() {
+            let rb = reader.current_data_batch().slice_record_batch();
+            let ts_array = rb.column(1);
+            let ts_slice = timestamp_array_to_i64_slice(ts_array);
+            timestamps.extend_from_slice(ts_slice);
+
+            reader.next().unwrap();
+        }
+        timestamps
+    }
+
     #[test]
     fn test_write_read_shard() {
         let metadata = metadata_for_test();
@@ -520,16 +534,44 @@ mod tests {
         }
         assert!(!shard.is_empty());
 
-        let mut reader = shard.read().unwrap().build(None).unwrap();
-        let mut timestamps = Vec::new();
-        while reader.is_valid() {
-            let rb = reader.current_data_batch().slice_record_batch();
-            let ts_array = rb.column(1);
-            let ts_slice = timestamp_array_to_i64_slice(ts_array);
-            timestamps.extend_from_slice(ts_slice);
-
-            reader.next().unwrap();
-        }
+        let timestamps = collect_timestamps(&shard);
         assert_eq!(vec![0, 1, 10, 11, 20, 21], timestamps);
+    }
+
+    #[test]
+    fn test_shard_freeze() {
+        let metadata = metadata_for_test();
+        let kvs = build_key_values_with_ts_seq_values(
+            &metadata,
+            "shard".to_string(),
+            0,
+            [0].into_iter(),
+            [Some(0.0)].into_iter(),
+            0,
+        );
+        let mut shard = new_shard_with_dict(8, metadata.clone(), &[(kvs, 0)], 50);
+        let expected: Vec<_> = (0..200).collect();
+        for i in &expected {
+            let kvs = build_key_values_with_ts_seq_values(
+                &metadata,
+                "shard".to_string(),
+                0,
+                [*i].into_iter(),
+                [Some(0.0)].into_iter(),
+                *i as u64,
+            );
+            let pk_id = PkId {
+                shard_id: shard.shard_id,
+                pk_index: *i as PkIndex,
+            };
+            for kv in kvs.iter() {
+                shard.write_with_pk_id(pk_id, &kv).unwrap();
+            }
+        }
+        assert!(!shard.is_empty());
+        assert_eq!(3, shard.data_parts.frozen_len());
+
+        let timestamps = collect_timestamps(&shard);
+        assert_eq!(expected, timestamps);
     }
 }

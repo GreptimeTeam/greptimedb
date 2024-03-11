@@ -988,6 +988,11 @@ impl DataParts {
     pub(crate) fn is_empty(&self) -> bool {
         self.active.is_empty() && self.frozen.iter().all(|part| part.is_empty())
     }
+
+    #[cfg(test)]
+    pub(crate) fn frozen_len(&self) -> usize {
+        self.frozen.len()
+    }
 }
 
 pub struct DataPartsReaderBuilder {
