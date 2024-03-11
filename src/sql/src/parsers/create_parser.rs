@@ -1495,4 +1495,25 @@ ENGINE=mito";
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let _ = result.unwrap();
     }
+
+    #[test]
+    fn test_incorrect_default_value_issue_3479() {
+        let sql = r#"CREATE TABLE `ExcePTuRi`(
+non TIMESTAMP(6) TIME INDEX,
+`iUSTO` DOUBLE DEFAULT 0.047318541668048164
+)"#;
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        match &result[0] {
+            Statement::CreateTable(c) => {
+                assert_eq!(
+                    "`iUSTO` DOUBLE DEFAULT 0.047318541668048164",
+                    c.columns[1].to_string()
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
 }
