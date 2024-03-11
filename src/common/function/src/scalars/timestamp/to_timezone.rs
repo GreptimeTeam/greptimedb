@@ -26,7 +26,7 @@ use datatypes::vectors::{
     StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt};
 
 use crate::function::{Function, FunctionContext};
 use crate::helper;
@@ -87,60 +87,51 @@ impl Function for ToTimezoneFunction {
         );
 
         // TODO: maybe support epoch timestamp? https://github.com/GreptimeTeam/greptimedb/issues/3477
-        let ts = columns[0]
-            .data_type()
-            .as_timestamp()
-            .context(UnsupportedInputDataTypeSnafu {
+        let ts = columns[0].data_type().as_timestamp().with_context(|| {
+            UnsupportedInputDataTypeSnafu {
                 function: NAME,
                 datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-            })?;
+            }
+        })?;
         let array = columns[0].to_arrow_array();
         let times = match ts {
             TimestampType::Second(_) => {
-                let vector =
-                    paste::expr!(TimestampSecondVector::try_from_arrow_array(array).unwrap());
+                let vector = TimestampSecondVector::try_from_arrow_array(array).unwrap();
                 (0..vector.len())
                     .map(|i| convert_to_timestamp(&vector.get(i)))
                     .collect::<Vec<_>>()
             }
             TimestampType::Millisecond(_) => {
-                let vector =
-                    paste::expr!(TimestampMillisecondVector::try_from_arrow_array(array).unwrap());
+                let vector = TimestampMillisecondVector::try_from_arrow_array(array).unwrap();
                 (0..vector.len())
                     .map(|i| convert_to_timestamp(&vector.get(i)))
                     .collect::<Vec<_>>()
             }
             TimestampType::Microsecond(_) => {
-                let vector =
-                    paste::expr!(TimestampMicrosecondVector::try_from_arrow_array(array).unwrap());
+                let vector = TimestampMicrosecondVector::try_from_arrow_array(array).unwrap();
                 (0..vector.len())
                     .map(|i| convert_to_timestamp(&vector.get(i)))
                     .collect::<Vec<_>>()
             }
             TimestampType::Nanosecond(_) => {
-                let vector =
-                    paste::expr!(TimestampNanosecondVector::try_from_arrow_array(array).unwrap());
+                let vector = TimestampNanosecondVector::try_from_arrow_array(array).unwrap();
                 (0..vector.len())
                     .map(|i| convert_to_timestamp(&vector.get(i)))
                     .collect::<Vec<_>>()
             }
         };
 
-        let tzs = match columns[1].data_type() {
-            ConcreteDataType::String(_) => {
-                let array = columns[1].to_arrow_array();
-                let vector = StringVector::try_from_arrow_array(&array).unwrap();
-                (0..vector.len())
-                    .map(|i| convert_to_timezone(&vector.get(i).to_string()))
-                    .collect::<Vec<_>>()
-            }
-            _ => {
-                return UnsupportedInputDataTypeSnafu {
+        let tzs = {
+            let array = columns[1].to_arrow_array();
+            let vector = StringVector::try_from_arrow_array(&array)
+                .ok()
+                .with_context(|| UnsupportedInputDataTypeSnafu {
                     function: NAME,
                     datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-                }
-                    .fail()
-            },
+                })?;
+            (0..vector.len())
+                .map(|i| convert_to_timezone(&vector.get(i).to_string()))
+                .collect::<Vec<_>>()
         };
 
         let result = times
