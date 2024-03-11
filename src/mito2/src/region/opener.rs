@@ -171,6 +171,8 @@ impl RegionOpener {
         // Initial memtable id is 0.
         let mutable = self.memtable_builder.build(0, &metadata);
 
+        debug!("Create region {} with options: {:?}", region_id, options);
+
         let version = VersionBuilder::new(metadata, mutable)
             .options(options)
             .build();
@@ -249,6 +251,9 @@ impl RegionOpener {
 
         let region_id = self.region_id;
         let object_store = self.object_store(&region_options.storage)?.clone();
+
+        debug!("Open region {} with options: {:?}", region_id, self.options);
+
         let access_layer = Arc::new(AccessLayer::new(
             self.region_dir.clone(),
             object_store,
