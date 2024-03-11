@@ -160,7 +160,7 @@ PARTITION ON COLUMNS (n) (
 }
 
 #[apply(both_instances_cases)]
-async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
+async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let format = "json";
     let location = find_testing_resource("/tests/data/json/various_type.json");
@@ -178,8 +178,8 @@ async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
           ) WITH (foo='bar', location='{location}', format='{format}');"#,
     );
 
-    let result = try_execute_sql(&frontend, sql).await;
-    assert!(matches!(result, Err(Error::ParseSql { .. })));
+    let output = execute_sql(&frontend, sql).await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 }
 
 #[apply(both_instances_cases)]

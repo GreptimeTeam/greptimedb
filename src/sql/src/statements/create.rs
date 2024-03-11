@@ -343,7 +343,7 @@ ENGINE=mito
     fn test_validate_table_options() {
         let sql = r"create table if not exists demo(
             host string,
-            ts bigint,
+            ts timestamp,
             cpu double default 0,
             memory double,
             TIME INDEX (ts),

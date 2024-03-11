@@ -764,7 +764,7 @@ mod tests {
                 expected_if_not_exist: true,
             },
             Test {
-                sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv',foo.foo='bar');",
+                sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv','foo.foo'='bar');",
                 expected_table_name: "city",
                 expected_options: HashMap::from([
                     ("location".to_string(), "/var/data/city.csv".to_string()),
