@@ -7,7 +7,7 @@ create table if not exists test_opts(
     PRIMARY KEY(host)
 )
 engine=mito
-with(regions=1, ttl='7d', 'compaction.twcs.time_window'='1d');
+with(regions=1, ttl='7d', 'compaction.type'='twcs', 'compaction.twcs.time_window'='1d');
 
 drop table test_opts;
 
@@ -20,6 +20,6 @@ create table if not exists test_opts(
     PRIMARY KEY(host)
 )
 engine=mito
-with('regions'=1, 'ttl'='7d', 'compaction.twcs.time_window'='1d');
+with('regions'=1, 'ttl'='7d', 'compaction.type'='twcs', 'compaction.twcs.time_window'='1d');
 
 drop table test_opts;
