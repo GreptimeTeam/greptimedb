@@ -1,0 +1,34 @@
+create table if not exists test_opts(
+    host string,
+    ts timestamp,
+    cpu double default 0,
+    memory double,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+engine=mito
+with(regions=1, ttl='7d', 'compaction.twcs.time_window'='1d');
+
+Affected Rows: 0
+
+drop table test_opts;
+
+Affected Rows: 0
+
+create table if not exists test_opts(
+    host string,
+    ts timestamp,
+    cpu double default 0,
+    memory double,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+engine=mito
+with('regions'=1, 'ttl'='7d', 'compaction.twcs.time_window'='1d');
+
+Affected Rows: 0
+
+drop table test_opts;
+
+Affected Rows: 0
+
