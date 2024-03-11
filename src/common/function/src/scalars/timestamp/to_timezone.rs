@@ -26,7 +26,7 @@ use datatypes::vectors::{
     StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::function::{Function, FunctionContext};
 use crate::helper;
@@ -45,20 +45,6 @@ fn convert_to_timestamp(arg: &Value) -> Option<Timestamp> {
         Value::Timestamp(ts) => Some(*ts),
         _ => None,
     }
-}
-
-fn process_to_timezone(
-    times: Vec<Option<Timestamp>>,
-    tzs: Vec<Option<Timezone>>,
-) -> Vec<Option<String>> {
-    times
-        .iter()
-        .zip(tzs.iter())
-        .map(|(time, tz)| match (time, tz) {
-            (Some(time), _) => Some(time.to_timezone_aware_string(tz.as_ref())),
-            _ => None,
-        })
-        .collect::<Vec<Option<String>>>()
 }
 
 impl fmt::Display for ToTimezoneFunction {
@@ -100,6 +86,7 @@ impl Function for ToTimezoneFunction {
             }
         );
 
+        // TODO: maybe support epoch timestamp? https://github.com/GreptimeTeam/greptimedb/issues/3477
         let ts = columns[0]
             .data_type()
             .as_timestamp()
@@ -108,34 +95,34 @@ impl Function for ToTimezoneFunction {
                 datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
             })?;
         let array = columns[0].to_arrow_array();
-        let times: Result<Vec<Option<Timestamp>>> = match ts {
+        let times = match ts {
             TimestampType::Second(_) => {
                 let vector =
                     paste::expr!(TimestampSecondVector::try_from_arrow_array(array).unwrap());
-                Ok((0..vector.len())
+                (0..vector.len())
                     .map(|i| convert_to_timestamp(&vector.get(i)))
-                    .collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
             }
             TimestampType::Millisecond(_) => {
                 let vector =
                     paste::expr!(TimestampMillisecondVector::try_from_arrow_array(array).unwrap());
-                Ok((0..vector.len())
+                (0..vector.len())
                     .map(|i| convert_to_timestamp(&vector.get(i)))
-                    .collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
             }
             TimestampType::Microsecond(_) => {
                 let vector =
                     paste::expr!(TimestampMicrosecondVector::try_from_arrow_array(array).unwrap());
-                Ok((0..vector.len())
+                (0..vector.len())
                     .map(|i| convert_to_timestamp(&vector.get(i)))
-                    .collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
             }
             TimestampType::Nanosecond(_) => {
                 let vector =
                     paste::expr!(TimestampNanosecondVector::try_from_arrow_array(array).unwrap());
-                Ok((0..vector.len())
+                (0..vector.len())
                     .map(|i| convert_to_timestamp(&vector.get(i)))
-                    .collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
             }
         };
 
@@ -143,27 +130,28 @@ impl Function for ToTimezoneFunction {
             ConcreteDataType::String(_) => {
                 let array = columns[1].to_arrow_array();
                 let vector = StringVector::try_from_arrow_array(&array).unwrap();
-                Ok((0..vector.len())
+                (0..vector.len())
                     .map(|i| convert_to_timezone(&vector.get(i).to_string()))
-                    .collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
             }
-            _ => UnsupportedInputDataTypeSnafu {
-                function: NAME,
-                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-            }
-            .fail(),
+            _ => {
+                return UnsupportedInputDataTypeSnafu {
+                    function: NAME,
+                    datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+                }
+                    .fail()
+            },
         };
 
-        match (times, tzs) {
-            (Ok(times), Ok(tzs)) => Ok(Arc::new(StringVector::from(process_to_timezone(
-                times, tzs,
-            )))),
-            _ => UnsupportedInputDataTypeSnafu {
-                function: NAME,
-                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-            }
-            .fail(),
-        }
+        let result = times
+            .iter()
+            .zip(tzs.iter())
+            .map(|(time, tz)| match (time, tz) {
+                (Some(time), _) => Some(time.to_timezone_aware_string(tz.as_ref())),
+                _ => None,
+            })
+            .collect::<Vec<Option<String>>>();
+        Ok(Arc::new(StringVector::from(result)))
     }
 }
 

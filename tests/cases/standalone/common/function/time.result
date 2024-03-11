@@ -52,7 +52,6 @@ select to_timezone('2024-03-29T14:16:43.012345Z'::Timestamp, 'Asia/Shanghai');
 | 2024-03-29 22:16:43.012                                                |
 +------------------------------------------------------------------------+
 
--- TODO: maybe support epoch timestamp? https://github.com/GreptimeTeam/greptimedb/issues/3477
 select to_timezone(1709992225, 'Asia/Shanghai');
 
 Error: 3001(EngineExecuteQuery), DataFusion error: Error during planning: Coercion from [Int64, Utf8] to the signature OneOf([Exact([Timestamp(Second, None), Utf8]), Exact([Timestamp(Millisecond, None), Utf8]), Exact([Timestamp(Microsecond, None), Utf8]), Exact([Timestamp(Nanosecond, None), Utf8])]) failed.
