@@ -113,13 +113,15 @@ impl Accumulator for Bool {
                 ),
             }
         );
+        // ignore nulls
+        if value.is_null() {
+            return Ok(());
+        }
+
         match value {
             Value::Boolean(true) => self.trues += diff,
             Value::Boolean(false) => self.falses += diff,
             x => {
-                if x.is_null() {
-                    return Ok(());
-                }
                 return Err(TypeMismatchSnafu {
                     expected: ConcreteDataType::boolean_datatype(),
                     actual: x.data_type(),
@@ -209,6 +211,10 @@ impl Accumulator for SimpleNumber {
             }
         );
 
+        if value.is_null() {
+            return Ok(());
+        }
+
         let v = match (aggr_fn, value) {
             (AggregateFunc::SumInt16, Value::Int16(x)) => i128::from(x),
             (AggregateFunc::SumInt32, Value::Int32(x)) => i128::from(x),
@@ -217,9 +223,6 @@ impl Accumulator for SimpleNumber {
             (AggregateFunc::SumUInt32, Value::UInt32(x)) => i128::from(x),
             (AggregateFunc::SumUInt64, Value::UInt64(x)) => i128::from(x),
             (f, v) => {
-                if v.is_null() {
-                    return Ok(());
-                }
                 let expected_datatype = match f {
                     AggregateFunc::SumInt16 => ConcreteDataType::int16_datatype(),
                     AggregateFunc::SumInt32 => ConcreteDataType::int32_datatype(),
@@ -342,13 +345,15 @@ impl Accumulator for Float {
                 ),
             }
         );
+
+        if value.is_null() {
+            return Ok(());
+        }
+
         let x = match (aggr_fn, value) {
             (AggregateFunc::SumFloat32, Value::Float32(x)) => OrderedF64::from(*x as f64),
             (AggregateFunc::SumFloat64, Value::Float64(x)) => OrderedF64::from(x),
             (f, v) => {
-                if v.is_null() {
-                    return Ok(());
-                }
                 let expected_datatype = match f {
                     AggregateFunc::SumFloat32 => ConcreteDataType::float32_datatype(),
                     AggregateFunc::SumFloat64 => ConcreteDataType::float64_datatype(),
