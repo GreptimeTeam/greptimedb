@@ -84,64 +84,15 @@ pub enum AggregateFunc {
 
 impl AggregateFunc {
     pub fn is_max(&self) -> bool {
-        use AggregateFunc::*;
-        matches!(
-            self,
-            MaxInt16
-                | MaxInt32
-                | MaxInt64
-                | MaxUInt16
-                | MaxUInt32
-                | MaxUInt64
-                | MaxFloat32
-                | MaxFloat64
-                | MaxBool
-                | MaxString
-                | MaxDate
-                | MaxDateTime
-                | MaxTimestamp
-                | MaxTime
-                | MaxDuration
-                | MaxInterval
-        )
+        self.signature().generic_fn == GenericFn::Max
     }
 
     pub fn is_min(&self) -> bool {
-        use AggregateFunc::*;
-        matches!(
-            self,
-            MinInt16
-                | MinInt32
-                | MinInt64
-                | MinUInt16
-                | MinUInt32
-                | MinUInt64
-                | MinFloat32
-                | MinFloat64
-                | MinBool
-                | MinString
-                | MinDate
-                | MinDateTime
-                | MinTimestamp
-                | MinTime
-                | MinDuration
-                | MinInterval
-        )
+        self.signature().generic_fn == GenericFn::Min
     }
 
     pub fn is_sum(&self) -> bool {
-        use AggregateFunc::*;
-        matches!(
-            self,
-            SumInt16
-                | SumInt32
-                | SumInt64
-                | SumUInt16
-                | SumUInt32
-                | SumUInt64
-                | SumFloat32
-                | SumFloat64
-        )
+        self.signature().generic_fn == GenericFn::Sum
     }
 
     /// Eval value, diff with accumulator
@@ -174,6 +125,7 @@ pub struct Signature {
     pub generic_fn: GenericFn,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum GenericFn {
     Max,
     Min,

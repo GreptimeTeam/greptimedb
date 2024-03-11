@@ -45,6 +45,7 @@ pub trait Accumulator: Sized {
         value: Value,
         diff: Diff,
     ) -> Result<(), EvalError>;
+
     fn update_batch<I>(&mut self, aggr_fn: &AggregateFunc, value_diffs: I) -> Result<(), EvalError>
     where
         I: IntoIterator<Item = (Value, Diff)>,
@@ -114,14 +115,11 @@ impl Accumulator for Bool {
                 ),
             }
         );
-        // ignore nulls
-        if value.is_null() {
-            return Ok(());
-        }
 
         match value {
             Value::Boolean(true) => self.trues += diff,
             Value::Boolean(false) => self.falses += diff,
+            Value::Null => (), // ignore nulls
             x => {
                 return Err(TypeMismatchSnafu {
                     expected: ConcreteDataType::boolean_datatype(),
@@ -212,10 +210,6 @@ impl Accumulator for SimpleNumber {
             }
         );
 
-        if value.is_null() {
-            return Ok(());
-        }
-
         let v = match (aggr_fn, value) {
             (AggregateFunc::SumInt16, Value::Int16(x)) => i128::from(x),
             (AggregateFunc::SumInt32, Value::Int32(x)) => i128::from(x),
@@ -223,6 +217,7 @@ impl Accumulator for SimpleNumber {
             (AggregateFunc::SumUInt16, Value::UInt16(x)) => i128::from(x),
             (AggregateFunc::SumUInt32, Value::UInt32(x)) => i128::from(x),
             (AggregateFunc::SumUInt64, Value::UInt64(x)) => i128::from(x),
+            (_f, Value::Null) => return Ok(()), // ignore null
             (f, v) => {
                 let expected_datatype = f.signature().input;
                 return Err(TypeMismatchSnafu {
@@ -339,13 +334,10 @@ impl Accumulator for Float {
             }
         );
 
-        if value.is_null() {
-            return Ok(());
-        }
-
         let x = match (aggr_fn, value) {
             (AggregateFunc::SumFloat32, Value::Float32(x)) => OrderedF64::from(*x as f64),
             (AggregateFunc::SumFloat64, Value::Float64(x)) => OrderedF64::from(x),
+            (_f, Value::Null) => return Ok(()), // ignore null
             (f, v) => {
                 let expected_datatype = f.signature().input;
                 return Err(TypeMismatchSnafu {
@@ -487,31 +479,31 @@ impl Accumulator for OrdValue {
         }
 
         if !is_null {
-            self.non_nulls += diff;
-        }
-
-        match (aggr_fn.signature().generic_fn, is_null) {
-            (GenericFn::Max, false) => {
-                self.val = self
-                    .val
-                    .clone()
-                    .map(|v| v.max(value.clone()))
-                    .or_else(|| Some(value))
-            }
-            (GenericFn::Min, false) => {
-                self.val = self
-                    .val
-                    .clone()
-                    .map(|v| v.min(value.clone()))
-                    .or_else(|| Some(value))
-            }
-            // min/max ignore nulls
-            (GenericFn::Min, true) | (GenericFn::Max, true) => (),
             // compile count(*) to count(true) to include null/non-nulls
-            // the counts of non-null values are already updated
-            (GenericFn::Count, _) => (),
-            (_, _) => unreachable!("already checked by ensure!"),
+            // And the counts of non-null values are updated here
+            self.non_nulls += diff;
+
+            match aggr_fn.signature().generic_fn {
+                GenericFn::Max => {
+                    self.val = self
+                        .val
+                        .clone()
+                        .map(|v| v.max(value.clone()))
+                        .or_else(|| Some(value))
+                }
+                GenericFn::Min => {
+                    self.val = self
+                        .val
+                        .clone()
+                        .map(|v| v.min(value.clone()))
+                        .or_else(|| Some(value))
+                }
+
+                GenericFn::Count => (),
+                _ => unreachable!("already checked by ensure!"),
+            }
         };
+        // min/max ignore nulls
 
         Ok(())
     }
@@ -613,19 +605,16 @@ impl Accum {
             AggregateFunc::SumFloat32 | AggregateFunc::SumFloat64 => {
                 Ok(Self::from(Float::try_from(state)?))
             }
-            f => {
-                if f.is_max() || f.is_min() || matches!(f, AggregateFunc::Count) {
-                    Ok(Self::from(OrdValue::try_from(state)?))
-                } else {
-                    Err(InternalSnafu {
-                        reason: format!(
-                            "Accumulator does not support this aggregation function: {:?}",
-                            f
-                        ),
-                    }
-                    .build())
-                }
+            f if f.is_max() || f.is_min() || matches!(f, AggregateFunc::Count) => {
+                Ok(Self::from(OrdValue::try_from(state)?))
             }
+            f => Err(InternalSnafu {
+                reason: format!(
+                    "Accumulator does not support this aggregation function: {:?}",
+                    f
+                ),
+            }
+            .build()),
         }
     }
 }
