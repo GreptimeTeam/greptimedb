@@ -32,7 +32,7 @@ use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::{
-    DfRecordBatch, DfSendableRecordBatchStream, RecordBatch, RecordBatchStream,
+    DfRecordBatch, DfSendableRecordBatchStream, OrderOption, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream, Stream,
 };
 
@@ -228,6 +228,10 @@ impl RecordBatchStream for RecordBatchStreamAdapter {
             Metrics::Unavailable | Metrics::Unresolved(_) => None,
         }
     }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
 }
 
 impl Stream for RecordBatchStreamAdapter {
@@ -316,6 +320,14 @@ impl RecordBatchStream for AsyncRecordBatchStreamAdapter {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
+    }
 }
 
 impl Stream for AsyncRecordBatchStreamAdapter {
@@ -374,6 +386,14 @@ mod test {
         impl RecordBatchStream for MaybeErrorRecordBatchStream {
             fn schema(&self) -> SchemaRef {
                 unimplemented!()
+            }
+
+            fn output_ordering(&self) -> Option<&[OrderOption]> {
+                None
+            }
+
+            fn metrics(&self) -> Option<RecordBatchMetrics> {
+                None
             }
         }
 
