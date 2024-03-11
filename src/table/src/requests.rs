@@ -19,13 +19,11 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use serde::{Deserialize, Serialize};
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::storage::RegionNumber;
 
 use crate::error;
@@ -315,21 +313,6 @@ impl TruncateTableRequest {
     }
 }
 
-pub fn valid_table_option(key: &str) -> bool {
-    matches!(
-        key,
-        FILE_TABLE_LOCATION_KEY
-            | FILE_TABLE_FORMAT_KEY
-            | FILE_TABLE_PATTERN_KEY
-            | WRITE_BUFFER_SIZE_KEY
-            | TTL_KEY
-            | REGIONS_KEY
-            | STORAGE_KEY
-            | PHYSICAL_TABLE_METADATA_KEY
-            | LOGICAL_TABLE_METADATA_KEY
-    ) | is_supported_in_s3(key)
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CopyDatabaseRequest {
     pub catalog_name: String,
@@ -343,18 +326,6 @@ pub struct CopyDatabaseRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_validate_table_option() {
-        assert!(valid_table_option(FILE_TABLE_LOCATION_KEY));
-        assert!(valid_table_option(FILE_TABLE_FORMAT_KEY));
-        assert!(valid_table_option(FILE_TABLE_PATTERN_KEY));
-        assert!(valid_table_option(TTL_KEY));
-        assert!(valid_table_option(REGIONS_KEY));
-        assert!(valid_table_option(WRITE_BUFFER_SIZE_KEY));
-        assert!(valid_table_option(STORAGE_KEY));
-        assert!(!valid_table_option("foo"));
-    }
 
     #[test]
     fn test_serialize_table_options() {
