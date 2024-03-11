@@ -465,50 +465,48 @@ impl Accumulator for OrdValue {
                 .build());
             }
         }
-
-        if value != Value::Null {
+        #[derive(Debug, PartialEq, Eq)]
+        enum FnType {
+            Max,
+            Min,
+            Count,
+        }
+        let fn_type = if aggr_fn.is_max() {
+            FnType::Max
+        } else if aggr_fn.is_min() {
+            FnType::Min
+        } else if matches!(aggr_fn, AggregateFunc::Count) {
+            FnType::Count
+        } else {
+            unreachable!("already checked by ensure!")
+        };
+        let is_null = value.is_null();
+        if !is_null {
             self.non_nulls += diff;
         }
 
-        if aggr_fn.is_max() {
-            if !value.is_null() {
+        match (fn_type, is_null) {
+            (FnType::Max, false) => {
                 self.val = self
                     .val
                     .clone()
                     .map(|v| v.max(value.clone()))
-                    .or_else(|| Some(value));
+                    .or_else(|| Some(value))
             }
-        } else if aggr_fn.is_min() {
-            if !value.is_null() {
+            (FnType::Min, false) => {
                 self.val = self
                     .val
                     .clone()
                     .map(|v| v.min(value.clone()))
-                    .or_else(|| Some(value));
+                    .or_else(|| Some(value))
             }
-        } else if matches!(aggr_fn, AggregateFunc::Count) {
-            // store numbers of null for case like count(*)
-            if value.is_null() {
-                self.val = match &self.val {
-                    None => Some(Diff::from(1).into()),
-                    Some(v) => {
-                        let v = match v {
-                            Value::Int64(v) => v,
-                            _ => {
-                                return Err(TypeMismatchSnafu {
-                                    expected: ConcreteDataType::int64_datatype(),
-                                    actual: v.data_type(),
-                                }
-                                .build())
-                            }
-                        };
-                        Some((v + 1).into())
-                    }
-                };
-            }
-        } else {
-            unreachable!()
-        }
+            // min/max ignore nulls
+            (FnType::Min, true) | (FnType::Max, true) => (),
+            // compile count(*) to count(true) to include null/non-nulls
+            // the counts of non-null values are already updated
+            (FnType::Count, _) => (),
+        };
+
         Ok(())
     }
 
@@ -704,7 +702,7 @@ mod test {
                     (Value::Null, 1),
                     (Value::Null, 1),
                 ],
-                (2i64.into(), vec![2i64.into(), 2i64.into()]),
+                (2i64.into(), vec![Value::Null, 2i64.into()]),
             ),
             (
                 AggregateFunc::Any,
