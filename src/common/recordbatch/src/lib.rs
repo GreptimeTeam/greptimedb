@@ -39,13 +39,9 @@ use snafu::{ensure, ResultExt};
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn schema(&self) -> SchemaRef;
 
-    fn output_ordering(&self) -> Option<&[OrderOption]> {
-        None
-    }
+    fn output_ordering(&self) -> Option<&[OrderOption]>;
 
-    fn metrics(&self) -> Option<RecordBatchMetrics> {
-        None
-    }
+    fn metrics(&self) -> Option<RecordBatchMetrics>;
 }
 
 pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
@@ -73,6 +69,14 @@ impl EmptyRecordBatchStream {
 impl RecordBatchStream for EmptyRecordBatchStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 
@@ -191,6 +195,14 @@ pub struct SimpleRecordBatchStream {
 impl RecordBatchStream for SimpleRecordBatchStream {
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 

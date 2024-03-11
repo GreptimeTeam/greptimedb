@@ -41,7 +41,8 @@ mod tests {
     use futures::Stream;
 
     use super::*;
-    use crate::RecordBatchStream;
+    use crate::adapter::RecordBatchMetrics;
+    use crate::{OrderOption, RecordBatchStream};
 
     struct MockRecordBatchStream {
         batch: Option<RecordBatch>,
@@ -51,6 +52,14 @@ mod tests {
     impl RecordBatchStream for MockRecordBatchStream {
         fn schema(&self) -> SchemaRef {
             self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            None
         }
     }
 

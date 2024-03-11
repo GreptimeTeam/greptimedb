@@ -23,7 +23,7 @@ use common_query::error::Result as QueryResult;
 use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
 use datafusion::execution::context::TaskContext;
@@ -156,6 +156,10 @@ impl RecordBatchStream for StreamWithMetricWrapper {
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
         self.stream.metrics()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.stream.output_ordering()
     }
 }
 
