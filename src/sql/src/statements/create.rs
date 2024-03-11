@@ -230,6 +230,7 @@ pub struct CreateTableLike {
 #[cfg(test)]
 mod tests {
     use crate::dialect::GreptimeDbDialect;
+    use crate::error::Error;
     use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::statement::Statement;
 
@@ -351,7 +352,7 @@ ENGINE=mito
       )
       PARTITION ON COLUMNS (host) ()
       engine=mito
-      with(regions=1, ttl='7d', compaction.type='world');
+      with(regions=1, ttl='7d', 'compaction.type'='world');
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -377,6 +378,6 @@ ENGINE=mito
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(matches!(result, Err(InvalidTableOption { .. })));
+        assert!(matches!(result, Err(Error::InvalidTableOption { .. })));
     }
 }

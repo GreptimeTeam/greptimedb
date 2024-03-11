@@ -44,3 +44,26 @@ engine=mito
 with('regions'=1, 'ttl'='7d', 'compaction.type'='twcs', 'compaction.twcs.time_window'='1d');
 
 drop table test_opts;
+
+create table if not exists test_mito_options(
+    host string,
+    ts timestamp,
+    cpu double default 0,
+    memory double,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+engine=mito
+with(
+    'regions'=1,
+    'ttl'='7d',
+    'compaction.type'='twcs',
+    'compaction.twcs.max_active_window_files'='8',
+    'compaction.twcs.max_inactive_window_files'='2',
+    'compaction.twcs.time_window'='1d',
+    'index.inverted_index.ignore_column_ids'='1,2,3',
+    'index.inverted_index.segment_row_count'='512',
+    'wal_options'='{"wal.provider":"raft_engine"}',
+);
+
+drop table test_mito_options;

@@ -26,6 +26,7 @@ use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
+use store_api::mito_engine_options::is_mito_engine_option_key;
 use store_api::storage::RegionNumber;
 
 use crate::error;
@@ -38,8 +39,13 @@ pub const FILE_TABLE_LOCATION_KEY: &str = "location";
 pub const FILE_TABLE_PATTERN_KEY: &str = "pattern";
 pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 
-pub fn valid_table_option(key: &str) -> bool {
+/// Returns true if the `key` is a valid key for any engine or storage.
+pub fn validate_table_option(key: &str) -> bool {
     if is_supported_in_s3(key) {
+        return true;
+    }
+
+    if is_mito_engine_option_key(key) {
         return true;
     }
 
@@ -353,14 +359,14 @@ mod tests {
 
     #[test]
     fn test_validate_table_option() {
-        assert!(valid_table_option(FILE_TABLE_LOCATION_KEY));
-        assert!(valid_table_option(FILE_TABLE_FORMAT_KEY));
-        assert!(valid_table_option(FILE_TABLE_PATTERN_KEY));
-        assert!(valid_table_option(TTL_KEY));
-        assert!(valid_table_option(REGIONS_KEY));
-        assert!(valid_table_option(WRITE_BUFFER_SIZE_KEY));
-        assert!(valid_table_option(STORAGE_KEY));
-        assert!(!valid_table_option("foo"));
+        assert!(validate_table_option(FILE_TABLE_LOCATION_KEY));
+        assert!(validate_table_option(FILE_TABLE_FORMAT_KEY));
+        assert!(validate_table_option(FILE_TABLE_PATTERN_KEY));
+        assert!(validate_table_option(TTL_KEY));
+        assert!(validate_table_option(REGIONS_KEY));
+        assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
+        assert!(validate_table_option(STORAGE_KEY));
+        assert!(!validate_table_option("foo"));
     }
 
     #[test]
