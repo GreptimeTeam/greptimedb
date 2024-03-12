@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::string::ToString;
 
 use api::prom_store::remote::Sample;
@@ -23,6 +21,8 @@ use api::v1::{
     Value,
 };
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use hashbrown::hash_map::Entry;
+use hashbrown::HashMap;
 
 use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
@@ -85,7 +85,7 @@ impl Default for TableBuilder {
 
 impl TableBuilder {
     pub(crate) fn with_capacity(cols: usize, rows: usize) -> Self {
-        let mut col_indexes = HashMap::with_capacity(cols);
+        let mut col_indexes = HashMap::with_capacity_and_hasher(cols, Default::default());
         col_indexes.insert(GREPTIME_TIMESTAMP.to_string(), 0);
         col_indexes.insert(GREPTIME_VALUE.to_string(), 1);
 
