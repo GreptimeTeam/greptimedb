@@ -17,9 +17,12 @@ use std::sync::Arc;
 use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
 use criterion::{criterion_group, criterion_main, Criterion};
+use datafusion_common::Column;
+use datafusion_expr::{lit, Expr};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::merge_tree::{MergeTreeConfig, MergeTreeMemtable};
+use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
 use rand::rngs::ThreadRng;
@@ -29,14 +32,23 @@ use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
 use store_api::storage::RegionId;
+use table::predicate::Predicate;
 
 fn write_merge_tree(c: &mut Criterion) {
     let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
     let timestamps = (0..100).collect::<Vec<_>>();
 
-    let memtable = MergeTreeMemtable::new(1, metadata.clone(), None, &MergeTreeConfig::default());
-
-    c.bench_function("write_merge_tree", |b| {
+    let mut group = c.benchmark_group("write");
+    group.bench_function("merge_tree", |b| {
+        let memtable = MergeTreeMemtable::new(1, metadata.clone(), None, &MergeTreeConfig::default());
+        let kvs =
+            memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
+        b.iter(|| {
+            memtable.write(&kvs).unwrap();
+        });
+    });
+    group.bench_function("time_series", |b| {
+        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None);
         let kvs =
             memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
         b.iter(|| {
@@ -52,17 +64,67 @@ fn full_scan_merge_tree(c: &mut Criterion) {
     let generator = CpuDataGenerator::new(metadata.clone(), 4000, start_sec, start_sec + 3600 * 2);
 
     let mut group = c.benchmark_group("full_scan");
-    group.sample_size(20);
+    group.sample_size(10);
     group.bench_function("merge_tree", |b| {
         let memtable = MergeTreeMemtable::new(1, metadata.clone(), None, &config);
-        // Prepares data.
         for kvs in generator.iter() {
             memtable.write(&kvs).unwrap();
         }
 
-        // Scans the memtable.
         b.iter(|| {
             let iter = memtable.iter(None, None).unwrap();
+            for batch in iter {
+                let _batch = batch.unwrap();
+            }
+        });
+    });
+    group.bench_function("time_series", |b| {
+        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None);
+        for kvs in generator.iter() {
+            memtable.write(&kvs).unwrap();
+        }
+
+        b.iter(|| {
+            let iter = memtable.iter(None, None).unwrap();
+            for batch in iter {
+                let _batch = batch.unwrap();
+            }
+        });
+    });
+}
+
+/// Filter with 1 host.
+fn filter_1_host_merge_tree(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let config = MergeTreeConfig::default();
+    let start_sec = 1710043200;
+    let generator = CpuDataGenerator::new(metadata.clone(), 4000, start_sec, start_sec + 3600 * 2);
+
+    let mut group = c.benchmark_group("filter_1_host");
+    group.sample_size(10);
+    group.bench_function("merge_tree", |b| {
+        let memtable = MergeTreeMemtable::new(1, metadata.clone(), None, &config);
+        for kvs in generator.iter() {
+            memtable.write(&kvs).unwrap();
+        }
+        let predicate = generator.random_host_filter();
+
+        b.iter(|| {
+            let iter = memtable.iter(None, Some(predicate.clone())).unwrap();
+            for batch in iter {
+                let _batch = batch.unwrap();
+            }
+        });
+    });
+    group.bench_function("time_series", |b| {
+        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None);
+        for kvs in generator.iter() {
+            memtable.write(&kvs).unwrap();
+        }
+        let predicate = generator.random_host_filter();
+
+        b.iter(|| {
+            let iter = memtable.iter(None, Some(predicate.clone())).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }
@@ -204,6 +266,17 @@ impl CpuDataGenerator {
         KeyValues::new(&self.metadata, mutation).unwrap()
     }
 
+    fn random_host_filter(&self) -> Predicate {
+        let host = self.random_hostname();
+        let expr = Expr::Column(Column::from_name("hostname")).eq(lit(host));
+        Predicate::new(vec![expr.into()])
+    }
+
+    fn random_hostname(&self) -> String {
+        let mut rng = rand::thread_rng();
+        self.hosts.choose(&mut rng).unwrap().hostname.clone()
+    }
+
     fn random_f64(rng: &mut ThreadRng) -> f64 {
         let base: u32 = rng.gen_range(30..95);
         base as f64
@@ -214,10 +287,6 @@ impl CpuDataGenerator {
     }
 }
 
-// Sample data:
-// cpu,
-// hostname=host_2,region=sa-east-1,datacenter=sa-east-1a,rack=89,os=Ubuntu16.04LTS,arch=x86,team=LON,service=13,service_version=0,service_environment=staging
-// usage_user=29i,usage_system=48i,usage_idle=5i,usage_nice=63i,usage_iowait=17i,usage_irq=52i,usage_softirq=60i,usage_steal=49i,usage_guest=93i,usage_guest_nice=1i 1686441600000000000
 /// Creates a metadata for TSBS cpu-like table.
 fn cpu_metadata() -> RegionMetadata {
     let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
@@ -275,5 +344,10 @@ fn cpu_metadata() -> RegionMetadata {
     builder.build().unwrap()
 }
 
-criterion_group!(benches, write_merge_tree, full_scan_merge_tree);
+criterion_group!(
+    benches,
+    write_merge_tree,
+    full_scan_merge_tree,
+    filter_1_host_merge_tree
+);
 criterion_main!(benches);
