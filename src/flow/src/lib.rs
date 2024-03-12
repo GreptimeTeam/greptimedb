@@ -19,3 +19,4 @@ mod adapter;
 mod expr;
 mod plan;
 mod repr;
+mod utils;

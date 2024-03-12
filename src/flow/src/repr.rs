@@ -45,6 +45,8 @@ pub type Timestamp = i64;
 /// Default type for a repr of changes to a collection.
 pub type DiffRow = (Row, Timestamp, Diff);
 
+pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
+
 /// Convert a value that is or can be converted to Datetime to internal timestamp
 pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
     match value {
