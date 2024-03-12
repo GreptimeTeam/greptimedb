@@ -29,7 +29,7 @@ use client::api::v1::column::Values;
 use client::api::v1::{
     Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertRequest, InsertRequests, SemanticType,
 };
-use client::{Client, Database, Output, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use futures_util::TryStreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -502,9 +502,9 @@ async fn do_query(num_iter: usize, db: &Database, table_name: &str) {
         for i in 0..num_iter {
             let now = Instant::now();
             let res = db.sql(&query).await.unwrap();
-            match res {
-                Output::AffectedRows(_) | Output::RecordBatches(_) => (),
-                Output::Stream(stream, _) => {
+            match res.data {
+                OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => (),
+                OutputData::Stream(stream) => {
                     stream.try_collect::<Vec<_>>().await.unwrap();
                 }
             }

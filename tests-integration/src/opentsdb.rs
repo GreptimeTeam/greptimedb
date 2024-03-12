@@ -16,7 +16,7 @@
 mod tests {
     use std::sync::Arc;
 
-    use common_query::Output;
+    use client::OutputData;
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
     use itertools::Itertools;
@@ -83,8 +83,8 @@ mod tests {
             .await
             .remove(0)
             .unwrap();
-        match output {
-            Output::Stream(stream, _) => {
+        match output.data {
+            OutputData::Stream(stream) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print().unwrap();
                 let expected = vec![

@@ -16,7 +16,7 @@ use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_error::ext::ErrorExt;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::{util, RecordBatch};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -153,41 +153,45 @@ impl InfluxdbV1Response {
         for (statement_id, out) in outputs.into_iter().enumerate() {
             let statement_id = statement_id as u32;
             match out {
-                Ok(Output::AffectedRows(_)) => {
-                    results.push(InfluxdbOutput {
-                        statement_id,
-                        series: vec![],
-                    });
-                }
-                Ok(Output::Stream(stream, _)) => {
-                    // TODO(sunng87): streaming response
-                    match util::collect(stream).await {
-                        Ok(rows) => match InfluxdbRecordsOutput::try_from((epoch, rows)) {
-                            Ok(rows) => {
-                                results.push(InfluxdbOutput {
-                                    statement_id,
-                                    series: vec![rows],
-                                });
-                            }
-                            Err(err) => {
-                                return make_error_response(err);
-                            }
-                        },
-                        Err(err) => {
-                            return make_error_response(err);
-                        }
-                    }
-                }
-                Ok(Output::RecordBatches(rbs)) => {
-                    match InfluxdbRecordsOutput::try_from((epoch, rbs.take())) {
-                        Ok(rows) => {
+                Ok(o) => {
+                    match o.data {
+                        OutputData::AffectedRows(_) => {
                             results.push(InfluxdbOutput {
                                 statement_id,
-                                series: vec![rows],
+                                series: vec![],
                             });
                         }
-                        Err(err) => {
-                            return make_error_response(err);
+                        OutputData::Stream(stream) => {
+                            // TODO(sunng87): streaming response
+                            match util::collect(stream).await {
+                                Ok(rows) => match InfluxdbRecordsOutput::try_from((epoch, rows)) {
+                                    Ok(rows) => {
+                                        results.push(InfluxdbOutput {
+                                            statement_id,
+                                            series: vec![rows],
+                                        });
+                                    }
+                                    Err(err) => {
+                                        return make_error_response(err);
+                                    }
+                                },
+                                Err(err) => {
+                                    return make_error_response(err);
+                                }
+                            }
+                        }
+                        OutputData::RecordBatches(rbs) => {
+                            match InfluxdbRecordsOutput::try_from((epoch, rbs.take())) {
+                                Ok(rows) => {
+                                    results.push(InfluxdbOutput {
+                                        statement_id,
+                                        series: vec![rows],
+                                    });
+                                }
+                                Err(err) => {
+                                    return make_error_response(err);
+                                }
+                            }
                         }
                     }
                 }

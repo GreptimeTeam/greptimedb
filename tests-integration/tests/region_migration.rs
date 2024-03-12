@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::{RegionDistribution, TableMetadataManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
@@ -136,7 +136,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     let results = insert_values(&cluster.frontend, logical_timer).await;
     logical_timer += 1000;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // The region distribution
@@ -197,7 +197,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     // Inserts more table.
     let results = insert_values(&cluster.frontend, logical_timer).await;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // Asserts the writes.
@@ -262,7 +262,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     let results = insert_values(&cluster.frontend, logical_timer).await;
     logical_timer += 1000;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // The region distribution
@@ -312,7 +312,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     // Inserts more table.
     let results = insert_values(&cluster.frontend, logical_timer).await;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // Asserts the writes.
@@ -385,7 +385,7 @@ pub async fn test_region_migration_multiple_regions(
     let results = insert_values(&cluster.frontend, logical_timer).await;
     logical_timer += 1000;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // The region distribution
@@ -456,7 +456,7 @@ pub async fn test_region_migration_multiple_regions(
     // Inserts more table.
     let results = insert_values(&cluster.frontend, logical_timer).await;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // Asserts the writes.
@@ -522,7 +522,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     let results = insert_values(&cluster.frontend, logical_timer).await;
     logical_timer += 1000;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // The region distribution
@@ -586,7 +586,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     // Inserts more table.
     let results = insert_values(&cluster.frontend, logical_timer).await;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // Asserts the writes.
@@ -653,7 +653,7 @@ pub async fn test_region_migration_incorrect_from_peer(
     // Inserts data
     let results = insert_values(&cluster.frontend, logical_timer).await;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // The region distribution
@@ -728,7 +728,7 @@ pub async fn test_region_migration_incorrect_region_id(
     // Inserts data
     let results = insert_values(&cluster.frontend, logical_timer).await;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // The region distribution
@@ -807,7 +807,7 @@ async fn assert_values(instance: &Arc<Instance>) {
 | 55 | 2023-05-31T04:51:55 |
 | 55 | 2023-05-31T04:51:56 |
 +----+---------------------+";
-    check_output_stream(result.unwrap(), expected).await;
+    check_output_stream(result.unwrap().data, expected).await;
 }
 
 async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
@@ -824,7 +824,7 @@ async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
     );
     let mut result = cluster.frontend.do_query(&sql, QueryContext::arc()).await;
     let output = result.remove(0).unwrap();
-    assert!(matches!(output, Output::AffectedRows(0)));
+    assert!(matches!(output.data, OutputData::AffectedRows(0)));
 
     let table = cluster
         .frontend
@@ -852,7 +852,7 @@ async fn find_region_distribution(
 async fn find_region_distribution_by_sql(cluster: &GreptimeDbCluster) -> RegionDistribution {
     let query_ctx = QueryContext::arc();
 
-    let Output::Stream(stream, _) = run_sql(
+    let OutputData::Stream(stream) = run_sql(
         &cluster.frontend,
         &format!(r#"select b.peer_id as datanode_id,
                            a.greptime_partition_id as region_id
@@ -862,7 +862,7 @@ async fn find_region_distribution_by_sql(cluster: &GreptimeDbCluster) -> RegionD
         ),
         query_ctx.clone(),
     )
-        .await.unwrap() else {
+        .await.unwrap().data else {
             unreachable!();
         };
 
@@ -901,13 +901,15 @@ async fn trigger_migration_by_sql(
     from_peer_id: u64,
     to_peer_id: u64,
 ) -> String {
-    let Output::Stream(stream, _) = run_sql(
+    let OutputData::Stream(stream) = run_sql(
         &cluster.frontend,
         &format!("select migrate_region({region_id}, {from_peer_id}, {to_peer_id})"),
         QueryContext::arc(),
     )
     .await
-    .unwrap() else {
+    .unwrap()
+    .data
+    else {
         unreachable!();
     };
 
@@ -924,13 +926,15 @@ async fn trigger_migration_by_sql(
 
 /// Query procedure state by SQL.
 async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
-    let Output::Stream(stream, _) = run_sql(
+    let OutputData::Stream(stream) = run_sql(
         instance,
         &format!("select procedure_state('{pid}')"),
         QueryContext::arc(),
     )
     .await
-    .unwrap() else {
+    .unwrap()
+    .data
+    else {
         unreachable!();
     };
 

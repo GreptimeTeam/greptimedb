@@ -33,7 +33,10 @@ use snafu::ResultExt;
 
 use crate::expr::error::{CastValueSnafu, EvalError};
 
-/// System-wide Record count difference type.
+/// System-wide Record count difference type. Useful for capture data change
+///
+/// i.e. +1 means insert one record, -1 means remove,
+/// and +/-n means insert/remove multiple duplicate records.
 pub type Diff = i64;
 
 /// System-wide default timestamp type

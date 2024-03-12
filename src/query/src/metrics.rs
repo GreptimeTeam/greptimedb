@@ -15,7 +15,8 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures::Stream;
 use futures_util::ready;
@@ -77,6 +78,14 @@ impl<F> OnDone<F> {
 impl<F: FnOnce() + Unpin> RecordBatchStream for OnDone<F> {
     fn schema(&self) -> SchemaRef {
         self.stream.schema()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.stream.output_ordering()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.stream.metrics()
     }
 }
 

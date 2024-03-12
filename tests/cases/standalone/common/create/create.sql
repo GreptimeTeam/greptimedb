@@ -64,6 +64,14 @@ CREATE TABLE test_like_2 LIKE test_like_1;
 
 CREATE TABLE test_like_2 LIKE test_like_1;
 
+CREATE TABLE `ExcePTuRi`(
+non TIMESTAMP(6) TIME INDEX,
+`iUSTO` DOUBLE DEFAULT 0.047318541668048164
+)
+ENGINE=mito;
+
+DESC table `ExcePTuRi`;
+
 DESC TABLE test_like_1;
 
 DESC TABLE test_like_2;
@@ -71,3 +79,5 @@ DESC TABLE test_like_2;
 DROP TABLE test_like_1;
 
 DROP TABLE test_like_2;
+
+DROP table `ExcePTuRi`;

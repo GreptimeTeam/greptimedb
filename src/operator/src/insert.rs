@@ -111,7 +111,7 @@ impl Inserter {
         .await?;
 
         let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+        Ok(Output::new_with_affected_rows(affected_rows))
     }
 
     /// Handle row inserts request with metric engine.
@@ -149,7 +149,7 @@ impl Inserter {
                 .await?;
 
         let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+        Ok(Output::new_with_affected_rows(affected_rows))
     }
 
     pub async fn handle_table_insert(
@@ -185,7 +185,7 @@ impl Inserter {
                 .await?;
 
         let affected_rows = self.do_request(inserts, ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+        Ok(Output::new_with_affected_rows(affected_rows))
     }
 }
 

@@ -30,7 +30,7 @@ pub trait TxnService: Sync + Send {
 
     /// Maximum number of operations permitted in a transaction.
     fn max_txn_ops(&self) -> usize {
-        usize::MAX
+        unimplemented!("txn is not implemented")
     }
 }
 

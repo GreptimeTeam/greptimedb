@@ -15,6 +15,7 @@
 use std::env;
 use std::sync::Arc;
 
+use client::OutputData;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::warn;
@@ -329,9 +330,9 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str
             .unwrap()
     };
 
-    let recordbatches = match output {
-        Output::Stream(stream, _) => util::collect_batches(stream).await.unwrap(),
-        Output::RecordBatches(recordbatches) => recordbatches,
+    let recordbatches = match output.data {
+        OutputData::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(recordbatches) => recordbatches,
         _ => unreachable!(),
     };
     let pretty_print = sort_table(&recordbatches.pretty_print().unwrap());

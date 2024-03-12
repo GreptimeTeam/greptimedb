@@ -307,7 +307,7 @@ impl Database {
                         reason: "Expect 'AffectedRows' Flight messages to be the one and the only!"
                     }
                 );
-                Ok(Output::AffectedRows(rows))
+                Ok(Output::new_with_affected_rows(rows))
             }
             FlightMessage::Recordbatch(_) | FlightMessage::Metrics(_) => {
                 IllegalFlightMessagesSnafu {
@@ -340,7 +340,7 @@ impl Database {
                     output_ordering: None,
                     metrics: Default::default(),
                 };
-                Ok(Output::new_stream(Box::pin(record_batch_stream)))
+                Ok(Output::new_with_stream(Box::pin(record_batch_stream)))
             }
         }
     }

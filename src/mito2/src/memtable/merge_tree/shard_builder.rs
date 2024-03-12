@@ -138,7 +138,13 @@ impl ShardBuilder {
         let shard_id = self.current_shard_id;
         self.current_shard_id += 1;
 
-        Ok(Some(Shard::new(shard_id, key_dict, data_parts, self.dedup)))
+        Ok(Some(Shard::new(
+            shard_id,
+            key_dict,
+            data_parts,
+            self.dedup,
+            self.data_freeze_threshold,
+        )))
     }
 
     /// Scans the shard builder.

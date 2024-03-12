@@ -21,7 +21,7 @@ mod accum;
 mod func;
 
 /// Describes an aggregation expression.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct AggregateExpr {
     /// Names the aggregation function.
     pub func: AggregateFunc,

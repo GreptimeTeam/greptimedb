@@ -189,9 +189,18 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
 
 #[cfg(test)]
 mod tests {
+    use datatypes::value::Value;
     use rand::SeedableRng;
 
     use super::*;
+
+    #[test]
+    fn test_float64() {
+        let value = Value::from(0.047318541668048164);
+        assert_eq!("0.047318541668048164", value.to_string());
+        let value: f64 = "0.047318541668048164".parse().unwrap();
+        assert_eq!("0.047318541668048164", value.to_string());
+    }
 
     #[test]
     fn test_create_table_expr_generator() {

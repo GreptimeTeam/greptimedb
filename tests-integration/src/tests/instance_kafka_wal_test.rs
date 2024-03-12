@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use client::OutputData;
 use common_query::Output;
 use common_recordbatch::util;
 use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
@@ -33,7 +34,7 @@ async fn test_create_database_and_insert_query(instance: Option<Box<dyn Rebuilda
     let instance = instance.frontend();
 
     let output = execute_sql(&instance, "create database test").await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    assert!(matches!(output.data, OutputData::AffectedRows(1)));
 
     let output = execute_sql(
         &instance,
@@ -46,7 +47,7 @@ async fn test_create_database_and_insert_query(instance: Option<Box<dyn Rebuilda
 )"#,
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    assert!(matches!(output.data, OutputData::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
@@ -56,11 +57,11 @@ async fn test_create_database_and_insert_query(instance: Option<Box<dyn Rebuilda
                            "#,
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
+    assert!(matches!(output.data, OutputData::AffectedRows(2)));
 
     let query_output = execute_sql(&instance, "select ts from test.demo order by ts limit 1").await;
-    match query_output {
-        Output::Stream(s, _) => {
+    match query_output.data {
+        OutputData::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(

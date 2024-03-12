@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
@@ -107,40 +107,38 @@ impl PrometheusJsonResponse {
         result_type: ValueType,
     ) -> Self {
         let response: Result<Self> = try {
-            let resp = match result? {
-                Output::RecordBatches(batches) => Self::success(Self::record_batches_to_data(
-                    batches,
-                    metric_name,
-                    result_type,
-                )?),
-                Output::Stream(stream, physical_plan) => {
-                    let record_batches = RecordBatches::try_collect(stream)
-                        .await
-                        .context(CollectRecordbatchSnafu)?;
-                    let mut resp = Self::success(Self::record_batches_to_data(
-                        record_batches,
-                        metric_name,
-                        result_type,
-                    )?);
-
-                    if let Some(physical_plan) = physical_plan {
-                        let mut result_map = HashMap::new();
-                        let mut tmp = vec![&mut result_map];
-                        collect_plan_metrics(physical_plan, &mut tmp);
-
-                        let re = result_map
-                            .into_iter()
-                            .map(|(k, v)| (k, Value::from(v)))
-                            .collect();
-                        resp.resp_metrics = re;
+            let result = result?;
+            let mut resp =
+                match result.data {
+                    OutputData::RecordBatches(batches) => Self::success(
+                        Self::record_batches_to_data(batches, metric_name, result_type)?,
+                    ),
+                    OutputData::Stream(stream) => {
+                        let record_batches = RecordBatches::try_collect(stream)
+                            .await
+                            .context(CollectRecordbatchSnafu)?;
+                        Self::success(Self::record_batches_to_data(
+                            record_batches,
+                            metric_name,
+                            result_type,
+                        )?)
                     }
+                    OutputData::AffectedRows(_) => {
+                        Self::error("Unexpected", "expected data result, but got affected rows")
+                    }
+                };
 
-                    resp
-                }
-                Output::AffectedRows(_) => {
-                    Self::error("Unexpected", "expected data result, but got affected rows")
-                }
-            };
+            if let Some(physical_plan) = result.meta.plan {
+                let mut result_map = HashMap::new();
+                let mut tmp = vec![&mut result_map];
+                collect_plan_metrics(physical_plan, &mut tmp);
+
+                let re = result_map
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::from(v)))
+                    .collect();
+                resp.resp_metrics = re;
+            }
 
             resp
         };

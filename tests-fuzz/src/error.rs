@@ -46,4 +46,7 @@ pub enum Error {
         error: sqlx::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to assert: {}", reason))]
+    Assert { reason: String, location: Location },
 }

@@ -27,7 +27,7 @@ use common_error::ext::BoxedError;
 use common_error::status_code::StatusCode;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::DfPhysicalPlanAdapter;
-use common_query::{DfPhysicalPlan, Output};
+use common_query::{DfPhysicalPlan, OutputData};
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
 use common_telemetry::tracing::{self, info_span};
@@ -651,11 +651,11 @@ impl RegionServerInner {
             .await
             .context(ExecuteLogicalPlanSnafu)?;
 
-        match result {
-            Output::AffectedRows(_) | Output::RecordBatches(_) => {
+        match result.data {
+            OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => {
                 UnsupportedOutputSnafu { expected: "stream" }.fail()
             }
-            Output::Stream(stream, _) => Ok(stream),
+            OutputData::Stream(stream) => Ok(stream),
         }
     }
 

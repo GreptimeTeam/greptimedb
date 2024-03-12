@@ -20,7 +20,7 @@ use api::v1::{
     PromqlRequest, RequestHeader, SemanticType,
 };
 use auth::user_provider_from_option;
-use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::MITO_ENGINE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -311,7 +311,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     // create
     let expr = testing_create_expr();
     let result = db.create(expr).await.unwrap();
-    assert!(matches!(result, Output::AffectedRows(0)));
+    assert!(matches!(result.data, OutputData::AffectedRows(0)));
 
     //alter
     let add_column = ColumnDef {
@@ -335,7 +335,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         kind: Some(kind),
     };
     let result = db.alter(expr).await.unwrap();
-    assert!(matches!(result, Output::AffectedRows(0)));
+    assert!(matches!(result.data, OutputData::AffectedRows(0)));
 
     // insert
     insert_and_assert(&db).await;
@@ -373,7 +373,7 @@ async fn insert_and_assert(db: &Database) {
         )
         .await
         .unwrap();
-    assert!(matches!(result, Output::AffectedRows(2)));
+    assert!(matches!(result.data, OutputData::AffectedRows(2)));
 
     // select
     let output = db
@@ -381,10 +381,10 @@ async fn insert_and_assert(db: &Database) {
         .await
         .unwrap();
 
-    let record_batches = match output {
-        Output::RecordBatches(record_batches) => record_batches,
-        Output::Stream(stream, _) => RecordBatches::try_collect(stream).await.unwrap(),
-        Output::AffectedRows(_) => unreachable!(),
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
     };
 
     let pretty = record_batches.pretty_print().unwrap();
@@ -479,14 +479,16 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     assert!(matches!(
         db.sql("CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);")
             .await
-            .unwrap(),
-        Output::AffectedRows(0)
+            .unwrap()
+            .data,
+        OutputData::AffectedRows(0)
     ));
     assert!(matches!(
         db.sql(r#"INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");"#)
             .await
-            .unwrap(),
-        Output::AffectedRows(3)
+            .unwrap()
+            .data,
+        OutputData::AffectedRows(3)
     ));
 
     // Instant query using prometheus gateway service
@@ -684,10 +686,10 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
 }
 
 async fn to_batch(output: Output) -> String {
-    match output {
-        Output::RecordBatches(batch) => batch,
-        Output::Stream(stream, _) => RecordBatches::try_collect(stream).await.unwrap(),
-        Output::AffectedRows(_) => unreachable!(),
+    match output.data {
+        OutputData::RecordBatches(batch) => batch,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
     }
     .pretty_print()
     .unwrap()

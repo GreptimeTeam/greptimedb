@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
 use common_telemetry::tracing;
@@ -74,15 +74,19 @@ fn output_to_query_response<'a>(
     field_format: &Format,
 ) -> PgWireResult<Response<'a>> {
     match output {
-        Ok(Output::AffectedRows(rows)) => Ok(Response::Execution(Tag::new("OK").with_rows(rows))),
-        Ok(Output::Stream(record_stream, _)) => {
-            let schema = record_stream.schema();
-            recordbatches_to_query_response(record_stream, schema, field_format)
-        }
-        Ok(Output::RecordBatches(recordbatches)) => {
-            let schema = recordbatches.schema();
-            recordbatches_to_query_response(recordbatches.as_stream(), schema, field_format)
-        }
+        Ok(o) => match o.data {
+            OutputData::AffectedRows(rows) => {
+                Ok(Response::Execution(Tag::new("OK").with_rows(rows)))
+            }
+            OutputData::Stream(record_stream) => {
+                let schema = record_stream.schema();
+                recordbatches_to_query_response(record_stream, schema, field_format)
+            }
+            OutputData::RecordBatches(recordbatches) => {
+                let schema = recordbatches.schema();
+                recordbatches_to_query_response(recordbatches.as_stream(), schema, field_format)
+            }
+        },
         Err(e) => Ok(Response::Error(Box::new(ErrorInfo::new(
             "ERROR".to_string(),
             "XX000".to_string(),

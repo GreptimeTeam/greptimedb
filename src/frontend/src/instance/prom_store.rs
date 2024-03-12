@@ -19,6 +19,7 @@ use api::prom_store::remote::{Query, QueryResult, ReadRequest, ReadResponse, Wri
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use client::OutputData;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
@@ -77,7 +78,7 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
 }
 
 async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
-    let Output::Stream(stream, _) = output else {
+    let OutputData::Stream(stream) = output.data else {
         unreachable!()
     };
     let recordbatches = RecordBatches::try_collect(stream)

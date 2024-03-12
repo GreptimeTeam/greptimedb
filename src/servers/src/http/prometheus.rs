@@ -23,7 +23,7 @@ use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use common_telemetry::tracing;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
@@ -336,19 +336,19 @@ async fn retrieve_series_from_query_result(
     series: &mut Vec<HashMap<String, String>>,
     table_name: &str,
 ) -> Result<()> {
-    match result? {
-        Output::RecordBatches(batches) => {
+    match result?.data {
+        OutputData::RecordBatches(batches) => {
             record_batches_to_series(batches, series, table_name)?;
             Ok(())
         }
-        Output::Stream(stream, _) => {
+        OutputData::Stream(stream) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
             record_batches_to_series(batches, series, table_name)?;
             Ok(())
         }
-        Output::AffectedRows(_) => Err(Error::UnexpectedResult {
+        OutputData::AffectedRows(_) => Err(Error::UnexpectedResult {
             reason: "expected data result, but got affected rows".to_string(),
             location: Location::default(),
         }),
@@ -360,19 +360,19 @@ async fn retrieve_labels_name_from_query_result(
     result: Result<Output>,
     labels: &mut HashSet<String>,
 ) -> Result<()> {
-    match result? {
-        Output::RecordBatches(batches) => {
+    match result?.data {
+        OutputData::RecordBatches(batches) => {
             record_batches_to_labels_name(batches, labels)?;
             Ok(())
         }
-        Output::Stream(stream, _) => {
+        OutputData::Stream(stream) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
             record_batches_to_labels_name(batches, labels)?;
             Ok(())
         }
-        Output::AffectedRows(_) => UnexpectedResultSnafu {
+        OutputData::AffectedRows(_) => UnexpectedResultSnafu {
             reason: "expected data result, but got affected rows".to_string(),
         }
         .fail(),
@@ -569,17 +569,17 @@ async fn retrieve_label_values(
     label_name: &str,
     labels_values: &mut HashSet<String>,
 ) -> Result<()> {
-    match result? {
-        Output::RecordBatches(batches) => {
+    match result?.data {
+        OutputData::RecordBatches(batches) => {
             retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
         }
-        Output::Stream(stream, _) => {
+        OutputData::Stream(stream) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
             retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
         }
-        Output::AffectedRows(_) => UnexpectedResultSnafu {
+        OutputData::AffectedRows(_) => UnexpectedResultSnafu {
             reason: "expected data result, but got affected rows".to_string(),
         }
         .fail(),
