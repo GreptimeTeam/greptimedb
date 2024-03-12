@@ -282,7 +282,7 @@ jobs:
       - name: Docker Cache
         uses: ScribeMD/docker-cache@0.3.7
         with:
-          key: docker-${{ runner.os }}-${{ hashFiles('tests-integration/fixtures/etcd/docker-compose-standalone.yml') }}
+          key: docker-${{ runner.os }}-coverage
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
