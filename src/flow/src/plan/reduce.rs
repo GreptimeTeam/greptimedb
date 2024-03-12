@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::expr::{AggregateExpr, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr};
 
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct KeyValPlan {
     pub key_plan: SafeMfpPlan,
     pub val_plan: SafeMfpPlan,
@@ -24,7 +24,7 @@ pub struct KeyValPlan {
 
 /// TODO(discord9): def&impl of Hierarchical aggregates(for min/max with support to deletion) and
 /// basic aggregates(for other aggregate functions) and mixed aggregate
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub enum ReducePlan {
     /// Plan for not computing any aggregations, just determining the set of
     /// distinct keys.
@@ -35,7 +35,7 @@ pub enum ReducePlan {
 }
 
 /// Accumulable plan for the execution of a reduction.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct AccumulablePlan {
     /// All of the aggregations we were asked to compute, stored
     /// in order.

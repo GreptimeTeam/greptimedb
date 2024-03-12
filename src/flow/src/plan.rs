@@ -27,7 +27,7 @@ use crate::expr::{
 use crate::plan::join::JoinPlan;
 use crate::repr::{DiffRow, RelationType};
 
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct TypedPlan {
     /// output type of the relation
     pub typ: RelationType,
@@ -35,7 +35,7 @@ pub struct TypedPlan {
 }
 
 /// TODO(discord9): support `TableFunc`（by define FlatMap that map 1 to n)
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub enum Plan {
     /// A constant collection of rows.
     Constant { rows: Vec<DiffRow> },
