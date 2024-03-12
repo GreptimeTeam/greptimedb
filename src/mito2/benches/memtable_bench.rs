@@ -287,7 +287,7 @@ impl CpuDataGenerator {
     }
 
     fn generate_hosts(num_hosts: usize) -> Vec<Host> {
-        (0..num_hosts).map(|id| Host::random_with_id(id)).collect()
+        (0..num_hosts).map(Host::random_with_id).collect()
     }
 }
 
