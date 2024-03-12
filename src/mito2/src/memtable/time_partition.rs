@@ -14,13 +14,16 @@
 
 //! Partitions memtables by time.
 
-use std::{time::Duration, sync::Mutex};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use common_time::Timestamp;
 use smallvec::SmallVec;
+use store_api::metadata::RegionMetadataRef;
 
-use crate::memtable::{MemtableRef, KeyValues, MemtableId};
 use crate::error::Result;
+use crate::memtable::version::SmallMemtableVec;
+use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 
 /// A partition holds rows with timestamps between `[min, max)`.
 #[derive(Debug, Clone)]
@@ -28,7 +31,7 @@ pub struct TimePartition {
     /// Memtable of the partition.
     memtable: MemtableRef,
     /// Time range of the partition. `None` means there is no time range.
-    time_range: Option<PartTimeRange>
+    time_range: Option<PartTimeRange>,
 }
 
 type PartitionVec = SmallVec<[TimePartition; 2]>;
@@ -42,30 +45,79 @@ pub struct TimePartitions {
     ///
     /// `None` means there is only one partition.
     part_duration: Option<Duration>,
+    /// Metadata of the region.
+    metadata: RegionMetadataRef,
+    /// Builder of memtables.
+    builder: MemtableBuilderRef,
 }
 
+pub type TimePartitionsRef = Arc<TimePartitions>;
+
 impl TimePartitions {
-    fn write(&self, kvs: &KeyValues) -> Result<()> {
+    /// Returns a new empty partition list with optional duration.
+    pub fn new(
+        metadata: RegionMetadataRef,
+        builder: MemtableBuilderRef,
+        next_memtable_id: MemtableId,
+        part_duration: Option<Duration>,
+    ) -> Self {
+        Self {
+            inner: Mutex::new(PartitionsInner::new(next_memtable_id)),
+            part_duration,
+            metadata,
+            builder,
+        }
+    }
+
+    /// Write key values to memtables.
+    ///
+    /// It creates new partitions if necessary.
+    pub fn write(&self, kvs: &KeyValues) -> Result<()> {
         unimplemented!()
     }
 
     /// Append memtables in partitions to `memtables`.
-    fn list_memtables(&self, memtables: &mut Vec<MemtableRef>) {
+    pub fn list_memtables(&self, memtables: &mut Vec<MemtableRef>) {
+        unimplemented!()
+    }
+
+    /// Returns the number of partitions.
+    pub fn num_partitions(&self) -> usize {
         unimplemented!()
     }
 
     /// Returns true if all memtables are empty.
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         unimplemented!()
     }
 
     /// Freezes all memtables.
-    fn freeze(&self) -> Result<()> {
+    pub fn freeze(&self) -> Result<()> {
         unimplemented!()
     }
 
     /// Forks latest partition.
-    fn fork(&self) -> Self {
+    pub fn fork(&self, metadata: &RegionMetadataRef) -> Self {
+        unimplemented!()
+    }
+
+    /// Returns partition duration.
+    pub(crate) fn part_duration(&self) -> Option<Duration> {
+        unimplemented!()
+    }
+
+    /// Returns memory usage.
+    pub(crate) fn memory_usage(&self) -> usize {
+        unimplemented!()
+    }
+
+    /// Append memtables in partitions to small vec.
+    pub(crate) fn list_memtables_to_small_vec(&self, memtables: &mut SmallMemtableVec) {
+        unimplemented!()
+    }
+
+    /// Returns the next memtable id.
+    pub(crate) fn next_memtable_id(&self) -> MemtableId {
         unimplemented!()
     }
 }
@@ -76,6 +128,12 @@ struct PartitionsInner {
     parts: PartitionVec,
     /// Next memtable id.
     next_memtable_id: MemtableId,
+}
+
+impl PartitionsInner {
+    fn new(next_memtable_id: MemtableId) -> Self {
+        unimplemented!()
+    }
 }
 
 /// Time range of a partition.

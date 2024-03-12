@@ -25,6 +25,7 @@ use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder}
 use store_api::storage::RegionId;
 
 use crate::manifest::action::RegionEdit;
+use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilder;
 use crate::region::version::{Version, VersionBuilder, VersionControl};
 use crate::sst::file::{FileId, FileMeta};
@@ -101,7 +102,12 @@ impl VersionControlBuilder {
 
     pub(crate) fn build_version(&self) -> Version {
         let metadata = Arc::new(self.metadata.clone());
-        let mutable = self.memtable_builder.build(0, &metadata);
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            self.memtable_builder.clone(),
+            0,
+            None,
+        ));
         VersionBuilder::new(metadata, mutable)
             .add_files(self.file_purger.clone(), self.files.values().cloned())
             .build()
