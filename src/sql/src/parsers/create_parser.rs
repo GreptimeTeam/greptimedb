@@ -23,7 +23,7 @@ use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
-use table::requests::valid_table_option;
+use table::requests::validate_table_option;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
@@ -84,7 +84,7 @@ impl<'a> ParserContext<'a> {
             .collect::<HashMap<String, String>>();
         for key in options.keys() {
             ensure!(
-                valid_table_option(key),
+                validate_table_option(key),
                 InvalidTableOptionSnafu {
                     key: key.to_string()
                 }
@@ -150,7 +150,7 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu)?;
         for option in options.iter() {
             ensure!(
-                valid_table_option(&option.name.value),
+                validate_table_option(&option.name.value),
                 InvalidTableOptionSnafu {
                     key: option.name.value.to_string()
                 }
@@ -795,6 +795,17 @@ mod tests {
                 expected_options: HashMap::from([
                     ("location".to_string(), "/var/data/city.csv".to_string()),
                     ("format".to_string(), "csv".to_string()),
+                ]),
+                expected_engine: "foo",
+                expected_if_not_exist: true,
+            },
+            Test {
+                sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv','compaction.type'='bar');",
+                expected_table_name: "city",
+                expected_options: HashMap::from([
+                    ("location".to_string(), "/var/data/city.csv".to_string()),
+                    ("format".to_string(), "csv".to_string()),
+                    ("compaction.type".to_string(), "bar".to_string()),
                 ]),
                 expected_engine: "foo",
                 expected_if_not_exist: true,
