@@ -35,7 +35,7 @@ use store_api::storage::RegionId;
 use table::predicate::Predicate;
 
 /// Writes rows.
-fn write_merge_tree(c: &mut Criterion) {
+fn write_rows(c: &mut Criterion) {
     let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
     let timestamps = (0..100).collect::<Vec<_>>();
 
@@ -61,7 +61,7 @@ fn write_merge_tree(c: &mut Criterion) {
 }
 
 /// Scans all rows.
-fn full_scan_merge_tree(c: &mut Criterion) {
+fn full_scan(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
     let config = MergeTreeConfig::default();
     let start_sec = 1710043200;
@@ -98,7 +98,7 @@ fn full_scan_merge_tree(c: &mut Criterion) {
 }
 
 /// Filters 1 host.
-fn filter_1_host_merge_tree(c: &mut Criterion) {
+fn filter_1_host(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
     let config = MergeTreeConfig::default();
     let start_sec = 1710043200;
@@ -348,10 +348,5 @@ fn cpu_metadata() -> RegionMetadata {
     builder.build().unwrap()
 }
 
-criterion_group!(
-    benches,
-    write_merge_tree,
-    full_scan_merge_tree,
-    filter_1_host_merge_tree
-);
+criterion_group!(benches, write_rows, full_scan, filter_1_host);
 criterion_main!(benches);
