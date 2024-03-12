@@ -34,13 +34,16 @@ use store_api::metadata::{
 use store_api::storage::RegionId;
 use table::predicate::Predicate;
 
+/// Writes rows.
 fn write_merge_tree(c: &mut Criterion) {
     let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
     let timestamps = (0..100).collect::<Vec<_>>();
 
+    // Note that this test only generate one time series.
     let mut group = c.benchmark_group("write");
     group.bench_function("merge_tree", |b| {
-        let memtable = MergeTreeMemtable::new(1, metadata.clone(), None, &MergeTreeConfig::default());
+        let memtable =
+            MergeTreeMemtable::new(1, metadata.clone(), None, &MergeTreeConfig::default());
         let kvs =
             memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
         b.iter(|| {
@@ -57,6 +60,7 @@ fn write_merge_tree(c: &mut Criterion) {
     });
 }
 
+/// Scans all rows.
 fn full_scan_merge_tree(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
     let config = MergeTreeConfig::default();
@@ -93,7 +97,7 @@ fn full_scan_merge_tree(c: &mut Criterion) {
     });
 }
 
-/// Filter with 1 host.
+/// Filters 1 host.
 fn filter_1_host_merge_tree(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
     let config = MergeTreeConfig::default();
