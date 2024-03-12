@@ -380,6 +380,6 @@ ENGINE=mito
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert_matches!(result, Err(InvalidTableOption { .. }))
+        assert_matches!(result, Err(Error::InvalidTableOption { .. }))
     }
 }
