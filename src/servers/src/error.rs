@@ -298,6 +298,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Error decoding gzip stream"))]
+    InvalidGzip {
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
+
     #[snafu(display("Error accessing catalog"))]
     CatalogError { source: catalog::error::Error },
 
@@ -529,7 +536,7 @@ impl ErrorExt for Error {
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
-            InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
+            InvalidFlushArgument { .. } | InvalidGzip { .. } => StatusCode::InvalidArguments,
 
             ReplacePreparedStmtParams { source, .. }
             | GetPreparedStmtParams { source, .. }

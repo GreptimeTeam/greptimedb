@@ -48,6 +48,7 @@ datafusion-expr.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 digest = "0.10"
+flate2 = "1.0"
 futures = "0.3"
 hashbrown = "0.14"
 headers = "0.3"
