@@ -36,7 +36,7 @@ use crate::{error, Interval};
 /// - for [TimeUnit::Second]: [-262144-01-01 00:00:00, +262143-12-31 23:59:59]
 /// - for [TimeUnit::Millisecond]: [-262144-01-01 00:00:00.000, +262143-12-31 23:59:59.999]
 /// - for [TimeUnit::Microsecond]: [-262144-01-01 00:00:00.000000, +262143-12-31 23:59:59.999999]
-/// - for [TimeUnit::Nanosecond]: [1677-09-21 00:12:43.145225, 2262-04-11 23:47:16.854775807]
+/// - for [TimeUnit::Nanosecond]: [1677-09-21 00:12:43.145224192, 2262-04-11 23:47:16.854775807]
 ///
 /// # Note:
 /// For values out of range, you can still store these timestamps, but while performing arithmetic
@@ -187,28 +187,28 @@ impl Timestamp {
         Self { unit, value }
     }
 
-    pub fn new_second(value: i64) -> Self {
+    pub const fn new_second(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Second,
         }
     }
 
-    pub fn new_millisecond(value: i64) -> Self {
+    pub const fn new_millisecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Millisecond,
         }
     }
 
-    pub fn new_microsecond(value: i64) -> Self {
+    pub const fn new_microsecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Microsecond,
         }
     }
 
-    pub fn new_nanosecond(value: i64) -> Self {
+    pub const fn new_nanosecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Nanosecond,
@@ -281,8 +281,26 @@ impl Timestamp {
                 .and_then(|v| v.checked_add(micros as i64))
                 .map(Timestamp::new_microsecond)
         } else {
+            // Refer to <https://github.com/chronotope/chrono/issues/1289>
+            //
+            // subsec nanos are always non-negative, however the timestamp itself (both in seconds and in nanos) can be
+            // negative. Now i64::MIN is NOT dividable by 1_000_000_000, so
+            //
+            //   (sec * 1_000_000_000) + nsec
+            //
+            // may underflow (even when in theory we COULD represent the datetime as i64) because we add the non-negative
+            // nanos AFTER the multiplication. This is fixed by converting the negative case to
+            //
+            //   ((sec + 1) * 1_000_000_000) + (nsec - 1_000_000_000)
+            let mut sec = sec;
+            let mut nsec = nsec as i64;
+            if sec < 0 && nsec > 0 {
+                nsec -= 1_000_000_000;
+                sec += 1;
+            }
+
             sec.checked_mul(1_000_000_000)
-                .and_then(|v| v.checked_add(nsec as i64))
+                .and_then(|v| v.checked_add(nsec))
                 .map(Timestamp::new_nanosecond)
         }
     }
@@ -423,6 +441,20 @@ impl Timestamp {
 
         ParseTimestampSnafu { raw: s }.fail()
     }
+}
+
+impl Timestamp {
+    pub const MIN_SECOND: Self = Self::new_second(-8_334_601_228_800);
+    pub const MAX_SECOND: Self = Self::new_second(8_210_266_876_799);
+
+    pub const MIN_MILLISECOND: Self = Self::new_millisecond(-8_334_601_228_800_000);
+    pub const MAX_MILLISECOND: Self = Self::new_millisecond(8_210_266_876_799_999);
+
+    pub const MIN_MICROSECOND: Self = Self::new_microsecond(-8_334_601_228_800_000_000);
+    pub const MAX_MICROSECOND: Self = Self::new_microsecond(8_210_266_876_799_999_999);
+
+    pub const MIN_NANOSECOND: Self = Self::new_nanosecond(i64::MIN);
+    pub const MAX_NANOSECOND: Self = Self::new_nanosecond(i64::MAX);
 }
 
 /// Converts the naive datetime (which has no specific timezone) to a
@@ -586,6 +618,7 @@ impl Hash for Timestamp {
 mod tests {
     use std::collections::hash_map::DefaultHasher;
 
+    use chrono_tz::Tz;
     use rand::Rng;
     use serde_json::Value;
 
@@ -1297,7 +1330,7 @@ mod tests {
             "+262142-12-31 23:59:59Z",
             "+262142-12-31 23:59:59.999Z",
             "+262142-12-31 23:59:59.999999Z",
-            "1677-09-21 00:12:43.145225Z",
+            "1677-09-21 00:12:43.145224192Z",
             "2262-04-11 23:47:16.854775807Z",
             "+100000-01-01 00:00:01.5Z",
         ];
@@ -1305,5 +1338,48 @@ mod tests {
         for s in valid_strings {
             Timestamp::from_str_utc(s).unwrap();
         }
+    }
+
+    #[test]
+    fn test_min_nanos_roundtrip() {
+        let (sec, nsec) = Timestamp::MIN_NANOSECOND.split();
+        let ts = Timestamp::from_splits(sec, nsec).unwrap();
+        assert_eq!(Timestamp::MIN_NANOSECOND, ts);
+    }
+
+    #[test]
+    fn test_timestamp_bound_format() {
+        assert_eq!(
+            "1677-09-21 00:12:43.145224192",
+            Timestamp::MIN_NANOSECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "2262-04-11 23:47:16.854775807",
+            Timestamp::MAX_NANOSECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "-262143-01-01 00:00:00",
+            Timestamp::MIN_MICROSECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "+262142-12-31 23:59:59.999999",
+            Timestamp::MAX_MICROSECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "-262143-01-01 00:00:00",
+            Timestamp::MIN_MILLISECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "+262142-12-31 23:59:59.999",
+            Timestamp::MAX_MILLISECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "-262143-01-01 00:00:00",
+            Timestamp::MIN_SECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "+262142-12-31 23:59:59",
+            Timestamp::MAX_SECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
     }
 }
