@@ -73,7 +73,7 @@ impl PromLabel {
 #[inline(always)]
 fn copy_to_bytes(data: &mut Bytes, len: usize) -> Bytes {
     if len == data.remaining() {
-        core::mem::replace(data, Bytes::new())
+        std::mem::replace(data, Bytes::new())
     } else {
         let ret = split_to(data, len);
         data.advance(len);
@@ -113,7 +113,11 @@ fn split_to(buf: &mut Bytes, end: usize) -> Bytes {
 fn merge_bytes(value: &mut Bytes, buf: &mut Bytes) -> Result<(), DecodeError> {
     let len = decode_varint(buf)?;
     if len > buf.remaining() as u64 {
-        return Err(DecodeError::new("buffer underflow"));
+        return Err(DecodeError::new(format!(
+            "buffer underflow, len: {}, remaining: {}",
+            len,
+            buf.remaining()
+        )));
     }
     *value = copy_to_bytes(buf, len as usize);
     Ok(())
@@ -182,7 +186,7 @@ impl PromTimeSeries {
                 )?;
                 Ok(())
             }
-            // skip exemplars
+            // todo(hl): exemplars are skipped temporarily
             3u32 => prost::encoding::skip_field(wire_type, tag, buf, Default::default()),
             _ => prost::encoding::skip_field(wire_type, tag, buf, Default::default()),
         }
@@ -219,6 +223,7 @@ impl PromWriteRequest {
         self.table_data.as_insert_requests()
     }
 
+    // todo(hl): maybe use &[u8] can reduce the overhead introduced with Bytes.
     pub fn merge(&mut self, mut buf: Bytes) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
         while buf.has_remaining() {
@@ -247,7 +252,7 @@ impl PromWriteRequest {
                     self.series.add_to_table_data(&mut self.table_data);
                 }
                 3u32 => {
-                    // we can ignore metadata for now.
+                    // todo(hl): metadata are skipped.
                     prost::encoding::skip_field(wire_type, tag, &mut buf, Default::default())?;
                 }
                 _ => prost::encoding::skip_field(wire_type, tag, &mut buf, Default::default())?,
