@@ -35,6 +35,7 @@ pub mod key_values;
 pub mod merge_tree;
 pub mod time_series;
 pub(crate) mod version;
+pub mod time_partition;
 
 /// Id for memtables.
 ///
