@@ -34,8 +34,7 @@ pub struct TypedPlan {
     pub plan: Plan,
 }
 
-/// TODO(discord9): support `join`
-/// and `TableFunc`（by define FlatMap that map 1 to n)
+/// TODO(discord9): support `TableFunc`（by define FlatMap that map 1 to n)
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub enum Plan {
     /// A constant collection of rows.
@@ -57,7 +56,7 @@ pub enum Plan {
         /// Linear operator to apply to each record.
         mfp: MapFilterProject,
     },
-    /// Aggregation by key.
+    /// Reduce operator, aggregation by key assembled from KeyValPlan
     Reduce {
         /// The input collection.
         input: Box<Plan>,
