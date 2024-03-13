@@ -398,13 +398,14 @@ struct PartitionToWrite<'a> {
 mod tests {
     use super::*;
     use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
-    use crate::test_util::memtable_util;
+    use crate::test_util::memtable_util::{self, collect_iter_timestamps};
 
     #[test]
     fn test_no_duration() {
         let metadata = memtable_util::metadata_for_test();
         let builder = Arc::new(MergeTreeMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder, 0, None);
+        assert_eq!(1, partitions.num_partitions());
 
         let kvs = memtable_util::build_key_values(
             &metadata,
@@ -416,5 +417,113 @@ mod tests {
         partitions.write(&kvs).unwrap();
 
         assert_eq!(1, partitions.num_partitions());
+        assert!(!partitions.is_empty());
+        let mut memtables = Vec::new();
+        partitions.list_memtables(&mut memtables);
+
+        let iter = memtables[0].iter(None, None).unwrap();
+        let timestamps = collect_iter_timestamps(iter);
+        assert_eq!(&[1000, 3000, 5000, 6000, 7000], &timestamps[..]);
+    }
+
+    #[test]
+    fn test_write_single_part() {
+        let metadata = memtable_util::metadata_for_test();
+        let builder = Arc::new(MergeTreeMemtableBuilder::default());
+        let partitions =
+            TimePartitions::new(metadata.clone(), builder, 0, Some(Duration::from_secs(10)));
+        assert_eq!(0, partitions.num_partitions());
+
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            "hello".to_string(),
+            0,
+            &[5000, 2000, 0],
+            0, // sequence 0, 1, 2
+        );
+        // It should creates a new partition.
+        partitions.write(&kvs).unwrap();
+        assert_eq!(1, partitions.num_partitions());
+
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            "hello".to_string(),
+            0,
+            &[3000, 7000, 4000],
+            3, // sequence 3, 4, 5
+        );
+        // Still writes to the same partition.
+        partitions.write(&kvs).unwrap();
+        assert_eq!(1, partitions.num_partitions());
+
+        let mut memtables = Vec::new();
+        partitions.list_memtables(&mut memtables);
+        let iter = memtables[0].iter(None, None).unwrap();
+        let timestamps = collect_iter_timestamps(iter);
+        assert_eq!(&[0, 2000, 3000, 4000, 5000, 7000], &timestamps[..]);
+        let parts = partitions.list_partitions();
+        assert_eq!(
+            Timestamp::new_millisecond(0),
+            parts[0].time_range.unwrap().min_timestamp
+        );
+        assert_eq!(
+            Timestamp::new_millisecond(10000),
+            parts[0].time_range.unwrap().max_timestamp
+        );
+    }
+
+    #[test]
+    fn test_write_multi_parts() {
+        let metadata = memtable_util::metadata_for_test();
+        let builder = Arc::new(MergeTreeMemtableBuilder::default());
+        let partitions =
+            TimePartitions::new(metadata.clone(), builder, 0, Some(Duration::from_secs(5)));
+        assert_eq!(0, partitions.num_partitions());
+
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            "hello".to_string(),
+            0,
+            &[2000, 0],
+            0, // sequence 0, 1
+        );
+        // It should creates a new partition.
+        partitions.write(&kvs).unwrap();
+        assert_eq!(1, partitions.num_partitions());
+
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            "hello".to_string(),
+            0,
+            &[3000, 7000, 4000, 5000],
+            2, // sequence 2, 3, 4, 5
+        );
+        // Writes 2 rows to the old partition and 1 row to a new partition.
+        partitions.write(&kvs).unwrap();
+        assert_eq!(2, partitions.num_partitions());
+
+        let parts = partitions.list_partitions();
+        let iter = parts[0].memtable.iter(None, None).unwrap();
+        let timestamps = collect_iter_timestamps(iter);
+        assert_eq!(
+            Timestamp::new_millisecond(0),
+            parts[0].time_range.unwrap().min_timestamp
+        );
+        assert_eq!(
+            Timestamp::new_millisecond(5000),
+            parts[0].time_range.unwrap().max_timestamp
+        );
+        assert_eq!(&[0, 2000, 3000, 4000], &timestamps[..]);
+        let iter = parts[1].memtable.iter(None, None).unwrap();
+        let timestamps = collect_iter_timestamps(iter);
+        assert_eq!(&[5000, 7000], &timestamps[..]);
+        assert_eq!(
+            Timestamp::new_millisecond(5000),
+            parts[1].time_range.unwrap().min_timestamp
+        );
+        assert_eq!(
+            Timestamp::new_millisecond(10000),
+            parts[1].time_range.unwrap().max_timestamp
+        );
     }
 }
