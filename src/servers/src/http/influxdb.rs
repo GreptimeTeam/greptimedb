@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Extension;
 use bytes::Bytes;
@@ -46,9 +46,11 @@ pub async fn influxdb_health() -> Result<impl IntoResponse> {
 
 fn is_gzip(headers: &HeaderMap) -> Result<bool> {
     match headers
-        .get("Content-Encoding")
+        .get(header::CONTENT_ENCODING)
         .map(|val| val.to_str().context(InvisibleASCIISnafu))
         .transpose()?
+        .map(|val| val.to_lowercase())
+        .as_deref()
     {
         None | Some("identity") => Ok(false),
         Some("gzip") => Ok(true),

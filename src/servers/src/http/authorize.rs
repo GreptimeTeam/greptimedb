@@ -35,7 +35,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
 use super::{ResponseFormat, PUBLIC_APIS};
 use crate::error::{
-    self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
+    self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
 use crate::http::error_result::ErrorResponse;
@@ -174,15 +174,13 @@ fn get_influxdb_credentials<B>(request: &Request<B>) -> Result<Option<(Username,
         // try header
         let (auth_scheme, credential) = header
             .to_str()
-            .context(InvisibleASCIISnafu)?
+            .context(InvalidAuthHeaderInvisibleASCIISnafu)?
             .split_once(' ')
-            .context(InvalidAuthorizationHeaderSnafu)?;
+            .context(InvalidAuthHeaderSnafu)?;
 
         let (username, password) = match auth_scheme.to_lowercase().as_str() {
             "token" => {
-                let (u, p) = credential
-                    .split_once(':')
-                    .context(InvalidAuthorizationHeaderSnafu)?;
+                let (u, p) = credential.split_once(':').context(InvalidAuthHeaderSnafu)?;
                 (u.to_string(), p.to_string().into())
             }
             "basic" => decode_basic(credential)?,
@@ -237,13 +235,10 @@ impl TryFrom<&str> for AuthScheme {
     type Error = error::Error;
 
     fn try_from(value: &str) -> Result<Self> {
-        let (scheme, encoded_credentials) = value
-            .split_once(' ')
-            .context(InvalidAuthorizationHeaderSnafu)?;
-        ensure!(
-            !encoded_credentials.contains(' '),
-            InvalidAuthorizationHeaderSnafu
-        );
+        let (scheme, encoded_credentials) =
+            value.split_once(' ').context(InvalidAuthHeaderSnafu)?;
+
+        ensure!(!encoded_credentials.contains(' '), InvalidAuthHeaderSnafu);
 
         match scheme.to_lowercase().as_str() {
             "basic" => decode_basic(encoded_credentials)
@@ -261,7 +256,7 @@ fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
         .get(http::header::AUTHORIZATION)
         .context(error::NotFoundAuthHeaderSnafu)?
         .to_str()
-        .context(InvisibleASCIISnafu)?;
+        .context(InvalidAuthHeaderInvisibleASCIISnafu)?;
 
     auth_header.try_into()
 }
@@ -270,13 +265,14 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
     let decoded = BASE64_STANDARD
         .decode(credential)
         .context(error::InvalidBase64ValueSnafu)?;
-    let as_utf8 = String::from_utf8(decoded).context(error::InvalidUtf8ValueSnafu)?;
+    let as_utf8 =
+        String::from_utf8(decoded).context(error::InvalidAuthHeaderInvalidUtf8ValueSnafu)?;
 
     if let Some((user_id, password)) = as_utf8.split_once(':') {
         return Ok((user_id.to_string(), password.to_string().into()));
     }
 
-    InvalidAuthorizationHeaderSnafu {}.fail()
+    InvalidAuthHeaderSnafu {}.fail()
 }
 
 fn need_auth<B>(req: &Request<B>) -> bool {
@@ -395,10 +391,7 @@ mod tests {
 
         let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6 cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);
-        assert_matches!(
-            res.err(),
-            Some(error::Error::InvalidAuthorizationHeader { .. })
-        );
+        assert_matches!(res.err(), Some(error::Error::InvalidAuthHeader { .. }));
 
         let wrong_req = mock_http_request(Some("Digest dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);

@@ -281,8 +281,22 @@ pub enum Error {
     #[snafu(display("Unsupported http auth scheme, name: {}", name))]
     UnsupportedAuthScheme { name: String },
 
+    #[snafu(display("Invalid visibility ASCII chars"))]
+    InvalidAuthHeaderInvisibleASCII {
+        #[snafu(source)]
+        error: hyper::header::ToStrError,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid utf-8 value"))]
+    InvalidAuthHeaderInvalidUtf8Value {
+        #[snafu(source)]
+        error: FromUtf8Error,
+        location: Location,
+    },
+
     #[snafu(display("Invalid http authorization header"))]
-    InvalidAuthorizationHeader { location: Location },
+    InvalidAuthHeader { location: Location },
 
     #[snafu(display("Invalid base64 value"))]
     InvalidBase64Value {
@@ -527,16 +541,20 @@ impl ErrorExt for Error {
             DescribeStatement { source } => source.status_code(),
 
             NotFoundAuthHeader { .. } | NotFoundInfluxAuth { .. } => StatusCode::AuthHeaderNotFound,
-            InvisibleASCII { .. }
+            InvalidAuthHeaderInvisibleASCII { .. }
             | UnsupportedAuthScheme { .. }
-            | InvalidAuthorizationHeader { .. }
+            | InvalidAuthHeader { .. }
             | InvalidBase64Value { .. }
-            | InvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
+            | InvalidAuthHeaderInvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
-            InvalidFlushArgument { .. } | InvalidGzip { .. } => StatusCode::InvalidArguments,
+
+            InvalidUtf8Value { .. }
+            | InvisibleASCII { .. }
+            | InvalidFlushArgument { .. }
+            | InvalidGzip { .. } => StatusCode::InvalidArguments,
 
             ReplacePreparedStmtParams { source, .. }
             | GetPreparedStmtParams { source, .. }
