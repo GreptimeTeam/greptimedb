@@ -37,6 +37,21 @@ fn is_nullable(str: &str) -> bool {
     str.to_uppercase() == "YES"
 }
 
+enum SemanticType {
+    Timestamp,
+    Field,
+    Tag,
+}
+
+fn semantic_type(str: &str) -> Option<SemanticType> {
+    match str {
+        "TIMESTAMP" => Some(SemanticType::Timestamp),
+        "FIELD" => Some(SemanticType::Field),
+        "TAG" => Some(SemanticType::Tag),
+        _ => None,
+    }
+}
+
 impl PartialEq<Column> for ColumnEntry {
     fn eq(&self, other: &Column) -> bool {
         // Checks `table_name`
@@ -108,11 +123,47 @@ impl PartialEq<Column> for ColumnEntry {
                 .iter()
                 .any(|opt| matches!(opt, ColumnOption::NotNull | ColumnOption::TimeIndex))
             {
-                debug!("unexpected ColumnOption::NotNull or ColumnOption::TimeIndex");
+                debug!("ColumnOption::NotNull or ColumnOption::TimeIndex is not found");
                 return false;
             }
         }
         //TODO: Checks `semantic_type`
+        match semantic_type(&self.semantic_type) {
+            Some(SemanticType::Tag) => {
+                if !other
+                    .options
+                    .iter()
+                    .any(|opt| matches!(opt, ColumnOption::PrimaryKey))
+                {
+                    debug!("ColumnOption::PrimaryKey is not found");
+                    return false;
+                }
+            }
+            Some(SemanticType::Field) => {
+                if other
+                    .options
+                    .iter()
+                    .any(|opt| matches!(opt, ColumnOption::PrimaryKey | ColumnOption::TimeIndex))
+                {
+                    debug!("unexpected ColumnOption::PrimaryKey or ColumnOption::TimeIndex");
+                    return false;
+                }
+            }
+            Some(SemanticType::Timestamp) => {
+                if !other
+                    .options
+                    .iter()
+                    .any(|opt| matches!(opt, ColumnOption::TimeIndex))
+                {
+                    debug!("ColumnOption::TimeIndex is not found");
+                    return false;
+                }
+            }
+            None => {
+                debug!("unknown semantic type: {}", self.semantic_type);
+                return false;
+            }
+        };
 
         true
     }
@@ -186,7 +237,7 @@ mod tests {
             table_name: String::new(),
             column_name: "test".to_string(),
             data_type: ConcreteDataType::int8_datatype().name(),
-            semantic_type: String::new(),
+            semantic_type: "FIELD".to_string(),
             column_default: None,
             is_nullable: "Yes".to_string(),
         };
@@ -210,7 +261,7 @@ mod tests {
             table_name: String::new(),
             column_name: "test".to_string(),
             data_type: ConcreteDataType::int8_datatype().to_string(),
-            semantic_type: String::new(),
+            semantic_type: "FIELD".to_string(),
             column_default: Some("1".to_string()),
             is_nullable: "Yes".to_string(),
         };
@@ -226,7 +277,7 @@ mod tests {
             table_name: String::new(),
             column_name: "test".to_string(),
             data_type: ConcreteDataType::int8_datatype().to_string(),
-            semantic_type: String::new(),
+            semantic_type: "FIELD".to_string(),
             column_default: Some("Hello()".to_string()),
             is_nullable: "Yes".to_string(),
         };

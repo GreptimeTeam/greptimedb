@@ -55,3 +55,10 @@ path = "targets/fuzz_insert.rs"
 test = false
 bench = false
 doc = false
+
+[[bin]]
+name = "fuzz_alter_table"
+path = "targets/fuzz_alter_table.rs"
+test = false
+bench = false
+doc = false

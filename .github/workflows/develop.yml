@@ -123,7 +123,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [ "fuzz_create_table" ]
+        target: [ "fuzz_create_table", "fuzz_alter_table" ]
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
