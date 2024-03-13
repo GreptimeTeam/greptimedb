@@ -227,16 +227,31 @@ impl PromWriteRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     use api::prom_store::remote::WriteRequest;
-    use api::v1::RowInsertRequests;
+    use api::v1::{Row, RowInsertRequests, Rows};
     use bytes::Bytes;
     use prost::Message;
 
     use crate::prom_store::to_grpc_row_insert_requests;
     use crate::proto::PromWriteRequest;
     use crate::repeated_field::Clear;
+
+    fn sort_rows(rows: Rows) -> Rows {
+        let permutation =
+            permutation::sort_by_key(&rows.schema, |schema| schema.column_name.clone());
+        let schema = permutation.apply_slice(&rows.schema);
+        let mut inner_rows = vec![];
+        for row in rows.rows {
+            let values = permutation.apply_slice(&row.values);
+            inner_rows.push(Row { values });
+        }
+        Rows {
+            schema,
+            rows: inner_rows,
+        }
+    }
 
     fn check_deserialized(
         prom_write_request: &mut PromWriteRequest,
@@ -251,35 +266,16 @@ mod tests {
         assert_eq!(expected_samples, samples);
         assert_eq!(expected_rows.inserts.len(), prom_rows.inserts.len());
 
-        let schemas = expected_rows
+        let expected_rows_map = expected_rows
             .inserts
             .iter()
-            .map(|r| {
-                (
-                    r.table_name.clone(),
-                    r.rows
-                        .as_ref()
-                        .unwrap()
-                        .schema
-                        .iter()
-                        .map(|c| (c.column_name.clone(), c.datatype, c.semantic_type))
-                        .collect::<HashSet<_>>(),
-                )
-            })
+            .map(|insert| (insert.table_name.clone(), insert.rows.clone().unwrap()))
             .collect::<HashMap<_, _>>();
 
         for r in &prom_rows.inserts {
-            let expected = schemas.get(&r.table_name).unwrap();
-            assert_eq!(
-                expected,
-                &r.rows
-                    .as_ref()
-                    .unwrap()
-                    .schema
-                    .iter()
-                    .map(|c| { (c.column_name.clone(), c.datatype, c.semantic_type) })
-                    .collect()
-            );
+            // check value
+            let expected_rows = expected_rows_map.get(&r.table_name).unwrap().clone();
+            assert_eq!(sort_rows(expected_rows), sort_rows(r.rows.clone().unwrap()));
         }
     }
 
