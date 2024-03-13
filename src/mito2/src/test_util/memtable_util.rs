@@ -58,7 +58,7 @@ impl Memtable for EmptyMemtable {
         Ok(())
     }
 
-    fn write_one(&self, key_value: KeyValue) -> Result<()> {
+    fn write_one(&self, _key_value: KeyValue) -> Result<()> {
         Ok(())
     }
 

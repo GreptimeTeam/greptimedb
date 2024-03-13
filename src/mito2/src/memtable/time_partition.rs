@@ -251,10 +251,15 @@ impl TimePartitions {
             if !part_found {
                 // We need to write it to a new part.
                 // Safety: `new()` ensures duration is always Some if we do to this method.
-                let part_start = partition_start_timestamp(ts, self.part_duration.unwrap())
-                    .with_context(|| InvalidRequestSnafu {
-                        region_id: self.metadata.region_id,
-                        reason: format!("timestamp {:?} out of range", ts),
+                let part_duration = self.part_duration.unwrap();
+                let part_start =
+                    partition_start_timestamp(ts, part_duration).with_context(|| {
+                        InvalidRequestSnafu {
+                            region_id: self.metadata.region_id,
+                            reason: format!(
+                                "timestamp {ts:?} and bucket {part_duration:?} are out of range"
+                            ),
+                        }
                     })?;
                 missing_parts
                     .entry(part_start)
@@ -286,8 +291,7 @@ impl TimePartitions {
                         .with_context(|| InvalidRequestSnafu {
                             region_id: self.metadata.region_id,
                             reason: format!(
-                                "Partition time range is for {:?} and duration {:?} is out of bound",
-                                part_start, part_duration
+                                "Partition time range for {part_start:?} is out of bound, bucket size: {part_duration:?}",
                             ),
                         })?;
                     let memtable = self
@@ -316,14 +320,13 @@ impl TimePartitions {
     }
 }
 
-// TODO(yingwen): Checks bucket size in options.
 /// Computes the start timestamp of the partition for `ts`.
 ///
 /// It always use bucket size in seconds which should fit all timestamp resolution.
 fn partition_start_timestamp(ts: Timestamp, bucket: Duration) -> Option<Timestamp> {
     // Safety: We convert it to seconds so it nerver returns Some.
     let ts_sec = ts.convert_to(TimeUnit::Second).unwrap();
-    let bucket_sec: i64 = bucket.as_secs().try_into().unwrap();
+    let bucket_sec: i64 = bucket.as_secs().try_into().ok()?;
     let start_sec = ts_sec.align_by_bucket(bucket_sec)?;
     start_sec.convert_to(ts.unit())
 }
