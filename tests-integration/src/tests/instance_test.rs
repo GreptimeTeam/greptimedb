@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches::assert_matches;
 use std::env;
 use std::sync::Arc;
 
@@ -639,7 +640,7 @@ async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>
         ),
     )
     .await;
-    assert!(matches!(result, Err(Error::TableOperation { .. })));
+    assert_matches!(result, Err(Error::ParseSql { .. }));
 }
 
 #[apply(both_instances_cases)]

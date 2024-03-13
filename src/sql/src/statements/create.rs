@@ -229,6 +229,8 @@ pub struct CreateTableLike {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use crate::dialect::GreptimeDbDialect;
     use crate::error::Error;
     use crate::parser::{ParseOptions, ParserContext};
@@ -378,6 +380,6 @@ ENGINE=mito
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(matches!(result, Err(Error::InvalidTableOption { .. })));
+        assert_matches!(result, Err(Error::InvalidTableOption { .. }))
     }
 }
