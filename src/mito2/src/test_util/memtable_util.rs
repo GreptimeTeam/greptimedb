@@ -21,7 +21,9 @@ use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
 use datatypes::arrow::array::UInt64Array;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::scalars::ScalarVector;
 use datatypes::schema::ColumnSchema;
+use datatypes::vectors::TimestampMillisecondVector;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
@@ -301,4 +303,21 @@ pub(crate) fn encode_key_by_kv(key_value: &KeyValue) -> Vec<u8> {
         SortField::new(ConcreteDataType::uint32_datatype()),
     ]);
     row_codec.encode(key_value.primary_keys()).unwrap()
+}
+
+/// Collects timestamps from the batch iter.
+pub(crate) fn collect_iter_timestamps(iter: BoxedBatchIterator) -> Vec<i64> {
+    iter.flat_map(|batch| {
+        batch
+            .unwrap()
+            .timestamps()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondVector>()
+            .unwrap()
+            .iter_data()
+            .collect::<Vec<_>>()
+            .into_iter()
+    })
+    .map(|v| v.unwrap().0.value())
+    .collect()
 }
