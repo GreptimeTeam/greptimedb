@@ -14,14 +14,20 @@
 
 //! Partitions memtables by time.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common_telemetry::debug;
+use common_time::timestamp::TimeUnit;
+use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
 use smallvec::{smallvec, SmallVec};
+use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
 
-use crate::error::Result;
+use crate::error::{InvalidRequestSnafu, Result};
+use crate::memtable::key_values::KeyValue;
 use crate::memtable::version::SmallMemtableVec;
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 
@@ -32,6 +38,22 @@ pub struct TimePartition {
     memtable: MemtableRef,
     /// Time range of the partition. `None` means there is no time range.
     time_range: Option<PartTimeRange>,
+}
+
+impl TimePartition {
+    /// Returns whether the `ts` belongs to the partition.
+    fn contains_timestamp(&self, ts: Timestamp) -> bool {
+        let Some(range) = self.time_range else {
+            return true;
+        };
+
+        range.contains_timestamp(ts)
+    }
+
+    /// Write rows to the part.
+    fn write(&self, kvs: &KeyValues) -> Result<()> {
+        self.memtable.write(kvs)
+    }
 }
 
 type PartitionVec = SmallVec<[TimePartition; 2]>;
@@ -61,6 +83,15 @@ impl TimePartitions {
         next_memtable_id: MemtableId,
         part_duration: Option<Duration>,
     ) -> Self {
+        let mut inner = PartitionsInner::new(next_memtable_id);
+        if part_duration.is_none() {
+            let part = TimePartition {
+                memtable: builder.build(inner.alloc_memtable_id(), &metadata),
+                time_range: None,
+            };
+            inner.parts.push(part);
+        }
+
         Self {
             inner: Mutex::new(PartitionsInner::new(next_memtable_id)),
             part_duration,
@@ -73,7 +104,31 @@ impl TimePartitions {
     ///
     /// It creates new partitions if necessary.
     pub fn write(&self, kvs: &KeyValues) -> Result<()> {
-        unimplemented!()
+        // Get all parts.
+        let parts = self.list_partitions();
+
+        // Checks whether all rows belongs to a single part. Checks in reverse order as we usually
+        // put to latest part.
+        for part in parts.iter().rev() {
+            let mut all_in_partition = true;
+            for kv in kvs.iter() {
+                // Safety: We checked the schema in the write request.
+                let ts = kv.timestamp().as_timestamp().unwrap().unwrap();
+                if !part.contains_timestamp(ts) {
+                    all_in_partition = false;
+                    break;
+                }
+            }
+            if !all_in_partition {
+                continue;
+            }
+
+            // We can write all rows to this part.
+            return part.write(kvs);
+        }
+
+        // Slow path: We have to split kvs by partitions.
+        self.write_multi_parts(kvs, &parts)
     }
 
     /// Append memtables in partitions to `memtables`.
@@ -162,6 +217,115 @@ impl TimePartitions {
         let inner = self.inner.lock().unwrap();
         inner.next_memtable_id
     }
+
+    /// Returns all partitions.
+    fn list_partitions(&self) -> PartitionVec {
+        let inner = self.inner.lock().unwrap();
+        inner.parts.clone()
+    }
+
+    /// Write to multiple partitions.
+    fn write_multi_parts(&self, kvs: &KeyValues, parts: &PartitionVec) -> Result<()> {
+        let mut parts_to_write = HashMap::new();
+        let mut missing_parts = HashMap::new();
+        for kv in kvs.iter() {
+            let mut part_found = false;
+            // Safety: We used the timestamp before.
+            let ts = kv.timestamp().as_timestamp().unwrap().unwrap();
+            for part in parts {
+                if part.contains_timestamp(ts) {
+                    // Safety: If time range is None then we won't go to this method.
+                    parts_to_write
+                        .entry(part.time_range.unwrap().min_timestamp)
+                        .or_insert_with(|| PartitionToWrite {
+                            partition: part.clone(),
+                            key_values: Vec::new(),
+                        })
+                        .key_values
+                        .push(kv);
+                    part_found = true;
+                    break;
+                }
+            }
+
+            if !part_found {
+                // We need to write it to a new part.
+                // Safety: `new()` ensures duration is always Some if we do to this method.
+                let part_start = partition_start_timestamp(ts, self.part_duration.unwrap())
+                    .with_context(|| InvalidRequestSnafu {
+                        region_id: self.metadata.region_id,
+                        reason: format!("timestamp {:?} out of range", ts),
+                    })?;
+                missing_parts
+                    .entry(part_start)
+                    .or_insert_with(Vec::new)
+                    .push(kv);
+            }
+        }
+
+        // Writes rows to existing parts.
+        for part_to_write in parts_to_write.into_values() {
+            for kv in part_to_write.key_values {
+                part_to_write.partition.memtable.write_one(kv)?;
+            }
+        }
+
+        let part_duration = self.part_duration.unwrap();
+        // Creates new parts and writes to them. Acquires the lock to avoid others create
+        // the same partition.
+        let mut inner = self.inner.lock().unwrap();
+        for (part_start, key_values) in missing_parts {
+            let part_pos = match inner
+                .parts
+                .iter()
+                .position(|part| part.time_range.unwrap().min_timestamp == part_start)
+            {
+                Some(pos) => pos,
+                None => {
+                    let range = PartTimeRange::from_start_duration(part_start, part_duration)
+                        .with_context(|| InvalidRequestSnafu {
+                            region_id: self.metadata.region_id,
+                            reason: format!(
+                                "Partition time range is for {:?} and duration {:?} is out of bound",
+                                part_start, part_duration
+                            ),
+                        })?;
+                    let memtable = self
+                        .builder
+                        .build(inner.alloc_memtable_id(), &self.metadata);
+                    debug!(
+                        "Create partition {:?} for region {}, duration: {:?}",
+                        range, self.metadata.region_id, part_duration
+                    );
+                    let pos = inner.parts.len();
+                    inner.parts.push(TimePartition {
+                        memtable,
+                        time_range: Some(range),
+                    });
+                    pos
+                }
+            };
+
+            let memtable = &inner.parts[part_pos].memtable;
+            for kv in key_values {
+                memtable.write_one(kv)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// TODO(yingwen): Checks bucket size in options.
+/// Computes the start timestamp of the partition for `ts`.
+///
+/// It always use bucket size in seconds which should fit all timestamp resolution.
+fn partition_start_timestamp(ts: Timestamp, bucket: Duration) -> Option<Timestamp> {
+    // Safety: We convert it to seconds so it nerver returns Some.
+    let ts_sec = ts.convert_to(TimeUnit::Second).unwrap();
+    let bucket_sec: i64 = bucket.as_secs().try_into().unwrap();
+    let start_sec = ts_sec.align_by_bucket(bucket_sec)?;
+    start_sec.convert_to(ts.unit())
 }
 
 #[derive(Debug)]
@@ -201,4 +365,28 @@ struct PartTimeRange {
     min_timestamp: Timestamp,
     /// Exclusive max timestamp of rows in the partition.
     max_timestamp: Timestamp,
+}
+
+impl PartTimeRange {
+    fn from_start_duration(start: Timestamp, duration: Duration) -> Option<Self> {
+        let start_sec = start.convert_to(TimeUnit::Second)?;
+        let end_sec = start_sec.add_duration(duration).ok()?;
+        let min_timestamp = start_sec.convert_to(start.unit())?;
+        let max_timestamp = end_sec.convert_to(start.unit())?;
+
+        Some(Self {
+            min_timestamp,
+            max_timestamp,
+        })
+    }
+
+    /// Returns whether the `ts` belongs to the partition.
+    fn contains_timestamp(&self, ts: Timestamp) -> bool {
+        self.min_timestamp <= ts && ts < self.max_timestamp
+    }
+}
+
+struct PartitionToWrite<'a> {
+    partition: TimePartition,
+    key_values: Vec<KeyValue<'a>>,
 }
