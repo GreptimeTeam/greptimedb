@@ -12,6 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use chrono::Utc;
+use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext};
+use datafusion_common::config::ConfigOptions;
+use datafusion_common::{DFSchema, Result as DFResult, ScalarValue, TableReference};
+use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
+use datafusion_physical_expr::execution_props::ExecutionProps;
+use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use snafu::ResultExt;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
@@ -28,7 +37,10 @@ const EVALUATE: &str = "EVALUATE";
 const EXPLAIN: &str = "EXPLAIN";
 const VERBOSE: &str = "VERBOSE";
 
+use datatypes::arrow::datatypes::DataType;
 use sqlparser::parser::Parser;
+
+use crate::dialect::GreptimeDbDialect;
 
 /// TQL extension parser, including:
 /// - `TQL EVAL <query>`
@@ -69,9 +81,9 @@ impl<'a> ParserContext<'a> {
     fn parse_tql_eval(&mut self) -> std::result::Result<Statement, ParserError> {
         let parser = &mut self.parser;
         parser.expect_token(&Token::LParen)?;
-        let start = Self::parse_string_or_number(parser, Token::Comma)?;
-        let end = Self::parse_string_or_number(parser, Token::Comma)?;
-        let step = Self::parse_string_or_number(parser, Token::RParen)?;
+        let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+        let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+        let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
         let query = Self::parse_tql_query(parser, self.sql, ")")?;
 
         Ok(Statement::Tql(Tql::Eval(TqlEval {
@@ -100,6 +112,62 @@ impl<'a> ParserContext<'a> {
         Ok(value)
     }
 
+    fn parse_string_or_number_or_word(
+        parser: &mut Parser,
+        token: Token,
+    ) -> std::result::Result<String, ParserError> {
+        let value = match parser.next_token().token {
+            Token::Number(n, _) => n,
+            Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
+            Token::Word(w) => Self::parse_tql_word(Token::Word(w), parser).unwrap(),
+            unexpected => {
+                return Err(ParserError::ParserError(format!(
+                    "Expect number or string TODO adjust message, but is {unexpected:?}"
+                )));
+            }
+        };
+        parser.expect_token(&token)?;
+        Ok(value)
+    }
+
+    fn parse_tql_word(w: Token, parser: &mut Parser) -> std::result::Result<String, ParserError> {
+        let tokens = Self::collect_tokens(w, parser);
+        let empty_df_schema = DFSchema::empty();
+
+        let expr = Parser::new(&GreptimeDbDialect {})
+            .with_tokens(tokens)
+            .parse_expr()
+            .map_err(|err| {
+                ParserError::ParserError(format!("Expect number or string, but is {err:?}"))
+            })?;
+
+        let sql_to_rel = SqlToRel::new(&DummyContextProvider {});
+        let logical_expr = sql_to_rel
+            .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
+            .unwrap();
+
+        let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
+        let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema));
+        let simplified_expr = ExprSimplifier::new(info).simplify(logical_expr).unwrap();
+
+        let timestamp_nanos = match simplified_expr {
+            Expr::Literal(ScalarValue::TimestampNanosecond(Some(v), _)) => v,
+            _ => panic!(),
+        };
+
+        Ok((timestamp_nanos / 1_000_000_000).to_string())
+    }
+
+    fn collect_tokens(w: Token, parser: &mut Parser) -> Vec<Token> {
+        let mut tokens = vec![];
+        tokens.push(w);
+        while parser.peek_token() != Token::Comma {
+            let token = parser.next_token();
+            tokens.push(token.token);
+        }
+        tokens
+    }
+
     fn parse_tql_query(
         parser: &mut Parser,
         sql: &str,
@@ -113,7 +181,14 @@ impl<'a> ParserContext<'a> {
                 return Err(ParserError::ParserError("empty TQL query".to_string()));
             }
 
-            let query = &sql[index..];
+            let query = if delimiter == ")" {
+                match Self::find_last_balanced_bracket(sql) {
+                    Some(to) => &sql[(to + 1)..],
+                    None => &sql[index..],
+                }
+            } else {
+                &sql[index..]
+            };
 
             while parser.next_token() != Token::EOF {
                 // consume all tokens
@@ -125,6 +200,23 @@ impl<'a> ParserContext<'a> {
         } else {
             Err(ParserError::ParserError(format!("{delimiter} not found",)))
         }
+    }
+
+    fn find_last_balanced_bracket(sql: &str) -> Option<usize> {
+        let mut balance = 0;
+        for (index, c) in sql.char_indices() {
+            match c {
+                '(' => balance += 1,
+                ')' => {
+                    balance -= 1;
+                    if balance == 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn parse_tql_explain(&mut self) -> Result<Statement> {
@@ -184,6 +276,35 @@ impl<'a> ParserContext<'a> {
     }
 }
 
+#[derive(Default)]
+struct DummyContextProvider {}
+
+impl ContextProvider for DummyContextProvider {
+    fn get_table_provider(&self, _name: TableReference) -> DFResult<Arc<dyn TableSource>> {
+        unimplemented!()
+    }
+
+    fn get_function_meta(&self, _name: &str) -> Option<Arc<ScalarUDF>> {
+        None
+    }
+
+    fn get_aggregate_meta(&self, _name: &str) -> Option<Arc<AggregateUDF>> {
+        unimplemented!()
+    }
+
+    fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
+        unimplemented!()
+    }
+
+    fn get_variable_type(&self, _variable_names: &[String]) -> Option<DataType> {
+        unimplemented!()
+    }
+
+    fn options(&self) -> &ConfigOptions {
+        unimplemented!()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use common_error::ext::ErrorExt;
@@ -191,6 +312,33 @@ mod tests {
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
+
+    #[test]
+    fn test_parse_tql_eval_with_functions() {
+        let sql = "TQL EVAL (now() - '10 minutes'::interval, now(), '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let assert_time = Utc::now()
+            .timestamp_nanos_opt()
+            .map(|x| x / 1_000_000_000)
+            .unwrap_or(0);
+
+        let statement = result.remove(0);
+
+        match statement {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, (assert_time - 600).to_string());
+                assert_eq!(eval.end, assert_time.to_string());
+                assert_eq!(eval.step, "1m");
+                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+            }
+            _ => unreachable!(),
+        }
+    }
+
     #[test]
     fn test_parse_tql_eval() {
         let sql = "TQL EVAL (1676887657, 1676887659, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
