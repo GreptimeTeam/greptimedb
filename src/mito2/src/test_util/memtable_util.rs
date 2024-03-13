@@ -58,6 +58,10 @@ impl Memtable for EmptyMemtable {
         Ok(())
     }
 
+    fn write_one(&self, key_value: KeyValue) -> Result<()> {
+        Ok(())
+    }
+
     fn iter(
         &self,
         _projection: Option<&[ColumnId]>,

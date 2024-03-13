@@ -36,6 +36,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::tree::MergeTree;
 use crate::memtable::{
@@ -121,6 +122,17 @@ impl Memtable for MergeTreeMemtable {
         let mut pk_buffer = Vec::new();
         // Ensures the memtable always updates stats.
         let res = self.tree.write(kvs, &mut pk_buffer, &mut metrics);
+
+        self.update_stats(&metrics);
+
+        res
+    }
+
+    fn write_one(&self, key_value: KeyValue) -> Result<()> {
+        let mut metrics = WriteMetrics::default();
+        let mut pk_buffer = Vec::new();
+        // Ensures the memtable always updates stats.
+        let res = self.tree.write_one(key_value, &mut pk_buffer, &mut metrics);
 
         self.update_stats(&metrics);
 

@@ -38,6 +38,7 @@ use table::predicate::Predicate;
 
 use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
@@ -110,48 +111,74 @@ impl TimeSeriesMemtable {
     }
 
     /// Updates memtable stats.
-    fn update_stats(&self, request_size: usize, min: i64, max: i64) {
-        self.alloc_tracker.on_allocation(request_size);
+    fn update_stats(&self, stats: LocalStats) {
+        self.alloc_tracker.on_allocation(stats.allocated);
 
         loop {
             let current_min = self.min_timestamp.load(Ordering::Relaxed);
-            if min >= current_min {
+            if stats.min_ts >= current_min {
                 break;
             }
 
             let Err(updated) = self.min_timestamp.compare_exchange(
                 current_min,
-                min,
+                stats.min_ts,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) else {
                 break;
             };
 
-            if updated == min {
+            if updated == stats.min_ts {
                 break;
             }
         }
 
         loop {
             let current_max = self.max_timestamp.load(Ordering::Relaxed);
-            if max <= current_max {
+            if stats.max_ts <= current_max {
                 break;
             }
 
             let Err(updated) = self.max_timestamp.compare_exchange(
                 current_max,
-                max,
+                stats.max_ts,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) else {
                 break;
             };
 
-            if updated == max {
+            if updated == stats.max_ts {
                 break;
             }
         }
+    }
+
+    fn write_key_value(&self, kv: KeyValue, stats: &mut LocalStats) -> Result<()> {
+        ensure!(
+            kv.num_primary_keys() == self.row_codec.num_fields(),
+            PrimaryKeyLengthMismatchSnafu {
+                expect: self.row_codec.num_fields(),
+                actual: kv.num_primary_keys()
+            }
+        );
+        let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
+        let fields = kv.fields().collect::<Vec<_>>();
+
+        stats.allocated += fields.iter().map(|v| v.data_size()).sum::<usize>();
+        let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
+        stats.allocated += series_allocated;
+
+        // safety: timestamp of kv must be both present and a valid timestamp value.
+        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        stats.min_ts = stats.min_ts.min(ts);
+        stats.max_ts = stats.max_ts.max(ts);
+
+        let mut guard = series.write().unwrap();
+        guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), fields);
+
+        Ok(())
     }
 }
 
@@ -167,41 +194,28 @@ impl Memtable for TimeSeriesMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
-        let mut allocated = 0;
-        let mut min_ts = i64::MAX;
-        let mut max_ts = i64::MIN;
+        let mut local_stats = LocalStats::default();
 
         for kv in kvs.iter() {
-            ensure!(
-                kv.num_primary_keys() == self.row_codec.num_fields(),
-                PrimaryKeyLengthMismatchSnafu {
-                    expect: self.row_codec.num_fields(),
-                    actual: kv.num_primary_keys()
-                }
-            );
-            let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
-            let fields = kv.fields().collect::<Vec<_>>();
-
-            allocated += fields.iter().map(|v| v.data_size()).sum::<usize>();
-            let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
-            allocated += series_allocated;
-
-            // safety: timestamp of kv must be both present and a valid timestamp value.
-            let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
-            min_ts = min_ts.min(ts);
-            max_ts = max_ts.max(ts);
-
-            let mut guard = series.write().unwrap();
-            guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), fields);
+            self.write_key_value(kv, &mut local_stats)?;
         }
-        allocated += kvs.num_rows() * std::mem::size_of::<Timestamp>();
-        allocated += kvs.num_rows() * std::mem::size_of::<OpType>();
+        local_stats.allocated += kvs.num_rows() * std::mem::size_of::<Timestamp>();
+        local_stats.allocated += kvs.num_rows() * std::mem::size_of::<OpType>();
 
         // TODO(hl): this maybe inaccurate since for-iteration may return early.
         // We may lift the primary key length check out of Memtable::write
         // so that we can ensure writing to memtable will succeed.
-        self.update_stats(allocated, min_ts, max_ts);
+        self.update_stats(local_stats);
         Ok(())
+    }
+
+    fn write_one(&self, key_value: KeyValue) -> Result<()> {
+        let mut local_stats = LocalStats::default();
+        let res = self.write_key_value(key_value, &mut local_stats);
+        local_stats.allocated += std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>();
+
+        self.update_stats(local_stats);
+        res
     }
 
     fn iter(
@@ -264,6 +278,22 @@ impl Memtable for TimeSeriesMemtable {
             id,
             self.alloc_tracker.write_buffer_manager(),
         ))
+    }
+}
+
+struct LocalStats {
+    allocated: usize,
+    min_ts: i64,
+    max_ts: i64,
+}
+
+impl Default for LocalStats {
+    fn default() -> Self {
+        LocalStats {
+            allocated: 0,
+            min_ts: i64::MAX,
+            max_ts: i64::MIN,
+        }
     }
 }
 
