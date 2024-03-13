@@ -23,7 +23,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_plugins::GREPTIME_EXEC_PREFIX;
+use common_plugins::{GREPTIME_EXEC_PREFIX, GREPTIME_EXEC_WRITE_COST};
 use common_query::physical_plan::PhysicalPlan;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
@@ -143,6 +143,9 @@ pub async fn from_output(
             Ok(o) => match o.data {
                 OutputData::AffectedRows(rows) => {
                     results.push(GreptimeQueryOutput::AffectedRows(rows));
+                    if o.meta.cost > 0 {
+                        merge_map.insert(GREPTIME_EXEC_WRITE_COST.to_string(), o.meta.cost as u64);
+                    }
                 }
                 OutputData::Stream(stream) => {
                     let schema = stream.schema().clone();
@@ -166,8 +169,8 @@ pub async fn from_output(
                         let re = result_map
                             .into_iter()
                             .map(|(k, v)| (k, Value::from(v)))
-                            .collect();
-                        http_record_output.metrics = re;
+                            .collect::<HashMap<String, Value>>();
+                        http_record_output.metrics.extend(re);
                     }
                     results.push(GreptimeQueryOutput::Records(http_record_output))
                 }
