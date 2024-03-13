@@ -36,7 +36,8 @@ use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 pub struct TimePartition {
     /// Memtable of the partition.
     memtable: MemtableRef,
-    /// Time range of the partition. `None` means there is no time range.
+    /// Time range of the partition. `None` means there is no time range. The time
+    /// range is `None` if and only if the [TimePartitions::part_duration] is `None`.
     time_range: Option<PartTimeRange>,
 }
 
@@ -65,7 +66,8 @@ pub struct TimePartitions {
     inner: Mutex<PartitionsInner>,
     /// Duration of a partition.
     ///
-    /// `None` means there is only one partition.
+    /// `None` means there is only one partition and the [TimePartition::time_range] is
+    /// also `None`.
     part_duration: Option<Duration>,
     /// Metadata of the region.
     metadata: RegionMetadataRef,
@@ -85,6 +87,8 @@ impl TimePartitions {
     ) -> Self {
         let mut inner = PartitionsInner::new(next_memtable_id);
         if part_duration.is_none() {
+            // If `part_duration` is None, then we create a partition with `None` time
+            // range so we will write all rows to that partition.
             let memtable = builder.build(inner.alloc_memtable_id(), &metadata);
             debug!(
                 "Creates a time partition for all timestamps, region: {}, memtable_id: {}",
@@ -232,6 +236,10 @@ impl TimePartitions {
 
     /// Write to multiple partitions.
     fn write_multi_parts(&self, kvs: &KeyValues, parts: &PartitionVec) -> Result<()> {
+        // If part duration is `None` then there is always one partition and all rows
+        // will be put in that partition before invoking this method.
+        debug_assert!(self.part_duration.is_some());
+
         let mut parts_to_write = HashMap::new();
         let mut missing_parts = HashMap::new();
         for kv in kvs.iter() {
@@ -240,7 +248,7 @@ impl TimePartitions {
             let ts = kv.timestamp().as_timestamp().unwrap().unwrap();
             for part in parts {
                 if part.contains_timestamp(ts) {
-                    // Safety: If time range is None then we won't go to this method.
+                    // Safety: Since part duration is `Some` so all time range should be `Some`.
                     parts_to_write
                         .entry(part.time_range.unwrap().min_timestamp)
                         .or_insert_with(|| PartitionToWrite {
@@ -334,7 +342,7 @@ impl TimePartitions {
 ///
 /// It always use bucket size in seconds which should fit all timestamp resolution.
 fn partition_start_timestamp(ts: Timestamp, bucket: Duration) -> Option<Timestamp> {
-    // Safety: We convert it to seconds so it never returns Some.
+    // Safety: We convert it to seconds so it never returns `None`.
     let ts_sec = ts.convert_to(TimeUnit::Second).unwrap();
     let bucket_sec: i64 = bucket.as_secs().try_into().ok()?;
     let start_sec = ts_sec.align_by_bucket(bucket_sec)?;
