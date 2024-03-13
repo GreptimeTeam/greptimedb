@@ -152,7 +152,7 @@ impl TimePartitions {
     /// Returns true if all memtables are empty.
     pub fn is_empty(&self) -> bool {
         let inner = self.inner.lock().unwrap();
-        inner.parts.is_empty()
+        inner.parts.iter().all(|part| part.memtable.is_empty())
     }
 
     /// Freezes all memtables.
@@ -415,6 +415,7 @@ mod tests {
         let builder = Arc::new(MergeTreeMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder, 0, None);
         assert_eq!(1, partitions.num_partitions());
+        assert!(partitions.is_empty());
 
         let kvs = memtable_util::build_key_values(
             &metadata,
@@ -426,6 +427,7 @@ mod tests {
         partitions.write(&kvs).unwrap();
 
         assert_eq!(1, partitions.num_partitions());
+        assert!(!partitions.is_empty());
         assert!(!partitions.is_empty());
         let mut memtables = Vec::new();
         partitions.list_memtables(&mut memtables);
@@ -453,6 +455,7 @@ mod tests {
         // It should creates a new partition.
         partitions.write(&kvs).unwrap();
         assert_eq!(1, partitions.num_partitions());
+        assert!(!partitions.is_empty());
 
         let kvs = memtable_util::build_key_values(
             &metadata,
@@ -499,6 +502,7 @@ mod tests {
         // It should creates a new partition.
         partitions.write(&kvs).unwrap();
         assert_eq!(1, partitions.num_partitions());
+        assert!(!partitions.is_empty());
 
         let kvs = memtable_util::build_key_values(
             &metadata,
