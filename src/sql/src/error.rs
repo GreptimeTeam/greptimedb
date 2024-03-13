@@ -117,7 +117,7 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Invalid table option key: {}", key))]
+    #[snafu(display("Unrecognized table option key: {}", key))]
     InvalidTableOption { key: String, location: Location },
 
     #[snafu(display("Failed to serialize column default constraint"))]

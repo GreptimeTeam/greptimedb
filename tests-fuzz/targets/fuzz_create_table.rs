@@ -32,6 +32,7 @@ use tests_fuzz::ir::CreateTableExpr;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{init_greptime_connections, Connections};
+use tests_fuzz::validator;
 
 struct FuzzContext {
     greptime: Pool<MySql>,
@@ -52,7 +53,8 @@ struct FuzzInput {
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
-        let columns = u.int_in_range(2..=10)?;
+        let mut rng = ChaChaRng::seed_from_u64(seed);
+        let columns = rng.gen_range(2..30);
         Ok(FuzzInput { columns, seed })
     }
 }
@@ -64,7 +66,7 @@ fn generate_expr(input: FuzzInput) -> Result<CreateTableExpr> {
             WordGenerator,
             merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
         )))
-        .columns(rng.gen_range(1..input.columns))
+        .columns(input.columns)
         .engine("mito")
         .build()
         .unwrap();
@@ -81,6 +83,15 @@ async fn execute_create_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> 
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create table: {sql}, result: {result:?}");
+
+    // Validates columns
+    let mut column_entries =
+        validator::column::fetch_columns(&ctx.greptime, "public".into(), expr.table_name.clone())
+            .await?;
+    column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
+    let mut columns = expr.columns.clone();
+    columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
+    validator::column::assert_eq(&column_entries, &columns)?;
 
     // Cleans up
     let sql = format!("DROP TABLE {}", expr.table_name);

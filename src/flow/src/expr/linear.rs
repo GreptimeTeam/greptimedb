@@ -45,7 +45,7 @@ use crate::repr::{self, value_to_internal_ts, Diff, Row};
 /// expressions in `self.expressions`, even though this is not something
 /// we can directly evaluate. The plan creation methods will defensively
 /// ensure that the right thing happens.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct MapFilterProject {
     /// A sequence of expressions that should be appended to the row.
     ///
@@ -415,7 +415,7 @@ impl MapFilterProject {
 }
 
 /// A wrapper type which indicates it is safe to simply evaluate all expressions.
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SafeMfpPlan {
     pub(crate) mfp: MapFilterProject,
 }

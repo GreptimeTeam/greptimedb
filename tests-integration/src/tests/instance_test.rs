@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches::assert_matches;
 use std::env;
 use std::sync::Arc;
 
@@ -160,7 +161,7 @@ PARTITION ON COLUMNS (n) (
 }
 
 #[apply(both_instances_cases)]
-async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
+async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let format = "json";
     let location = find_testing_resource("/tests/data/json/various_type.json");
@@ -639,7 +640,7 @@ async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>
         ),
     )
     .await;
-    assert!(matches!(result, Err(Error::TableOperation { .. })));
+    assert_matches!(result, Err(Error::ParseSql { .. }));
 }
 
 #[apply(both_instances_cases)]

@@ -12,10 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod merge_tree_bench;
-
-use criterion::criterion_main;
-
-criterion_main! {
-    merge_tree_bench::benches
-}
+pub mod column;

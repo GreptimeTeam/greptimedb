@@ -26,9 +26,10 @@ use common_function::function_registry::FUNCTION_REGISTRY;
 use common_query::error::{PyUdfSnafu, UdfTempRecordBatchSnafu};
 use common_query::prelude::Signature;
 use common_query::{Output, OutputData};
+use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{
-    RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
+    OrderOption, RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
 };
 use datafusion_expr::Volatility;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -254,6 +255,14 @@ impl RecordBatchStream for CoprStream {
     fn schema(&self) -> SchemaRef {
         // FIXME(discord9): use copr returns for schema
         self.ret_schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 

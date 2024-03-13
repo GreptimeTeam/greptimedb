@@ -23,7 +23,7 @@ use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
-use table::requests::valid_table_option;
+use table::requests::validate_table_option;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
@@ -62,17 +62,21 @@ impl<'a> ParserContext<'a> {
         let _ = self.parser.next_token();
         self.parser
             .expect_keyword(Keyword::TABLE)
-            .context(error::SyntaxSnafu)?;
+            .context(SyntaxSnafu)?;
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
         let table_name = self.intern_parse_table_name()?;
         let (columns, constraints) = self.parse_columns()?;
+        if !columns.is_empty() {
+            validate_time_index(&columns, &constraints)?;
+        }
+
         let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
         let options = self
             .parser
             .parse_options(Keyword::WITH)
-            .context(error::SyntaxSnafu)?
+            .context(SyntaxSnafu)?
             .into_iter()
             .filter_map(|option| {
                 if let Some(v) = parse_option_string(option.value) {
@@ -84,7 +88,7 @@ impl<'a> ParserContext<'a> {
             .collect::<HashMap<String, String>>();
         for key in options.keys() {
             ensure!(
-                valid_table_option(key),
+                validate_table_option(key),
                 InvalidTableOptionSnafu {
                     key: key.to_string()
                 }
@@ -140,8 +144,12 @@ impl<'a> ParserContext<'a> {
         }
 
         let (columns, constraints) = self.parse_columns()?;
+        validate_time_index(&columns, &constraints)?;
 
         let partitions = self.parse_partitions()?;
+        if let Some(partitions) = &partitions {
+            validate_partitions(&columns, partitions)?;
+        }
 
         let engine = self.parse_table_engine(default_engine())?;
         let options = self
@@ -150,7 +158,7 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu)?;
         for option in options.iter() {
             ensure!(
-                valid_table_option(&option.name.value),
+                validate_table_option(&option.name.value),
                 InvalidTableOptionSnafu {
                     key: option.name.value.to_string()
                 }
@@ -168,7 +176,6 @@ impl<'a> ParserContext<'a> {
             table_id: 0, // table id is assigned by catalog manager
             partitions,
         };
-        validate_create(&create_table)?;
 
         Ok(Statement::CreateTable(create_table))
     }
@@ -553,18 +560,8 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-fn validate_create(create_table: &CreateTable) -> Result<()> {
-    if let Some(partitions) = &create_table.partitions {
-        validate_partitions(&create_table.columns, partitions)?;
-    }
-    validate_time_index(create_table)?;
-
-    Ok(())
-}
-
-fn validate_time_index(create_table: &CreateTable) -> Result<()> {
-    let time_index_constraints: Vec<_> = create_table
-        .constraints
+fn validate_time_index(columns: &[ColumnDef], constraints: &[TableConstraint]) -> Result<()> {
+    let time_index_constraints: Vec<_> = constraints
         .iter()
         .filter_map(|c| {
             if let TableConstraint::Unique {
@@ -605,8 +602,7 @@ fn validate_time_index(create_table: &CreateTable) -> Result<()> {
     // It's safe to use time_index_constraints[0][0],
     // we already check the bound above.
     let time_index_column_ident = &time_index_constraints[0][0];
-    let time_index_column = create_table
-        .columns
+    let time_index_column = columns
         .iter()
         .find(|c| c.name.value == *time_index_column_ident.value)
         .with_context(|| InvalidTimeIndexSnafu {
@@ -753,7 +749,7 @@ mod tests {
     fn test_validate_external_table_options() {
         let sql = "CREATE EXTERNAL TABLE city (
             host string,
-            ts int64,
+            ts timestamp,
             cpu float64 default 0,
             memory float64,
             TIME INDEX (ts),
@@ -799,6 +795,17 @@ mod tests {
                 expected_engine: "foo",
                 expected_if_not_exist: true,
             },
+            Test {
+                sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv','compaction.type'='bar');",
+                expected_table_name: "city",
+                expected_options: HashMap::from([
+                    ("location".to_string(), "/var/data/city.csv".to_string()),
+                    ("format".to_string(), "csv".to_string()),
+                    ("compaction.type".to_string(), "bar".to_string()),
+                ]),
+                expected_engine: "foo",
+                expected_if_not_exist: true,
+            },
         ];
 
         for test in tests {
@@ -825,7 +832,7 @@ mod tests {
     fn test_parse_create_external_table_with_schema() {
         let sql = "CREATE EXTERNAL TABLE city (
             host string,
-            ts int64,
+            ts timestamp,
             cpu float32 default 0,
             memory float64,
             TIME INDEX (ts),
@@ -848,7 +855,7 @@ mod tests {
 
                 let columns = &c.columns;
                 assert_column_def(&columns[0], "host", "STRING");
-                assert_column_def(&columns[1], "ts", "BIGINT");
+                assert_column_def(&columns[1], "ts", "TIMESTAMP");
                 assert_column_def(&columns[2], "cpu", "FLOAT");
                 assert_column_def(&columns[3], "memory", "DOUBLE");
 
@@ -927,7 +934,7 @@ ENGINE=mito";
         let _ = result.unwrap();
 
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( ts TIMESTAMP TIME INDEX, a INT, b STRING, c INT )
 PARTITION ON COLUMNS(x) ()
 ENGINE=mito";
         let result =
@@ -1315,7 +1322,7 @@ ENGINE=mito";
     #[test]
     fn test_parse_partitions_with_error_syntax() {
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( ts TIMESTAMP TIME INDEX, a INT, b STRING, c INT )
 PARTITION COLUMNS(c, a) (
     a < 10,
     a > 10 AND a < 20,
@@ -1344,7 +1351,7 @@ ENGINE=mito";
     #[test]
     fn test_parse_partitions_unreferenced_column() {
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( ts TIMESTAMP TIME INDEX, a INT, b STRING, c INT )
 PARTITION ON COLUMNS(c, a) (
     b = 'foo'
 )
@@ -1360,7 +1367,7 @@ ENGINE=mito";
     #[test]
     fn test_parse_partitions_not_binary_expr() {
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( ts TIMESTAMP TIME INDEX, a INT, b STRING, c INT )
 PARTITION ON COLUMNS(c, a) (
     b
 )
@@ -1494,5 +1501,26 @@ ENGINE=mito";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let _ = result.unwrap();
+    }
+
+    #[test]
+    fn test_incorrect_default_value_issue_3479() {
+        let sql = r#"CREATE TABLE `ExcePTuRi`(
+non TIMESTAMP(6) TIME INDEX,
+`iUSTO` DOUBLE DEFAULT 0.047318541668048164
+)"#;
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        match &result[0] {
+            Statement::CreateTable(c) => {
+                assert_eq!(
+                    "`iUSTO` DOUBLE DEFAULT 0.047318541668048164",
+                    c.columns[1].to_string()
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 }

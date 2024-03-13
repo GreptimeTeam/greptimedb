@@ -155,6 +155,23 @@ CREATE TABLE test_like_2 LIKE test_like_1;
 
 Error: 4000(TableAlreadyExists), Table already exists: `greptime.public.test_like_2`
 
+CREATE TABLE `ExcePTuRi`(
+non TIMESTAMP(6) TIME INDEX,
+`iUSTO` DOUBLE DEFAULT 0.047318541668048164
+)
+ENGINE=mito;
+
+Affected Rows: 0
+
+DESC table `ExcePTuRi`;
+
++--------+----------------------+-----+------+----------------------+---------------+
+| Column | Type                 | Key | Null | Default              | Semantic Type |
++--------+----------------------+-----+------+----------------------+---------------+
+| non    | TimestampMicrosecond | PRI | NO   |                      | TIMESTAMP     |
+| iUSTO  | Float64              |     | YES  | 0.047318541668048164 | FIELD         |
++--------+----------------------+-----+------+----------------------+---------------+
+
 DESC TABLE test_like_1;
 
 +--------+----------------------+-----+------+---------+---------------+
@@ -180,6 +197,10 @@ DROP TABLE test_like_1;
 Affected Rows: 0
 
 DROP TABLE test_like_2;
+
+Affected Rows: 0
+
+DROP table `ExcePTuRi`;
 
 Affected Rows: 0
 

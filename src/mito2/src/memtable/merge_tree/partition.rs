@@ -78,7 +78,7 @@ impl Partition {
 
         // Finds key in shards, now we ensure one key only exists in one shard.
         if let Some(pk_id) = inner.find_key_in_shards(primary_key) {
-            inner.write_to_shard(pk_id, &key_value);
+            inner.write_to_shard(pk_id, &key_value)?;
             inner.num_rows += 1;
             return Ok(());
         }
@@ -106,7 +106,7 @@ impl Partition {
     }
 
     /// Writes to the partition without a primary key.
-    pub fn write_no_key(&self, key_value: KeyValue) {
+    pub fn write_no_key(&self, key_value: KeyValue) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
         // If no primary key, always write to the first shard.
         debug_assert!(!inner.shards.is_empty());
@@ -117,12 +117,15 @@ impl Partition {
             shard_id: 0,
             pk_index: 0,
         };
-        inner.shards[0].write_with_pk_id(pk_id, &key_value);
+        inner.shards[0].write_with_pk_id(pk_id, &key_value)?;
         inner.num_rows += 1;
+
+        Ok(())
     }
 
     /// Scans data in the partition.
     pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
+        let start = Instant::now();
         let key_filter = if context.need_prune_key {
             Some(PrimaryKeyFilter::new(
                 context.metadata.clone(),
@@ -150,7 +153,7 @@ impl Partition {
             (builder_reader, shard_source)
         };
 
-        context.metrics.num_shards = shard_reader_builders.len();
+        context.metrics.num_shards += shard_reader_builders.len();
         let mut nodes = shard_reader_builders
             .into_iter()
             .map(|builder| {
@@ -161,7 +164,7 @@ impl Partition {
             .collect::<Result<Vec<_>>>()?;
 
         if let Some(builder) = builder_source {
-            context.metrics.read_builder = true;
+            context.metrics.num_builder += 1;
             // Move the initialization of ShardBuilderReader out of read lock.
             let shard_builder_reader =
                 builder.build(Some(&context.pk_weights), key_filter.clone())?;
@@ -172,8 +175,10 @@ impl Partition {
         let merger = ShardMerger::try_new(nodes)?;
         if self.dedup {
             let source = DedupReader::try_new(merger)?;
+            context.metrics.build_partition_reader += start.elapsed();
             PartitionReader::new(context, Box::new(source))
         } else {
+            context.metrics.build_partition_reader += start.elapsed();
             PartitionReader::new(context, Box::new(merger))
         }
     }
@@ -282,9 +287,10 @@ pub(crate) struct PartitionStats {
 
 #[derive(Default)]
 struct PartitionReaderMetrics {
+    build_partition_reader: Duration,
     read_source: Duration,
     data_batch_to_batch: Duration,
-    read_builder: bool,
+    num_builder: usize,
     num_shards: usize,
 }
 
@@ -440,9 +446,15 @@ impl Drop for ReadPartitionContext {
             .observe(partition_data_batch_to_batch);
 
         common_telemetry::debug!(
-            "TreeIter partitions metrics, read_builder: {}, num_shards: {}, partition_read_source: {}s, partition_data_batch_to_batch: {}s",
-            self.metrics.read_builder,
+            "TreeIter partitions metrics, \
+            num_builder: {}, \
+            num_shards: {}, \
+            build_partition_reader: {}s, \
+            partition_read_source: {}s, \
+            partition_data_batch_to_batch: {}s",
+            self.metrics.num_builder,
             self.metrics.num_shards,
+            self.metrics.build_partition_reader.as_secs_f64(),
             partition_read_source,
             partition_data_batch_to_batch,
         );
@@ -549,7 +561,16 @@ impl Inner {
     fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
         let (shards, current_shard_id) = if metadata.primary_key.is_empty() {
             let data_parts = DataParts::new(metadata.clone(), DATA_INIT_CAP, config.dedup);
-            (vec![Shard::new(0, None, data_parts, config.dedup)], 1)
+            (
+                vec![Shard::new(
+                    0,
+                    None,
+                    data_parts,
+                    config.dedup,
+                    config.data_freeze_threshold,
+                )],
+                1,
+            )
         } else {
             (Vec::new(), 0)
         };
@@ -569,18 +590,22 @@ impl Inner {
         self.pk_to_pk_id.get(primary_key).copied()
     }
 
-    fn write_to_shard(&mut self, pk_id: PkId, key_value: &KeyValue) {
+    fn write_to_shard(&mut self, pk_id: PkId, key_value: &KeyValue) -> Result<()> {
         if pk_id.shard_id == self.shard_builder.current_shard_id() {
             self.shard_builder.write_with_pk_id(pk_id, key_value);
-            return;
+            return Ok(());
         }
-        for shard in &mut self.shards {
-            if shard.shard_id == pk_id.shard_id {
-                shard.write_with_pk_id(pk_id, key_value);
-                self.num_rows += 1;
-                return;
-            }
-        }
+
+        // Safety: We find the shard by shard id.
+        let shard = self
+            .shards
+            .iter_mut()
+            .find(|shard| shard.shard_id == pk_id.shard_id)
+            .unwrap();
+        shard.write_with_pk_id(pk_id, key_value)?;
+        self.num_rows += 1;
+
+        Ok(())
     }
 
     fn freeze_active_shard(&mut self) -> Result<()> {

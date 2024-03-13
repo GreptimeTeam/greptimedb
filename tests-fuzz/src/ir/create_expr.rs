@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::{Column, Ident};
 
-// The column options
+/// The column options
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum ColumnOption {
     Null,

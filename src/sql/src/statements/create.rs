@@ -229,8 +229,10 @@ pub struct CreateTableLike {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use crate::dialect::GreptimeDbDialect;
-    use crate::error::Error::InvalidTableOption;
+    use crate::error::Error;
     use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::statement::Statement;
 
@@ -344,7 +346,29 @@ ENGINE=mito
     fn test_validate_table_options() {
         let sql = r"create table if not exists demo(
             host string,
-            ts bigint,
+            ts timestamp,
+            cpu double default 0,
+            memory double,
+            TIME INDEX (ts),
+            PRIMARY KEY(host)
+      )
+      PARTITION ON COLUMNS (host) ()
+      engine=mito
+      with(regions=1, ttl='7d', 'compaction.type'='world');
+";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        match &result[0] {
+            Statement::CreateTable(c) => {
+                assert_eq!(3, c.options.len());
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = r"create table if not exists demo(
+            host string,
+            ts timestamp,
             cpu double default 0,
             memory double,
             TIME INDEX (ts),
@@ -356,6 +380,6 @@ ENGINE=mito
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(matches!(result, Err(InvalidTableOption { .. })))
+        assert_matches!(result, Err(Error::InvalidTableOption { .. }))
     }
 }
