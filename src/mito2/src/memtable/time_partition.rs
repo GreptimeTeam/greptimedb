@@ -85,6 +85,11 @@ impl TimePartitions {
     ) -> Self {
         let mut inner = PartitionsInner::new(next_memtable_id);
         if part_duration.is_none() {
+            debug!(
+                "Creates a time partition for all timestamps, region: {}",
+                metadata.region_id
+            );
+
             let part = TimePartition {
                 memtable: builder.build(inner.alloc_memtable_id(), &metadata),
                 time_range: None,
@@ -298,7 +303,7 @@ impl TimePartitions {
                         .builder
                         .build(inner.alloc_memtable_id(), &self.metadata);
                     debug!(
-                        "Create partition {:?} for region {}, duration: {:?}",
+                        "Create time partition {:?} for region {}, duration: {:?}",
                         range, self.metadata.region_id, part_duration
                     );
                     let pos = inner.parts.len();
