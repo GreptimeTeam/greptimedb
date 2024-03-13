@@ -36,7 +36,6 @@ pub mod constants {
     pub const GREPTIME_DB_HEADER_NAME: &str = "x-greptime-db-name";
     pub const GREPTIME_TIMEZONE_HEADER_NAME: &str = "x-greptime-timezone";
     pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = common_error::GREPTIME_DB_HEADER_ERROR_CODE;
-    pub const GREPTIME_DB_HEADER_ERROR_MSG: &str = common_error::GREPTIME_DB_HEADER_ERROR_MSG;
 }
 
 pub static GREPTIME_DB_HEADER_FORMAT: HeaderName =
