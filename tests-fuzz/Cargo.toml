@@ -40,13 +40,6 @@ sqlx = { version = "0.6", features = [
 ] }
 
 [dev-dependencies]
-dotenv = "0.15"
-sqlx = { version = "0.6", features = [
-    "runtime-tokio-rustls",
-    "mysql",
-    "postgres",
-    "chrono",
-] }
 tokio = { workspace = true }
 
 [[bin]]

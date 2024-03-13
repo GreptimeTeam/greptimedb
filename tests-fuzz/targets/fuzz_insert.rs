@@ -105,9 +105,8 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let create_expr = generate_create_expr(input, &mut rng)?;
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&create_expr)?;
-    let _result = ctx
-        .greptime
-        .execute(sql.as_str()) // unprepared query
+    let _result = sqlx::query(&sql)
+        .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
 
@@ -117,7 +116,8 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let sql = translator.translate(&insert_expr)?;
     let result = ctx
         .greptime
-        .execute(sql.as_str()) // unprepared query
+        // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
+        .execute(sql.as_str())
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
 
