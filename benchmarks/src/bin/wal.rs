@@ -26,7 +26,9 @@ use common_wal::config::kafka::DatanodeKafkaConfig as KafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::options::{KafkaWalOptions, WalOptions};
 use itertools::Itertools;
-use log_store::kafka::log_store::KafkaLogStore;
+use log_store::kafka::log_store::{
+    KafkaLogStore, APPEND_BATCH_ELAPSED_TOTAL, PRODUCED_ELAPSED_TOTAL,
+};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use mito2::wal::Wal;
 use prometheus::{Encoder, TextEncoder};
@@ -378,8 +380,11 @@ fn build_schema(cols_factor: usize, mut rng: &mut SmallRng) -> Vec<ColumnSchema>
 
 fn dump_report(cfg: &Config, write_elapsed: u128, read_elapsed: u128) {
     let cost_report = format!(
-        "write costs: {} ms, read costs: {} ms",
-        write_elapsed, read_elapsed
+        "write costs: {} ms, read costs: {} ms, append_batch costs: {} ms, produce costs: {} ms",
+        write_elapsed,
+        read_elapsed,
+        APPEND_BATCH_ELAPSED_TOTAL.load(Ordering::Relaxed),
+        PRODUCED_ELAPSED_TOTAL.load(Ordering::Relaxed),
     );
 
     let total_written_bytes = metrics::METRIC_WAL_WRITE_BYTES_TOTAL.get();
