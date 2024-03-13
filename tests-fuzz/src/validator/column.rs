@@ -98,7 +98,7 @@ impl PartialEq<Column> for ColumnEntry {
                 .iter()
                 .any(|opt| matches!(opt, ColumnOption::NotNull))
             {
-                debug!("ColumnOption::NotNull is not found");
+                debug!("ColumnOption::NotNull is found");
                 return false;
             }
         } else {

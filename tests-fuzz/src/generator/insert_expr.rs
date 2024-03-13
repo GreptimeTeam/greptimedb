@@ -14,6 +14,7 @@
 
 use std::marker::PhantomData;
 
+use datatypes::value::Value;
 use derive_builder::Builder;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -22,7 +23,7 @@ use crate::context::TableContextRef;
 use crate::error::{Error, Result};
 use crate::fake::WordGenerator;
 use crate::generator::{Generator, Random};
-use crate::ir::insert_expr::InsertIntoExpr;
+use crate::ir::insert_expr::{InsertIntoExpr, RowValue};
 use crate::ir::{generate_random_value, Ident};
 
 /// Generates [InsertIntoExpr].
@@ -41,30 +42,64 @@ pub struct InsertExprGenerator<R: Rng + 'static> {
 impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
     type Error = Error;
 
-    /// Generates the [CreateTableExpr].
+    /// Generates the [InsertIntoExpr].
     fn generate(&self, rng: &mut R) -> Result<InsertIntoExpr> {
-        let mut columns = self.table_ctx.columns.clone();
-        columns.shuffle(rng);
+        // Whether to omit all columns, i.e. INSERT INTO table_name VALUES (...)
+        let omit_column_list = rng.gen_bool(0.2);
 
-        let mut rows = Vec::with_capacity(self.rows);
+        let mut values_columns = vec![];
+        if omit_column_list {
+            // If omit column list, then all columns are required in the values list
+            values_columns = self.table_ctx.columns.clone();
+        } else {
+            for column in &self.table_ctx.columns {
+                let can_omit = column.is_nullable() || column.has_default_value();
+
+                // 50% chance to omit a column if it's not required
+                if !can_omit || rng.gen_bool(0.5) {
+                    values_columns.push(column.clone());
+                }
+            }
+            values_columns.shuffle(rng);
+
+            // If all columns are omitted, pick a random column
+            if values_columns.is_empty() {
+                values_columns.push(self.table_ctx.columns.choose(rng).unwrap().clone());
+            }
+        }
+
+        let mut values_list = Vec::with_capacity(self.rows);
         for _ in 0..self.rows {
-            let mut row = Vec::with_capacity(columns.len());
-            for column in &columns {
-                // TODO(weny): generates the special cases
-                row.push(generate_random_value(
+            let mut row = Vec::with_capacity(values_columns.len());
+            for column in &values_columns {
+                if column.is_nullable() && rng.gen_bool(0.2) {
+                    row.push(RowValue::Value(Value::Null));
+                    continue;
+                }
+
+                if column.has_default_value() && rng.gen_bool(0.2) {
+                    row.push(RowValue::Default);
+                    continue;
+                }
+
+                row.push(RowValue::Value(generate_random_value(
                     rng,
                     &column.column_type,
                     Some(self.word_generator.as_ref()),
-                ));
+                )));
             }
 
-            rows.push(row);
+            values_list.push(row);
         }
 
         Ok(InsertIntoExpr {
             table_name: self.table_ctx.name.to_string(),
-            columns,
-            rows,
+            columns: if omit_column_list {
+                vec![]
+            } else {
+                values_columns
+            },
+            values_list,
         })
     }
 }
