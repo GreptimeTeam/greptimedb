@@ -15,7 +15,9 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::usize;
 
+use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
 use common_datasource::file_format::json::{JsonFormat, JsonOpener};
@@ -328,7 +330,7 @@ impl StatementExecutor {
         &self,
         req: CopyTableRequest,
         query_ctx: QueryContextRef,
-    ) -> Result<usize> {
+    ) -> Result<Output> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,
@@ -373,6 +375,7 @@ impl StatementExecutor {
         }
 
         let mut rows_inserted = 0;
+        let mut insert_cost = 0;
         for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
         {
             let mut stream = self
@@ -419,28 +422,48 @@ impl StatementExecutor {
                 ));
 
                 if pending_mem_size as u64 >= pending_mem_threshold {
-                    rows_inserted += batch_insert(&mut pending, &mut pending_mem_size).await?;
+                    let (rows, cost) = batch_insert(&mut pending, &mut pending_mem_size).await?;
+                    rows_inserted += rows;
+                    insert_cost += cost;
                 }
             }
 
             if !pending.is_empty() {
-                rows_inserted += batch_insert(&mut pending, &mut pending_mem_size).await?;
+                let (rows, cost) = batch_insert(&mut pending, &mut pending_mem_size).await?;
+                rows_inserted += rows;
+                insert_cost += cost;
             }
         }
 
-        Ok(rows_inserted)
+        Ok(Output::new(
+            OutputData::AffectedRows(rows_inserted),
+            OutputMeta::new_with_cost(insert_cost),
+        ))
     }
 }
 
 /// Executes all pending inserts all at once, drain pending requests and reset pending bytes.
 async fn batch_insert(
-    pending: &mut Vec<impl Future<Output = Result<usize>>>,
+    pending: &mut Vec<impl Future<Output = Result<Output>>>,
     pending_bytes: &mut usize,
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     let batch = pending.drain(..);
-    let res: usize = futures::future::try_join_all(batch).await?.iter().sum();
+    let result = futures::future::try_join_all(batch)
+        .await?
+        .iter()
+        .map(|o| {
+            let rows = if let OutputData::AffectedRows(r) = o.data {
+                r
+            } else {
+                0
+            };
+            let cost = o.meta.cost;
+            (rows, cost)
+        })
+        .reduce(|(a, b), (c, d)| (a + c, b + d))
+        .unwrap_or((0, 0));
     *pending_bytes = 0;
-    Ok(res)
+    Ok(result)
 }
 
 fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {

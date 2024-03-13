@@ -124,10 +124,7 @@ impl StatementExecutor {
                         .copy_table_to(req, query_ctx)
                         .await
                         .map(Output::new_with_affected_rows),
-                    CopyDirection::Import => self
-                        .copy_table_from(req, query_ctx)
-                        .await
-                        .map(Output::new_with_affected_rows),
+                    CopyDirection::Import => self.copy_table_from(req, query_ctx).await,
                 }
             }
 

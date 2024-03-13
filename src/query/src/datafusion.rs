@@ -128,6 +128,8 @@ impl DatafusionQueryEngine {
         };
 
         let mut affected_rows = 0;
+        let mut insert_cost = 0;
+
         while let Some(batch) = stream.next().await {
             let batch = batch.context(CreateRecordBatchSnafu)?;
             let column_vectors = batch
@@ -135,20 +137,30 @@ impl DatafusionQueryEngine {
                 .map_err(BoxedError::new)
                 .context(QueryExecutionSnafu)?;
 
-            let rows = match dml.op {
+            match dml.op {
                 WriteOp::InsertInto => {
-                    self.insert(&table_name, column_vectors, query_ctx.clone())
-                        .await?
+                    let output = self
+                        .insert(&table_name, column_vectors, query_ctx.clone())
+                        .await?;
+                    affected_rows += if let OutputData::AffectedRows(r) = output.data {
+                        r
+                    } else {
+                        0
+                    };
+                    insert_cost += output.meta.cost;
                 }
                 WriteOp::Delete => {
-                    self.delete(&table_name, &table, column_vectors, query_ctx.clone())
-                        .await?
+                    affected_rows += self
+                        .delete(&table_name, &table, column_vectors, query_ctx.clone())
+                        .await?;
                 }
                 _ => unreachable!("guarded by the 'ensure!' at the beginning"),
-            };
-            affected_rows += rows;
+            }
         }
-        Ok(Output::new_with_affected_rows(affected_rows))
+        Ok(Output::new(
+            OutputData::AffectedRows(affected_rows),
+            OutputMeta::new_with_cost(insert_cost),
+        ))
     }
 
     #[tracing::instrument(skip_all)]
@@ -201,7 +213,7 @@ impl DatafusionQueryEngine {
         table_name: &ResolvedTableReference<'a>,
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
-    ) -> Result<usize> {
+    ) -> Result<Output> {
         let request = InsertRequest {
             catalog_name: table_name.catalog.to_string(),
             schema_name: table_name.schema.to_string(),
