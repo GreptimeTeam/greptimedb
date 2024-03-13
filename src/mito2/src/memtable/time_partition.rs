@@ -329,7 +329,7 @@ impl TimePartitions {
 ///
 /// It always use bucket size in seconds which should fit all timestamp resolution.
 fn partition_start_timestamp(ts: Timestamp, bucket: Duration) -> Option<Timestamp> {
-    // Safety: We convert it to seconds so it nerver returns Some.
+    // Safety: We convert it to seconds so it never returns Some.
     let ts_sec = ts.convert_to(TimeUnit::Second).unwrap();
     let bucket_sec: i64 = bucket.as_secs().try_into().ok()?;
     let start_sec = ts_sec.align_by_bucket(bucket_sec)?;
