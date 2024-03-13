@@ -22,10 +22,13 @@ pub(crate) mod select_expr;
 use core::fmt;
 
 pub use alter_expr::AlterTableExpr;
+use common_time::{Date, DateTime, Timestamp};
 pub use create_expr::CreateTableExpr;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use derive_builder::Builder;
+pub use insert_expr::InsertIntoExpr;
 use lazy_static::lazy_static;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -91,12 +94,60 @@ pub fn generate_random_value<R: Rng>(
             Some(random) => Value::from(random.gen(rng).value),
             None => Value::from(rng.gen::<char>().to_string()),
         },
-        ConcreteDataType::Date(_) => Value::from(rng.gen::<i32>()),
-        ConcreteDataType::DateTime(_) => Value::from(rng.gen::<i64>()),
-        &ConcreteDataType::Timestamp(_) => Value::from(rng.gen::<u64>()),
+        ConcreteDataType::Date(_) => generate_random_date(rng),
+        ConcreteDataType::DateTime(_) => generate_random_datetime(rng),
+        &ConcreteDataType::Timestamp(ts_type) => generate_random_timestamp(rng, ts_type),
 
         _ => unimplemented!("unsupported type: {datatype}"),
     }
+}
+
+fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
+    let v = match ts_type {
+        TimestampType::Second(_) => {
+            let min = i64::from(Timestamp::MIN_SECOND);
+            let max = i64::from(Timestamp::MAX_SECOND);
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_second(value)
+        }
+        TimestampType::Millisecond(_) => {
+            let min = i64::from(Timestamp::MIN_MILLISECOND);
+            let max = i64::from(Timestamp::MAX_MILLISECOND);
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_millisecond(value)
+        }
+        TimestampType::Microsecond(_) => {
+            let min = i64::from(Timestamp::MIN_MICROSECOND);
+            let max = i64::from(Timestamp::MAX_MICROSECOND);
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_microsecond(value)
+        }
+        TimestampType::Nanosecond(_) => {
+            let min = i64::from(Timestamp::MIN_NANOSECOND);
+            let max = i64::from(Timestamp::MAX_NANOSECOND);
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_nanosecond(value)
+        }
+    };
+    Value::from(v)
+}
+
+fn generate_random_datetime<R: Rng>(rng: &mut R) -> Value {
+    let min = i64::from(Timestamp::MIN_MILLISECOND);
+    let max = i64::from(Timestamp::MAX_MILLISECOND);
+    let value = rng.gen_range(min..=max);
+    let datetime = Timestamp::new_millisecond(value)
+        .to_chrono_datetime()
+        .unwrap();
+    Value::from(DateTime::from(datetime))
+}
+
+fn generate_random_date<R: Rng>(rng: &mut R) -> Value {
+    let min = i64::from(Timestamp::MIN_MILLISECOND);
+    let max = i64::from(Timestamp::MAX_MILLISECOND);
+    let value = rng.gen_range(min..=max);
+    let date = Timestamp::new_millisecond(value).to_chrono_date().unwrap();
+    Value::from(Date::from(date))
 }
 
 /// An identifier.
@@ -180,6 +231,24 @@ impl Column {
         self.options
             .iter()
             .any(|opt| opt == &ColumnOption::PrimaryKey)
+    }
+
+    /// Returns true if it's nullable.
+    pub fn is_nullable(&self) -> bool {
+        !self
+            .options
+            .iter()
+            .any(|opt| matches!(opt, ColumnOption::NotNull | ColumnOption::TimeIndex))
+    }
+
+    // Returns true if it has default value.
+    pub fn has_default_value(&self) -> bool {
+        self.options.iter().any(|opt| {
+            matches!(
+                opt,
+                ColumnOption::DefaultValue(_) | ColumnOption::DefaultFn(_)
+            )
+        })
     }
 }
 

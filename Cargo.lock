@@ -10219,6 +10219,7 @@ dependencies = [
  "common-query",
  "common-runtime",
  "common-telemetry",
+ "common-time",
  "datatypes",
  "derive_builder 0.12.0",
  "dotenv",

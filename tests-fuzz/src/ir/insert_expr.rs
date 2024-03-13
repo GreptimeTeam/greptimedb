@@ -12,14 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use datatypes::value::Value;
 
 use crate::ir::Column;
 
-pub type RowValue = Vec<Value>;
-
 pub struct InsertIntoExpr {
     pub table_name: String,
     pub columns: Vec<Column>,
-    pub rows: Vec<RowValue>,
+    pub values_list: Vec<RowValues>,
+}
+
+pub type RowValues = Vec<RowValue>;
+
+pub enum RowValue {
+    Value(Value),
+    Default,
+}
+
+impl Display for RowValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RowValue::Value(v) => match v {
+                Value::Null => write!(f, "NULL"),
+                v @ (Value::String(_)
+                | Value::Timestamp(_)
+                | Value::DateTime(_)
+                | Value::Date(_)) => write!(f, "'{}'", v),
+                v => write!(f, "{}", v),
+            },
+            RowValue::Default => write!(f, "DEFAULT"),
+        }
+    }
 }
