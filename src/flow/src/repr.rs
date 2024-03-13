@@ -51,6 +51,7 @@ pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
     match value {
         Value::DateTime(ts) => Ok(ts.val()),
+        Value::Int64(ts) => Ok(ts),
         arg => {
             let arg_ty = arg.data_type();
             let res = cast(arg, &ConcreteDataType::datetime_datatype()).context({

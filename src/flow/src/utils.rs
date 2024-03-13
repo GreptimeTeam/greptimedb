@@ -3,103 +3,374 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use smallvec::{smallvec, SmallVec};
+use tokio::sync::{Mutex, RwLock};
 
-use crate::repr::{Diff, KeyValDiffRow, Row, Timestamp};
+use crate::expr::error::InternalSnafu;
+use crate::expr::{EvalError, ScalarExpr};
+use crate::repr::{value_to_internal_ts, Diff, DiffRow, KeyValDiffRow, Row, Timestamp};
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+pub struct ExpireState {
+    /// a map from event timestamp to key, used for expire keys
+    event_ts_to_key: BTreeMap<Timestamp, BTreeSet<Row>>,
+    /// duration after which a key is considered expired, and will be removed from state
+    key_expiration_duration: Option<Timestamp>,
+    /// using this to get timestamp from key row
+    event_timestamp_from_row: ScalarExpr,
+}
+
+impl ExpireState {
+    pub fn extract_event_ts(&self, row: &Row) -> Result<Timestamp, EvalError> {
+        let ts = value_to_internal_ts(self.event_timestamp_from_row.eval(&row.inner)?)?;
+        Ok(ts)
+    }
+
+    pub fn get_expire_time(&self, now: Timestamp) -> Option<Timestamp> {
+        self.key_expiration_duration.map(|d| now - d)
+    }
+
+    pub fn is_key_expired(&self, now: Timestamp, key: &Row) -> Result<bool, EvalError> {
+        let event_ts = self.extract_event_ts(key)?;
+        Ok(self
+            .get_expire_time(now)
+            .map(|e| e > event_ts)
+            .unwrap_or(false))
+    }
+
+    /// update the event timestamp to key mapping
+    /// if given key is expired by now, return false
+    pub fn update_event_ts(&mut self, now: Timestamp, row: &Row) -> Result<bool, EvalError> {
+        if self.is_key_expired(now, row)? {
+            return Ok(false);
+        }
+        let ts = self.extract_event_ts(row)?;
+        self.event_ts_to_key
+            .entry(ts)
+            .or_default()
+            .insert(row.clone());
+        Ok(true)
+    }
+}
 
 /// A shared state of key-value pair for various state
 /// in dataflow execution
+/// TODO(discord9): impl multiversion instead, like merge current into spine too
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct Arrangement {
-    /// all the future updates that pending to be applied
+    /// all the updates that pending to be applied
     /// arranged in time -> (key -> (new_val, diff))
-    spine: BTreeMap<Timestamp, BTreeMap<Row, (Row, Diff)>>,
-    /// indicate all of the time of update for each key in spine
-    key_to_time: BTreeMap<Row, BTreeSet<Timestamp>>,
-    /// the current value of the arrangement,
-    /// updated by spine when current time is no less than the time of the update
-    /// TODO(discord9): consider if have val=(Row, Diff) support multicity of the same key
-    current: BTreeMap<Row, (Row, Diff)>,
+    /// all updates where the update time is greater than the last key but less than or equal to the current key
+    /// are updates are categorized under current key.
+    ///
+    /// that is: `last key < update time <= current key`
+    /// or for time that's before the first key, just being categorized under the first key
+    /// The first key is always `now` which include consolidated updates from past, representing the current state of arrangement
+    ///
+    /// Note that for a given time and key, there might be a bunch of updates and they should be applied in order
+    /// And for consolidated batch(i.e. btach representing now), there should be only one update for each key with `diff==1``
+    spine: BTreeMap<Timestamp, BTreeMap<Row, SmallVec<[DiffRow; 4]>>>,
+    /// if set to false, will not update current value of the arrangement, useful for case like `map -> arrange -> reduce`
+    full_arrangement: bool,
+    /// manage the expire state of the arrangement
+    expire_state: Option<ExpireState>,
 }
 
 impl Arrangement {
-    /// send back updates that can be applied (i.e. the time of the update is not greater than the current time)
-    ///
-    /// also send updates from spine which can be applied now back too.
-    /// and only retain updates that are yet to come.
-    /// Wouldn't update the current value of the arrangement.
-    ///
-    /// useful for Mfp Operator's temporal filter,
-    pub fn filter_and_retain_future_updates(
-        &mut self,
-        now: Timestamp,
-        mut updates: Vec<KeyValDiffRow>,
-    ) -> Vec<KeyValDiffRow> {
-        updates = updates
-            .into_iter()
-            .filter_map(|((key, val), time, diff)| {
-                if time <= now {
-                    Some(((key, val), time, diff))
-                } else {
-                    // future updates goes into spine for later application
-                    self.spine.entry(time).or_default().insert(key, (val, diff));
-                    None
-                }
-            })
-            .collect_vec();
-
-        // also append updates from spine which can be applied now back too
-        // note that current time's updates is also send back
-        let after = self.spine.split_off(&(now + 1));
-        // TODO(discord9): consolidate updates with same key and time
-        // BTreeMap;'s root is just a NodeRef which is a pointer so mem::take is not very expensive
-        for (time, update) in std::mem::take(&mut self.spine).into_iter() {
-            updates.extend(
-                update
-                    .into_iter()
-                    .map(|(key, (val, diff))| ((key, val), time, diff)),
-            );
+    pub fn new() -> Self {
+        Self {
+            spine: Default::default(),
+            full_arrangement: false,
+            expire_state: None,
         }
-        self.spine = after;
-
-        updates
     }
 
-    /// apply updates <= now, and save future updates in spine
-    pub fn apply_updates(&mut self, now: Timestamp, updates: Vec<KeyValDiffRow>) {
-        for ((key, val), time, diff) in updates {
-            if time <= now {
-                // TODO(discord9): consider error handling including check old/new val eq etc.
-
-                let new_val_diff = self
-                    .current
-                    .entry(key.clone())
-                    .and_modify(|e| e.1 += diff)
-                    .or_insert((val, diff));
-
-                if new_val_diff.1 == 0 {
-                    self.current.remove(&key);
+    /// apply updates into spine, all updates should have timestamps that are larger than spine's first key
+    pub fn apply_updates(
+        &mut self,
+        now: Timestamp,
+        updates: Vec<KeyValDiffRow>,
+    ) -> Result<(), EvalError> {
+        for ((key, val), ts, diff) in updates {
+            // keep rows with expired event timestamp from being updated
+            if let Some(s) = &mut self.expire_state {
+                if s.is_key_expired(now, &key)? {
+                    continue;
                 }
+                s.update_event_ts(now, &key)?;
+            }
+            // the first batch with key that's greater or equal to ts
+            let batch = if let Some((_, batch)) = self.spine.range_mut(ts..).next() {
+                batch
             } else {
-                self.spine
-                    .entry(time)
-                    .or_default()
-                    .insert(key.clone(), (val, diff));
-                self.key_to_time.entry(key).or_default().insert(time);
+                // if no batch with `batch key >= ts`, then create a new batch with key being `ts`
+                self.spine.entry(ts).or_default()
+            };
+
+            {
+                let key_updates = batch.entry(key).or_insert(smallvec![]);
+                key_updates.push((val, ts, diff));
+            }
+        }
+        Ok(())
+    }
+
+    /// advance time to `now` and consolidate all older(`now` included) updates to the first key
+    pub fn set_compaction(&mut self, now: Timestamp) -> Result<(), EvalError> {
+        let mut should_compact = self.spine.split_off(&(now + 1));
+        std::mem::swap(&mut should_compact, &mut self.spine);
+
+        // if a full arrangement is not needed, we can just discard everything before and including now
+        if !self.full_arrangement {
+            return Ok(());
+        }
+        // else we update them into current key value pairs
+        let mut compacted_batch: BTreeMap<Row, SmallVec<[DiffRow; 4]>> = Default::default();
+
+        for (_, batch) in should_compact {
+            for (key, updates) in batch {
+                if let Some(s) = &mut self.expire_state {
+                    if s.is_key_expired(now, &key)? {
+                        continue;
+                    }
+                    s.update_event_ts(now, &key)?;
+                }
+                // if diff cancel out each other, then remove the key
+                let mut old_row: Option<DiffRow> =
+                    compacted_batch.get(&key).and_then(|v| v.first()).cloned();
+
+                for new_row in updates {
+                    old_row = compact_diff_row(old_row, new_row);
+                }
+                if let Some(compacted_update) = old_row {
+                    compacted_batch.insert(key, smallvec![compacted_update]);
+                } else {
+                    compacted_batch.remove(&key);
+                }
+            }
+        }
+
+        // insert the compacted batch into spine with key being `now`
+        let mut first_entry = BTreeMap::from([(now, compacted_batch)]);
+        self.spine.append(&mut first_entry);
+        Ok(())
+    }
+
+    /// get the updates of the arrangement from the given range of time
+    pub fn get_updates_in_range<R: std::ops::RangeBounds<Timestamp>>(
+        &self,
+        range: R,
+    ) -> Vec<KeyValDiffRow> {
+        let mut result = vec![];
+        for (_ts, batch) in self.spine.range(range) {
+            for (key, updates) in batch.clone() {
+                for (val, ts, diff) in updates {
+                    result.push(((key.clone(), val), ts, diff));
+                }
+            }
+        }
+        result
+    }
+
+    /// expire keys in now that are older than expire_time, intended for reducing memory usage and limit late data arrive
+    pub fn trunc_expired(&mut self, now: Timestamp) {
+        if let Some(s) = &mut self.expire_state {
+            let expire_time = if let Some(t) = s.get_expire_time(now) {
+                t
+            } else {
+                // never expire
+                return;
+            };
+            // find all keys smaller than or equal expire_time and silently remove them
+            let mut after = s.event_ts_to_key.split_off(&(expire_time + 1));
+            std::mem::swap(&mut s.event_ts_to_key, &mut after);
+            let before = after;
+            for (_, keys) in before.into_iter() {
+                for key in keys {
+                    self.spine.first_entry().map(|e| e.into_mut().remove(&key));
+                }
             }
         }
     }
 
-    // TODO(discord9): expire key, values by something
-
-    /// useful for join to query existing keys
-    pub fn get(&self, key: &Row) -> Option<&(Row, Diff)> {
-        self.current.get(key)
+    /// get current state of things
+    /// useful for query existing keys(i.e. reduce and join operator need to query existing state)
+    pub fn get(&self, now: Timestamp, key: &Row) -> Option<(Row, Diff)> {
+        if self
+            .spine
+            .first_key_value()
+            .map(|(ts, _)| *ts >= now)
+            .unwrap_or(false)
+        {
+            self.spine.first_key_value().and_then(|(_ts, batch)| {
+                batch
+                    .get(key)
+                    .and_then(|v| v.first())
+                    .map(|(row, _ts, diff)| (row.clone(), *diff))
+            })
+        } else {
+            // check keys <= now to know current value
+            let mut final_val = None;
+            for (_ts, batch) in self.spine.range(..=now) {
+                if let Some(new_rows) = batch.get(key).map(|v| v.iter()) {
+                    for new_row in new_rows {
+                        final_val = compact_diff_row(final_val, new_row.clone());
+                    }
+                }
+            }
+            final_val.map(|(row, _ts, diff)| (row, diff))
+        }
     }
 }
 
-/// A handler to the inner Arrangement, can be cloned and shared
-#[derive(Debug, Clone)]
-pub struct Arranged {
-    inner: Arc<Mutex<Arrangement>>,
+fn compact_diff_row(old_row: Option<DiffRow>, new_row: DiffRow) -> Option<DiffRow> {
+    let (val, ts, diff) = new_row;
+    match (old_row, diff) {
+        (Some((row, _old_ts, old_diff)), diff) if row == val && old_diff + diff == 0 => {
+            // the key is deleted now
+            None
+        }
+        (Some((row, _old_ts, old_diff)), diff) if row == val && old_diff + diff != 0 => {
+            Some((val, ts, old_diff + diff))
+        }
+        // if old val not equal new val, simple consider it as being overwritten, for each key can only have one value
+        // so it make sense to just replace the old value with new value
+        _ => Some((val, ts, diff)),
+    }
+}
+
+/// A handler to the inner Arrangement, can be cloned and shared, useful for query it's inner state
+#[derive(Debug)]
+pub struct ArrangeHandler {
+    inner: Arc<RwLock<Arrangement>>,
+}
+impl ArrangeHandler {
+    pub fn from(arr: Arrangement) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(arr)),
+        }
+    }
+    pub fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, Arrangement> {
+        self.inner.blocking_write()
+    }
+    pub fn read(&self) -> tokio::sync::RwLockReadGuard<'_, Arrangement> {
+        self.inner.blocking_read()
+    }
+
+    /// clone the handler, but only keep the future updates
+    pub fn clone_future_only(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// clone the handler, but keep all updates
+    pub fn clone_full_arrange(&self) -> Self {
+        let mut arr = self.write();
+        arr.full_arrangement = true;
+        drop(arr);
+        self.clone_future_only()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn only_save_future_updates() {
+        // mfp operator's temporal filter need to record future updates so that it can delete on time
+        // i.e. insert a record now, delete this record 5 minutes later
+        // they will only need to keep future updates(if downstream don't need full arrangement that is)
+        let arr = Arrangement::new();
+        let arr = ArrangeHandler::from(arr);
+
+        {
+            let mut arr = arr.write();
+            let updates: Vec<KeyValDiffRow> = vec![
+                ((Row::new(vec![1.into()]), Row::new(vec![2.into()])), 1, 1),
+                ((Row::new(vec![2.into()]), Row::new(vec![3.into()])), 2, 1),
+                ((Row::new(vec![3.into()]), Row::new(vec![4.into()])), 3, 1),
+            ];
+            // all updates above are future updates
+            arr.apply_updates(0, updates).unwrap();
+            assert_eq!(
+                arr.get_updates_in_range(1..=1),
+                vec![((Row::new(vec![1.into()]), Row::new(vec![2.into()])), 1, 1)]
+            );
+            assert_eq!(arr.spine.len(), 3);
+            arr.set_compaction(1).unwrap();
+            assert_eq!(arr.spine.len(), 2);
+        }
+        // TODO(discord9): disallow clone full arrange after write something
+        let _arr2 = arr.clone_full_arrange();
+
+        {
+            let mut arr = arr.write();
+            assert_eq!(arr.spine.len(), 2);
+            arr.set_compaction(2).unwrap();
+            assert_eq!(arr.spine.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_reduce_expire_keys() {
+        let mut arr = Arrangement::new();
+        let expire_state = ExpireState {
+            event_ts_to_key: Default::default(),
+            key_expiration_duration: Some(10),
+            event_timestamp_from_row: ScalarExpr::Column(0),
+        };
+        let expire_state = Some(expire_state);
+        arr.expire_state = expire_state;
+        arr.full_arrangement = true;
+
+        let arr = ArrangeHandler::from(arr);
+        let now = 0;
+        let key = Row::new(vec![1i64.into()]);
+        let updates: Vec<KeyValDiffRow> = vec![
+            (
+                (Row::new(vec![1i64.into()]), Row::new(vec![2.into()])),
+                1,
+                1,
+            ),
+            (
+                (Row::new(vec![2i64.into()]), Row::new(vec![3.into()])),
+                2,
+                1,
+            ),
+            (
+                (Row::new(vec![3i64.into()]), Row::new(vec![4.into()])),
+                3,
+                1,
+            ),
+        ];
+        {
+            let mut arr = arr.write();
+            arr.apply_updates(now, updates).unwrap();
+            assert_eq!(
+                arr.get_updates_in_range(1..=1),
+                vec![((key.clone(), Row::new(vec![2.into()])), 1, 1)]
+            );
+            assert_eq!(arr.spine.len(), 3);
+            arr.set_compaction(1).unwrap();
+            assert_eq!(arr.spine.len(), 3);
+        }
+        {
+            let mut arr = arr.write();
+            assert_eq!(arr.spine.len(), 3);
+            assert_eq!(arr.get(10, &key), Some((Row::new(vec![2.into()]), 1)));
+            arr.trunc_expired(10);
+            assert_eq!(arr.spine.len(), 3);
+            arr.trunc_expired(11);
+            assert_eq!(arr.get(11, &key), None);
+            assert_eq!(arr.spine.len(), 3);
+            assert_eq!(arr.expire_state.as_ref().unwrap().event_ts_to_key.len(), 2);
+            arr.trunc_expired(12);
+            assert_eq!(arr.spine.len(), 3);
+            assert_eq!(arr.expire_state.as_ref().unwrap().event_ts_to_key.len(), 1);
+        }
+    }
+
+    // TODO(discord9): test get()
 }
