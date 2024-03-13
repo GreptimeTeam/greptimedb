@@ -237,7 +237,7 @@ mod tests {
             table_name: String::new(),
             column_name: "test".to_string(),
             data_type: ConcreteDataType::int8_datatype().name(),
-            semantic_type: String::new(),
+            semantic_type: "FIELD".to_string(),
             column_default: None,
             is_nullable: "Yes".to_string(),
         };
@@ -261,7 +261,7 @@ mod tests {
             table_name: String::new(),
             column_name: "test".to_string(),
             data_type: ConcreteDataType::int8_datatype().to_string(),
-            semantic_type: String::new(),
+            semantic_type: "FIELD".to_string(),
             column_default: Some("1".to_string()),
             is_nullable: "Yes".to_string(),
         };
@@ -277,7 +277,7 @@ mod tests {
             table_name: String::new(),
             column_name: "test".to_string(),
             data_type: ConcreteDataType::int8_datatype().to_string(),
-            semantic_type: String::new(),
+            semantic_type: "FIELD".to_string(),
             column_default: Some("Hello()".to_string()),
             is_nullable: "Yes".to_string(),
         };
