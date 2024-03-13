@@ -25,6 +25,7 @@ use crate::error::{
 use crate::kafka::client_manager::ClientManagerRef;
 use crate::kafka::util::offset::Offset;
 use crate::kafka::{EntryId, EntryImpl, NamespaceImpl};
+use crate::metrics;
 
 /// The current version of Record.
 pub(crate) const VERSION: u32 = 0;
@@ -175,6 +176,12 @@ impl RecordProducer {
         for entry in self.entries {
             for record in build_records(entry, max_record_size) {
                 let kafka_record = KafkaRecord::try_from(record)?;
+
+                metrics::METRIC_KAFKA_PRODUCE_RECORD_COUNTS.inc();
+                metrics::METRIC_KAFKA_PRODUCE_RECORD_BYTES_TOTAL
+                    .inc_by(kafka_record.approximate_size() as u64);
+                let _timer = metrics::METRIC_KAFKA_PRODUCE_ELAPSED.start_timer();
+
                 // Records of a certain region cannot be produced in parallel since their order must be static.
                 let offset = producer
                     .produce(kafka_record.clone())

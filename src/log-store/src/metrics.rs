@@ -51,6 +51,18 @@ lazy_static! {
         "kafka read record bytes total"
     ).unwrap();
 
+    /// Counter of the numbers of the records produced by the kafka logstore.
+    pub static ref METRIC_KAFKA_PRODUCE_RECORD_COUNTS: IntCounter = register_int_counter!(
+        "greptime_kafka_produce_record_counts",
+        "kafka produce record counts",
+    ).unwrap();
+
+    /// Counter of bytes of the records produced by the kafka logstore.
+    pub static ref METRIC_KAFKA_PRODUCE_RECORD_BYTES_TOTAL: IntCounter = register_int_counter!(
+        "greptime_kafka_produce_record_bytes_total",
+        "kafka produce record bytes total"
+    ).unwrap();
+
     /// Counters of calls of each operation on a logstore.
     pub static ref METRIC_LOGSTORE_OP_CALLS_TOTAL: IntCounterVec = register_int_counter_vec!(
         "greptime_logstore_op_calls_total",
@@ -92,4 +104,10 @@ lazy_static! {
     /// Timer of the append_batch operation on the raft-engine logstore.
     /// This timer only measures the duration of the read operation, not measures the total duration of replay.
     pub static ref METRIC_RAFT_ENGINE_READ_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["raft-engine", "read"]);
+
+    /// Timer of the produce operation on the kafka client.
+    pub static ref METRIC_KAFKA_PRODUCE_ELAPSED: Histogram = register_histogram!(
+        "greptime_kafka_produce_elapsed",
+        "kafka produce elapsed",
+    ).unwrap();
 }
