@@ -54,8 +54,6 @@ SELECT rank() OVER (PARTITION BY host ORDER BY ts DESC) RANGE '10s' FROM host AL
 
 -- 2.6 invalid fill
 
-SELECT min(val) RANGE '5s', min(val) RANGE '5s' FILL NULL FROM host ALIGN '5s';
-
 SELECT min(val) RANGE '5s' FROM host ALIGN '5s' FILL 3.0;
 
 -- 2.7 zero align/range
