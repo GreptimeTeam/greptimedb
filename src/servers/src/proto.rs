@@ -26,10 +26,13 @@ use crate::prom_store::METRIC_NAME_LABEL_BYTES;
 use crate::repeated_field::{Clear, RepeatedField};
 
 impl Clear for Sample {
-    fn clear(&mut self) {}
+    fn clear(&mut self) {
+        self.timestamp = 0;
+        self.value = 0.0;
+    }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct PromLabel {
     pub name: Bytes,
     pub value: Bytes,
@@ -76,7 +79,7 @@ impl PromLabel {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct PromTimeSeries {
     pub table_name: String,
     pub labels: RepeatedField<PromLabel>,
@@ -161,7 +164,7 @@ impl PromTimeSeries {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct PromWriteRequest {
     table_data: TablesBuilder,
     series: PromTimeSeries,
