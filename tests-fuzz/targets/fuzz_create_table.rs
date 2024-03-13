@@ -33,7 +33,6 @@ use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{init_greptime_connections, Connections};
 use tests_fuzz::validator;
-use tests_fuzz::validator::column::fetch_columns;
 
 struct FuzzContext {
     greptime: Pool<MySql>,
@@ -85,9 +84,10 @@ async fn execute_create_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> 
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create table: {sql}, result: {result:?}");
 
-    // Validate columns
+    // Validates columns
     let mut column_entries =
-        fetch_columns(&ctx.greptime, "public".into(), expr.table_name.clone()).await?;
+        validator::column::fetch_columns(&ctx.greptime, "public".into(), expr.table_name.clone())
+            .await?;
     column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
     let mut columns = expr.columns.clone();
     columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));

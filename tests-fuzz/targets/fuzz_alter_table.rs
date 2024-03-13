@@ -40,6 +40,7 @@ use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{init_greptime_connections, Connections};
+use tests_fuzz::validator;
 
 struct FuzzContext {
     greptime: Pool<MySql>,
@@ -143,7 +144,18 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         info!("Alter table: {sql}, result: {result:?}");
         // Applies changes
         table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
-        // TODO(weny): Validate columns
+
+        // Validates columns
+        let mut column_entries = validator::column::fetch_columns(
+            &ctx.greptime,
+            "public".into(),
+            table_ctx.name.clone(),
+        )
+        .await?;
+        column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
+        let mut columns = table_ctx.columns.clone();
+        columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
+        validator::column::assert_eq(&column_entries, &columns)?;
     }
 
     // Cleans up
