@@ -93,7 +93,7 @@ impl TimePartitions {
         }
 
         Self {
-            inner: Mutex::new(PartitionsInner::new(next_memtable_id)),
+            inner: Mutex::new(inner),
             part_duration,
             metadata,
             builder,
@@ -392,4 +392,29 @@ impl PartTimeRange {
 struct PartitionToWrite<'a> {
     partition: TimePartition,
     key_values: Vec<KeyValue<'a>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
+    use crate::test_util::memtable_util;
+
+    #[test]
+    fn test_no_duration() {
+        let metadata = memtable_util::metadata_for_test();
+        let builder = Arc::new(MergeTreeMemtableBuilder::default());
+        let partitions = TimePartitions::new(metadata.clone(), builder, 0, None);
+
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            "hello".to_string(),
+            0,
+            &[1000, 3000, 7000, 5000, 6000],
+            0, // sequence 0, 1, 2, 3, 4
+        );
+        partitions.write(&kvs).unwrap();
+
+        assert_eq!(1, partitions.num_partitions());
+    }
 }
