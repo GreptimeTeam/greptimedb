@@ -99,8 +99,7 @@ impl KeyExpiryManager {
 /// `mfp operator -> arrange(store futures only, no expire) -> reduce operator <-> arrange(full, with key expiring time) -> output`
 ///
 /// Note the two way arrow between reduce operator and arrange, it's because reduce operator need to query existing state
-///
-/// TODO(discord9): impl multiversion instead, like merge current into spine too
+/// and also need to update existing state
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct Arrangement {
     /// all the updates that pending to be applied
@@ -319,7 +318,8 @@ impl ArrangeHandler {
     }
 
     /// clone the handler, but keep all updates
-    /// TODO(discord9): prevent illegal clone after the arrange have been written, because that will cause loss of data before clone
+    /// prevent illegal clone after the arrange have been written,
+    /// because that will cause loss of data before clone
     pub fn clone_full_arrange(&self) -> Option<Self> {
         if self.read().is_written {
             return None;
@@ -460,6 +460,4 @@ mod test {
             assert_eq!(arr.expire_state.as_ref().unwrap().event_ts_to_key.len(), 1);
         }
     }
-
-    // TODO(discord9): test get()
 }
