@@ -338,7 +338,8 @@ impl<S: LogStore> WorkerStarter<S> {
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
-        let memtable_builder = match &self.config.memtable {
+
+        let default_memtable_builder = match &self.config.memtable {
             MemtableConfig::Experimental(merge_tree) => Arc::new(MergeTreeMemtableBuilder::new(
                 merge_tree.clone(),
                 Some(self.write_buffer_manager.clone()),
@@ -358,7 +359,7 @@ impl<S: LogStore> WorkerStarter<S> {
             wal: Wal::new(self.log_store),
             object_store_manager: self.object_store_manager.clone(),
             running: running.clone(),
-            memtable_builder,
+            default_memtable_builder,
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
@@ -514,7 +515,7 @@ struct RegionWorkerLoop<S> {
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
     /// Default memtable builder for each region.
-    memtable_builder: MemtableBuilderRef,
+    default_memtable_builder: MemtableBuilderRef,
     /// Background job scheduler.
     scheduler: SchedulerRef,
     /// Engine write buffer manager.

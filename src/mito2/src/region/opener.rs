@@ -53,7 +53,7 @@ use crate::wal::{EntryId, Wal};
 pub(crate) struct RegionOpener {
     region_id: RegionId,
     metadata: Option<RegionMetadata>,
-    memtable_builder: MemtableBuilderRef,
+    default_memtable_builder: MemtableBuilderRef,
     object_store_manager: ObjectStoreManagerRef,
     region_dir: String,
     scheduler: SchedulerRef,
@@ -69,7 +69,7 @@ impl RegionOpener {
     pub(crate) fn new(
         region_id: RegionId,
         region_dir: &str,
-        memtable_builder: MemtableBuilderRef,
+        default_memtable_builder: MemtableBuilderRef,
         object_store_manager: ObjectStoreManagerRef,
         scheduler: SchedulerRef,
         intermediate_manager: IntermediateManager,
@@ -77,7 +77,7 @@ impl RegionOpener {
         RegionOpener {
             region_id,
             metadata: None,
-            memtable_builder,
+            default_memtable_builder,
             object_store_manager,
             region_dir: normalize_dir(region_dir),
             scheduler,
@@ -175,7 +175,7 @@ impl RegionOpener {
         let part_duration = options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
-            self.memtable_builder.clone(),
+            self.default_memtable_builder.clone(),
             0,
             part_duration,
         ));
@@ -210,7 +210,7 @@ impl RegionOpener {
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
             time_provider,
-            memtable_builder: self.memtable_builder,
+            memtable_builder: self.default_memtable_builder,
         })
     }
 
@@ -282,7 +282,7 @@ impl RegionOpener {
         let part_duration = region_options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
-            self.memtable_builder.clone(),
+            self.default_memtable_builder.clone(),
             0,
             part_duration,
         ));
@@ -330,7 +330,7 @@ impl RegionOpener {
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
             time_provider,
-            memtable_builder: self.memtable_builder.clone(),
+            memtable_builder: self.default_memtable_builder.clone(),
         };
         Ok(Some(region))
     }
