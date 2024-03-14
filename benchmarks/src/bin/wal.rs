@@ -22,6 +22,7 @@ use benchmarks::wal::Region;
 use clap::{Parser, ValueEnum};
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
+use common_wal::config::kafka::common::BackoffConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig as KafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::options::{KafkaWalOptions, WalOptions};
@@ -35,6 +36,7 @@ use prometheus::{Encoder, TextEncoder};
 use rand::distributions::{Alphanumeric, DistString};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rskafka::client::partition::Compression;
 use rskafka::client::ClientBuilder;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
@@ -104,6 +106,26 @@ struct Args {
     #[clap(long, default_value_t = 20)]
     linger: u64,
 
+    /// The initial backoff delay of the kafka consumer.
+    #[clap(long, default_value_t = 10)]
+    backoff_init: u64,
+
+    /// The maximum backoff delay of the kafka consumer.
+    #[clap(long, default_value_t = 1000)]
+    backoff_max: u64,
+
+    /// The exponential backoff rate of the kafka consumer. Next back off = base * current backoff.
+    #[clap(long, default_value_t = 2)]
+    backoff_base: u32,
+
+    /// The deadline of backoff. The backoff ends if the total backoff delay reaches the deadline.
+    #[clap(long, default_value_t = 3000)]
+    backoff_deadline: u64,
+
+    /// The compression algorithm of kafka records.
+    #[clap(long, default_value = "no")]
+    compression: String,
+
     /// The seed of random number generators.
     #[clap(long, default_value_t = 42)]
     rng_seed: u64,
@@ -142,6 +164,11 @@ struct Config {
     num_scrapes: u32,
     max_batch_size: u64,
     linger: u64,
+    backoff_init: Duration,
+    backoff_max: Duration,
+    backoff_base: u32,
+    backoff_deadline: Duration,
+    compression: Compression,
     rng_seed: u64,
     workload: Workload,
     skip_read: bool,
@@ -310,6 +337,17 @@ impl Benchmarker {
     }
 }
 
+fn parse_compression(comp: &str) -> Compression {
+    match comp {
+        "no" => Compression::NoCompression,
+        "gzip" => Compression::Gzip,
+        "lz4" => Compression::Lz4,
+        "snappy" => Compression::Snappy,
+        "zstd" => Compression::Zstd,
+        _ => unreachable!(),
+    }
+}
+
 fn parse_workload(workload: &Workload) -> (usize, usize) {
     // Normally, a wal entry contains mutations of 5 rows and 4 cols.
     // The factors controls how a wal entry is inflated.
@@ -442,6 +480,11 @@ fn main() {
         num_scrapes: args.num_scrapes,
         max_batch_size: args.max_batch_size,
         linger: args.linger,
+        backoff_init: Duration::from_millis(args.backoff_init),
+        backoff_max: Duration::from_millis(args.backoff_max),
+        backoff_base: args.backoff_base,
+        backoff_deadline: Duration::from_millis(args.backoff_deadline),
+        compression: parse_compression(&args.compression),
         rng_seed: args.rng_seed,
         workload: args.workload,
         skip_read: args.skip_read,
@@ -502,6 +545,13 @@ fn main() {
                         broker_endpoints: cfg.bootstrap_brokers.clone(),
                         max_batch_size: ReadableSize::mb(cfg.max_batch_size),
                         linger: Duration::from_millis(cfg.linger),
+                        backoff: BackoffConfig {
+                            init: cfg.backoff_init,
+                            max: cfg.backoff_max,
+                            base: cfg.backoff_base,
+                            deadline: Some(cfg.backoff_deadline),
+                        },
+                        compression: cfg.compression,
                         ..Default::default()
                     };
                     let store = Arc::new(KafkaLogStore::try_new(&kafka_cfg).await.unwrap());
