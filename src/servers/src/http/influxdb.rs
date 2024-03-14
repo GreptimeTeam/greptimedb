@@ -15,14 +15,17 @@
 use std::collections::HashMap;
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
 use common_telemetry::tracing;
+use hyper::HeaderMap;
+use serde_json::Value;
 use session::context::QueryContextRef;
 
+use super::header::GREPTIME_DB_HEADER_METRICS;
 use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
@@ -93,9 +96,22 @@ pub async fn influxdb_write(
         .start_timer();
 
     let request = InfluxdbRequest { precision, lines };
-    handler.exec(request, ctx).await?;
+    let output = handler.exec(request, ctx).await?;
 
-    Ok((StatusCode::NO_CONTENT, ()))
+    let mut header_map = HeaderMap::new();
+    if output.meta.cost > 0 {
+        let mut map: HashMap<String, Value> = HashMap::new();
+        map.insert(
+            common_plugins::GREPTIME_EXEC_WRITE_COST.to_string(),
+            Value::from(output.meta.cost),
+        );
+        let _ = serde_json::to_string(&map)
+            .ok()
+            .and_then(|s| HeaderValue::from_str(&s).ok())
+            .and_then(|v| header_map.insert(&GREPTIME_DB_HEADER_METRICS, v));
+    }
+
+    Ok((StatusCode::NO_CONTENT, header_map))
 }
 
 fn parse_time_precision(value: &str) -> Result<Precision> {
