@@ -112,6 +112,7 @@ impl<'a> ParserContext<'a> {
         Ok(value)
     }
 
+    // TODO this method will substitute `parse_string_or_number` eventually
     fn parse_string_or_number_or_word(
         parser: &mut Parser,
         token: Token,
@@ -119,10 +120,10 @@ impl<'a> ParserContext<'a> {
         let value = match parser.next_token().token {
             Token::Number(n, _) => n,
             Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
-            Token::Word(w) => Self::parse_tql_word(Token::Word(w), parser).unwrap(),
+            Token::Word(w) => Self::parse_tql_word(Token::Word(w), parser)?,
             unexpected => {
                 return Err(ParserError::ParserError(format!(
-                    "Expect number or string TODO adjust message, but is {unexpected:?}"
+                    "Expect number, string or word, but is {unexpected:?}"
                 )));
             }
         };
@@ -133,29 +134,37 @@ impl<'a> ParserContext<'a> {
     fn parse_tql_word(w: Token, parser: &mut Parser) -> std::result::Result<String, ParserError> {
         let tokens = Self::collect_tokens(w, parser);
         let empty_df_schema = DFSchema::empty();
+        let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
 
         let expr = Parser::new(&GreptimeDbDialect {})
             .with_tokens(tokens)
             .parse_expr()
             .map_err(|err| {
-                ParserError::ParserError(format!("Expect number or string, but is {err:?}"))
+                ParserError::ParserError(format!("Failed to convert to expression: {err:?}"))
             })?;
 
         let sql_to_rel = SqlToRel::new(&DummyContextProvider {});
         let logical_expr = sql_to_rel
             .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
-            .unwrap();
+            .map_err(|err| {
+                ParserError::ParserError(format!("Failed to convert to logical expression {err:?}"))
+            })?;
 
-        let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
         let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema));
-        let simplified_expr = ExprSimplifier::new(info).simplify(logical_expr).unwrap();
+        let simplified_expr = ExprSimplifier::new(info)
+            .simplify(logical_expr)
+            .map_err(|err| {
+                ParserError::ParserError(format!("Failed to simplify expression {err:?}"))
+            })?;
 
-        let timestamp_nanos = match simplified_expr {
-            Expr::Literal(ScalarValue::TimestampNanosecond(Some(v), _)) => v,
-            _ => panic!(),
-        };
-
-        Ok((timestamp_nanos / 1_000_000_000).to_string())
+        match simplified_expr {
+            Expr::Literal(ScalarValue::TimestampNanosecond(v, _)) => v,
+            _ => None,
+        }
+        .map(|timestamp_nanos| (timestamp_nanos / 1_000_000_000).to_string())
+        .ok_or(ParserError::ParserError(format!(
+            "Failed to extract a timestamp value {simplified_expr:?}"
+        )))
     }
 
     fn collect_tokens(w: Token, parser: &mut Parser) -> Vec<Token> {
