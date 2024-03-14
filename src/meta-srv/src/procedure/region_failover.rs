@@ -28,7 +28,8 @@ use async_trait::async_trait;
 use common_meta::key::datanode_table::DatanodeTableKey;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::ResettableKvBackendRef;
-use common_meta::lock_key::{RegionLock, TableLock};
+use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
+use common_meta::table_name::TableName;
 use common_meta::{ClusterId, RegionIdent};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -44,7 +45,7 @@ use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use crate::error::{RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{self, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
@@ -164,7 +165,14 @@ impl RegionFailoverManager {
             return Ok(());
         };
 
-        if !self.table_exists(failed_region).await? {
+        let table_info = self
+            .table_metadata_manager
+            .table_info_manager()
+            .get(failed_region.table_id)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+
+        if table_info.is_none() {
             // The table could be dropped before the failure detector knows it. Then the region
             // failover is not needed.
             // Or the table could be renamed. But we will have a new region ident to detect failure.
@@ -178,7 +186,15 @@ impl RegionFailoverManager {
         }
 
         let context = self.create_context();
-        let procedure = RegionFailoverProcedure::new(failed_region.clone(), context);
+        // Safety: Check before.
+        let table_info = table_info.unwrap();
+        let TableName {
+            catalog_name,
+            schema_name,
+            ..
+        } = table_info.table_name();
+        let procedure =
+            RegionFailoverProcedure::new(catalog_name, schema_name, failed_region.clone(), context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
         info!("Starting region failover procedure {procedure_id} for region {failed_region:?}");
@@ -206,16 +222,6 @@ impl RegionFailoverManager {
         Ok(())
     }
 
-    async fn table_exists(&self, failed_region: &RegionIdent) -> Result<bool> {
-        Ok(self
-            .table_metadata_manager
-            .table_route_manager()
-            .get_region_distribution(failed_region.table_id)
-            .await
-            .context(TableMetadataManagerSnafu)?
-            .is_some())
-    }
-
     async fn failed_region_exists(&self, failed_region: &RegionIdent) -> Result<bool> {
         let table_id = failed_region.table_id;
         let datanode_id = failed_region.datanode_id;
@@ -238,10 +244,17 @@ impl RegionFailoverManager {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct LockMeta {
+    catalog: String,
+    schema: String,
+}
+
 /// A "Node" in the state machine of region failover procedure.
 /// Contains the current state and the data.
 #[derive(Serialize, Deserialize, Debug)]
 struct Node {
+    lock_meta: LockMeta,
     failed_region: RegionIdent,
     state: Box<dyn State>,
 }
@@ -330,9 +343,15 @@ pub struct RegionFailoverProcedure {
 impl RegionFailoverProcedure {
     const TYPE_NAME: &'static str = "metasrv-procedure::RegionFailover";
 
-    pub fn new(failed_region: RegionIdent, context: RegionFailoverContext) -> Self {
+    pub fn new(
+        catalog: String,
+        schema: String,
+        failed_region: RegionIdent,
+        context: RegionFailoverContext,
+    ) -> Self {
         let state = RegionFailoverStart::new();
         let node = Node {
+            lock_meta: LockMeta { catalog, schema },
             failed_region,
             state: Box::new(state),
         };
@@ -372,8 +391,9 @@ impl Procedure for RegionFailoverProcedure {
 
     fn lock_key(&self) -> LockKey {
         let region_ident = &self.node.failed_region;
-        // TODO(weny): acquires the catalog, schema read locks.
         let lock_key = vec![
+            CatalogLock::Read(&self.node.lock_meta.catalog).into(),
+            SchemaLock::read(&self.node.lock_meta.catalog, &self.node.lock_meta.catalog).into(),
             TableLock::Read(region_ident.table_id).into(),
             RegionLock::Write(RegionId::new(
                 region_ident.table_id,
@@ -568,6 +588,8 @@ mod tests {
         let failed_region = env.failed_region(1).await;
 
         let mut procedure = Box::new(RegionFailoverProcedure::new(
+            "greptime".into(),
+            "public".into(),
             failed_region.clone(),
             env.context.clone(),
         )) as BoxedProcedure;
@@ -671,7 +693,7 @@ mod tests {
 
         assert_eq!(
             procedure.dump().unwrap(),
-            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1,"engine":"mito2"},"state":{"region_failover_state":"RegionFailoverEnd"}}"#
+            r#"{"lock_meta":{"catalog":"greptime","schema":"public"},"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1,"engine":"mito2"},"state":{"region_failover_state":"RegionFailoverEnd"}}"#
         );
 
         // Verifies that the failed region (region 1) is moved from failed datanode (datanode 1) to the candidate datanode.
@@ -700,6 +722,10 @@ mod tests {
 
         let state = RegionFailoverStart::new();
         let node = Node {
+            lock_meta: LockMeta {
+                catalog: "greptime".into(),
+                schema: "public".into(),
+            },
             failed_region,
             state: Box::new(state),
         };
@@ -711,12 +737,12 @@ mod tests {
         let s = procedure.dump().unwrap();
         assert_eq!(
             s,
-            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1,"engine":"mito2"},"state":{"region_failover_state":"RegionFailoverStart","failover_candidate":null}}"#
+            r#"{"lock_meta":{"catalog":"greptime","schema":"public"},"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1,"engine":"mito2"},"state":{"region_failover_state":"RegionFailoverStart","failover_candidate":null}}"#,
         );
         let n: Node = serde_json::from_str(&s).unwrap();
         assert_eq!(
             format!("{n:?}"),
-            r#"Node { failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, table_id: 1, region_number: 1, engine: "mito2" }, state: RegionFailoverStart { failover_candidate: None } }"#
+            r#"Node { lock_meta: LockMeta { catalog: "greptime", schema: "public" }, failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, table_id: 1, region_number: 1, engine: "mito2" }, state: RegionFailoverStart { failover_candidate: None } }"#,
         );
     }
 
@@ -765,6 +791,10 @@ mod tests {
 
         let state = RegionFailoverStart::new();
         let node = Node {
+            lock_meta: LockMeta {
+                catalog: "greptime".into(),
+                schema: "public".into(),
+            },
             failed_region,
             state: Box::new(state),
         };

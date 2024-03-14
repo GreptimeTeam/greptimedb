@@ -346,6 +346,8 @@ async fn run_region_failover_procedure(
     let meta_srv = &cluster.meta_srv;
     let procedure_manager = meta_srv.procedure_manager();
     let procedure = RegionFailoverProcedure::new(
+        "greptime".into(),
+        "public".into(),
         failed_region.clone(),
         RegionFailoverContext {
             region_lease_secs: 10,
