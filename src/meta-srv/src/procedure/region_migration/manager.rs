@@ -18,9 +18,11 @@ use std::fmt::Display;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
+use common_meta::table_name::TableName;
 use common_meta::ClusterId;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info};
@@ -90,26 +92,6 @@ impl Display for RegionMigrationProcedureTask {
             "cluster: {}, region: {}, from_peer: {}, to_peer: {}",
             self.cluster_id, self.region_id, self.from_peer, self.to_peer
         )
-    }
-}
-
-impl From<RegionMigrationProcedureTask> for PersistentContext {
-    fn from(
-        RegionMigrationProcedureTask {
-            cluster_id,
-            region_id,
-            from_peer,
-            to_peer,
-            replay_timeout,
-        }: RegionMigrationProcedureTask,
-    ) -> Self {
-        PersistentContext {
-            cluster_id,
-            from_peer,
-            to_peer,
-            region_id,
-            replay_timeout,
-        }
     }
 }
 
@@ -184,6 +166,22 @@ impl RegionMigrationManager {
             .context(error::TableRouteNotFoundSnafu {
                 table_id: region_id.table_id(),
             })?;
+
+        Ok(table_route)
+    }
+
+    async fn retrieve_table_info(&self, region_id: RegionId) -> Result<TableInfoValue> {
+        let table_route = self
+            .context_factory
+            .table_metadata_manager
+            .table_info_manager()
+            .get(region_id.table_id())
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .context(error::TableInfoNotFoundSnafu {
+                table_id: region_id.table_id(),
+            })?
+            .into_inner();
 
         Ok(table_route)
     }
@@ -279,8 +277,31 @@ impl RegionMigrationManager {
 
         self.verify_region_leader_peer(&region_route, &task)?;
 
-        let procedure =
-            RegionMigrationProcedure::new(task.clone().into(), self.context_factory.clone());
+        let table_info = self.retrieve_table_info(region_id).await?;
+        let TableName {
+            catalog_name,
+            schema_name,
+            ..
+        } = table_info.table_name();
+        let RegionMigrationProcedureTask {
+            cluster_id,
+            region_id,
+            from_peer,
+            to_peer,
+            replay_timeout,
+        } = task.clone();
+        let procedure = RegionMigrationProcedure::new(
+            PersistentContext {
+                catalog: catalog_name,
+                schema: schema_name,
+                cluster_id,
+                region_id,
+                from_peer,
+                to_peer,
+                replay_timeout,
+            },
+            self.context_factory.clone(),
+        );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
