@@ -6633,6 +6633,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
 
 [[package]]
+name = "permutation"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df202b0b0f5b8e389955afd5f27b007b00fb948162953f1db9c70d2c7e3157d7"
+
+[[package]]
 name = "pest"
 version = "2.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9212,6 +9218,7 @@ dependencies = [
  "opensrv-mysql",
  "opentelemetry-proto 0.3.0",
  "parking_lot 0.12.1",
+ "permutation",
  "pgwire",
  "pin-project",
  "postgres-types",

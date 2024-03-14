@@ -120,6 +120,7 @@ criterion = "0.4"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
+permutation = "0.4"
 rand.workspace = true
 script = { workspace = true, features = ["python"] }
 serde_json.workspace = true

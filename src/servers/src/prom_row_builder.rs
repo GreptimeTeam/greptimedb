@@ -28,7 +28,7 @@ use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
 
 /// [TablesBuilder] serves as an intermediate container to build [RowInsertRequests].
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(crate) struct TablesBuilder {
     tables: HashMap<String, TableBuilder>,
 }
@@ -68,6 +68,7 @@ impl TablesBuilder {
 }
 
 /// Builder for one table.
+#[derive(Debug)]
 pub(crate) struct TableBuilder {
     /// Column schemas.
     schema: Vec<ColumnSchema>,
