@@ -13,8 +13,6 @@
 // limitations under the License.
 
 pub(crate) mod downgrade_leader_region;
-// TODO(weny): remove it.
-#[allow(dead_code)]
 pub(crate) mod manager;
 pub(crate) mod migration_abort;
 pub(crate) mod migration_end;
@@ -185,8 +183,6 @@ impl ContextFactory for DefaultContextFactory {
     }
 }
 
-// TODO(weny): remove it.
-#[allow(dead_code)]
 /// The context of procedure execution.
 pub struct Context {
     persistent_ctx: PersistentContext,
@@ -368,7 +364,6 @@ pub struct RegionMigrationProcedure {
     context: Context,
 }
 
-// TODO(weny): remove it.
 #[allow(dead_code)]
 impl RegionMigrationProcedure {
     const TYPE_NAME: &'static str = "metasrv-procedure::RegionMigration";

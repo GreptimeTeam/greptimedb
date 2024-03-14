@@ -297,16 +297,6 @@ pub(crate) struct ProcedureMigrationTestSuite {
 pub(crate) type BeforeTest =
     Arc<dyn Fn(&mut ProcedureMigrationTestSuite) -> BoxFuture<'_, ()> + Send + Sync>;
 
-/// Custom assertion.
-pub(crate) type CustomAssertion = Arc<
-    dyn Fn(
-            &mut ProcedureMigrationTestSuite,
-            Result<(Box<dyn State>, Status)>,
-        ) -> BoxFuture<'_, Result<()>>
-        + Send
-        + Sync,
->;
-
 /// State assertion function.
 pub(crate) type StateAssertion = Arc<dyn Fn(&dyn State) + Send + Sync>;
 
@@ -316,14 +306,11 @@ pub(crate) type StatusAssertion = Arc<dyn Fn(Status) + Send + Sync>;
 /// Error assertion function.
 pub(crate) type ErrorAssertion = Arc<dyn Fn(Error) + Send + Sync>;
 
-// TODO(weny): Remove it.
-#[allow(dead_code)]
 /// The type of assertion.
 #[derive(Clone)]
 pub(crate) enum Assertion {
     Simple(StateAssertion, StatusAssertion),
     Error(ErrorAssertion),
-    Custom(CustomAssertion),
 }
 
 impl Assertion {
@@ -383,9 +370,6 @@ impl ProcedureMigrationTestSuite {
             Assertion::Error(error_assert) => {
                 let error = result.unwrap_err();
                 error_assert(error);
-            }
-            Assertion::Custom(assert_fn) => {
-                assert_fn(self, result).await?;
             }
         }
 
