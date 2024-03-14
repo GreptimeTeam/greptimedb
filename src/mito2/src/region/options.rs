@@ -94,6 +94,14 @@ pub enum CompactionOptions {
     Twcs(TwcsOptions),
 }
 
+impl CompactionOptions {
+    pub(crate) fn time_window(&self) -> Option<Duration> {
+        match self {
+            CompactionOptions::Twcs(opts) => opts.time_window,
+        }
+    }
+}
+
 impl Default for CompactionOptions {
     fn default() -> Self {
         Self::Twcs(TwcsOptions::default())

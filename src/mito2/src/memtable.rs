@@ -26,6 +26,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::key_values::KeyValue;
 pub use crate::memtable::key_values::KeyValues;
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::metrics::WRITE_BUFFER_BYTES;
@@ -33,6 +34,7 @@ use crate::read::Batch;
 
 pub mod key_values;
 pub mod merge_tree;
+pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;
 
@@ -82,8 +84,11 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns the id of this memtable.
     fn id(&self) -> MemtableId;
 
-    /// Write key values into the memtable.
+    /// Writes key values into the memtable.
     fn write(&self, kvs: &KeyValues) -> Result<()>;
+
+    /// Writes one key value pair into the memtable.
+    fn write_one(&self, key_value: KeyValue) -> Result<()>;
 
     /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.
