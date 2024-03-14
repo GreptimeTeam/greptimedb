@@ -79,10 +79,9 @@ Read more on docs:
 
 Check the prerequisite:
 
-* C/C++ toolchain: This is available as `build-essential` on Ubuntu and similar name on other platforms.
-* Rust toolchain: It's recommend to use [`rustup`](https://rustup.rs/) to install the toolchain.
-* Protobuf compiler: Read the [installation instructions](https://grpc.io/docs/protoc-installation/) of Protobuf. **The `protoc` version needs to be >= 3.15.**
-* Python dev toolchain (optional): Required only if built with PyO3 backend. More detail for compiling with PyO3 can be found in [PyO3's documentation](https://pyo3.rs/v0.18.1/building_and_distribution#configuring-the-python-version).
+* [Rust toolchain](https://www.rust-lang.org/tools/install) (nightly)
+* [Protobuf compiler](https://grpc.io/docs/protoc-installation/) (>= 3.15)
+* Python toolchain (optional): Required only if built with PyO3 backend. More detail for compiling with PyO3 can be found in its [documentation](https://pyo3.rs/v0.18.1/building_and_distribution#configuring-the-python-version).
 
 Build GreptimeDB binary:
 
