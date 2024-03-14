@@ -423,6 +423,13 @@ mod tests {
     }
 
     #[test]
+    fn test_unknown_memtable_type() {
+        let map = make_map(&[("memtable.type", "no_such_memtable")]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
     fn test_with_all() {
         let wal_options = WalOptions::Kafka(KafkaWalOptions {
             topic: "test_topic".to_string(),
