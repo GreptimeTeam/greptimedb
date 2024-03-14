@@ -53,10 +53,9 @@ pub enum MemtableConfig {
     TimeSeries,
 }
 
-// TODO(yingwen): 1. Use time series as default. 2. sanitize dedup
 impl Default for MemtableConfig {
     fn default() -> Self {
-        Self::Experimental(MergeTreeConfig::default())
+        Self::TimeSeries
     }
 }
 

@@ -68,6 +68,10 @@ pub struct MergeTreeConfig {
     /// Number of rows to freeze a data part.
     pub data_freeze_threshold: usize,
     /// Whether to delete duplicates rows.
+    ///
+    /// Skips deserializing as it should be determined by whether the
+    /// table is append only.
+    #[serde(skip_deserializing)]
     pub dedup: bool,
     /// Total bytes of dictionary to keep in fork.
     pub fork_dictionary_bytes: ReadableSize,
@@ -538,5 +542,22 @@ mod tests {
             let read = collect_iter_timestamps(iter);
             assert_eq!(timestamps, read);
         }
+    }
+
+    #[test]
+    fn test_deserialize_config() {
+        let config = MergeTreeConfig {
+            dedup: false,
+            ..Default::default()
+        };
+        // Creates a json with dedup = false.
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(
+            json,
+            r#"{"index_max_keys_per_shard":8192,"data_freeze_threshold":131072,"dedup":false,"fork_dictionary_bytes":"1GiB"}"#
+        );
+        let config: MergeTreeConfig = serde_json::from_str(&json).unwrap();
+        assert!(config.dedup);
+        assert_eq!(MergeTreeConfig::default(), config);
     }
 }
