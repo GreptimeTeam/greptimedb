@@ -32,7 +32,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
-use crate::memtable::MemtableId;
+use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::OnFailure;
 use crate::sst::file_purger::FilePurgerRef;
@@ -83,9 +83,10 @@ pub(crate) struct MitoRegion {
     last_flush_millis: AtomicI64,
     /// Whether the region is writable.
     writable: AtomicBool,
-
     /// Provider to get current time.
     time_provider: TimeProviderRef,
+    /// Memtable builder for the region.
+    pub(crate) memtable_builder: MemtableBuilderRef,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;

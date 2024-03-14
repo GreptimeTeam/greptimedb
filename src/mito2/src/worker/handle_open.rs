@@ -62,6 +62,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         info!("Try to open region {}", region_id);
 
         // Open region from specific region dir.
+        // TODO(yingwen): Create memtable builder by type.
         let region = RegionOpener::new(
             region_id,
             &request.region_dir,

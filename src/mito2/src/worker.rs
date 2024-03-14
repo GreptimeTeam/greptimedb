@@ -513,7 +513,7 @@ struct RegionWorkerLoop<S> {
     object_store_manager: ObjectStoreManagerRef,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
-    /// Memtable builder for each region.
+    /// Default memtable builder for each region.
     memtable_builder: MemtableBuilderRef,
     /// Background job scheduler.
     scheduler: SchedulerRef,

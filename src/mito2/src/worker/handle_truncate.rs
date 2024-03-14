@@ -55,7 +55,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region.version_control.truncate(
             truncated_entry_id,
             truncated_sequence,
-            &self.memtable_builder,
+            &region.memtable_builder,
         );
 
         // Make all data obsolete.

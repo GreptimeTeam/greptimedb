@@ -175,7 +175,7 @@ impl RegionOpener {
         let part_duration = options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
-            self.memtable_builder,
+            self.memtable_builder.clone(),
             0,
             part_duration,
         ));
@@ -210,6 +210,7 @@ impl RegionOpener {
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
             time_provider,
+            memtable_builder: self.memtable_builder,
         })
     }
 
@@ -329,6 +330,7 @@ impl RegionOpener {
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
             time_provider,
+            memtable_builder: self.memtable_builder.clone(),
         };
         Ok(Some(region))
     }
