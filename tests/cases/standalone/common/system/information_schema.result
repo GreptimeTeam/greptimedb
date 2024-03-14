@@ -447,7 +447,7 @@ Affected Rows: 0
 
 drop schema my_db;
 
-Error: 1001(Unsupported), SQL statement is not supported: drop schema my_db;, keyword: schema
+Error: 1001(Unsupported), Not supported: Drop Database
 
 use information_schema;
 
