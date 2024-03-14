@@ -49,7 +49,7 @@ pub struct RegionOptions {
     /// Index options.
     pub index_options: IndexOptions,
     /// Memtable options.
-    pub memtable: MemtableOptions,
+    pub memtable: Option<MemtableOptions>,
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -80,9 +80,9 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
 
         let index_options: IndexOptions = serde_json::from_str(&json).context(JsonOptionsSnafu)?;
         let memtable = if validate_enum_options(options_map, "memtable.type")? {
-            serde_json::from_str(&json).context(JsonOptionsSnafu)?
+            Some(serde_json::from_str(&json).context(JsonOptionsSnafu)?)
         } else {
-            MemtableOptions::default()
+            None
         };
 
         Ok(RegionOptions {
@@ -281,13 +281,11 @@ fn validate_enum_options(
 }
 
 /// Options for region level memtable.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "memtable.type", rename_all = "snake_case")]
 pub enum MemtableOptions {
-    #[default]
     TimeSeries,
     Experimental,
-    Unknown,
 }
 
 #[cfg(test)]
@@ -409,13 +407,16 @@ mod tests {
     fn test_with_memtable() {
         let map = make_map(&[("memtable.type", "time_series")]);
         let options = RegionOptions::try_from(&map).unwrap();
-        let expect = RegionOptions::default();
+        let expect = RegionOptions {
+            memtable: Some(MemtableOptions::TimeSeries),
+            ..Default::default()
+        };
         assert_eq!(expect, options);
 
         let map = make_map(&[("memtable.type", "experimental")]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
-            memtable: MemtableOptions::Experimental,
+            memtable: Some(MemtableOptions::Experimental),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -457,7 +458,7 @@ mod tests {
                     segment_row_count: 512,
                 },
             },
-            memtable: MemtableOptions::Experimental,
+            memtable: Some(MemtableOptions::Experimental),
         };
         assert_eq!(expect, options);
     }
