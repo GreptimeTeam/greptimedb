@@ -46,6 +46,8 @@ use crate::memtable::{
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
 const DICTIONARY_SIZE_FACTOR: u64 = 8;
+pub(crate) const DEFAULT_MAX_KEYS_PER_SHARD: usize = 8192;
+pub(crate) const DEFAULT_FREEZE_THRESHOLD: usize = 131072;
 
 /// Id of a shard, only unique inside a partition.
 type ShardId = u32;

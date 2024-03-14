@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
@@ -28,6 +29,7 @@ use snafu::{ensure, ResultExt};
 use store_api::storage::ColumnId;
 
 use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
+use crate::memtable::merge_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 
@@ -99,7 +101,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
 /// Options for compactions
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "compaction.type")]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum CompactionOptions {
     /// Time window compaction strategy.
     #[serde(with = "prefix_twcs")]
@@ -218,6 +220,42 @@ impl Default for InvertedIndexOptions {
     }
 }
 
+/// Options for region level memtable.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "memtable.type", rename_all = "snake_case")]
+pub enum MemtableOptions {
+    TimeSeries,
+    #[serde(with = "prefix_experimental")]
+    Experimental(ExperimentalOptions),
+}
+
+with_prefix!(prefix_experimental "memtable.experimental.");
+
+/// Experimental memtable options.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ExperimentalOptions {
+    /// Max keys in an index shard.
+    #[serde_as(as = "DisplayFromStr")]
+    pub index_max_keys_per_shard: usize,
+    /// Number of rows to freeze a data part.
+    #[serde_as(as = "DisplayFromStr")]
+    pub data_freeze_threshold: usize,
+    /// Total bytes of dictionary to keep in fork.
+    pub fork_dictionary_bytes: ReadableSize,
+}
+
+impl Default for ExperimentalOptions {
+    fn default() -> Self {
+        Self {
+            index_max_keys_per_shard: DEFAULT_MAX_KEYS_PER_SHARD,
+            data_freeze_threshold: DEFAULT_FREEZE_THRESHOLD,
+            fork_dictionary_bytes: ReadableSize::mb(64),
+        }
+    }
+}
+
 fn deserialize_ignore_column_ids<'de, D>(deserializer: D) -> Result<Vec<ColumnId>, D::Error>
 where
     D: Deserializer<'de>,
@@ -233,17 +271,16 @@ where
 
 /// Converts the `options` map to a json object.
 ///
-/// Converts all key-values to lowercase and replaces "null" strings by `null` json values.
+/// Replaces "null" strings by `null` json values.
 fn options_map_to_value(options: &HashMap<String, String>) -> Value {
     let map = options
         .iter()
         .map(|(key, value)| {
-            let (key, value) = (key.to_lowercase(), value.to_lowercase());
-
-            if value == "null" {
-                (key, Value::Null)
+            // Only convert the key to lowercase.
+            if value.eq_ignore_ascii_case("null") {
+                (key.to_string(), Value::Null)
             } else {
-                (key, Value::from(value))
+                (key.to_string(), Value::from(value.to_string()))
             }
         })
         .collect();
@@ -278,14 +315,6 @@ fn validate_enum_options(
     );
 
     Ok(has_tag)
-}
-
-/// Options for region level memtable.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "memtable.type", rename_all = "snake_case")]
-pub enum MemtableOptions {
-    TimeSeries,
-    Experimental,
 }
 
 #[cfg(test)]
@@ -326,7 +355,7 @@ mod tests {
         let map = make_map(&[("storage", "S3")]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
-            storage: Some("s3".to_string()),
+            storage: Some("S3".to_string()),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -416,7 +445,7 @@ mod tests {
         let map = make_map(&[("memtable.type", "experimental")]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
-            memtable: Some(MemtableOptions::Experimental),
+            memtable: Some(MemtableOptions::Experimental(ExperimentalOptions::default())),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -448,6 +477,9 @@ mod tests {
                 &serde_json::to_string(&wal_options).unwrap(),
             ),
             ("memtable.type", "experimental"),
+            ("memtable.experimental.index_max_keys_per_shard", "2048"),
+            ("memtable.experimental.data_freeze_threshold", "2048"),
+            ("memtable.experimental.fork_dictionary_bytes", "128M"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -457,7 +489,7 @@ mod tests {
                 max_inactive_window_files: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
             }),
-            storage: Some("s3".to_string()),
+            storage: Some("S3".to_string()),
             wal_options,
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
@@ -465,7 +497,11 @@ mod tests {
                     segment_row_count: 512,
                 },
             },
-            memtable: Some(MemtableOptions::Experimental),
+            memtable: Some(MemtableOptions::Experimental(ExperimentalOptions {
+                index_max_keys_per_shard: 2048,
+                data_freeze_threshold: 2048,
+                fork_dictionary_bytes: ReadableSize::mb(128),
+            })),
         };
         assert_eq!(expect, options);
     }

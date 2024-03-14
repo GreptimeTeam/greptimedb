@@ -234,8 +234,13 @@ impl MemtableBuilderProvider {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
             )),
-            Some(MemtableOptions::Experimental) => Arc::new(MergeTreeMemtableBuilder::new(
-                MergeTreeConfig::default(),
+            Some(MemtableOptions::Experimental(opts)) => Arc::new(MergeTreeMemtableBuilder::new(
+                MergeTreeConfig {
+                    index_max_keys_per_shard: opts.index_max_keys_per_shard,
+                    data_freeze_threshold: opts.data_freeze_threshold,
+                    fork_dictionary_bytes: opts.fork_dictionary_bytes,
+                    ..Default::default()
+                },
                 self.write_buffer_manager.clone(),
             )),
             None => self.default_memtable_builder.clone(),
