@@ -112,8 +112,10 @@ pub struct Arrangement {
     /// The first key is always `now` which include consolidated updates from past, representing the current state of arrangement
     ///
     /// Note that for a given time and key, there might be a bunch of updates and they should be applied in order
-    /// And for consolidated batch(i.e. btach representing now), there should be only one update for each key with `diff==1``
-    spine: BTreeMap<Timestamp, BTreeMap<Row, SmallVec<[DiffRow; 4]>>>,
+    /// And for consolidated batch(i.e. btach representing now), there should be only one update for each key with `diff==1`
+    ///
+    /// And since most time a key gots updated by first delete then insert, small vec with size of 2 make sense
+    spine: BTreeMap<Timestamp, BTreeMap<Row, SmallVec<[DiffRow; 2]>>>,
     /// if set to false, will not update current value of the arrangement, useful for case like `map -> arrange -> reduce`
     full_arrangement: bool,
     /// flag to mark that this arrangement haven't been written to, so that it can be cloned and shared
@@ -175,7 +177,7 @@ impl Arrangement {
             return Ok(());
         }
         // else we update them into current key value pairs
-        let mut compacted_batch: BTreeMap<Row, SmallVec<[DiffRow; 4]>> = Default::default();
+        let mut compacted_batch: BTreeMap<Row, SmallVec<[DiffRow; 2]>> = Default::default();
 
         for (_, batch) in should_compact {
             for (key, updates) in batch {
