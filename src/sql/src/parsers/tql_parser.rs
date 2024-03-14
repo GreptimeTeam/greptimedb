@@ -177,55 +177,30 @@ impl<'a> ParserContext<'a> {
         tokens
     }
 
+    pub fn is_word_or_eof(parser: &mut Parser) -> bool {
+        matches!(parser.peek_token().token, Token::Word(_) | Token::EOF)
+    }
+
     fn parse_tql_query(
         parser: &mut Parser,
         sql: &str,
-        delimiter: &str,
+        _delimiter: &str,
     ) -> std::result::Result<String, ParserError> {
-        let index = sql.to_uppercase().find(delimiter);
-
-        if let Some(index) = index {
-            let index = index + delimiter.len() + 1;
-            if index >= sql.len() {
-                return Err(ParserError::ParserError("empty TQL query".to_string()));
-            }
-
-            let query = if delimiter == ")" {
-                match Self::find_last_balanced_bracket(sql) {
-                    Some(to) => &sql[(to + 1)..],
-                    None => &sql[index..],
-                }
-            } else {
-                &sql[index..]
-            };
-
-            while parser.next_token() != Token::EOF {
-                // consume all tokens
-                // TODO(dennis): supports multi TQL statements separated by ';'?
-            }
-
-            // remove the last ';' or tailing space if exists
-            Ok(query.trim().trim_end_matches(';').to_string())
-        } else {
-            Err(ParserError::ParserError(format!("{delimiter} not found",)))
+        while !Self::is_word_or_eof(parser) {
+            let _ = parser.next_token();
         }
-    }
-
-    fn find_last_balanced_bracket(sql: &str) -> Option<usize> {
-        let mut balance = 0;
-        for (index, c) in sql.char_indices() {
-            match c {
-                '(' => balance += 1,
-                ')' => {
-                    balance -= 1;
-                    if balance == 0 {
-                        return Some(index);
-                    }
-                }
-                _ => {}
-            }
+        let index = parser.next_token().location.column as usize;
+        if index == 0 {
+            return Err(ParserError::ParserError("empty TQL query".to_string()));
         }
-        None
+
+        let query = &sql[index - 1..];
+        while parser.next_token() != Token::EOF {
+            // consume all tokens
+            // TODO(dennis): supports multi TQL statements separated by ';'?
+        }
+        // remove the last ';' or tailing space if exists
+        Ok(query.trim().trim_end_matches(';').to_string())
     }
 
     fn parse_tql_explain(&mut self) -> Result<Statement> {
@@ -325,6 +300,7 @@ mod tests {
     #[test]
     fn test_parse_tql_eval_with_functions() {
         let sql = "TQL EVAL (now() - '10 minutes'::interval, now(), '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -336,7 +312,6 @@ mod tests {
             .unwrap_or(0);
 
         let statement = result.remove(0);
-
         match statement {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.start, (assert_time - 600).to_string());
@@ -532,6 +507,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tql_with_whitespaces() {
+        let sql = "TQL EVAL (0, 30, '10s')           ,       data + (1 < bool 2);";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        match statement {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "30");
+                assert_eq!(eval.step, "10s");
+                assert_eq!(eval.query, "data + (1 < bool 2)");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn test_parse_tql_error() {
         // Invalid duration
         let sql = "TQL EVAL (1676887657, 1676887659, 1m) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
@@ -546,5 +541,12 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         assert!(result.output_msg().contains("Expected ,, found: )"));
+
+        // empty TQL query
+        let sql = "TQL EVAL (0, 30, '10s')";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+        assert!(result.output_msg().contains("empty TQL query"));
     }
 }
