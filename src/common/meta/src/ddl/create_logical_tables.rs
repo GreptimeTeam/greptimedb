@@ -36,7 +36,7 @@ use crate::ddl::DdlContext;
 use crate::error::{Result, TableAlreadyExistsSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
-use crate::lock_key::{TableLock, TableNameLock};
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
@@ -307,8 +307,15 @@ impl Procedure for CreateLogicalTablesProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        let mut lock_key = Vec::with_capacity(1 + self.creator.data.tasks.len());
+        // CatalogLock, SchemaLock,
+        // TableLock
+        // TableNameLock(s)
+        let mut lock_key = Vec::with_capacity(2 + 1 + self.creator.data.tasks.len());
+        let table_ref = self.creator.data.tasks[0].table_ref();
+        lock_key.push(CatalogLock::Read(table_ref.catalog).into());
+        lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());
         lock_key.push(TableLock::Write(self.creator.data.physical_table_id()).into());
+
         for task in &self.creator.data.tasks {
             lock_key.push(
                 TableNameLock::new(
