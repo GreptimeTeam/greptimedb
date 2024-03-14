@@ -271,13 +271,6 @@ pub enum Error {
     #[snafu(display("Not found influx http authorization info"))]
     NotFoundInfluxAuth {},
 
-    #[snafu(display("Invalid visibility ASCII chars"))]
-    InvisibleASCII {
-        #[snafu(source)]
-        error: hyper::header::ToStrError,
-        location: Location,
-    },
-
     #[snafu(display("Unsupported http auth scheme, name: {}", name))]
     UnsupportedAuthScheme { name: String },
 
@@ -309,13 +302,6 @@ pub enum Error {
     InvalidUtf8Value {
         #[snafu(source)]
         error: FromUtf8Error,
-        location: Location,
-    },
-
-    #[snafu(display("Error decoding gzip stream"))]
-    InvalidGzip {
-        #[snafu(source)]
-        error: std::io::Error,
         location: Location,
     },
 
@@ -551,10 +537,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
 
-            InvalidUtf8Value { .. }
-            | InvisibleASCII { .. }
-            | InvalidFlushArgument { .. }
-            | InvalidGzip { .. } => StatusCode::InvalidArguments,
+            InvalidUtf8Value { .. } | InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
             ReplacePreparedStmtParams { source, .. }
             | GetPreparedStmtParams { source, .. }

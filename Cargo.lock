@@ -9193,7 +9193,6 @@ dependencies = [
  "datatypes",
  "derive_builder 0.12.0",
  "digest",
- "flate2",
  "futures",
  "hashbrown 0.14.3",
  "headers",
