@@ -38,6 +38,7 @@ use opentelemetry_proto::tonic::collector::metrics::v1::{
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
+use serde_json::Value;
 use session::context::QueryContextRef;
 
 use crate::error::Result;
@@ -84,6 +85,7 @@ pub trait OpentsdbProtocolHandler {
 pub struct PromStoreResponse {
     pub content_type: String,
     pub content_encoding: String,
+    pub resp_metrics: HashMap<String, Value>,
     pub body: Vec<u8>,
 }
 
@@ -95,7 +97,7 @@ pub trait PromStoreProtocolHandler {
         request: WriteRequest,
         ctx: QueryContextRef,
         with_metric_engine: bool,
-    ) -> Result<()>;
+    ) -> Result<Output>;
 
     /// Handling prometheus remote write requests
     async fn write_fast(
@@ -103,7 +105,7 @@ pub trait PromStoreProtocolHandler {
         request: RowInsertRequests,
         ctx: QueryContextRef,
         with_metric_engine: bool,
-    ) -> Result<()>;
+    ) -> Result<Output>;
 
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;

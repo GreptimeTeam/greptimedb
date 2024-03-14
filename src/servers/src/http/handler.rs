@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -23,18 +22,17 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_plugins::{GREPTIME_EXEC_PREFIX, GREPTIME_EXEC_WRITE_COST};
-use common_query::physical_plan::PhysicalPlan;
+use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
-use datafusion::physical_plan::metrics::MetricValue;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::QueryContextRef;
 
+use super::header::collect_plan_metrics;
 use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
@@ -198,42 +196,6 @@ pub async fn from_output(
         .collect();
 
     Ok((results, merge_map))
-}
-
-fn collect_into_maps(name: &str, value: u64, maps: &mut [&mut HashMap<String, u64>]) {
-    if name.starts_with(GREPTIME_EXEC_PREFIX) && value > 0 {
-        maps.iter_mut().for_each(|map| {
-            map.entry(name.to_string())
-                .and_modify(|v| *v += value)
-                .or_insert(value);
-        });
-    }
-}
-
-pub fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, maps: &mut [&mut HashMap<String, u64>]) {
-    if let Some(m) = plan.metrics() {
-        m.iter().for_each(|m| match m.value() {
-            MetricValue::Count { name, count } => {
-                collect_into_maps(name, count.value() as u64, maps);
-            }
-            MetricValue::Gauge { name, gauge } => {
-                collect_into_maps(name, gauge.value() as u64, maps);
-            }
-            MetricValue::Time { name, time } => {
-                if name.starts_with(GREPTIME_EXEC_PREFIX) {
-                    // override
-                    maps.iter_mut().for_each(|map| {
-                        map.insert(name.to_string(), time.value() as u64);
-                    });
-                }
-            }
-            _ => {}
-        });
-    }
-
-    for c in plan.children() {
-        collect_plan_metrics(c, maps);
-    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]

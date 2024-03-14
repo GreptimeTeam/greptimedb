@@ -17,14 +17,14 @@ use std::sync::Arc;
 use api::prom_store::remote::{ReadRequest, WriteRequest};
 use api::v1::RowInsertRequests;
 use axum::extract::{Query, RawBody, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Extension;
 use bytes::Bytes;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
-use hyper::Body;
+use hyper::{Body, HeaderMap};
 use lazy_static::lazy_static;
 use object_pool::Pool;
 use prost::Message;
@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 
+use super::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::error::{self, Result, UnexpectedPhysicalTableSnafu};
 use crate::prom_store::snappy_decompress;
 use crate::proto::PromWriteRequest;
@@ -68,7 +69,7 @@ pub async fn route_write_without_metric_engine(
     Query(params): Query<DatabaseQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
-) -> Result<(StatusCode, ())> {
+) -> Result<impl IntoResponse> {
     let db = params.db.clone().unwrap_or_default();
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
@@ -80,8 +81,11 @@ pub async fn route_write_without_metric_engine(
         return UnexpectedPhysicalTableSnafu {}.fail();
     }
 
-    handler.write(request, query_ctx, false).await?;
-    Ok((StatusCode::NO_CONTENT, ()))
+    let output = handler.write(request, query_ctx, false).await?;
+    Ok((
+        StatusCode::NO_CONTENT,
+        write_cost_header_map(output.meta.cost),
+    ))
 }
 
 #[axum_macros::debug_handler]
@@ -94,7 +98,7 @@ pub async fn remote_write(
     Query(params): Query<DatabaseQuery>,
     Extension(mut query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
-) -> Result<(StatusCode, ())> {
+) -> Result<impl IntoResponse> {
     let db = params.db.clone().unwrap_or_default();
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
@@ -108,20 +112,35 @@ pub async fn remote_write(
         query_ctx = Arc::new(new_query_ctx);
     }
 
-    handler.write_fast(request, query_ctx, true).await?;
-    Ok((StatusCode::NO_CONTENT, ()))
+    let output = handler.write_fast(request, query_ctx, true).await?;
+    Ok((
+        StatusCode::NO_CONTENT,
+        write_cost_header_map(output.meta.cost),
+    ))
 }
 
 impl IntoResponse for PromStoreResponse {
     fn into_response(self) -> axum::response::Response {
-        (
-            [
-                (header::CONTENT_TYPE, self.content_type),
-                (header::CONTENT_ENCODING, self.content_encoding),
-            ],
-            self.body,
-        )
-            .into_response()
+        let mut header_map = HeaderMap::new();
+        header_map.insert(
+            &header::CONTENT_TYPE,
+            HeaderValue::from_str(&self.content_type).unwrap(),
+        );
+        header_map.insert(
+            &header::CONTENT_ENCODING,
+            HeaderValue::from_str(&self.content_encoding).unwrap(),
+        );
+
+        let metrics = if self.resp_metrics.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&self.resp_metrics).ok()
+        };
+        if let Some(m) = metrics.and_then(|m| HeaderValue::from_str(&m).ok()) {
+            header_map.insert(&GREPTIME_DB_HEADER_METRICS, m);
+        }
+
+        (header_map, self.body).into_response()
     }
 }
 

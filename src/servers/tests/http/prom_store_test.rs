@@ -57,13 +57,13 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl PromStoreProtocolHandler for DummyInstance {
-    async fn write(&self, request: WriteRequest, ctx: QueryContextRef, _: bool) -> Result<()> {
+    async fn write(&self, request: WriteRequest, ctx: QueryContextRef, _: bool) -> Result<Output> {
         let _ = self
             .tx
             .send((ctx.current_schema().to_owned(), request.encode_to_vec()))
             .await;
 
-        Ok(())
+        Ok(Output::new_with_affected_rows(0))
     }
 
     async fn write_fast(
@@ -71,8 +71,8 @@ impl PromStoreProtocolHandler for DummyInstance {
         _request: RowInsertRequests,
         _ctx: QueryContextRef,
         _with_metric_engine: bool,
-    ) -> Result<()> {
-        Ok(())
+    ) -> Result<Output> {
+        Ok(Output::new_with_affected_rows(0))
     }
 
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse> {
@@ -90,6 +90,7 @@ impl PromStoreProtocolHandler for DummyInstance {
         Ok(PromStoreResponse {
             content_type: "application/x-protobuf".to_string(),
             content_encoding: "snappy".to_string(),
+            resp_metrics: Default::default(),
             body: response.encode_to_vec(),
         })
     }
