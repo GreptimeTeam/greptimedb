@@ -24,10 +24,10 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::storage::ColumnId;
 
-use crate::error::{Error, JsonOptionsSnafu, Result};
+use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 
@@ -48,6 +48,8 @@ pub struct RegionOptions {
     pub wal_options: WalOptions,
     /// Index options.
     pub index_options: IndexOptions,
+    /// Memtable options.
+    pub memtable: MemtableOptions,
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -62,7 +64,11 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         // See https://github.com/serde-rs/serde/issues/1626
         let options: RegionOptionsWithoutEnum =
             serde_json::from_str(&json).context(JsonOptionsSnafu)?;
-        let compaction: CompactionOptions = serde_json::from_str(&json).unwrap_or_default();
+        let compaction = if validate_enum_options(options_map, "compaction.type")? {
+            serde_json::from_str(&json).context(JsonOptionsSnafu)?
+        } else {
+            CompactionOptions::default()
+        };
 
         // Tries to decode the wal options from the map or sets to the default if there's none wal options in the map.
         let wal_options = options_map.get(WAL_OPTIONS_KEY).map_or_else(
@@ -73,6 +79,11 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         )?;
 
         let index_options: IndexOptions = serde_json::from_str(&json).context(JsonOptionsSnafu)?;
+        let memtable = if validate_enum_options(options_map, "memtable.type")? {
+            serde_json::from_str(&json).context(JsonOptionsSnafu)?
+        } else {
+            MemtableOptions::default()
+        };
 
         Ok(RegionOptions {
             ttl: options.ttl,
@@ -80,6 +91,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             storage: options.storage,
             wal_options,
             index_options,
+            memtable,
         })
     }
 }
@@ -238,8 +250,50 @@ fn options_map_to_value(options: &HashMap<String, String>) -> Value {
     Value::Object(map)
 }
 
+// `#[serde(default)]` doesn't support enum (https://github.com/serde-rs/serde/issues/1799) so we
+// check the type key first.
+/// Validates whether the `options_map` has valid options for specific `enum_tag_key`
+/// and returns `true` if the map contains enum options.
+fn validate_enum_options(
+    options_map: &HashMap<String, String>,
+    enum_tag_key: &str,
+) -> Result<bool> {
+    let enum_type = enum_tag_key.split('.').next().unwrap();
+    let mut has_other_options = false;
+    let mut has_tag = false;
+    for key in options_map.keys() {
+        if key == enum_tag_key {
+            has_tag = true;
+        } else if key.starts_with(enum_type) {
+            has_other_options = true;
+        }
+    }
+
+    // If tag is not provided, then other options for the enum should not exist.
+    ensure!(
+        has_tag || !has_other_options,
+        InvalidRegionOptionsSnafu {
+            reason: format!("missing key {} in options", enum_tag_key),
+        }
+    );
+
+    Ok(has_tag)
+}
+
+/// Options for region level memtable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(tag = "memtable.type", rename_all = "snake_case")]
+pub enum MemtableOptions {
+    #[default]
+    TimeSeries,
+    Experimental,
+    Unknown,
+}
+
 #[cfg(test)]
 mod tests {
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use common_wal::options::KafkaWalOptions;
 
     use super::*;
@@ -282,16 +336,12 @@ mod tests {
 
     #[test]
     fn test_without_compaction_type() {
-        // If `compaction.type` is not provided, we ignore all compaction
-        // related options. Actually serde does not support deserialize
-        // an enum without knowning its type.
         let map = make_map(&[
             ("compaction.twcs.max_active_window_files", "8"),
             ("compaction.twcs.time_window", "2h"),
         ]);
-        let options = RegionOptions::try_from(&map).unwrap();
-        let expect = RegionOptions::default();
-        assert_eq!(expect, options);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     #[test]
@@ -356,6 +406,22 @@ mod tests {
     }
 
     #[test]
+    fn test_with_memtable() {
+        let map = make_map(&[("memtable.type", "time_series")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions::default();
+        assert_eq!(expect, options);
+
+        let map = make_map(&[("memtable.type", "experimental")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            memtable: MemtableOptions::Experimental,
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+    }
+
+    #[test]
     fn test_with_all() {
         let wal_options = WalOptions::Kafka(KafkaWalOptions {
             topic: "test_topic".to_string(),
@@ -373,6 +439,7 @@ mod tests {
                 WAL_OPTIONS_KEY,
                 &serde_json::to_string(&wal_options).unwrap(),
             ),
+            ("memtable.type", "experimental"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -390,6 +457,7 @@ mod tests {
                     segment_row_count: 512,
                 },
             },
+            memtable: MemtableOptions::Experimental,
         };
         assert_eq!(expect, options);
     }
