@@ -45,6 +45,7 @@ use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
+use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
@@ -698,6 +699,11 @@ impl HttpServer {
         Router::new()
             .route("/write", routing::post(influxdb_write_v1))
             .route("/api/v2/write", routing::post(influxdb_write_v2))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(RequestDecompressionLayer::new()),
+            )
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
             .with_state(influxdb_handler)

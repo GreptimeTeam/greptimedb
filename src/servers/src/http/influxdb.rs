@@ -15,20 +15,15 @@
 use std::collections::HashMap;
 
 use axum::extract::{Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Extension;
-use bytes::Bytes;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
 use common_telemetry::tracing;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
 
-use crate::error::{
-    InvalidGzipSnafu, InvalidQuerySnafu, InvalidUtf8ValueSnafu, InvisibleASCIISnafu, Result,
-    TimePrecisionSnafu,
-};
+use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 
@@ -44,31 +39,13 @@ pub async fn influxdb_health() -> Result<impl IntoResponse> {
     Ok(StatusCode::OK)
 }
 
-fn is_gzip(headers: &HeaderMap) -> Result<bool> {
-    match headers
-        .get(header::CONTENT_ENCODING)
-        .map(|val| val.to_str().context(InvisibleASCIISnafu))
-        .transpose()?
-        .map(|val| val.to_lowercase())
-        .as_deref()
-    {
-        None | Some("identity") => Ok(false),
-        Some("gzip") => Ok(true),
-        Some(enc) => InvalidQuerySnafu {
-            reason: format!("unacceptable content-encoding: {enc}"),
-        }
-        .fail(),
-    }
-}
-
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "influxdb", request_type = "write_v1"))]
 pub async fn influxdb_write_v1(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
     Extension(query_ctx): Extension<QueryContextRef>,
-    headers: HeaderMap,
-    lines: Bytes,
+    lines: String,
 ) -> Result<impl IntoResponse> {
     let db = params
         .remove("db")
@@ -79,9 +56,7 @@ pub async fn influxdb_write_v1(
         .map(|val| parse_time_precision(val))
         .transpose()?;
 
-    let gzip = is_gzip(&headers)?;
-
-    influxdb_write(&db, precision, gzip, lines, handler, query_ctx).await
+    influxdb_write(&db, precision, lines, handler, query_ctx).await
 }
 
 #[axum_macros::debug_handler]
@@ -90,8 +65,7 @@ pub async fn influxdb_write_v2(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
     Extension(query_ctx): Extension<QueryContextRef>,
-    headers: HeaderMap,
-    lines: Bytes,
+    lines: String,
 ) -> Result<impl IntoResponse> {
     let db = match (params.remove("db"), params.remove("bucket")) {
         (_, Some(bucket)) => bucket.clone(),
@@ -104,35 +78,19 @@ pub async fn influxdb_write_v2(
         .map(|val| parse_time_precision(val))
         .transpose()?;
 
-    let gzip = is_gzip(&headers)?;
-
-    influxdb_write(&db, precision, gzip, lines, handler, query_ctx).await
+    influxdb_write(&db, precision, lines, handler, query_ctx).await
 }
 
 pub async fn influxdb_write(
     db: &str,
     precision: Option<Precision>,
-    gzip: bool,
-    lines: Bytes,
+    lines: String,
     handler: InfluxdbLineProtocolHandlerRef,
     ctx: QueryContextRef,
 ) -> Result<impl IntoResponse> {
     let _timer = crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED
         .with_label_values(&[db])
         .start_timer();
-
-    let lines = if gzip {
-        // Unzip the gzip-encoded content
-        use std::io::Read;
-        let mut decoder = flate2::read::GzDecoder::new(&lines[..]);
-        let mut decoded_data = Vec::new();
-        decoder
-            .read_to_end(&mut decoded_data)
-            .context(InvalidGzipSnafu)?;
-        String::from_utf8(decoded_data).context(InvalidUtf8ValueSnafu)?
-    } else {
-        String::from_utf8(lines.into()).context(InvalidUtf8ValueSnafu)?
-    };
 
     let request = InfluxdbRequest { precision, lines };
     handler.exec(request, ctx).await?;

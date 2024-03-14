@@ -104,7 +104,7 @@ tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 tonic-reflection = "0.10"
 tower = { version = "0.4", features = ["full"] }
-tower-http = { version = "0.3", features = ["full"] }
+tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
 
 [target.'cfg(not(windows))'.dependencies]
