@@ -42,6 +42,9 @@ pub type Diff = i64;
 /// System-wide default timestamp type
 pub type Timestamp = i64;
 
+/// System-wide default duration type
+pub type Duration = i64;
+
 /// Default type for a repr of changes to a collection.
 pub type DiffRow = (Row, Timestamp, Diff);
 
@@ -51,9 +54,12 @@ pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
     let is_supported_time_type = |arg: &Value| {
         let ty = arg.data_type();
-        matches!(ty, ConcreteDataType::Date(..))
-            | matches!(ty, ConcreteDataType::DateTime(..))
-            | matches!(ty, ConcreteDataType::Timestamp(..))
+        matches!(
+            ty,
+            ConcreteDataType::Date(..)
+                | ConcreteDataType::DateTime(..)
+                | ConcreteDataType::Timestamp(..)
+        )
     };
     match value {
         Value::DateTime(ts) => Ok(ts.val()),

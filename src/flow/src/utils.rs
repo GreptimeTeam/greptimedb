@@ -22,7 +22,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::expr::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
-use crate::repr::{value_to_internal_ts, Diff, DiffRow, KeyValDiffRow, Row, Timestamp};
+use crate::repr::{value_to_internal_ts, Diff, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
 
 /// Determine when should a key expire according to it's event timestamp in key
 ///
@@ -32,7 +32,7 @@ pub struct KeyExpiryManager {
     /// a map from event timestamp to key, used for expire keys
     event_ts_to_key: BTreeMap<Timestamp, BTreeSet<Row>>,
     /// duration after which a key is considered expired, and will be removed from state
-    key_expiration_duration: Option<Timestamp>,
+    key_expiration_duration: Option<Duration>,
     /// using this to get timestamp from key row
     event_timestamp_from_row: Option<ScalarExpr>,
 }
@@ -54,27 +54,20 @@ impl KeyExpiryManager {
         self.key_expiration_duration.map(|d| now - d)
     }
 
-    pub fn is_key_expired(&self, now: Timestamp, key: &Row) -> Result<bool, EvalError> {
-        let event_ts = if let Some(t) = self.extract_event_ts(key)? {
-            t
-        } else {
-            return Ok(false);
-        };
-        Ok(self
-            .get_expire_time(now)
-            .map(|e| e > event_ts)
-            .unwrap_or(false))
-    }
-
     /// update the event timestamp to key mapping
+    ///
     /// if given key is expired by now, return false
     pub fn update_event_ts(&mut self, now: Timestamp, row: &Row) -> Result<bool, EvalError> {
-        if self.is_key_expired(now, row)? {
-            return Ok(false);
-        }
-
-        let ts = if let Some(t) = self.extract_event_ts(row)? {
-            t
+        let ts = if let Some(event_ts) = self.extract_event_ts(row)? {
+            if self
+                .get_expire_time(now)
+                .map(|e| e > event_ts)
+                .unwrap_or(false)
+            {
+                // expired
+                return Ok(false);
+            }
+            event_ts
         } else {
             return Ok(true);
         };
@@ -146,10 +139,9 @@ impl Arrangement {
         for ((key, val), ts, diff) in updates {
             // keep rows with expired event timestamp from being updated
             if let Some(s) = &mut self.expire_state {
-                if s.is_key_expired(now, &key)? {
+                if !s.update_event_ts(now, &key)? {
                     continue;
                 }
-                s.update_event_ts(now, &key)?;
             }
             // the first batch with key that's greater or equal to ts
             let batch = if let Some((_, batch)) = self.spine.range_mut(ts..).next() {
@@ -182,10 +174,9 @@ impl Arrangement {
         for (_, batch) in should_compact {
             for (key, updates) in batch {
                 if let Some(s) = &mut self.expire_state {
-                    if s.is_key_expired(now, &key)? {
+                    if !s.update_event_ts(now, &key)? {
                         continue;
-                    }
-                    s.update_event_ts(now, &key)?;
+                    };
                 }
                 // if diff cancel out each other, then remove the key
                 let mut old_row: Option<DiffRow> =
@@ -247,19 +238,16 @@ impl Arrangement {
 
     /// get current state of things
     /// useful for query existing keys(i.e. reduce and join operator need to query existing state)
-    pub fn get(&self, now: Timestamp, key: &Row) -> Option<(Row, Diff)> {
+    pub fn get(&self, now: Timestamp, key: &Row) -> Option<(Row, Timestamp, Diff)> {
         if self
             .spine
             .first_key_value()
             .map(|(ts, _)| *ts >= now)
             .unwrap_or(false)
         {
-            self.spine.first_key_value().and_then(|(_ts, batch)| {
-                batch
-                    .get(key)
-                    .and_then(|v| v.first())
-                    .map(|(row, _ts, diff)| (row.clone(), *diff))
-            })
+            self.spine
+                .first_key_value()
+                .and_then(|(_ts, batch)| batch.get(key).and_then(|v| v.first()).cloned())
         } else {
             // check keys <= now to know current value
             let mut final_val = None;
@@ -270,7 +258,7 @@ impl Arrangement {
                     }
                 }
             }
-            final_val.map(|(row, _ts, diff)| (row, diff))
+            final_val
         }
     }
 }
@@ -356,11 +344,11 @@ mod test {
             // all updates above are future updates
             arr.apply_updates(0, updates).unwrap();
 
-            assert_eq!(arr.get(1, &key), Some((Row::new(vec![2.into()]), 1)));
+            assert_eq!(arr.get(1, &key), Some((Row::new(vec![2.into()]), 1, 1)));
 
-            assert_eq!(arr.get(2, &key), Some((Row::new(vec![3.into()]), 1)));
+            assert_eq!(arr.get(2, &key), Some((Row::new(vec![3.into()]), 2, 1)));
 
-            assert_eq!(arr.get(3, &key), Some((Row::new(vec![4.into()]), 1)));
+            assert_eq!(arr.get(3, &key), Some((Row::new(vec![4.into()]), 3, 1)));
         }
     }
 
@@ -438,10 +426,15 @@ mod test {
         ];
         {
             let mut arr = arr.write();
+            arr.apply_updates(now, updates.clone()).unwrap();
+            // repeat the same updates means having multiple updates for the same key
             arr.apply_updates(now, updates).unwrap();
             assert_eq!(
                 arr.get_updates_in_range(1..=1),
-                vec![((key.clone(), Row::new(vec![2.into()])), 1, 1)]
+                vec![
+                    ((key.clone(), Row::new(vec![2.into()])), 1, 1),
+                    ((key.clone(), Row::new(vec![2.into()])), 1, 1)
+                ]
             );
             assert_eq!(arr.spine.len(), 3);
             arr.set_compaction(1).unwrap();
@@ -450,7 +443,7 @@ mod test {
         {
             let mut arr = arr.write();
             assert_eq!(arr.spine.len(), 3);
-            assert_eq!(arr.get(10, &key), Some((Row::new(vec![2.into()]), 1)));
+            assert_eq!(arr.get(10, &key), Some((Row::new(vec![2.into()]), 1, 2)));
             arr.trunc_expired(10);
             assert_eq!(arr.spine.len(), 3);
             arr.trunc_expired(11);
@@ -460,6 +453,50 @@ mod test {
             arr.trunc_expired(12);
             assert_eq!(arr.spine.len(), 3);
             assert_eq!(arr.expire_state.as_ref().unwrap().event_ts_to_key.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_apply_expired_keys() {
+        // apply updates with a expired key
+        let mut arr = Arrangement::new();
+        let expire_state = KeyExpiryManager {
+            event_ts_to_key: Default::default(),
+            key_expiration_duration: Some(10),
+            event_timestamp_from_row: Some(ScalarExpr::Column(0)),
+        };
+        let expire_state = Some(expire_state);
+        arr.expire_state = expire_state;
+
+        let arr = ArrangeHandler::from(arr);
+
+        let updates: Vec<KeyValDiffRow> = vec![
+            (
+                (Row::new(vec![1i64.into()]), Row::new(vec![2.into()])),
+                1,
+                1,
+            ),
+            (
+                (Row::new(vec![2i64.into()]), Row::new(vec![3.into()])),
+                2,
+                1,
+            ),
+            (
+                (Row::new(vec![3i64.into()]), Row::new(vec![4.into()])),
+                3,
+                1,
+            ),
+        ];
+        {
+            let mut arr = arr.write();
+            arr.apply_updates(11, updates).unwrap();
+
+            assert_eq!(
+                arr.get(11, &Row::new(vec![1i64.into()])),
+                Some((Row::new(vec![2.into()]), 1, 1))
+            );
+            arr.trunc_expired(12);
+            assert_eq!(arr.get(12, &Row::new(vec![1i64.into()])), None);
         }
     }
 }
