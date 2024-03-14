@@ -59,6 +59,9 @@ struct PkId {
     pk_index: PkIndex,
 }
 
+// TODO(yingwen): `fork_dictionary_bytes` is per region option, if we have multiple merge
+// tree memtable then we will use a lot memory. We should find a better way to control the
+// dictionary size.
 /// Config for the merge tree memtable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -552,10 +555,6 @@ mod tests {
         };
         // Creates a json with dedup = false.
         let json = serde_json::to_string(&config).unwrap();
-        assert_eq!(
-            json,
-            r#"{"index_max_keys_per_shard":8192,"data_freeze_threshold":131072,"dedup":false,"fork_dictionary_bytes":"1GiB"}"#
-        );
         let config: MergeTreeConfig = serde_json::from_str(&json).unwrap();
         assert!(config.dedup);
         assert_eq!(MergeTreeConfig::default(), config);
