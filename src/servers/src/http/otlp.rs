@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use axum::extract::{RawBody, State};
-use axum::http::header;
+use axum::http::{header, HeaderValue};
 use axum::response::IntoResponse;
 use axum::Extension;
 use common_telemetry::tracing;
@@ -28,6 +28,7 @@ use prost::Message;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 
+use super::header::write_cost_header_map;
 use crate::error::{self, Result};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
@@ -43,10 +44,16 @@ pub async fn metrics(
         .with_label_values(&[db.as_str()])
         .start_timer();
     let request = parse_metrics_body(body).await?;
+
     handler
         .metrics(request, query_ctx)
         .await
-        .map(OtlpMetricsResponse)
+        .map(|o| OtlpMetricsResponse {
+            resp_body: ExportMetricsServiceResponse {
+                partial_success: None,
+            },
+            write_cost: o.meta.cost,
+        })
 }
 
 async fn parse_metrics_body(body: Body) -> Result<ExportMetricsServiceRequest> {
@@ -58,15 +65,20 @@ async fn parse_metrics_body(body: Body) -> Result<ExportMetricsServiceRequest> {
         })
 }
 
-pub struct OtlpMetricsResponse(ExportMetricsServiceResponse);
+pub struct OtlpMetricsResponse {
+    resp_body: ExportMetricsServiceResponse,
+    write_cost: usize,
+}
 
 impl IntoResponse for OtlpMetricsResponse {
     fn into_response(self) -> axum::response::Response {
-        (
-            [(header::CONTENT_TYPE, "application/x-protobuf")],
-            self.0.encode_to_vec(),
-        )
-            .into_response()
+        let mut header_map = write_cost_header_map(self.write_cost);
+        header_map.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str("application/x-protobuf").unwrap(),
+        );
+
+        (header_map, self.resp_body.encode_to_vec()).into_response()
     }
 }
 
@@ -85,7 +97,12 @@ pub async fn traces(
     handler
         .traces(request, query_ctx)
         .await
-        .map(OtlpTracesResponse)
+        .map(|o| OtlpTracesResponse {
+            resp_body: ExportTraceServiceResponse {
+                partial_success: None,
+            },
+            write_cost: o.meta.cost,
+        })
 }
 
 async fn parse_traces_body(body: Body) -> Result<ExportTraceServiceRequest> {
@@ -97,14 +114,19 @@ async fn parse_traces_body(body: Body) -> Result<ExportTraceServiceRequest> {
         })
 }
 
-pub struct OtlpTracesResponse(ExportTraceServiceResponse);
+pub struct OtlpTracesResponse {
+    resp_body: ExportTraceServiceResponse,
+    write_cost: usize,
+}
 
 impl IntoResponse for OtlpTracesResponse {
     fn into_response(self) -> axum::response::Response {
-        (
-            [(header::CONTENT_TYPE, "application/x-protobuf")],
-            self.0.encode_to_vec(),
-        )
-            .into_response()
+        let mut header_map = write_cost_header_map(self.write_cost);
+        header_map.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str("application/x-protobuf").unwrap(),
+        );
+
+        (header_map, self.resp_body.encode_to_vec()).into_response()
     }
 }

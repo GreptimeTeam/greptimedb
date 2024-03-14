@@ -52,9 +52,11 @@ impl TraceService for OtlpService {
             .cloned()
             .context(error::MissingQueryContextSnafu)?;
 
-        let res = self.handler.traces(req, ctx).await?;
+        let _ = self.handler.traces(req, ctx).await?;
 
-        Ok(Response::new(res))
+        Ok(Response::new(ExportTraceServiceResponse {
+            partial_success: None,
+        }))
     }
 }
 
@@ -71,8 +73,10 @@ impl MetricsService for OtlpService {
             .cloned()
             .context(error::MissingQueryContextSnafu)?;
 
-        let res = self.handler.metrics(req, ctx).await?;
+        let _ = self.handler.metrics(req, ctx).await?;
 
-        Ok(Response::new(res))
+        Ok(Response::new(ExportMetricsServiceResponse {
+            partial_success: None,
+        }))
     }
 }

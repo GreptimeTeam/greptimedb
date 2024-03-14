@@ -32,12 +32,8 @@ use api::prom_store::remote::{ReadRequest, WriteRequest};
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
-use opentelemetry_proto::tonic::collector::metrics::v1::{
-    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
-};
-use opentelemetry_proto::tonic::collector::trace::v1::{
-    ExportTraceServiceRequest, ExportTraceServiceResponse,
-};
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use serde_json::Value;
 use session::context::QueryContextRef;
 
@@ -120,12 +116,12 @@ pub trait OpenTelemetryProtocolHandler {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> Result<ExportMetricsServiceResponse>;
+    ) -> Result<Output>;
 
     /// Handling opentelemetry traces request
     async fn traces(
         &self,
         request: ExportTraceServiceRequest,
         ctx: QueryContextRef,
-    ) -> Result<ExportTraceServiceResponse>;
+    ) -> Result<Output>;
 }
