@@ -34,12 +34,19 @@ pub struct KeyExpiryManager {
     /// duration after which a key is considered expired, and will be removed from state
     key_expiration_duration: Option<Timestamp>,
     /// using this to get timestamp from key row
-    event_timestamp_from_row: ScalarExpr,
+    event_timestamp_from_row: Option<ScalarExpr>,
 }
 
 impl KeyExpiryManager {
-    pub fn extract_event_ts(&self, row: &Row) -> Result<Timestamp, EvalError> {
-        let ts = value_to_internal_ts(self.event_timestamp_from_row.eval(&row.inner)?)?;
+    /// extract event timestamp from key row
+    pub fn extract_event_ts(&self, row: &Row) -> Result<Option<Timestamp>, EvalError> {
+        let ts = self
+            .event_timestamp_from_row
+            .as_ref()
+            .map(|e| e.eval(&row.inner))
+            .transpose()?
+            .map(value_to_internal_ts)
+            .transpose()?;
         Ok(ts)
     }
 
@@ -48,7 +55,11 @@ impl KeyExpiryManager {
     }
 
     pub fn is_key_expired(&self, now: Timestamp, key: &Row) -> Result<bool, EvalError> {
-        let event_ts = self.extract_event_ts(key)?;
+        let event_ts = if let Some(t) = self.extract_event_ts(key)? {
+            t
+        } else {
+            return Ok(false);
+        };
         Ok(self
             .get_expire_time(now)
             .map(|e| e > event_ts)
@@ -61,7 +72,13 @@ impl KeyExpiryManager {
         if self.is_key_expired(now, row)? {
             return Ok(false);
         }
-        let ts = self.extract_event_ts(row)?;
+
+        let ts = if let Some(t) = self.extract_event_ts(row)? {
+            t
+        } else {
+            return Ok(true);
+        };
+
         self.event_ts_to_key
             .entry(ts)
             .or_default()
@@ -391,7 +408,7 @@ mod test {
         let expire_state = KeyExpiryManager {
             event_ts_to_key: Default::default(),
             key_expiration_duration: Some(10),
-            event_timestamp_from_row: ScalarExpr::Column(0),
+            event_timestamp_from_row: Some(ScalarExpr::Column(0)),
         };
         let expire_state = Some(expire_state);
         arr.expire_state = expire_state;
