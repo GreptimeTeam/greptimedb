@@ -172,7 +172,7 @@ impl StatementExecutor {
                 self.drop_table(table_name, stmt.drop_if_exists()).await
             }
             Statement::DropDatabase(_stmt) => {
-                //TODO(weny): implement the drop database procedure
+                // TODO(weny): implement the drop database procedure
                 error::NotSupportedSnafu {
                     feat: "Drop Database",
                 }
