@@ -50,7 +50,7 @@ use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef
 use crate::manifest::action::RegionEdit;
 use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
-use crate::memtable::{MemtableBuilderRef, MemtableConfig};
+use crate::memtable::{MemtableBuilderProvider, MemtableConfig};
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
@@ -359,7 +359,10 @@ impl<S: LogStore> WorkerStarter<S> {
             wal: Wal::new(self.log_store),
             object_store_manager: self.object_store_manager.clone(),
             running: running.clone(),
-            default_memtable_builder,
+            memtable_builder_provider: MemtableBuilderProvider::new(
+                Some(self.write_buffer_manager.clone()),
+                default_memtable_builder,
+            ),
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
@@ -514,8 +517,8 @@ struct RegionWorkerLoop<S> {
     object_store_manager: ObjectStoreManagerRef,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
-    /// Default memtable builder for each region.
-    default_memtable_builder: MemtableBuilderRef,
+    /// Memtable builder provider for each region.
+    memtable_builder_provider: MemtableBuilderProvider,
     /// Background job scheduler.
     scheduler: SchedulerRef,
     /// Engine write buffer manager.

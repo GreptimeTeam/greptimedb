@@ -66,7 +66,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let region = RegionOpener::new(
             region_id,
             &request.region_dir,
-            self.default_memtable_builder.clone(),
+            self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
             self.scheduler.clone(),
             self.intermediate_manager.clone(),
