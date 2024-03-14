@@ -10,8 +10,11 @@ use crate::expr::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
 use crate::repr::{value_to_internal_ts, Diff, DiffRow, KeyValDiffRow, Row, Timestamp};
 
+/// Determine when should a key expire according to it's event timestamp in key
+///
+/// TODO(discord9): find a better way to handle key expiration, like write to disk or something instead of throw away
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
-pub struct ExpireState {
+pub struct KeyExpiryManager {
     /// a map from event timestamp to key, used for expire keys
     event_ts_to_key: BTreeMap<Timestamp, BTreeSet<Row>>,
     /// duration after which a key is considered expired, and will be removed from state
@@ -20,7 +23,7 @@ pub struct ExpireState {
     event_timestamp_from_row: ScalarExpr,
 }
 
-impl ExpireState {
+impl KeyExpiryManager {
     pub fn extract_event_ts(&self, row: &Row) -> Result<Timestamp, EvalError> {
         let ts = value_to_internal_ts(self.event_timestamp_from_row.eval(&row.inner)?)?;
         Ok(ts)
@@ -55,6 +58,17 @@ impl ExpireState {
 
 /// A shared state of key-value pair for various state
 /// in dataflow execution
+///
+/// i.e: Mfp operator with temporal filter need to store it's future output so that it can add now, and delete later.
+/// To get all needed updates in a time span, use `get_updates_in_range`
+///
+/// And reduce operator need full state of it's output, so that it can query(and modify by calling `apply_updates`)
+/// existing state, also need a way to expire keys. To get a key's current value, use `get` with time being `now`
+/// so it's like:
+/// `mfp operator -> arrange(store futures only, no expire) -> reduce operator <-> arrange(full, with key expiring time) -> output`
+///
+/// Note the two way arrow between reduce operator and arrange, it's because reduce operator need to query existing state
+///
 /// TODO(discord9): impl multiversion instead, like merge current into spine too
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct Arrangement {
@@ -72,8 +86,10 @@ pub struct Arrangement {
     spine: BTreeMap<Timestamp, BTreeMap<Row, SmallVec<[DiffRow; 4]>>>,
     /// if set to false, will not update current value of the arrangement, useful for case like `map -> arrange -> reduce`
     full_arrangement: bool,
+    /// flag to mark that this arrangement haven't been written to, so that it can be cloned and shared
+    is_written: bool,
     /// manage the expire state of the arrangement
-    expire_state: Option<ExpireState>,
+    expire_state: Option<KeyExpiryManager>,
 }
 
 impl Arrangement {
@@ -81,6 +97,7 @@ impl Arrangement {
         Self {
             spine: Default::default(),
             full_arrangement: false,
+            is_written: false,
             expire_state: None,
         }
     }
@@ -91,6 +108,9 @@ impl Arrangement {
         now: Timestamp,
         updates: Vec<KeyValDiffRow>,
     ) -> Result<(), EvalError> {
+        if !self.is_written {
+            self.is_written = true;
+        }
         for ((key, val), ts, diff) in updates {
             // keep rows with expired event timestamp from being updated
             if let Some(s) = &mut self.expire_state {
@@ -258,18 +278,27 @@ impl ArrangeHandler {
     }
 
     /// clone the handler, but only keep the future updates
-    pub fn clone_future_only(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
+    pub fn clone_future_only(&self) -> Option<Self> {
+        if self.read().is_written {
+            return None;
         }
+        Some(Self {
+            inner: self.inner.clone(),
+        })
     }
 
     /// clone the handler, but keep all updates
-    pub fn clone_full_arrange(&self) -> Self {
+    /// TODO(discord9): prevent illegal clone after the arrange have been written, because that will cause loss of data before clone
+    pub fn clone_full_arrange(&self) -> Option<Self> {
+        if self.read().is_written {
+            return None;
+        }
         let mut arr = self.write();
         arr.full_arrangement = true;
         drop(arr);
-        self.clone_future_only()
+        Some(Self {
+            inner: self.inner.clone(),
+        })
     }
 }
 
@@ -278,12 +307,41 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_future_get() {
+        // test if apply only future updates, whether get(future_time) can operate correctly
+        let arr = Arrangement::new();
+        let arr = ArrangeHandler::from(arr);
+
+        {
+            let mut arr = arr.write();
+            let key = Row::new(vec![1.into()]);
+            let updates: Vec<KeyValDiffRow> = vec![
+                ((key.clone(), Row::new(vec![2.into()])), 1, 1),
+                ((key.clone(), Row::new(vec![3.into()])), 2, 1),
+                ((key.clone(), Row::new(vec![4.into()])), 3, 1),
+            ];
+            // all updates above are future updates
+            arr.apply_updates(0, updates).unwrap();
+
+            assert_eq!(arr.get(1, &key), Some((Row::new(vec![2.into()]), 1)));
+
+            assert_eq!(arr.get(2, &key), Some((Row::new(vec![3.into()]), 1)));
+
+            assert_eq!(arr.get(3, &key), Some((Row::new(vec![4.into()]), 1)));
+        }
+    }
+
+    #[test]
     fn only_save_future_updates() {
         // mfp operator's temporal filter need to record future updates so that it can delete on time
         // i.e. insert a record now, delete this record 5 minutes later
         // they will only need to keep future updates(if downstream don't need full arrangement that is)
         let arr = Arrangement::new();
         let arr = ArrangeHandler::from(arr);
+        let arr1 = arr.clone_full_arrange();
+        assert!(arr1.is_some());
+        let arr2 = arr.clone_future_only();
+        assert!(arr2.is_some());
 
         {
             let mut arr = arr.write();
@@ -300,14 +358,14 @@ mod test {
             );
             assert_eq!(arr.spine.len(), 3);
             arr.set_compaction(1).unwrap();
-            assert_eq!(arr.spine.len(), 2);
+            assert_eq!(arr.spine.len(), 3);
         }
-        // TODO(discord9): disallow clone full arrange after write something
-        let _arr2 = arr.clone_full_arrange();
 
+        let arr2 = arr.clone_full_arrange();
+        assert!(arr2.is_none());
         {
             let mut arr = arr.write();
-            assert_eq!(arr.spine.len(), 2);
+            assert_eq!(arr.spine.len(), 3);
             arr.set_compaction(2).unwrap();
             assert_eq!(arr.spine.len(), 2);
         }
@@ -316,7 +374,7 @@ mod test {
     #[test]
     fn test_reduce_expire_keys() {
         let mut arr = Arrangement::new();
-        let expire_state = ExpireState {
+        let expire_state = KeyExpiryManager {
             event_ts_to_key: Default::default(),
             key_expiration_duration: Some(10),
             event_timestamp_from_row: ScalarExpr::Column(0),
