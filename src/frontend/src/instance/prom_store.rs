@@ -255,11 +255,11 @@ impl PromStoreProtocolHandler for Instance {
                 let mut query_results = Vec::with_capacity(results.len());
                 let mut map = HashMap::new();
                 for (table_name, output) in results {
-                    warn!("[DEBUG]output: {:?}", output);
-                    if let Some(ref plan) = output.meta.plan {
+                    let plan = output.meta.plan.clone();
+                    query_results.push(to_query_result(&table_name, output).await?);
+                    if let Some(ref plan) = plan {
                         collect_plan_metrics(plan.clone(), &mut [&mut map]);
                     }
-                    query_results.push(to_query_result(&table_name, output).await?);
                 }
 
                 let response = ReadResponse {
