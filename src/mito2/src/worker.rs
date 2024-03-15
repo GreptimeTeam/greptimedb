@@ -678,11 +678,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        self.last_periodical_check_millis = self.time_provider.current_time_millis();
+
         if let Err(e) = self.flush_periodically() {
             error!(e; "Failed to flush regions periodically");
         }
-
-        self.last_periodical_check_millis = self.time_provider.current_time_millis();
     }
 
     /// Handles region background request
