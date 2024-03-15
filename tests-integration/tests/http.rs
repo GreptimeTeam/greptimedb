@@ -787,11 +787,7 @@ mem_threshold_on_create = "64.0MiB"
 intermediate_path = ""
 
 [datanode.region_engine.mito.memtable]
-type = "experimental"
-index_max_keys_per_shard = 8192
-data_freeze_threshold = 131072
-dedup = true
-fork_dictionary_bytes = "1GiB"
+type = "time_series"
 
 [[datanode.region_engine]]
 
