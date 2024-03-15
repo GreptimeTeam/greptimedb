@@ -26,7 +26,7 @@ use common_error::ext::BoxedError;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::{logging, tracing};
+use common_telemetry::{logging, tracing, warn};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -255,6 +255,7 @@ impl PromStoreProtocolHandler for Instance {
                 let mut query_results = Vec::with_capacity(results.len());
                 let mut map = HashMap::new();
                 for (table_name, output) in results {
+                    warn!("[DEBUG]output: {:?}", output);
                     if let Some(ref plan) = output.meta.plan {
                         collect_plan_metrics(plan.clone(), &mut [&mut map]);
                     }
