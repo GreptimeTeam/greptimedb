@@ -39,10 +39,10 @@ use crate::expr::error::{CastValueSnafu, EvalError, InvalidArgumentSnafu};
 /// and +/-n means insert/remove multiple duplicate records.
 pub type Diff = i64;
 
-/// System-wide default timestamp type
+/// System-wide default timestamp type, in milliseconds
 pub type Timestamp = i64;
 
-/// System-wide default duration type
+/// System-wide default duration type, in milliseconds
 pub type Duration = i64;
 
 /// Default type for a repr of changes to a collection.

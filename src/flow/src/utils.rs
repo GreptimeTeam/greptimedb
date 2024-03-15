@@ -50,17 +50,18 @@ impl KeyExpiryManager {
         Ok(ts)
     }
 
-    pub fn get_expire_time(&self, now: Timestamp) -> Option<Timestamp> {
+    /// return timestamp that should be expired by the time `now` by compute `now - expiration_duration`
+    pub fn compute_expiration_timestamp(&self, now: Timestamp) -> Option<Timestamp> {
         self.key_expiration_duration.map(|d| now - d)
     }
 
     /// update the event timestamp to key mapping
     ///
-    /// if given key is expired by now, return false
+    /// if given key is expired by now(that is lesser than `now - expiry_duration`), return false
     pub fn update_event_ts(&mut self, now: Timestamp, row: &Row) -> Result<bool, EvalError> {
         let ts = if let Some(event_ts) = self.extract_event_ts(row)? {
             if self
-                .get_expire_time(now)
+                .compute_expiration_timestamp(now)
                 .map(|e| e > event_ts)
                 .unwrap_or(false)
             {
@@ -84,10 +85,10 @@ impl KeyExpiryManager {
 /// in dataflow execution
 ///
 /// i.e: Mfp operator with temporal filter need to store it's future output so that it can add now, and delete later.
-/// To get all needed updates in a time span, use `get_updates_in_range`
+/// To get all needed updates in a time span, use [`get_updates_in_range`]
 ///
-/// And reduce operator need full state of it's output, so that it can query(and modify by calling `apply_updates`)
-/// existing state, also need a way to expire keys. To get a key's current value, use `get` with time being `now`
+/// And reduce operator need full state of it's output, so that it can query(and modify by calling [`apply_updates`])
+/// existing state, also need a way to expire keys. To get a key's current value, use [`get`] with time being `now`
 /// so it's like:
 /// `mfp operator -> arrange(store futures only, no expire) -> reduce operator <-> arrange(full, with key expiring time) -> output`
 ///
@@ -218,7 +219,7 @@ impl Arrangement {
     /// expire keys in now that are older than expire_time, intended for reducing memory usage and limit late data arrive
     pub fn trunc_expired(&mut self, now: Timestamp) {
         if let Some(s) = &mut self.expire_state {
-            let expire_time = if let Some(t) = s.get_expire_time(now) {
+            let expire_time = if let Some(t) = s.compute_expiration_timestamp(now) {
                 t
             } else {
                 // never expire
