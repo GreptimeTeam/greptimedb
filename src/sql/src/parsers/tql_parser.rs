@@ -34,7 +34,6 @@ use crate::statements::tql::{Tql, TqlAnalyze, TqlEval, TqlExplain};
 pub const TQL: &str = "TQL";
 const EVAL: &str = "EVAL";
 const EVALUATE: &str = "EVALUATE";
-const EXPLAIN: &str = "EXPLAIN";
 const VERBOSE: &str = "VERBOSE";
 
 use datatypes::arrow::datatypes::DataType;
@@ -53,23 +52,30 @@ impl<'a> ParserContext<'a> {
         match self.parser.peek_token().token {
             Token::Word(w) => {
                 let uppercase = w.value.to_uppercase();
+                let _consume_tql_token = self.parser.next_token();
                 match w.keyword {
                     Keyword::NoKeyword
                         if (uppercase == EVAL || uppercase == EVALUATE)
                             && w.quote_style.is_none() =>
                     {
-                        let _ = self.parser.next_token();
                         self.parse_tql_eval().context(error::SyntaxSnafu)
                     }
 
                     Keyword::EXPLAIN => {
-                        let _ = self.parser.next_token();
-                        self.parse_tql_explain()
+                        let is_verbose = self.peek_token_as_string() == VERBOSE;
+                        if is_verbose {
+                            let _consume_verbose_token = self.parser.next_token();
+                        }
+                        self.parse_tql_explain(is_verbose)
                     }
 
                     Keyword::ANALYZE => {
-                        let _ = self.parser.next_token();
-                        self.parse_tql_analyze().context(error::SyntaxSnafu)
+                        let is_verbose = self.peek_token_as_string() == VERBOSE;
+                        if is_verbose {
+                            let _consume_verbose_token = self.parser.next_token();
+                        }
+                        self.parse_tql_analyze(is_verbose)
+                            .context(error::SyntaxSnafu)
                     }
                     _ => self.unsupported(self.peek_token_as_string()),
                 }
@@ -84,7 +90,7 @@ impl<'a> ParserContext<'a> {
         let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
         let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
         let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
-        let query = Self::parse_tql_query(parser, self.sql, ")")?;
+        let query = Self::parse_tql_query(parser, self.sql)?;
 
         Ok(Statement::Tql(Tql::Eval(TqlEval {
             start,
@@ -94,25 +100,6 @@ impl<'a> ParserContext<'a> {
         })))
     }
 
-    fn parse_string_or_number(
-        parser: &mut Parser,
-        token: Token,
-    ) -> std::result::Result<String, ParserError> {
-        let value = match parser.next_token().token {
-            Token::Number(n, _) => n,
-            Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
-            unexpected => {
-                return Err(ParserError::ParserError(format!(
-                    "Expect number or string, but is {unexpected:?}"
-                )));
-            }
-        };
-        parser.expect_token(&token)?;
-
-        Ok(value)
-    }
-
-    // TODO this method will substitute `parse_string_or_number` eventually
     fn parse_string_or_number_or_word(
         parser: &mut Parser,
         token: Token,
@@ -177,16 +164,16 @@ impl<'a> ParserContext<'a> {
         tokens
     }
 
-    pub fn is_word_or_eof(parser: &mut Parser) -> bool {
-        matches!(parser.peek_token().token, Token::Word(_) | Token::EOF)
+    /// Seeks to the start of a query by moving the parser
+    /// to the first meaningful token, skipping over any leading commas tokens.
+    /// Returns `true` if the parser successfully moved to the first meaningful token,
+    /// otherwise returns `false`
+    pub fn seek_to_query_start(parser: &mut Parser) -> bool {
+        !matches!(parser.peek_token().token, Token::Comma)
     }
 
-    fn parse_tql_query(
-        parser: &mut Parser,
-        sql: &str,
-        _delimiter: &str,
-    ) -> std::result::Result<String, ParserError> {
-        while !Self::is_word_or_eof(parser) {
+    fn parse_tql_query(parser: &mut Parser, sql: &str) -> std::result::Result<String, ParserError> {
+        while !Self::seek_to_query_start(parser) {
             let _ = parser.next_token();
         }
         let index = parser.next_token().location.column as usize;
@@ -203,29 +190,24 @@ impl<'a> ParserContext<'a> {
         Ok(query.trim().trim_end_matches(';').to_string())
     }
 
-    fn parse_tql_explain(&mut self) -> Result<Statement> {
+    fn parse_tql_explain(&mut self, is_verbose: bool) -> Result<Statement> {
         let parser = &mut self.parser;
-        let is_verbose = if parser.peek_token().token.to_string() == VERBOSE {
-            let _ = parser.next_token();
-            true
-        } else {
-            false
-        };
-        let delimiter = match parser.expect_token(&Token::LParen) {
-            Ok(_) => ")",
-            Err(_) => {
-                if is_verbose {
-                    VERBOSE
-                } else {
-                    EXPLAIN
-                }
+
+        let (start, end, step) = match parser.peek_token().token {
+            Token::LParen => {
+                let _consume_lparen_token = parser.next_token();
+                let start = Self::parse_string_or_number_or_word(parser, Token::Comma)
+                    .unwrap_or("0".to_string());
+                let end = Self::parse_string_or_number_or_word(parser, Token::Comma)
+                    .unwrap_or("0".to_string());
+                let step = Self::parse_string_or_number_or_word(parser, Token::RParen)
+                    .unwrap_or("5m".to_string());
+                (start, end, step)
             }
+            _ => ("0".to_string(), "0".to_string(), "5m".to_string()),
         };
-        let start = Self::parse_string_or_number(parser, Token::Comma).unwrap_or("0".to_string());
-        let end = Self::parse_string_or_number(parser, Token::Comma).unwrap_or("0".to_string());
-        let step = Self::parse_string_or_number(parser, Token::RParen).unwrap_or("5m".to_string());
-        let query =
-            Self::parse_tql_query(parser, self.sql, delimiter).context(error::SyntaxSnafu)?;
+
+        let query = Self::parse_tql_query(parser, self.sql).context(error::SyntaxSnafu)?;
 
         Ok(Statement::Tql(Tql::Explain(TqlExplain {
             query,
@@ -236,20 +218,17 @@ impl<'a> ParserContext<'a> {
         })))
     }
 
-    fn parse_tql_analyze(&mut self) -> std::result::Result<Statement, ParserError> {
+    fn parse_tql_analyze(
+        &mut self,
+        is_verbose: bool,
+    ) -> std::result::Result<Statement, ParserError> {
         let parser = &mut self.parser;
-        let is_verbose = if parser.peek_token().token.to_string() == VERBOSE {
-            let _ = parser.next_token();
-            true
-        } else {
-            false
-        };
 
         parser.expect_token(&Token::LParen)?;
-        let start = Self::parse_string_or_number(parser, Token::Comma)?;
-        let end = Self::parse_string_or_number(parser, Token::Comma)?;
-        let step = Self::parse_string_or_number(parser, Token::RParen)?;
-        let query = Self::parse_tql_query(parser, self.sql, ")")?;
+        let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+        let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+        let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
+        let query = Self::parse_tql_query(parser, self.sql)?;
         Ok(Statement::Tql(Tql::Analyze(TqlAnalyze {
             start,
             end,
@@ -297,22 +276,25 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
 
-    #[test]
-    fn test_parse_tql_eval_with_functions() {
-        let sql = "TQL EVAL (now() - '10 minutes'::interval, now(), '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-
+    fn parse_into_statement(sql: &str) -> Statement {
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, result.len());
+        result.remove(0)
+    }
 
+    #[test]
+    fn test_parse_tql_eval_with_functions() {
+        let sql = "TQL EVAL (now() - '10 minutes'::interval, now(), '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let assert_time = Utc::now()
             .timestamp_nanos_opt()
             .map(|x| x / 1_000_000_000)
             .unwrap_or(0);
-
-        let statement = result.remove(0);
-        match statement {
+        // TODO `Utc::now()` introduces the flakiness in a test,
+        //  left: "1710514410"
+        //  right: "1710514409"
+        match parse_into_statement(sql) {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.start, (assert_time - 600).to_string());
                 assert_eq!(eval.end, assert_time.to_string());
@@ -326,14 +308,7 @@ mod tests {
     #[test]
     fn test_parse_tql_eval() {
         let sql = "TQL EVAL (1676887657, 1676887659, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        match statement {
+        match parse_into_statement(sql) {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.start, "1676887657");
                 assert_eq!(eval.end, "1676887659");
@@ -344,14 +319,9 @@ mod tests {
         }
 
         let sql = "TQL EVAL (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        let statement = parse_into_statement(sql);
 
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        match statement.clone() {
+        match &statement {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.start, "1676887657.1");
                 assert_eq!(eval.end, "1676887659.5");
@@ -361,25 +331,12 @@ mod tests {
             _ => unreachable!(),
         }
 
-        let sql = "TQL EVALUATE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement2 = result.remove(0);
+        let sql2 = "TQL EVALUATE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        let statement2 = parse_into_statement(sql2);
         assert_eq!(statement, statement2);
 
         let sql = "tql eval ('2015-07-01T20:10:30.781Z', '2015-07-01T20:11:00.781Z', '30s') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        match statement {
+        match parse_into_statement(sql) {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.start, "2015-07-01T20:10:30.781Z");
                 assert_eq!(eval.end, "2015-07-01T20:11:00.781Z");
@@ -393,14 +350,7 @@ mod tests {
     #[test]
     fn test_parse_tql_explain() {
         let sql = "TQL EXPLAIN http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        match statement {
+        match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
                 assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert_eq!(explain.start, "0");
@@ -412,14 +362,7 @@ mod tests {
         }
 
         let sql = "TQL EXPLAIN VERBOSE http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        match statement {
+        match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
                 assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert_eq!(explain.start, "0");
@@ -431,14 +374,7 @@ mod tests {
         }
 
         let sql = "TQL EXPLAIN (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        match statement {
+        match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
                 assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert_eq!(explain.start, "20");
@@ -450,14 +386,7 @@ mod tests {
         }
 
         let sql = "TQL EXPLAIN VERBOSE (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        match statement {
+        match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
                 assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert_eq!(explain.start, "20");
@@ -472,12 +401,7 @@ mod tests {
     #[test]
     fn test_parse_tql_analyze() {
         let sql = "TQL ANALYZE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-        let statement = result.remove(0);
-        match statement {
+        match parse_into_statement(sql) {
             Statement::Tql(Tql::Analyze(analyze)) => {
                 assert_eq!(analyze.start, "1676887657.1");
                 assert_eq!(analyze.end, "1676887659.5");
@@ -489,12 +413,7 @@ mod tests {
         }
 
         let sql = "TQL ANALYZE VERBOSE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-        let statement = result.remove(0);
-        match statement {
+        match parse_into_statement(sql) {
             Statement::Tql(Tql::Analyze(analyze)) => {
                 assert_eq!(analyze.start, "1676887657.1");
                 assert_eq!(analyze.end, "1676887659.5");
@@ -507,15 +426,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tql_with_whitespaces() {
-        let sql = "TQL EVAL (0, 30, '10s')           ,       data + (1 < bool 2);";
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
-        match statement {
+    fn test_parse_tql_with_various_queries() {
+        // query has whitespaces and comma
+        match parse_into_statement("TQL EVAL (0, 30, '10s')           ,       data + (1 < bool 2);")
+        {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.start, "0");
                 assert_eq!(eval.end, "30");
@@ -524,11 +438,55 @@ mod tests {
             }
             _ => unreachable!(),
         }
+        // query starts with a quote
+        match parse_into_statement("TQL EVAL (0, 10, '5s') '1+1';") {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "10");
+                assert_eq!(eval.step, "5s");
+                assert_eq!(eval.query, "'1+1'");
+            }
+            _ => unreachable!(),
+        }
+
+        // query starts with number
+        match parse_into_statement("TQL EVAL (300, 300, '1s') 10 atan2 20;") {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "300");
+                assert_eq!(eval.end, "300");
+                assert_eq!(eval.step, "1s");
+                assert_eq!(eval.query, "10 atan2 20");
+            }
+            _ => unreachable!(),
+        }
+
+        // query starts with a bracket
+        let sql = "TQL EVAL (0, 30, '10s') (sum by(host) (irate(host_cpu_seconds_total{mode!='idle'}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100;";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "30");
+                assert_eq!(eval.step, "10s");
+                assert_eq!(eval.query, "(sum by(host) (irate(host_cpu_seconds_total{mode!='idle'}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100");
+            }
+            _ => unreachable!(),
+        }
+
+        // query starts with a curly bracket
+        match parse_into_statement("TQL EVAL (0, 10, '5s') {__name__=\"test\"}") {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "10");
+                assert_eq!(eval.step, "5s");
+                assert_eq!(eval.query, "{__name__=\"test\"}");
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
     fn test_parse_tql_error() {
-        // Invalid duration
+        // invalid duration
         let sql = "TQL EVAL (1676887657, 1676887659, 1m) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
