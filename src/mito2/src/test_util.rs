@@ -59,6 +59,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
 
 #[derive(Debug)]
@@ -179,6 +180,7 @@ impl TestEnv {
             object_store_manager,
             manager,
             listener,
+            Arc::new(StdTimeProvider),
         )
         .await
         .unwrap()
@@ -219,6 +221,37 @@ impl TestEnv {
             object_store_manager,
             manager,
             listener,
+            Arc::new(StdTimeProvider),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Creates a new engine with specific config and manager/listener/time provider under this env.
+    pub async fn create_engine_with_time(
+        &mut self,
+        config: MitoConfig,
+        manager: Option<WriteBufferManagerRef>,
+        listener: Option<EventListenerRef>,
+        time_provider: TimeProviderRef,
+    ) -> MitoEngine {
+        let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
+
+        let logstore = Arc::new(log_store);
+        let object_store_manager = Arc::new(object_store_manager);
+        self.logstore = Some(logstore.clone());
+        self.object_store_manager = Some(object_store_manager.clone());
+
+        let data_home = self.data_home().display().to_string();
+
+        MitoEngine::new_for_test(
+            &data_home,
+            config,
+            logstore,
+            object_store_manager,
+            manager,
+            listener,
+            time_provider.clone(),
         )
         .await
         .unwrap()
