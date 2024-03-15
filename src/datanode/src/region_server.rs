@@ -282,6 +282,7 @@ impl RegionServerHandler for RegionServer {
                 }),
             }),
             affected_rows: affected_rows as _,
+            extension: Default::default(),
         })
     }
 }
