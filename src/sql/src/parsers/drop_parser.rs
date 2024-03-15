@@ -13,20 +13,29 @@
 // limitations under the License.
 
 use snafu::{ensure, ResultExt};
-use sqlparser::keywords::Keyword;
+use sqlparser::dialect::keywords::Keyword;
+use sqlparser::tokenizer::Token;
 
 use crate::error::{self, InvalidTableNameSnafu, Result};
 use crate::parser::ParserContext;
-use crate::statements::drop::DropTable;
+use crate::statements::drop::{DropDatabase, DropTable};
 use crate::statements::statement::Statement;
 
 /// DROP statement parser implementation
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_drop(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
-        if !self.matches_keyword(Keyword::TABLE) {
-            return self.unsupported(self.peek_token_as_string());
+        match self.parser.peek_token().token {
+            Token::Word(w) => match w.keyword {
+                Keyword::TABLE => self.parse_drop_table(),
+                Keyword::SCHEMA | Keyword::DATABASE => self.parse_drop_database(),
+                _ => self.unsupported(w.to_string()),
+            },
+            unexpected => self.unsupported(unexpected.to_string()),
         }
+    }
+
+    fn parse_drop_table(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
 
         let if_exists = self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
@@ -47,6 +56,26 @@ impl<'a> ParserContext<'a> {
         );
 
         Ok(Statement::DropTable(DropTable::new(table_ident, if_exists)))
+    }
+
+    fn parse_drop_database(&mut self) -> Result<Statement> {
+        let _ = self.parser.next_token();
+
+        let if_exists = self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
+        let database_name =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a database name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        let database_name = Self::canonicalize_object_name(database_name);
+
+        Ok(Statement::DropDatabase(DropDatabase::new(
+            database_name,
+            if_exists,
+        )))
     }
 }
 
@@ -105,5 +134,44 @@ mod tests {
                 false
             ))
         )
+    }
+
+    #[test]
+    pub fn test_drop_database() {
+        let sql = "DROP DATABASE public";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropDatabase(DropDatabase::new(
+                ObjectName(vec![Ident::new("public")]),
+                false
+            ))
+        );
+
+        let sql = "DROP DATABASE IF EXISTS public";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropDatabase(DropDatabase::new(
+                ObjectName(vec![Ident::new("public")]),
+                true
+            ))
+        );
+
+        let sql = "DROP DATABASE `fOo`";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropDatabase(DropDatabase::new(
+                ObjectName(vec![Ident::with_quote('`', "fOo"),]),
+                false
+            ))
+        );
     }
 }

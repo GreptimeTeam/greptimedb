@@ -119,7 +119,7 @@ impl<'a> ParserContext<'a> {
                 expected: "a database name",
                 actual: self.peek_token_as_string(),
             })?;
-
+        let database_name = Self::canonicalize_object_name(database_name);
         Ok(Statement::CreateDatabase(CreateDatabase {
             name: database_name,
             if_not_exists,
@@ -722,7 +722,7 @@ mod tests {
     use common_catalog::consts::FILE_ENGINE;
     use common_error::ext::ErrorExt;
     use sqlparser::ast::ColumnOption::NotNull;
-    use sqlparser::ast::{BinaryOperator, Value};
+    use sqlparser::ast::{BinaryOperator, ObjectName, Value};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -916,6 +916,18 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        let sql = "CREATE DATABASE `fOo`";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::CreateDatabase(CreateDatabase::new(
+                ObjectName(vec![Ident::with_quote('`', "fOo"),]),
+                false
+            ))
+        );
     }
 
     #[test]

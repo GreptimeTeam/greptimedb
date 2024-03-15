@@ -16,6 +16,7 @@ use datafusion_sql::parser::Statement as DfStatement;
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
+use super::drop::DropDatabase;
 use super::show::ShowVariables;
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::alter::AlterTable;
@@ -51,6 +52,8 @@ pub enum Statement {
     CreateTableLike(CreateTableLike),
     // DROP TABLE
     DropTable(DropTable),
+    // DROP DATABASE
+    DropDatabase(DropDatabase),
     // CREATE DATABASE
     CreateDatabase(CreateDatabase),
     /// ALTER TABLE

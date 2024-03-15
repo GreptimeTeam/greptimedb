@@ -171,6 +171,13 @@ impl StatementExecutor {
                 let table_name = TableName::new(catalog, schema, table);
                 self.drop_table(table_name, stmt.drop_if_exists()).await
             }
+            Statement::DropDatabase(_stmt) => {
+                // TODO(weny): implement the drop database procedure
+                error::NotSupportedSnafu {
+                    feat: "Drop Database",
+                }
+                .fail()
+            }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), &query_ctx)
