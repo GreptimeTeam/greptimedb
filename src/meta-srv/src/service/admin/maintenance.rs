@@ -21,7 +21,9 @@ use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 use tonic::codegen::http::Response;
 
-use crate::error::{InvalidHttpBodySnafu, MissingRequiredParameterSnafu, ParseBoolSnafu};
+use crate::error::{
+    InvalidHttpBodySnafu, KvBackendSnafu, MissingRequiredParameterSnafu, ParseBoolSnafu,
+};
 use crate::service::admin::HttpHandler;
 
 #[derive(Clone)]
@@ -32,7 +34,11 @@ pub struct MaintenanceHandler {
 
 impl MaintenanceHandler {
     async fn get_maintenance(&self) -> crate::Result<Response<String>> {
-        let enabled = self.in_memory.exists(MAINTENANCE_KEY.as_bytes()).await?;
+        let enabled = self
+            .in_memory
+            .exists(MAINTENANCE_KEY.as_bytes())
+            .await
+            .context(KvBackendSnafu)?;
         let response = if enabled {
             "Maintenance mode is enabled"
         } else {
@@ -63,16 +69,21 @@ impl MaintenanceHandler {
         };
 
         let response = if enable {
-            self.kv_backend.put(req.clone()).await?;
-            self.in_memory.put(req).await?;
+            self.kv_backend
+                .put(req.clone())
+                .await
+                .context(KvBackendSnafu)?;
+            self.in_memory.put(req).await.context(KvBackendSnafu)?;
             "Maintenance mode enabled"
         } else {
             self.kv_backend
                 .delete(MAINTENANCE_KEY.as_bytes(), false)
-                .await?;
+                .await
+                .context(KvBackendSnafu)?;
             self.in_memory
                 .delete(MAINTENANCE_KEY.as_bytes(), false)
-                .await?;
+                .await
+                .context(KvBackendSnafu)?;
             "Maintenance mode disabled"
         };
 

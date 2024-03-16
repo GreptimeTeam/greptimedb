@@ -45,7 +45,9 @@ use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use crate::error::{self, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{
+    self, KvBackendSnafu, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu,
+};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
@@ -160,7 +162,10 @@ impl RegionFailoverManager {
     }
 
     pub(crate) async fn is_maintenance_mode(&self) -> Result<bool> {
-        self.in_memory.exists(MAINTENANCE_KEY.as_bytes()).await
+        self.in_memory
+            .exists(MAINTENANCE_KEY.as_bytes())
+            .await
+            .context(KvBackendSnafu)
     }
 
     pub(crate) async fn do_region_failover(&self, failed_region: &RegionIdent) -> Result<()> {

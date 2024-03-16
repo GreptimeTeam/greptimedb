@@ -44,7 +44,7 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
-    self, InitMetadataSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
+    InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
     StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
@@ -358,20 +358,25 @@ impl MetaSrv {
             self.leader_cached_kv_backend
                 .load()
                 .await
-                .context(error::KvBackendSnafu)?;
+                .context(KvBackendSnafu)?;
             self.procedure_manager
                 .start()
                 .await
                 .context(StartProcedureManagerSnafu)?;
         }
 
-        if self.kv_backend.exists(MAINTENANCE_KEY.as_bytes()).await? {
+        if self
+            .kv_backend
+            .exists(MAINTENANCE_KEY.as_bytes())
+            .await
+            .context(KvBackendSnafu)?
+        {
             let req = PutRequest {
                 key: Vec::from(MAINTENANCE_KEY),
                 value: vec![],
                 prev_kv: false,
             };
-            self.in_memory.put(req).await?;
+            self.in_memory.put(req).await.context(KvBackendSnafu)?;
         }
 
         info!("MetaSrv started");
