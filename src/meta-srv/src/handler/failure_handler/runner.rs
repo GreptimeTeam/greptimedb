@@ -162,16 +162,27 @@ impl FailureDetectRunner {
                         })
                         .collect::<Vec<RegionIdent>>();
 
-                    for r in failed_regions {
-                        if let Err(e) = region_failover_manager.do_region_failover(&r).await {
-                            error!(e; "Failed to do region failover for {r}");
-                        } else {
-                            // Now that we know the region is starting to do failover, remove it
-                            // from the failure detectors, avoiding the failover procedure to be
-                            // triggered again.
-                            // If the region is back alive (the failover procedure runs successfully),
-                            // it will be added back to the failure detectors again.
-                            failure_detectors.remove(&r);
+                    match region_failover_manager.is_maintenance_mode().await {
+                        Ok(false) => {
+                            for r in failed_regions {
+                                if let Err(e) = region_failover_manager.do_region_failover(&r).await
+                                {
+                                    error!(e; "Failed to do region failover for {r}");
+                                } else {
+                                    // Now that we know the region is starting to do failover, remove it
+                                    // from the failure detectors, avoiding the failover procedure to be
+                                    // triggered again.
+                                    // If the region is back alive (the failover procedure runs successfully),
+                                    // it will be added back to the failure detectors again.
+                                    failure_detectors.remove(&r);
+                                }
+                            }
+                        }
+                        Ok(true) => {
+                            info!("Maintenance mode is enabled, skip failover");
+                        }
+                        Err(err) => {
+                            error!("Failed to check maintenance mode: {}", err);
                         }
                     }
                 }

@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common_meta::key::datanode_table::DatanodeTableKey;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::{TableMetadataManagerRef, MAINTENANCE_KEY};
 use common_meta::kv_backend::ResettableKvBackendRef;
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::table_name::TableName;
@@ -157,6 +157,10 @@ impl RegionFailoverManager {
         } else {
             None
         }
+    }
+
+    pub(crate) async fn is_maintenance_mode(&self) -> Result<bool> {
+        self.in_memory.exists(MAINTENANCE_KEY.as_bytes()).await
     }
 
     pub(crate) async fn do_region_failover(&self, failed_region: &RegionIdent) -> Result<()> {

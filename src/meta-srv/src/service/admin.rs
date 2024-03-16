@@ -15,10 +15,9 @@
 mod health;
 mod heartbeat;
 mod leader;
+mod maintenance;
 mod meta;
-// TODO(weny): removes it.
 mod node_lease;
-#[allow(dead_code)]
 mod region_migration;
 mod route;
 mod util;
@@ -98,6 +97,14 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
         meta_peer_client: meta_srv.meta_peer_client().clone(),
     };
     let router = router.route("/region-migration", handler);
+
+    let handler = maintenance::MaintenanceHandler {
+        kv_backend: meta_srv.kv_backend().clone(),
+        in_memory: meta_srv.in_memory().clone(),
+    };
+    let router = router
+        .route("/maintenance", handler.clone())
+        .route("/maintenance/set", handler);
 
     let router = Router::nest("/admin", router);
 

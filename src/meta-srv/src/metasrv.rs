@@ -22,10 +22,11 @@ use common_base::Plugins;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::ProcedureExecutorRef;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::{TableMetadataManagerRef, MAINTENANCE_KEY};
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_meta::rpc::store::PutRequest;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
 use common_meta::{distributed_time_constants, ClusterId};
 use common_procedure::options::ProcedureConfig;
@@ -362,6 +363,15 @@ impl MetaSrv {
                 .start()
                 .await
                 .context(StartProcedureManagerSnafu)?;
+        }
+
+        if self.kv_backend.exists(MAINTENANCE_KEY.as_bytes()).await? {
+            let req = PutRequest {
+                key: Vec::from(MAINTENANCE_KEY),
+                value: vec![],
+                prev_kv: false,
+            };
+            self.in_memory.put(req).await?;
         }
 
         info!("MetaSrv started");
