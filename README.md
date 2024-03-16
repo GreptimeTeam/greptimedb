@@ -149,12 +149,9 @@ Our official Grafana dashboard is available at [grafana](grafana/README.md) dire
 
 ## Project Status
 
-This project is in its early stage and under heavy development. We move fast and
-break things. Benchmark on development branch may not represent its potential
-performance. We release pre-built binaries constantly for functional
-evaluation. Do not use it in production at the moment.
-
-For future plans, check out [GreptimeDB roadmap](https://github.com/GreptimeTeam/greptimedb/issues/3412).
+The current version has not yet reached General Availability version standards.
+In line with our Greptime 2024 Roadmap, we plan to achieve a production-level
+version with the update to v1.0 in August. [Join force](https://github.com/GreptimeTeam/greptimedb/issues/3412).
 
 ## Community
 
