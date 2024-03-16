@@ -10,8 +10,9 @@
 
 <div align="center">
 <h3 align="center">
-  <a href="https://greptime.com/product/cloud">GreptimeCloud Serverless</a> |
-  <a href="https://docs.greptime.com/">Documentation</a> |
+  <a href="https://greptime.com/product/cloud">GreptimeCloud</a> |
+  <a href="https://docs.greptime.com/">User guide</a> |
+  <a href="https://greptimedb.rs/">API Docs</a> |
   <a href="https://github.com/GreptimeTeam/greptimedb/issues/3412">Roadmap 2024</a>
 </h4>
 
@@ -45,26 +46,48 @@
 </a>
 </div>
 
-## What is GreptimeDB
+## Introduction
 
-GreptimeDB is an open-source time-series database focusing on efficiency, scalability, and analytical capabilities.
-It's designed to work on infrastructure of the cloud era, and users benefit from its elasticity and commodity storage.
+**GreptimeDB** is an open-source time-series database focusing on efficiency, scalability, and analytical capabilities.
+Designed to work on infrastructure of the cloud era, GreptimeDB benefits users with its elasticity and commodity storage, offering a fast and cost-effective **alternative to InfluxDB and Prometheus**.
 
-Our core developers have been building time-series data platforms for years. Based on their best-practices, GreptimeDB is born to give you:
+## Why GreptimeDB
 
-* **Compatible with InfluxDB, Prometheus and more protocols**: Widely adopted database protocols and APIs, including MySQL, PostgreSQL, and Prometheus Remote Storage, etc. [Read more](https://docs.greptime.com/user-guide/clients/overview).
-* **Easy horizontal scaling**: Seamless scalability from a standalone binary at edge to a robust, highly available distributed cluster in cloud, with a transparent experience for both developers and administrators.
-* **Analyzing time-series data**: Native SQL and PromQL for queries, and Python scripting to facilitate complex analytical tasks.
-* **Cloud-native distributed database**: Fully open-source distributed cluster architecture that harnesses the power of cloud-native elastic computing resources.
-* **Performance and Cost-effective**: Flexible indexing capabilities and distributed, parallel-processing query engine, tackling high cardinality issues down. Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends, particularly cloud object storage with 50x cost efficiency.
+Our core developers have been building time-series data platforms for years. Based on our best-practices, GreptimeDB is born to give you:
 
-## Quickstart with [GreptimePlay](https://greptime.com/playground)
+* **Easy horizontal scaling**
+
+  Seamless scalability from a standalone binary at edge to a robust, highly available distributed cluster in cloud, with a transparent experience for both developers and administrators.
+
+* **Analyzing time-series data**
+
+  Query your time-series data with SQL and PromQL. Use Python scripts to facilitate complex analytical tasks.
+
+* **Cloud-native distributed database**
+
+  Fully open-source distributed cluster architecture that harnesses the power of cloud-native elastic computing resources.
+
+* **Performance and Cost-effective**
+
+  Flexible indexing capabilities and distributed, parallel-processing query engine, tackling high cardinality issues down. Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends, particularly cloud object storage with 50x cost efficiency.
+
+* **Compatible with InfluxDB, Prometheus and more protocols**
+
+  Widely adopted database protocols and APIs, including MySQL, PostgreSQL, and Prometheus Remote Storage, etc. [Read more](https://docs.greptime.com/user-guide/clients/overview).
+
+## Try GreptimeDB
+
+### 1. [GreptimePlay](https://greptime.com/playground)
 
 Try out the features of GreptimeDB right from your browser.
 
-## Up & Running
+### 2. [GreptimeCloud](https://console.greptime.cloud/)
 
-The recommended way to install GreptimeDB is via Docker:
+Start instantly with a free cluster.
+
+### 3. Docker Image
+
+To install GreptimeDB locally, the recommneded way is via Docker:
 
 ```shell
 docker pull greptime/greptimedb
@@ -73,32 +96,13 @@ docker pull greptime/greptimedb
 Start a GreptimeDB container with:
 
 ```shell
-docker run -p 4000-4003:4000-4003 \
-  -p 4242:4242 -v "$(pwd)/greptimedb:/tmp/greptimedb" \
-  --name greptime --rm \
-  greptime/greptimedb standalone start \
-  --http-addr 0.0.0.0:4000 \
-  --rpc-addr 0.0.0.0:4001 \
-  --mysql-addr 0.0.0.0:4002 \
-  --postgres-addr 0.0.0.0:4003 \
-  --opentsdb-addr 0.0.0.0:4242
+docker run --rm --name greptime --net=host greptime/greptimedb standalone start
 ```
 
-Connect to the server and test:
+Read more about [Installation](https://docs.greptime.com/getting-started/installation/overview) on docs.
 
-```shell
-curl -X POST -d 'sql=SELECT 42&format=csv' http://localhost:4000/v1/sql
-```
+## Getting Started
 
-You should get a reply as:
-
-```
-42
-```
-
-Read more on docs:
-
-* [Installation](https://docs.greptime.com/getting-started/installation/overview)
 * [Quickstart](https://docs.greptime.com/getting-started/quick-start/overview)
 * [Write Data](https://docs.greptime.com/user-guide/clients/overview)
 * [Query Data](https://docs.greptime.com/user-guide/query-data/overview)
@@ -123,11 +127,6 @@ Run a standalone server:
 ```shell
 cargo run -- standalone start
 ```
-
-## Documentation
-
-- [User guide](https://docs.greptime.com/user-guide/concepts/overview)
-- [API docs](https://greptimedb.rs)
 
 ## Extension
 
