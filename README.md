@@ -35,6 +35,8 @@
 <img src="https://img.shields.io/github/license/greptimeTeam/greptimedb" alt="License"/>
 </a>
 
+<br/>
+
 <a href="https://greptime.com/slack">
 <img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack&style=for-the-badge" alt="Slack"/>
 </a>
@@ -49,7 +51,7 @@
 ## Introduction
 
 **GreptimeDB** is an open-source time-series database focusing on efficiency, scalability, and analytical capabilities.
-Designed to work on infrastructure of the cloud era, GreptimeDB benefits users with its elasticity and commodity storage, offering a fast and cost-effective **alternative to InfluxDB and Prometheus**.
+Designed to work on infrastructure of the cloud era, GreptimeDB benefits users with its elasticity and commodity storage, offering a fast and cost-effective **alternative to InfluxDB** and a **long-term storage for Prometheus**.
 
 ## Why GreptimeDB
 
@@ -87,7 +89,7 @@ Start instantly with a free cluster.
 
 ### 3. Docker Image
 
-To install GreptimeDB locally, the recommneded way is via Docker:
+To install GreptimeDB locally, the recommended way is via Docker:
 
 ```shell
 docker pull greptime/greptimedb
@@ -151,7 +153,7 @@ Our official Grafana dashboard is available at [grafana](grafana/README.md) dire
 
 The current version has not yet reached General Availability version standards.
 In line with our Greptime 2024 Roadmap, we plan to achieve a production-level
-version with the update to v1.0 in August. [Join force](https://github.com/GreptimeTeam/greptimedb/issues/3412).
+version with the update to v1.0 in August. [[Join Force]](https://github.com/GreptimeTeam/greptimedb/issues/3412)
 
 ## Community
 
