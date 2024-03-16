@@ -6,15 +6,44 @@
   </picture>
 </p>
 
-[![codecov](https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C)](https://codecov.io/gh/GrepTimeTeam/greptimedb)
-[![GitHub Actions](https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg)](https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml)
-[![License](https://img.shields.io/github/license/greptimeTeam/greptimedb)](https://github.com/greptimeTeam/greptimedb/blob/main/LICENSE)
+<h1 align="center">Cloud-scale, Fast and Efficient Time Series Database</h1>
 
-<br/>
+<div align="center">
+<h3 align="center">
+  <a href="https://greptime.com/product/cloud">GreptimeCloud Serverless</a> |
+  <a href="https://docs.greptime.com/">Documentation</a> |
+  <a href="https://github.com/GreptimeTeam/greptimedb/issues/3412">Roadmap 2024</a>
+</h4>
 
-[![Twitter](https://img.shields.io/badge/twitter-follow_us-1d9bf0.svg?style=for-the-badge)](https://twitter.com/greptime/)
-[![LinkedIn](https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=for-the-badge)](https://www.linkedin.com/company/greptime/)
-[![Slack](https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack&style=for-the-badge)](https://greptime.com/slack)
+<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb.svg" alt="Version"/>
+</a>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
+<img src="https://img.shields.io/github/release-date/GreptimeTeam/greptimedb.svg" alt="Releases"/>
+</a>
+<a href="https://hub.docker.com/r/greptime/greptimedb/">
+<img src="https://img.shields.io/docker/pulls/greptime/greptimedb.svg" alt="Docker Pulls"/>
+</a>
+<a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml">
+<img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="GitHub Actions"/>
+</a>
+<a href="https://codecov.io/gh/GrepTimeTeam/greptimedb">
+<img src="https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C" alt="Codecov"/>
+</a>
+<a href="https://github.com/greptimeTeam/greptimedb/blob/main/LICENSE">
+<img src="https://img.shields.io/github/license/greptimeTeam/greptimedb" alt="License"/>
+</a>
+
+<a href="https://greptime.com/slack">
+<img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack&style=for-the-badge" alt="Slack"/>
+</a>
+<a href="https://twitter.com/greptime">
+<img src="https://img.shields.io/badge/twitter-follow_us-1d9bf0.svg?style=for-the-badge" alt="Twitter"/>
+</a>
+<a href="https://www.linkedin.com/company/greptime/">
+<img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=for-the-badge" alt="LinkedIn"/>
+</a>
+</div>
 
 ## What is GreptimeDB
 
