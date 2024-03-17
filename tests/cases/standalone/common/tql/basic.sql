@@ -19,4 +19,8 @@ TQL EVAL (0, 10, '5s') {__name__!="test"};
 -- the point at 1ms will be shadowed by the point at 2ms
 TQL EVAL (0, 10, '5s') test{k="a"};
 
+TQL EVAL ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '1s') test{k="a"};
+
+TQL EVAL (now() - '2 minutes'::interval, now(), '5s') test{k="a"};
+
 DROP TABLE test;

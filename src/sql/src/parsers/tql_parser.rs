@@ -52,7 +52,7 @@ impl<'a> ParserContext<'a> {
         match self.parser.peek_token().token {
             Token::Word(w) => {
                 let uppercase = w.value.to_uppercase();
-                let _consume_tql_token = self.parser.next_token();
+                let _consume_tql_keyword_token = self.parser.next_token();
                 match w.keyword {
                     Keyword::NoKeyword
                         if (uppercase == EVAL || uppercase == EVALUATE)
@@ -100,29 +100,46 @@ impl<'a> ParserContext<'a> {
         })))
     }
 
-    fn parse_string_or_number_or_word(
-        parser: &mut Parser,
-        token: Token,
-    ) -> std::result::Result<String, ParserError> {
-        let value = match parser.next_token().token {
-            Token::Number(n, _) => n,
-            Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
-            Token::Word(w) => Self::parse_tql_word(Token::Word(w), parser)?,
-            unexpected => {
-                return Err(ParserError::ParserError(format!(
-                    "Expect number, string or word, but is {unexpected:?}"
-                )));
-            }
-        };
-        parser.expect_token(&token)?;
-        Ok(value)
+    pub fn peek_to_token(parser: &mut Parser, token: &Token) -> bool {
+        match parser.peek_token().token {
+            Token::Comma => matches!(token, Token::Comma),
+            Token::RParen => matches!(token, Token::RParen),
+            _ => false,
+        }
     }
 
-    fn parse_tql_word(w: Token, parser: &mut Parser) -> std::result::Result<String, ParserError> {
-        let tokens = Self::collect_tokens(w, parser);
-        let empty_df_schema = DFSchema::empty();
-        let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
+    fn parse_string_or_number_or_word(
+        parser: &mut Parser,
+        delimiter_token: Token,
+    ) -> std::result::Result<String, ParserError> {
+        let mut tokens = vec![];
+        while !Self::peek_to_token(parser, &delimiter_token) {
+            let token = parser.next_token();
+            tokens.push(token.token);
+        }
+        let result = match tokens.len() {
+            0 => Err(ParserError::ParserError("Expected tokens".to_string())),
+            1 => {
+                let value = match tokens[0].clone() {
+                    Token::Number(n, _) => n,
+                    Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
+                    Token::Word(_) => Self::parse_tql_word(tokens)?,
+                    unexpected => {
+                        return Err(ParserError::ParserError(format!(
+                            "Expect number, string or word, but is {unexpected:?}"
+                        )));
+                    }
+                };
+                Ok(value)
+            }
+            _ => Self::parse_tql_word(tokens),
+        };
+        parser.expect_token(&delimiter_token)?;
+        result
+    }
 
+    fn parse_tql_word(tokens: Vec<Token>) -> std::result::Result<String, ParserError> {
+        let empty_df_schema = DFSchema::empty();
         let expr = Parser::new(&GreptimeDbDialect {})
             .with_tokens(tokens)
             .parse_expr()
@@ -137,6 +154,7 @@ impl<'a> ParserContext<'a> {
                 ParserError::ParserError(format!("Failed to convert to logical expression {err:?}"))
             })?;
 
+        let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
         let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema));
         let simplified_expr = ExprSimplifier::new(info)
             .simplify(logical_expr)
@@ -154,27 +172,9 @@ impl<'a> ParserContext<'a> {
         )))
     }
 
-    fn collect_tokens(w: Token, parser: &mut Parser) -> Vec<Token> {
-        let mut tokens = vec![];
-        tokens.push(w);
-        while parser.peek_token() != Token::Comma {
-            let token = parser.next_token();
-            tokens.push(token.token);
-        }
-        tokens
-    }
-
-    /// Seeks to the start of a query by moving the parser
-    /// to the first meaningful token, skipping over any leading commas tokens.
-    /// Returns `true` if the parser successfully moved to the first meaningful token,
-    /// otherwise returns `false`
-    pub fn seek_to_query_start(parser: &mut Parser) -> bool {
-        !matches!(parser.peek_token().token, Token::Comma)
-    }
-
     fn parse_tql_query(parser: &mut Parser, sql: &str) -> std::result::Result<String, ParserError> {
-        while !Self::seek_to_query_start(parser) {
-            let _ = parser.next_token();
+        while matches!(parser.peek_token().token, Token::Comma) {
+            let _skip_token = parser.next_token();
         }
         let index = parser.next_token().location.column as usize;
         if index == 0 {
@@ -294,10 +294,22 @@ mod tests {
         // TODO `Utc::now()` introduces the flakiness in a test,
         //  left: "1710514410"
         //  right: "1710514409"
-        match parse_into_statement(sql) {
+        let statement = parse_into_statement(sql);
+        match statement {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.start, (assert_time - 600).to_string());
                 assert_eq!(eval.end, assert_time.to_string());
+                assert_eq!(eval.step, "1m");
+                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "TQL EVAL ('1970-01-01T00:05:00'::timestamp, '1970-01-01T00:10:00'::timestamp + '10 minutes'::interval, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "300");
+                assert_eq!(eval.end, "1200");
                 assert_eq!(eval.step, "1m");
                 assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
             }
@@ -486,25 +498,29 @@ mod tests {
 
     #[test]
     fn test_parse_tql_error() {
+        let dialect = &GreptimeDbDialect {};
+        let parse_options = ParseOptions::default();
+
         // invalid duration
         let sql = "TQL EVAL (1676887657, 1676887659, 1m) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap_err();
-        assert!(result.output_msg().contains("Expected ), found: m"));
+            ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
+        assert!(result
+            .output_msg()
+            .contains("Failed to extract a timestamp value"));
 
         // missing end
         let sql = "TQL EVAL (1676887657, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap_err();
-        assert!(result.output_msg().contains("Expected ,, found: )"));
+            ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
+        assert!(result
+            .output_msg()
+            .contains("Failed to extract a timestamp value"));
 
         // empty TQL query
         let sql = "TQL EVAL (0, 30, '10s')";
         let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap_err();
+            ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
         assert!(result.output_msg().contains("empty TQL query"));
     }
 }
