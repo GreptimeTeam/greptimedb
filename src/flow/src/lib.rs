@@ -16,6 +16,7 @@
 #![allow(unused_imports)]
 // allow unused for now because it should be use later
 mod adapter;
+mod compute;
 mod expr;
 mod plan;
 mod repr;
