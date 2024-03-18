@@ -25,11 +25,7 @@ use object_store::util::join_dir;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
-    DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
-    LOGICAL_TABLE_METADATA_KEY, METADATA_REGION_SUBDIR, METADATA_SCHEMA_KEY_COLUMN_INDEX,
-    METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX,
-    METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX,
-    METADATA_SCHEMA_VALUE_COLUMN_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    ALTER_PHYSICAL_EXTENSION_KEY, DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METADATA_REGION_SUBDIR, METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME, PHYSICAL_TABLE_METADATA_KEY
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
@@ -41,6 +37,7 @@ use crate::engine::MetricEngineInner;
 use crate::error::{
     ConflictRegionOptionSnafu, CreateMitoRegionSnafu, InternalColumnOccupiedSnafu,
     MissingRegionOptionSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu, Result,
+    SerializeColumnMetadataSnafu,
 };
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils::{to_data_region_id, to_metadata_region_id};
@@ -51,13 +48,15 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: RegionCreateRequest,
+        extension_return_value: &mut HashMap<String, Vec<u8>>,
     ) -> Result<AffectedRows> {
         Self::verify_region_create_request(&request)?;
 
         let result = if request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY) {
             self.create_physical_region(region_id, request).await
         } else if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
-            self.create_logical_region(region_id, request).await
+            self.create_logical_region(region_id, request, extension_return_value)
+                .await
         } else {
             MissingRegionOptionSnafu {}.fail()
         };
@@ -124,10 +123,14 @@ impl MetricEngineInner {
     /// This method will alter the data region to add columns if necessary.
     ///
     /// If the logical region to create already exists, this method will do nothing.
+    ///
+    /// `alter_request` is a hashmap that stores the alter requests that were executed
+    /// to the physical region.
     async fn create_logical_region(
         &self,
         logical_region_id: RegionId,
         request: RegionCreateRequest,
+        alter_request: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
         // transform IDs
         let physical_region_id_raw = request
@@ -178,6 +181,7 @@ impl MetricEngineInner {
                 metadata_region_id,
                 logical_region_id,
                 new_columns,
+                alter_request,
             )
             .await?;
         }
@@ -204,16 +208,19 @@ impl MetricEngineInner {
         Ok(())
     }
 
+    /// Execute corresponding alter requests to mito region. New added columns' [ColumnMetadata] will be
+    /// cloned into `added_columns`.
     pub(crate) async fn add_columns_to_physical_data_region(
         &self,
         data_region_id: RegionId,
         metadata_region_id: RegionId,
         logical_region_id: RegionId,
-        new_columns: Vec<ColumnMetadata>,
+        mut new_columns: Vec<ColumnMetadata>,
+        added_columns: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
         // alter data region
         self.data_region
-            .add_columns(data_region_id, new_columns.clone())
+            .add_columns(data_region_id, &mut new_columns)
             .await?;
 
         // register columns to metadata region
@@ -232,6 +239,12 @@ impl MetricEngineInner {
         );
         info!("Create region {logical_region_id} leads to adding columns {new_columns:?} to physical region {data_region_id}");
         PHYSICAL_COLUMN_COUNT.add(new_columns.len() as _);
+
+        // store the new column metadata into alter request
+        added_columns.insert(
+            ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
+            serde_json::to_vec(&new_columns).context(SerializeColumnMetadataSnafu)?,
+        );
 
         Ok(())
     }

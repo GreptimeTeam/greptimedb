@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use common_telemetry::{error, info};
 use snafu::OptionExt;
 use store_api::region_request::{AffectedRows, AlterKind, RegionAlterRequest};
@@ -28,13 +30,15 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: RegionAlterRequest,
+        extension_return_value: &mut HashMap<String, Vec<u8>>,
     ) -> Result<AffectedRows> {
         let is_altering_physical_region = self.is_physical_region(region_id);
 
         let result = if is_altering_physical_region {
             self.alter_physical_region(region_id, request).await
         } else {
-            self.alter_logical_region(region_id, request).await
+            self.alter_logical_region(region_id, request, extension_return_value)
+                .await
         };
 
         result.map(|_| 0)
@@ -44,6 +48,7 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: RegionAlterRequest,
+        new_columns: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
         let physical_region_id = {
             let state = &self.state.read().unwrap();
@@ -82,6 +87,7 @@ impl MetricEngineInner {
             metadata_region_id,
             region_id,
             columns_to_add,
+            new_columns,
         )
         .await?;
 
@@ -166,7 +172,7 @@ mod test {
 
         let region_id = env.default_logical_region_id();
         engine_inner
-            .alter_logical_region(region_id, request)
+            .alter_logical_region(region_id, request, &mut HashMap::new())
             .await
             .unwrap();
         let semantic_type = metadata_region

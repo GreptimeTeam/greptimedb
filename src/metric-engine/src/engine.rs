@@ -24,6 +24,7 @@ mod region_metadata;
 mod state;
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -39,7 +40,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
 use crate::data_region::DataRegion;
-use crate::error::Result;
+use crate::error::{Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
 use crate::utils;
 
@@ -122,23 +123,38 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<RegionHandleResult, BoxedError> {
+        let mut extension_return_value = HashMap::new();
+
         let result = match request {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
-            RegionRequest::Delete(_) => todo!(),
-            RegionRequest::Create(create) => self.inner.create_region(region_id, create).await,
+            RegionRequest::Create(create) => {
+                self.inner
+                    .create_region(region_id, create, &mut extension_return_value)
+                    .await
+            }
             RegionRequest::Drop(drop) => self.inner.drop_region(region_id, drop).await,
             RegionRequest::Open(open) => self.inner.open_region(region_id, open).await,
             RegionRequest::Close(close) => self.inner.close_region(region_id, close).await,
-            RegionRequest::Alter(alter) => self.inner.alter_region(region_id, alter).await,
-            RegionRequest::Flush(_) => todo!(),
-            RegionRequest::Compact(_) => todo!(),
-            RegionRequest::Truncate(_) => todo!(),
+            RegionRequest::Alter(alter) => {
+                self.inner
+                    .alter_region(region_id, alter, &mut extension_return_value)
+                    .await
+            }
+            RegionRequest::Delete(_)
+            | RegionRequest::Flush(_)
+            | RegionRequest::Compact(_)
+            | RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
             // It always Ok(0), all data is the latest.
             RegionRequest::Catchup(_) => Ok(0),
         };
 
         // TODO: pass extension
-        result.map_err(BoxedError::new).map(RegionHandleResult::new)
+        result
+            .map_err(BoxedError::new)
+            .map(|rows| RegionHandleResult {
+                affected_rows: rows,
+                extension: extension_return_value,
+            })
     }
 
     /// Handles substrait query and return a stream of record batches
