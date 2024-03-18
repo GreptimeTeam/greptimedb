@@ -33,8 +33,8 @@ use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
-use store_api::region_request::{AffectedRows, RegionRequest};
+use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
+use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
@@ -121,7 +121,7 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<AffectedRows, BoxedError> {
+    ) -> Result<RegionHandleResult, BoxedError> {
         let result = match request {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Delete(_) => todo!(),
@@ -137,7 +137,8 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Catchup(_) => Ok(0),
         };
 
-        result.map_err(BoxedError::new)
+        // TODO: pass extension
+        result.map_err(BoxedError::new).map(RegionHandleResult::new)
     }
 
     /// Handles substrait query and return a stream of record batches

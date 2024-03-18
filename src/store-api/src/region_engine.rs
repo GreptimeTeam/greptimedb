@@ -15,6 +15,7 @@
 //! Region Engine's definition
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -129,7 +130,7 @@ pub trait RegionEngine: Send + Sync {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<AffectedRows, BoxedError>;
+    ) -> Result<RegionHandleResult, BoxedError>;
 
     /// Handles substrait query and return a stream of record batches
     async fn handle_query(
@@ -171,3 +172,20 @@ pub trait RegionEngine: Send + Sync {
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;
+
+// TODO: reorganize the dependence to merge this struct with the
+// one in common_meta
+#[derive(Debug)]
+pub struct RegionHandleResult {
+    pub affected_rows: AffectedRows,
+    pub extension: HashMap<String, Vec<u8>>,
+}
+
+impl RegionHandleResult {
+    pub fn new(affected_rows: AffectedRows) -> Self {
+        Self {
+            affected_rows,
+            extension: Default::default(),
+        }
+    }
+}

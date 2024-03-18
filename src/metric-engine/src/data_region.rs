@@ -167,6 +167,7 @@ impl DataRegion {
             .handle_request(region_id, RegionRequest::Put(request))
             .await
             .context(MitoWriteOperationSnafu)
+            .map(|result| result.affected_rows)
     }
 
     pub async fn physical_columns(
