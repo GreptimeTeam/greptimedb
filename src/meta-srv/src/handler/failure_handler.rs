@@ -170,7 +170,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_maintenance_mode() {
         let region_failover_manager = create_region_failover_manager();
-        let in_memory = region_failover_manager.create_context().in_memory.clone();
+        let kv_backend = region_failover_manager.create_context().kv_backend.clone();
         let _handler = RegionFailureHandler::try_new(
             None,
             region_failover_manager.clone(),
@@ -184,13 +184,13 @@ mod tests {
             value: vec![],
             prev_kv: false,
         };
-        let _ = in_memory.put(kv_req.clone()).await.unwrap();
+        let _ = kv_backend.put(kv_req.clone()).await.unwrap();
         assert_matches!(
             region_failover_manager.is_maintenance_mode().await,
             Ok(true)
         );
 
-        let _ = in_memory
+        let _ = kv_backend
             .delete(MAINTENANCE_KEY.as_bytes(), false)
             .await
             .unwrap();

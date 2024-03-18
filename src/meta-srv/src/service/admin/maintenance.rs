@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use common_meta::key::MAINTENANCE_KEY;
-use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::rpc::store::PutRequest;
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
@@ -29,13 +29,12 @@ use crate::service::admin::HttpHandler;
 #[derive(Clone)]
 pub struct MaintenanceHandler {
     pub kv_backend: KvBackendRef,
-    pub in_memory: ResettableKvBackendRef,
 }
 
 impl MaintenanceHandler {
     async fn get_maintenance(&self) -> crate::Result<Response<String>> {
         let enabled = self
-            .in_memory
+            .kv_backend
             .exists(MAINTENANCE_KEY.as_bytes())
             .await
             .context(KvBackendSnafu)?;
@@ -72,14 +71,9 @@ impl MaintenanceHandler {
                 .put(req.clone())
                 .await
                 .context(KvBackendSnafu)?;
-            self.in_memory.put(req).await.context(KvBackendSnafu)?;
             "Maintenance mode enabled"
         } else {
             self.kv_backend
-                .delete(MAINTENANCE_KEY.as_bytes(), false)
-                .await
-                .context(KvBackendSnafu)?;
-            self.in_memory
                 .delete(MAINTENANCE_KEY.as_bytes(), false)
                 .await
                 .context(KvBackendSnafu)?;

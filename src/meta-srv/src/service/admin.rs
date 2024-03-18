@@ -100,7 +100,6 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
 
     let handler = maintenance::MaintenanceHandler {
         kv_backend: meta_srv.kv_backend().clone(),
-        in_memory: meta_srv.in_memory().clone(),
     };
     let router = router
         .route("/maintenance", handler.clone())
