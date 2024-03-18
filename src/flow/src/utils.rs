@@ -184,7 +184,7 @@ impl Arrangement {
                     compacted_batch.get(&key).and_then(|v| v.first()).cloned();
 
                 for new_row in updates {
-                    old_row = compact_diff_row(old_row, new_row);
+                    old_row = compact_diff_row(old_row, &new_row);
                 }
                 if let Some(compacted_update) = old_row {
                     compacted_batch.insert(key, smallvec![compacted_update]);
@@ -195,8 +195,7 @@ impl Arrangement {
         }
 
         // insert the compacted batch into spine with key being `now`
-        let mut first_entry = BTreeMap::from([(now, compacted_batch)]);
-        self.spine.append(&mut first_entry);
+        self.spine.insert(now, compacted_batch);
         Ok(())
     }
 
@@ -229,9 +228,9 @@ impl Arrangement {
             let mut after = s.event_ts_to_key.split_off(&(expire_time + 1));
             std::mem::swap(&mut s.event_ts_to_key, &mut after);
             let before = after;
-            for (_, keys) in before.into_iter() {
-                for key in keys {
-                    self.spine.first_entry().map(|e| e.into_mut().remove(&key));
+            for key in before.into_iter().flat_map(|i| i.1.into_iter()) {
+                for (_ts, batch) in self.spine.iter_mut() {
+                    batch.remove(&key);
                 }
             }
         }
@@ -255,7 +254,7 @@ impl Arrangement {
             for (_ts, batch) in self.spine.range(..=now) {
                 if let Some(new_rows) = batch.get(key).map(|v| v.iter()) {
                     for new_row in new_rows {
-                        final_val = compact_diff_row(final_val, new_row.clone());
+                        final_val = compact_diff_row(final_val, new_row);
                     }
                 }
             }
@@ -264,19 +263,19 @@ impl Arrangement {
     }
 }
 
-fn compact_diff_row(old_row: Option<DiffRow>, new_row: DiffRow) -> Option<DiffRow> {
+fn compact_diff_row(old_row: Option<DiffRow>, new_row: &DiffRow) -> Option<DiffRow> {
     let (val, ts, diff) = new_row;
     match (old_row, diff) {
-        (Some((row, _old_ts, old_diff)), diff) if row == val && old_diff + diff == 0 => {
+        (Some((row, _old_ts, old_diff)), diff) if row == *val && old_diff + diff == 0 => {
             // the key is deleted now
             None
         }
-        (Some((row, _old_ts, old_diff)), diff) if row == val && old_diff + diff != 0 => {
-            Some((val, ts, old_diff + diff))
+        (Some((row, _old_ts, old_diff)), diff) if row == *val && old_diff + diff != 0 => {
+            Some((val.clone(), *ts, old_diff + *diff))
         }
         // if old val not equal new val, simple consider it as being overwritten, for each key can only have one value
         // so it make sense to just replace the old value with new value
-        _ => Some((val, ts, diff)),
+        _ => Some((val.clone(), *ts, *diff)),
     }
 }
 
