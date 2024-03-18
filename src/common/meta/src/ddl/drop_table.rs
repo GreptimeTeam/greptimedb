@@ -48,7 +48,6 @@ pub struct DropTableProcedure {
     pub dropping_regions: Vec<OperatingRegionGuard>,
 }
 
-#[allow(dead_code)]
 impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
@@ -114,6 +113,7 @@ impl DropTableProcedure {
 
     /// Removes the table metadata.
     async fn on_remove_metadata(&mut self, executor: &DropTableExecutor) -> Result<Status> {
+        self.register_dropping_regions()?;
         // NOTES: If the meta server is crashed after the `RemoveMetadata`,
         // Corresponding regions of this table on the Datanode will be closed automatically.
         // Then any future dropping operation will fail.
