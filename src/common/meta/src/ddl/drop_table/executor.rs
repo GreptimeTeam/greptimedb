@@ -120,6 +120,7 @@ impl DropTableExecutor {
             subject: Some("Invalidate table cache by dropping table".to_string()),
         };
 
+        // TODO(weny): merge these two invalidation instructions.
         cache_invalidator
             .invalidate_table_name(&ctx, self.table.table_ref().into())
             .await?;
