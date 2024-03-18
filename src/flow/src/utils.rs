@@ -271,7 +271,7 @@ fn compact_diff_row(old_row: Option<DiffRow>, new_row: &DiffRow) -> Option<DiffR
             None
         }
         (Some((row, _old_ts, old_diff)), diff) if row == *val && old_diff + diff != 0 => {
-            Some((val.clone(), *ts, old_diff + *diff))
+            Some((row, *ts, old_diff + *diff))
         }
         // if old val not equal new val, simple consider it as being overwritten, for each key can only have one value
         // so it make sense to just replace the old value with new value
