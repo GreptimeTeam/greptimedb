@@ -22,7 +22,7 @@ use table::metadata::TableId;
 
 use super::{TableMetaValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
 use crate::error::{Error, InvalidTableMetadataSnafu, Result};
-use crate::key::{to_removed_key, TableMetaKey};
+use crate::key::TableMetaKey;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -195,20 +195,9 @@ impl TableNameManager {
     }
 
     /// Builds a delete table name transaction. It only executes while the primary keys comparing successes.
-    pub(crate) fn build_delete_txn(
-        &self,
-        key: &TableNameKey<'_>,
-        table_id: TableId,
-    ) -> Result<Txn> {
+    pub(crate) fn build_delete_txn(&self, key: &TableNameKey<'_>) -> Result<Txn> {
         let raw_key = key.as_raw_key();
-        let value = TableNameValue::new(table_id);
-        let raw_value = value.try_as_raw_value()?;
-        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
-
-        let txn = Txn::new().and_then(vec![
-            TxnOp::Delete(raw_key),
-            TxnOp::Put(removed_key.into_bytes(), raw_value),
-        ]);
+        let txn = Txn::new().and_then(vec![TxnOp::Delete(raw_key)]);
 
         Ok(txn)
     }

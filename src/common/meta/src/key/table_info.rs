@@ -20,7 +20,7 @@ use table::table_reference::TableReference;
 
 use super::{txn_helper, DeserializedValueWithBytes, TableMetaValue, TABLE_INFO_KEY_PREFIX};
 use crate::error::Result;
-use crate::key::{to_removed_key, TableMetaKey};
+use crate::key::TableMetaKey;
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
@@ -157,36 +157,13 @@ impl TableInfoManager {
     }
 
     /// Builds a delete table info transaction.
-    pub(crate) fn build_delete_txn(
-        &self,
-        table_id: TableId,
-        table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
-    ) -> Result<Txn> {
+    pub(crate) fn build_delete_txn(&self, table_id: TableId) -> Result<Txn> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
-        let raw_value = table_info_value.get_raw_bytes();
-        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
-        let txn = Txn::new().and_then(vec![
-            TxnOp::Delete(raw_key),
-            TxnOp::Put(removed_key.into_bytes(), raw_value),
-        ]);
+        let txn = Txn::new().and_then(vec![TxnOp::Delete(raw_key)]);
 
         Ok(txn)
-    }
-
-    #[cfg(test)]
-    pub async fn get_removed(
-        &self,
-        table_id: TableId,
-    ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>> {
-        let key = TableInfoKey::new(table_id).to_string();
-        let removed_key = to_removed_key(&key).into_bytes();
-        self.kv_backend
-            .get(&removed_key)
-            .await?
-            .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
-            .transpose()
     }
 
     pub async fn get(
