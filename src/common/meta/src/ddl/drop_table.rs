@@ -44,7 +44,7 @@ pub struct DropTableProcedure {
     pub context: DdlContext,
     /// The serializable data.
     pub data: DropTableData,
-    /// The guards of opening regions.
+    /// The guards of opening regions.f
     pub dropping_regions: Vec<OperatingRegionGuard>,
 }
 

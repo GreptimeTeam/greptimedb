@@ -32,6 +32,7 @@ pub mod alter_table;
 pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;
+pub mod drop_database;
 pub mod drop_table;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
@@ -64,7 +65,7 @@ pub trait ProcedureExecutor: Send + Sync {
         request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse>;
 
-    /// Query the procedure state by its id
+    /// Query the  procedure state by its id
     async fn query_procedure_state(
         &self,
         ctx: &ExecutorContext,

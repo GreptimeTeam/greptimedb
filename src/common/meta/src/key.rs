@@ -273,6 +273,10 @@ impl<T: Serialize + DeserializeOwned + TableMetaValue> DeserializedValueWithByte
         self.inner
     }
 
+    pub fn get_inner_ref(&self) -> &T {
+        &self.inner
+    }
+
     /// Returns original `bytes`
     pub fn get_raw_bytes(&self) -> Vec<u8> {
         self.bytes.to_vec()
