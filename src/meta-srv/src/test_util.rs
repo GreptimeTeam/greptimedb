@@ -86,6 +86,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     Arc::new(RegionFailoverManager::new(
         10,
         in_memory,
+        kv_backend.clone(),
         mailbox,
         procedure_manager,
         (selector, selector_ctx),

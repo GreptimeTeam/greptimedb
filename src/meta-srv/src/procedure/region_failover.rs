@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common_meta::key::datanode_table::DatanodeTableKey;
-use common_meta::key::TableMetadataManagerRef;
-use common_meta::kv_backend::ResettableKvBackendRef;
+use common_meta::key::{TableMetadataManagerRef, MAINTENANCE_KEY};
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::table_name::TableName;
 use common_meta::{ClusterId, RegionIdent};
@@ -45,7 +45,9 @@ use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use crate::error::{self, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{
+    self, KvBackendSnafu, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu,
+};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
@@ -73,6 +75,7 @@ impl From<RegionIdent> for RegionFailoverKey {
 pub(crate) struct RegionFailoverManager {
     region_lease_secs: u64,
     in_memory: ResettableKvBackendRef,
+    kv_backend: KvBackendRef,
     mailbox: MailboxRef,
     procedure_manager: ProcedureManagerRef,
     selector: SelectorRef,
@@ -94,9 +97,11 @@ impl Drop for FailoverProcedureGuard {
 }
 
 impl RegionFailoverManager {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         region_lease_secs: u64,
         in_memory: ResettableKvBackendRef,
+        kv_backend: KvBackendRef,
         mailbox: MailboxRef,
         procedure_manager: ProcedureManagerRef,
         (selector, selector_ctx): (SelectorRef, SelectorContext),
@@ -106,6 +111,7 @@ impl RegionFailoverManager {
         Self {
             region_lease_secs,
             in_memory,
+            kv_backend,
             mailbox,
             procedure_manager,
             selector,
@@ -120,6 +126,7 @@ impl RegionFailoverManager {
         RegionFailoverContext {
             region_lease_secs: self.region_lease_secs,
             in_memory: self.in_memory.clone(),
+            kv_backend: self.kv_backend.clone(),
             mailbox: self.mailbox.clone(),
             selector: self.selector.clone(),
             selector_ctx: self.selector_ctx.clone(),
@@ -157,6 +164,13 @@ impl RegionFailoverManager {
         } else {
             None
         }
+    }
+
+    pub(crate) async fn is_maintenance_mode(&self) -> Result<bool> {
+        self.kv_backend
+            .exists(MAINTENANCE_KEY.as_bytes())
+            .await
+            .context(KvBackendSnafu)
     }
 
     pub(crate) async fn do_region_failover(&self, failed_region: &RegionIdent) -> Result<()> {
@@ -264,6 +278,7 @@ struct Node {
 pub struct RegionFailoverContext {
     pub region_lease_secs: u64,
     pub in_memory: ResettableKvBackendRef,
+    pub kv_backend: KvBackendRef,
     pub mailbox: MailboxRef,
     pub selector: SelectorRef,
     pub selector_ctx: SelectorContext,
@@ -569,6 +584,7 @@ mod tests {
                 context: RegionFailoverContext {
                     region_lease_secs: 10,
                     in_memory,
+                    kv_backend,
                     mailbox,
                     selector,
                     selector_ctx,
