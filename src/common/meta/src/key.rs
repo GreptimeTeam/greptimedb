@@ -140,10 +140,6 @@ lazy_static! {
     .unwrap();
 }
 
-pub fn to_removed_key(key: &str) -> String {
-    format!("{REMOVED_PREFIX}-{key}")
-}
-
 pub trait TableMetaKey {
     fn as_raw_key(&self) -> Vec<u8>;
 }
@@ -565,14 +561,10 @@ impl TableMetadataManager {
             &table_info.name,
         );
 
-        let delete_table_name_txn = self
-            .table_name_manager()
-            .build_delete_txn(&table_name, table_id)?;
+        let delete_table_name_txn = self.table_name_manager().build_delete_txn(&table_name)?;
 
         // Deletes table info.
-        let delete_table_info_txn = self
-            .table_info_manager()
-            .build_delete_txn(table_id, table_info_value)?;
+        let delete_table_info_txn = self.table_info_manager().build_delete_txn(table_id)?;
 
         // Deletes datanode table key value pairs.
         let distribution = region_distribution(table_route_value.region_routes()?);
@@ -584,7 +576,7 @@ impl TableMetadataManager {
         let delete_table_route_txn = self
             .table_route_manager()
             .table_route_storage()
-            .build_delete_txn(table_id, table_route_value)?;
+            .build_delete_txn(table_id)?;
 
         let txn = Txn::merge_all(vec![
             delete_table_name_txn,
@@ -871,7 +863,7 @@ mod tests {
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
-    use crate::key::{to_removed_key, DeserializedValueWithBytes, TableMetadataManager};
+    use crate::key::{DeserializedValueWithBytes, TableMetadataManager};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{region_distribution, Region, RegionRoute, RegionStatus};
@@ -902,13 +894,6 @@ mod tests {
 
         assert_eq!(decoded.inner, expected_region_routes);
         assert_eq!(decoded.bytes, expected);
-    }
-
-    #[test]
-    fn test_to_removed_key() {
-        let key = "test_key";
-        let removed = "__removed-test_key";
-        assert_eq!(removed, to_removed_key(key));
     }
 
     fn new_test_region_route() -> RegionRoute {
@@ -1148,24 +1133,20 @@ mod tests {
             .unwrap()
             .is_empty());
         // Checks removed values
-        let removed_table_info = table_metadata_manager
+        let table_info = table_metadata_manager
             .table_info_manager()
-            .get_removed(table_id)
+            .get(table_id)
             .await
-            .unwrap()
-            .unwrap()
-            .into_inner();
-        assert_eq!(removed_table_info.table_info, table_info);
+            .unwrap();
+        assert!(table_info.is_none());
 
-        let removed_table_route = table_metadata_manager
+        let table_route = table_metadata_manager
             .table_route_manager()
             .table_route_storage()
-            .get_raw_removed(table_id)
+            .get(table_id)
             .await
-            .unwrap()
-            .unwrap()
-            .into_inner();
-        assert_eq!(removed_table_route.region_routes().unwrap(), region_routes);
+            .unwrap();
+        assert!(table_route.is_none());
     }
 
     #[tokio::test]
