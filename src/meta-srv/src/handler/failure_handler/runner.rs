@@ -151,7 +151,7 @@ impl FailureDetectRunner {
                         return;
                     }
                     Err(err) => {
-                        error!("Failed to check maintenance mode: {}", err);
+                        error!(err; "Failed to check maintenance mode");
                         return;
                     }
                 }

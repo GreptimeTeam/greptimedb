@@ -62,13 +62,12 @@ impl MaintenanceHandler {
                 err_msg: "'enable' must be 'true' or 'false'",
             })?;
 
-        let req = PutRequest {
-            key: Vec::from(MAINTENANCE_KEY),
-            value: vec![],
-            prev_kv: false,
-        };
-
         let response = if enable {
+            let req = PutRequest {
+                key: Vec::from(MAINTENANCE_KEY),
+                value: vec![],
+                prev_kv: false,
+            };
             self.kv_backend
                 .put(req.clone())
                 .await
