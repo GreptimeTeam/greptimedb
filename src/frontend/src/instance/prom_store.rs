@@ -31,7 +31,7 @@ use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use prost::Message;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
-use servers::http::header::collect_plan_metrics;
+use servers::http::header::{collect_plan_metrics, CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
 use servers::prom_store::{self, Metrics};
@@ -273,8 +273,8 @@ impl PromStoreProtocolHandler for Instance {
 
                 // TODO(dennis): may consume too much memory, adds flow control
                 Ok(PromStoreResponse {
-                    content_type: "application/x-protobuf".to_string(),
-                    content_encoding: "snappy".to_string(),
+                    content_type: CONTENT_TYPE_PROTOBUF.clone(),
+                    content_encoding: CONTENT_ENCODING_SNAPPY.clone(),
                     resp_metrics,
                     body: prom_store::snappy_compress(&response.encode_to_vec())?,
                 })

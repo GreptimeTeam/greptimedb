@@ -32,6 +32,7 @@ use api::prom_store::remote::{ReadRequest, WriteRequest};
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
+use headers::HeaderValue;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use serde_json::Value;
@@ -79,8 +80,8 @@ pub trait OpentsdbProtocolHandler {
 }
 
 pub struct PromStoreResponse {
-    pub content_type: String,
-    pub content_encoding: String,
+    pub content_type: HeaderValue,
+    pub content_encoding: HeaderValue,
     pub resp_metrics: HashMap<String, Value>,
     pub body: Vec<u8>,
 }

@@ -61,6 +61,9 @@ pub static GREPTIME_DB_HEADER_NAME: HeaderName =
 pub static GREPTIME_TIMEZONE_HEADER_NAME: HeaderName =
     HeaderName::from_static(constants::GREPTIME_TIMEZONE_HEADER_NAME);
 
+pub static CONTENT_TYPE_PROTOBUF: HeaderValue = HeaderValue::from_static("application/x-protobuf");
+pub static CONTENT_ENCODING_SNAPPY: HeaderValue = HeaderValue::from_static("snappy");
+
 pub struct GreptimeDbName(Option<String>);
 
 impl Header for GreptimeDbName {

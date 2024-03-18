@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use axum::extract::{RawBody, State};
-use axum::http::{header, HeaderValue};
+use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Extension;
 use common_telemetry::tracing;
@@ -28,7 +28,7 @@ use prost::Message;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 
-use super::header::write_cost_header_map;
+use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, Result};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
@@ -73,10 +73,7 @@ pub struct OtlpMetricsResponse {
 impl IntoResponse for OtlpMetricsResponse {
     fn into_response(self) -> axum::response::Response {
         let mut header_map = write_cost_header_map(self.write_cost);
-        header_map.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_str("application/x-protobuf").unwrap(),
-        );
+        header_map.insert(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.clone());
 
         (header_map, self.resp_body.encode_to_vec()).into_response()
     }
@@ -122,10 +119,7 @@ pub struct OtlpTracesResponse {
 impl IntoResponse for OtlpTracesResponse {
     fn into_response(self) -> axum::response::Response {
         let mut header_map = write_cost_header_map(self.write_cost);
-        header_map.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_str("application/x-protobuf").unwrap(),
-        );
+        header_map.insert(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.clone());
 
         (header_map, self.resp_body.encode_to_vec()).into_response()
     }

@@ -122,14 +122,8 @@ pub async fn remote_write(
 impl IntoResponse for PromStoreResponse {
     fn into_response(self) -> axum::response::Response {
         let mut header_map = HeaderMap::new();
-        header_map.insert(
-            &header::CONTENT_TYPE,
-            HeaderValue::from_str(&self.content_type).unwrap(),
-        );
-        header_map.insert(
-            &header::CONTENT_ENCODING,
-            HeaderValue::from_str(&self.content_encoding).unwrap(),
-        );
+        header_map.insert(&header::CONTENT_TYPE, self.content_type);
+        header_map.insert(&header::CONTENT_ENCODING, self.content_encoding);
 
         let metrics = if self.resp_metrics.is_empty() {
             None

@@ -29,6 +29,7 @@ use query::parser::PromQuery;
 use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
+use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::prom_store;
 use servers::prom_store::{snappy_compress, Metrics};
@@ -88,8 +89,8 @@ impl PromStoreProtocolHandler for DummyInstance {
         };
 
         Ok(PromStoreResponse {
-            content_type: "application/x-protobuf".to_string(),
-            content_encoding: "snappy".to_string(),
+            content_type: CONTENT_TYPE_PROTOBUF.clone(),
+            content_encoding: CONTENT_ENCODING_SNAPPY.clone(),
             resp_metrics: Default::default(),
             body: response.encode_to_vec(),
         })
