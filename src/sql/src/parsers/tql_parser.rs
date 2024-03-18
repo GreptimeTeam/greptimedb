@@ -89,7 +89,15 @@ impl<'a> ParserContext<'a> {
         parser.expect_token(&Token::LParen)?;
         let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
         let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-        let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
+        let delimiter_token = Self::find_next_delimiter_token(parser);
+        let (step, lookback) = if Self::is_comma(&delimiter_token) {
+            let step = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+            let lookback = Self::parse_string_or_number_or_word(parser, Token::RParen).ok();
+            (step, lookback)
+        } else {
+            let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
+            (step, None)
+        };
         let query = Self::parse_tql_query(parser, self.sql)?;
 
         Ok(Statement::Tql(Tql::Eval(TqlEval {
@@ -97,15 +105,36 @@ impl<'a> ParserContext<'a> {
             end,
             step,
             query,
+            lookback,
         })))
     }
 
-    pub fn peek_to_token(parser: &mut Parser, token: &Token) -> bool {
-        match parser.peek_token().token {
-            Token::Comma => matches!(token, Token::Comma),
-            Token::RParen => matches!(token, Token::RParen),
+    fn find_next_delimiter_token(parser: &mut Parser) -> Token {
+        let mut n: usize = 0;
+        while !(Self::is_comma(&parser.peek_nth_token(n).token)
+            || Self::is_rparen(&parser.peek_nth_token(n).token))
+        {
+            n += 1;
+        }
+        parser.peek_nth_token(n).token
+    }
+
+    pub fn is_delimiter_token(token: &Token, delimiter_token: &Token) -> bool {
+        match token {
+            Token::Comma => Self::is_comma(delimiter_token),
+            Token::RParen => Self::is_rparen(delimiter_token),
             _ => false,
         }
+    }
+
+    #[inline]
+    fn is_comma(token: &Token) -> bool {
+        matches!(token, Token::Comma)
+    }
+
+    #[inline]
+    fn is_rparen(token: &Token) -> bool {
+        matches!(token, Token::RParen)
     }
 
     fn parse_string_or_number_or_word(
@@ -113,7 +142,8 @@ impl<'a> ParserContext<'a> {
         delimiter_token: Token,
     ) -> std::result::Result<String, ParserError> {
         let mut tokens = vec![];
-        while !Self::peek_to_token(parser, &delimiter_token) {
+
+        while !Self::is_delimiter_token(&parser.peek_token().token, &delimiter_token) {
             let token = parser.next_token();
             tokens.push(token.token);
         }
@@ -123,7 +153,7 @@ impl<'a> ParserContext<'a> {
                 let value = match tokens[0].clone() {
                     Token::Number(n, _) => n,
                     Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
-                    Token::Word(_) => Self::parse_tql_word(tokens)?,
+                    Token::Word(_) => Self::parse_tokens(tokens)?,
                     unexpected => {
                         return Err(ParserError::ParserError(format!(
                             "Expect number, string or word, but is {unexpected:?}"
@@ -132,13 +162,13 @@ impl<'a> ParserContext<'a> {
                 };
                 Ok(value)
             }
-            _ => Self::parse_tql_word(tokens),
+            _ => Self::parse_tokens(tokens),
         };
         parser.expect_token(&delimiter_token)?;
         result
     }
 
-    fn parse_tql_word(tokens: Vec<Token>) -> std::result::Result<String, ParserError> {
+    fn parse_tokens(tokens: Vec<Token>) -> std::result::Result<String, ParserError> {
         let empty_df_schema = DFSchema::empty();
         let expr = Parser::new(&GreptimeDbDialect {})
             .with_tokens(tokens)
@@ -300,6 +330,7 @@ mod tests {
                 assert_eq!(eval.start, (assert_time - 600).to_string());
                 assert_eq!(eval.end, assert_time.to_string());
                 assert_eq!(eval.step, "1m");
+                assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
             }
             _ => unreachable!(),
@@ -311,6 +342,7 @@ mod tests {
                 assert_eq!(eval.start, "300");
                 assert_eq!(eval.end, "1200");
                 assert_eq!(eval.step, "1m");
+                assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
             }
             _ => unreachable!(),
@@ -325,6 +357,7 @@ mod tests {
                 assert_eq!(eval.start, "1676887657");
                 assert_eq!(eval.end, "1676887659");
                 assert_eq!(eval.step, "1m");
+                assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
             }
             _ => unreachable!(),
@@ -338,6 +371,7 @@ mod tests {
                 assert_eq!(eval.start, "1676887657.1");
                 assert_eq!(eval.end, "1676887659.5");
                 assert_eq!(eval.step, "30.3");
+                assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
             }
             _ => unreachable!(),
@@ -353,6 +387,34 @@ mod tests {
                 assert_eq!(eval.start, "2015-07-01T20:10:30.781Z");
                 assert_eq!(eval.end, "2015-07-01T20:11:00.781Z");
                 assert_eq!(eval.step, "30s");
+                assert_eq!(eval.lookback, None);
+                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_tql_eval_with_lookback_values() {
+        let sql = "TQL EVAL (1676887657, 1676887659, '1m', '5m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "1676887657");
+                assert_eq!(eval.end, "1676887659");
+                assert_eq!(eval.step, "1m".to_string());
+                assert_eq!(eval.lookback, Some("5m".to_string()));
+                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "TQL EVAL ('1970-01-01T00:05:00'::timestamp, '1970-01-01T00:10:00'::timestamp + '10 minutes'::interval, '1m', '7m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "300");
+                assert_eq!(eval.end, "1200");
+                assert_eq!(eval.step, "1m");
+                assert_eq!(eval.lookback, Some("7m".to_string()));
                 assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
             }
             _ => unreachable!(),

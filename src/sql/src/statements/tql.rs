@@ -21,12 +21,14 @@ pub enum Tql {
     Analyze(TqlAnalyze),
 }
 
+/// TQL EVAL (<start>, <end>, <step>, [lookback]) <promql>
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlEval {
     pub start: String,
     pub end: String,
     pub step: String,
     pub query: String,
+    pub lookback: Option<String>,
 }
 
 /// TQL EXPLAIN [VERBOSE] (like SQL EXPLAIN): doesn't execute the query but tells how the query would be executed.
