@@ -24,7 +24,9 @@ use crate::expr::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
 use crate::repr::{value_to_internal_ts, Diff, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
 
-/// Determine when should a key expire according to it's event timestamp in key
+/// Determine when should a key expire according to it's event timestamp in key,
+/// if a key is expired, any future updates to it should be ignored
+/// Note that key is expired by it's event timestamp(contained in the key), not by the time it's inserted(system timestamp)
 ///
 /// TODO(discord9): find a better way to handle key expiration, like write to disk or something instead of throw away
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
@@ -39,6 +41,8 @@ pub struct KeyExpiryManager {
 
 impl KeyExpiryManager {
     /// extract event timestamp from key row
+    ///
+    /// if no expire state is set, return None
     pub fn extract_event_ts(&self, row: &Row) -> Result<Option<Timestamp>, EvalError> {
         let ts = self
             .event_timestamp_from_row
@@ -57,27 +61,35 @@ impl KeyExpiryManager {
 
     /// update the event timestamp to key mapping
     ///
-    /// if given key is expired by now(that is lesser than `now - expiry_duration`), return false
-    pub fn update_event_ts(&mut self, now: Timestamp, row: &Row) -> Result<bool, EvalError> {
+    /// if given key is expired by now(that is lesser than `now - expiry_duration`), return the amount of time it's expired
+    /// if it's not expired, return None
+    pub fn update_event_ts(
+        &mut self,
+        now: Timestamp,
+        row: &Row,
+    ) -> Result<Option<Duration>, EvalError> {
         let ts = if let Some(event_ts) = self.extract_event_ts(row)? {
-            if self
-                .compute_expiration_timestamp(now)
-                .map(|e| e > event_ts)
-                .unwrap_or(false)
-            {
-                // expired
-                return Ok(false);
+            let ret = self.compute_expiration_timestamp(now).and_then(|e| {
+                if e > event_ts {
+                    // return how much time it's expired
+                    Some(e - event_ts)
+                } else {
+                    None
+                }
+            });
+            if let Some(expire_by) = ret {
+                return Ok(Some(expire_by));
             }
             event_ts
         } else {
-            return Ok(true);
+            return Ok(None);
         };
 
         self.event_ts_to_key
             .entry(ts)
             .or_default()
             .insert(row.clone());
-        Ok(true)
+        Ok(None)
     }
 }
 
@@ -129,18 +141,22 @@ impl Arrangement {
     }
 
     /// apply updates into spine, all updates should have timestamps that are larger than spine's first key
+    ///
+    /// return the maximum expire time(already expire by how much time) of all updates if any keys is already expired
     pub fn apply_updates(
         &mut self,
         now: Timestamp,
         updates: Vec<KeyValDiffRow>,
-    ) -> Result<(), EvalError> {
+    ) -> Result<Option<Duration>, EvalError> {
+        let mut max_late_by: Option<Duration> = None;
         if !self.is_written {
             self.is_written = true;
         }
         for ((key, val), ts, diff) in updates {
             // keep rows with expired event timestamp from being updated
             if let Some(s) = &mut self.expire_state {
-                if !s.update_event_ts(now, &key)? {
+                if let Some(late_by) = s.update_event_ts(now, &key)? {
+                    max_late_by = Some(max_late_by.map_or(late_by, |v| v.max(late_by)));
                     continue;
                 }
             }
@@ -157,17 +173,21 @@ impl Arrangement {
                 key_updates.push((val, ts, diff));
             }
         }
-        Ok(())
+        Ok(max_late_by)
     }
 
     /// advance time to `now` and consolidate all older(`now` included) updates to the first key
-    pub fn set_compaction(&mut self, now: Timestamp) -> Result<(), EvalError> {
+    ///
+    /// return the maximum expire time(already expire by how much time) of all updates if any keys is already expired
+    pub fn set_compaction(&mut self, now: Timestamp) -> Result<Option<Duration>, EvalError> {
+        let mut max_late_by: Option<Duration> = None;
+
         let mut should_compact = self.spine.split_off(&(now + 1));
         std::mem::swap(&mut should_compact, &mut self.spine);
 
         // if a full arrangement is not needed, we can just discard everything before and including now
         if !self.full_arrangement {
-            return Ok(());
+            return Ok(None);
         }
         // else we update them into current key value pairs
         let mut compacted_batch: BTreeMap<Row, SmallVec<[DiffRow; 2]>> = Default::default();
@@ -175,9 +195,10 @@ impl Arrangement {
         for (_, batch) in should_compact {
             for (key, updates) in batch {
                 if let Some(s) = &mut self.expire_state {
-                    if !s.update_event_ts(now, &key)? {
+                    if let Some(late_by) = s.update_event_ts(now, &key)? {
+                        max_late_by = Some(max_late_by.map_or(late_by, |v| v.max(late_by)));
                         continue;
-                    };
+                    }
                 }
                 // if diff cancel out each other, then remove the key
                 let mut old_row: Option<DiffRow> =
@@ -196,7 +217,7 @@ impl Arrangement {
 
         // insert the compacted batch into spine with key being `now`
         self.spine.insert(now, compacted_batch);
-        Ok(())
+        Ok(max_late_by)
     }
 
     /// get the updates of the arrangement from the given range of time
@@ -486,6 +507,16 @@ mod test {
                 3,
                 1,
             ),
+            (
+                (Row::new(vec![3i64.into()]), Row::new(vec![4.into()])),
+                3,
+                1,
+            ),
+            (
+                (Row::new(vec![1i64.into()]), Row::new(vec![42.into()])),
+                10,
+                1,
+            ),
         ];
         {
             let mut arr = arr.write();
@@ -493,7 +524,7 @@ mod test {
 
             assert_eq!(
                 arr.get(11, &Row::new(vec![1i64.into()])),
-                Some((Row::new(vec![2.into()]), 1, 1))
+                Some((Row::new(vec![42.into()]), 10, 1))
             );
             arr.trunc_expired(12);
             assert_eq!(arr.get(12, &Row::new(vec![1i64.into()])), None);
