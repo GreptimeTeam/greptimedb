@@ -36,6 +36,7 @@ use crate::rpc::router::{find_leader_regions, find_leaders};
 use crate::table_name::TableName;
 
 /// [Control] indicated to the caller whether to go to the next step.
+#[derive(Debug)]
 pub enum Control<T> {
     Continue(T),
     Stop,
@@ -180,5 +181,97 @@ impl DropTableExecutor {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use api::v1::{ColumnDataType, SemanticType};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use table::metadata::RawTableInfo;
+
+    use super::*;
+    use crate::ddl::test_util::create_table::build_raw_table_info_from_expr;
+    use crate::ddl::test_util::{TestColumnDefBuilder, TestCreateTableExprBuilder};
+    use crate::table_name::TableName;
+    use crate::test_util::{new_ddl_context, MockDatanodeManager};
+
+    fn test_create_raw_table_info(name: &str) -> RawTableInfo {
+        let create_table = TestCreateTableExprBuilder::default()
+            .column_defs([
+                TestColumnDefBuilder::default()
+                    .name("ts")
+                    .data_type(ColumnDataType::TimestampMillisecond)
+                    .semantic_type(SemanticType::Timestamp)
+                    .build()
+                    .unwrap()
+                    .into(),
+                TestColumnDefBuilder::default()
+                    .name("host")
+                    .data_type(ColumnDataType::String)
+                    .semantic_type(SemanticType::Tag)
+                    .build()
+                    .unwrap()
+                    .into(),
+                TestColumnDefBuilder::default()
+                    .name("cpu")
+                    .data_type(ColumnDataType::Float64)
+                    .semantic_type(SemanticType::Field)
+                    .build()
+                    .unwrap()
+                    .into(),
+            ])
+            .time_index("ts")
+            .primary_keys(["host".into()])
+            .table_name(name)
+            .build()
+            .unwrap()
+            .into();
+        build_raw_table_info_from_expr(&create_table)
+    }
+
+    #[tokio::test]
+    async fn test_on_prepare() {
+        // Drops if exists
+        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
+        let ctx = new_ddl_context(datanode_manager);
+        let executor = DropTableExecutor::new(
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
+            1024,
+            true,
+        );
+        let ctrl = executor.on_prepare(&ctx).await.unwrap();
+        assert!(ctrl.stop());
+
+        // Drops a non-exists table
+        let executor = DropTableExecutor::new(
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
+            1024,
+            false,
+        );
+        let err = executor.on_prepare(&ctx).await.unwrap_err();
+        assert_matches!(err, error::Error::TableNotFound { .. });
+
+        // Drops a exists table
+        let executor = DropTableExecutor::new(
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
+            1024,
+            false,
+        );
+        let raw_table_info = test_create_raw_table_info("my_table");
+        ctx.table_metadata_manager
+            .create_table_metadata(
+                raw_table_info,
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let ctrl = executor.on_prepare(&ctx).await.unwrap();
+        assert!(!ctrl.stop());
     }
 }
