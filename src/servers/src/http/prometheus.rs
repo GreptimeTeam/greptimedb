@@ -287,28 +287,17 @@ pub async fn labels_query(
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
-
-        match retrieve_labels_name_from_query_result(result, &mut labels).await {
-            Err(err) => {
-                // Prometheus won't report error if querying nonexist label and metric
-                if err.status_code() != StatusCode::TableNotFound
-                    && err.status_code() != StatusCode::TableColumnNotFound
-                {
-                    return PrometheusJsonResponse::error(
-                        err.status_code().to_string(),
-                        err.output_msg(),
-                    );
-                }
-            }
-            Ok(map) => {
-                for (k, v) in map.into_iter() {
-                    merge_map
-                        .entry(k)
-                        .and_modify(|existing| {
-                            *existing += v;
-                        })
-                        .or_insert(v);
-                }
+        if let Err(err) =
+            retrieve_labels_name_from_query_result(result, &mut labels, &mut merge_map).await
+        {
+            // Prometheus won't report error if querying nonexist label and metric
+            if err.status_code() != StatusCode::TableNotFound
+                && err.status_code() != StatusCode::TableColumnNotFound
+            {
+                return PrometheusJsonResponse::error(
+                    err.status_code().to_string(),
+                    err.output_msg(),
+                );
             }
         }
     }
@@ -354,7 +343,8 @@ async fn retrieve_series_from_query_result(
     result: Result<Output>,
     series: &mut Vec<HashMap<String, String>>,
     table_name: &str,
-) -> Result<HashMap<String, u64>> {
+    metrics: &mut HashMap<String, u64>,
+) -> Result<()> {
     let result = result?;
     match result.data {
         OutputData::RecordBatches(batches) => record_batches_to_series(batches, series, table_name),
@@ -370,18 +360,18 @@ async fn retrieve_series_from_query_result(
         }),
     }?;
 
-    let mut map = HashMap::new();
     if let Some(ref plan) = result.meta.plan {
-        collect_plan_metrics(plan.clone(), &mut [&mut map]);
+        collect_plan_metrics(plan.clone(), &mut [metrics]);
     }
-    Ok(map)
+    Ok(())
 }
 
 /// Retrieve labels name from query result
 async fn retrieve_labels_name_from_query_result(
     result: Result<Output>,
     labels: &mut HashSet<String>,
-) -> Result<HashMap<String, u64>> {
+    metrics: &mut HashMap<String, u64>,
+) -> Result<()> {
     let result = result?;
     match result.data {
         OutputData::RecordBatches(batches) => record_batches_to_labels_name(batches, labels),
@@ -396,11 +386,10 @@ async fn retrieve_labels_name_from_query_result(
         }
         .fail(),
     }?;
-    let mut map = HashMap::new();
     if let Some(ref plan) = result.meta.plan {
-        collect_plan_metrics(plan.clone(), &mut [&mut map]);
+        collect_plan_metrics(plan.clone(), &mut [metrics]);
     }
-    Ok(map)
+    Ok(())
 }
 
 fn record_batches_to_series(
@@ -570,29 +559,17 @@ pub async fn label_values_query(
             step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
-        let result = retrieve_label_values(result, &label_name, &mut label_values).await;
-
-        match result {
-            Err(err) => {
-                // Prometheus won't report error if querying nonexist label and metric
-                if err.status_code() != StatusCode::TableNotFound
-                    && err.status_code() != StatusCode::TableColumnNotFound
-                {
-                    return PrometheusJsonResponse::error(
-                        err.status_code().to_string(),
-                        err.output_msg(),
-                    );
-                }
-            }
-            Ok(map) => {
-                for (k, v) in map.into_iter() {
-                    merge_map
-                        .entry(k)
-                        .and_modify(|existing| {
-                            *existing += v;
-                        })
-                        .or_insert(v);
-                }
+        if let Err(err) =
+            retrieve_label_values(result, &label_name, &mut label_values, &mut merge_map).await
+        {
+            // Prometheus won't report error if querying nonexist label and metric
+            if err.status_code() != StatusCode::TableNotFound
+                && err.status_code() != StatusCode::TableColumnNotFound
+            {
+                return PrometheusJsonResponse::error(
+                    err.status_code().to_string(),
+                    err.output_msg(),
+                );
             }
         }
     }
@@ -613,7 +590,8 @@ async fn retrieve_label_values(
     result: Result<Output>,
     label_name: &str,
     labels_values: &mut HashSet<String>,
-) -> Result<HashMap<String, u64>> {
+    metrics: &mut HashMap<String, u64>,
+) -> Result<()> {
     let result = result?;
     match result.data {
         OutputData::RecordBatches(batches) => {
@@ -630,12 +608,12 @@ async fn retrieve_label_values(
         }
         .fail(),
     }?;
-    let mut map = HashMap::new();
+
     if let Some(ref plan) = result.meta.plan {
-        collect_plan_metrics(plan.clone(), &mut [&mut map]);
+        collect_plan_metrics(plan.clone(), &mut [metrics]);
     }
 
-    Ok(map)
+    Ok(())
 }
 
 async fn retrieve_label_values_from_record_batch(
@@ -722,23 +700,11 @@ pub async fn series_query(
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 
-        match retrieve_series_from_query_result(result, &mut series, &table_name).await {
-            Err(err) => {
-                return PrometheusJsonResponse::error(
-                    err.status_code().to_string(),
-                    err.output_msg(),
-                );
-            }
-            Ok(map) => {
-                for (k, v) in map.into_iter() {
-                    merge_map
-                        .entry(k)
-                        .and_modify(|existing| {
-                            *existing += v;
-                        })
-                        .or_insert(v);
-                }
-            }
+        if let Err(err) =
+            retrieve_series_from_query_result(result, &mut series, &table_name, &mut merge_map)
+                .await
+        {
+            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg());
         }
     }
     let merge_map = merge_map

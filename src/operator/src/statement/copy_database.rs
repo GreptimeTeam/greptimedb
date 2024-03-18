@@ -159,12 +159,9 @@ impl StatementExecutor {
             debug!("Copy table, arg: {:?}", req);
             match self.copy_table_from(req, ctx.clone()).await {
                 Ok(o) => {
-                    rows_inserted += if let OutputData::AffectedRows(r) = o.data {
-                        r
-                    } else {
-                        0
-                    };
-                    insert_cost += o.meta.cost;
+                    let (rows, cost) = o.extract_rows_and_cost();
+                    rows_inserted += rows;
+                    insert_cost += cost;
                 }
                 Err(err) => {
                     if continue_on_error {

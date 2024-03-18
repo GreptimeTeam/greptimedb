@@ -78,6 +78,13 @@ impl Output {
     pub fn new(data: OutputData, meta: OutputMeta) -> Self {
         Self { data, meta }
     }
+
+    pub fn extract_rows_and_cost(&self) -> (usize, usize) {
+        match self.data {
+            OutputData::AffectedRows(rows) => (rows, self.meta.cost),
+            _ => (0, self.meta.cost),
+        }
+    }
 }
 
 impl Debug for OutputData {

@@ -142,12 +142,9 @@ impl DatafusionQueryEngine {
                     let output = self
                         .insert(&table_name, column_vectors, query_ctx.clone())
                         .await?;
-                    affected_rows += if let OutputData::AffectedRows(r) = output.data {
-                        r
-                    } else {
-                        0
-                    };
-                    insert_cost += output.meta.cost;
+                    let (rows, cost) = output.extract_rows_and_cost();
+                    affected_rows += rows;
+                    insert_cost += cost;
                 }
                 WriteOp::Delete => {
                     affected_rows += self

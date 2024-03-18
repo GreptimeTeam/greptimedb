@@ -99,6 +99,7 @@ impl GreptimeDbName {
     }
 }
 
+// collect write
 pub fn write_cost_header_map(cost: usize) -> HeaderMap {
     let mut header_map = HeaderMap::new();
     if cost > 0 {

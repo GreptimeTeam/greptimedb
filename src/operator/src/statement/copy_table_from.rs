@@ -451,15 +451,7 @@ async fn batch_insert(
     let result = futures::future::try_join_all(batch)
         .await?
         .iter()
-        .map(|o| {
-            let rows = if let OutputData::AffectedRows(r) = o.data {
-                r
-            } else {
-                0
-            };
-            let cost = o.meta.cost;
-            (rows, cost)
-        })
+        .map(|o| o.extract_rows_and_cost())
         .reduce(|(a, b), (c, d)| (a + c, b + d))
         .unwrap_or((0, 0));
     *pending_bytes = 0;
