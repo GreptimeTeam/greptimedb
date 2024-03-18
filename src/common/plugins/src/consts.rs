@@ -16,4 +16,5 @@
 pub const GREPTIME_EXEC_PREFIX: &str = "greptime_exec_";
 
 /// Execution cost metrics key
-pub const GREPTIME_EXEC_COST: &str = "greptime_exec_cost";
+pub const GREPTIME_EXEC_READ_COST: &str = "greptime_exec_read_cost";
+pub const GREPTIME_EXEC_WRITE_COST: &str = "greptime_exec_write_cost";

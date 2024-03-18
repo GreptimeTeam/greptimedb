@@ -32,8 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
-use super::handler::collect_plan_metrics;
-use super::header::GREPTIME_DB_HEADER_METRICS;
+use super::header::{collect_plan_metrics, GREPTIME_DB_HEADER_METRICS};
 use super::prometheus::{PromData, PromSeries, PrometheusResponse};
 use crate::error::{CollectRecordbatchSnafu, InternalSnafu, Result};
 

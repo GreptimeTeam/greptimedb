@@ -35,6 +35,7 @@ impl FunctionState {
         use common_base::AffectedRows;
         use common_meta::rpc::procedure::{MigrateRegionRequest, ProcedureStateResponse};
         use common_query::error::Result;
+        use common_query::Output;
         use session::context::QueryContextRef;
         use store_api::storage::RegionId;
         use table::requests::{
@@ -70,8 +71,8 @@ impl FunctionState {
                 &self,
                 _request: InsertRequest,
                 _ctx: QueryContextRef,
-            ) -> Result<AffectedRows> {
-                Ok(ROWS)
+            ) -> Result<Output> {
+                Ok(Output::new_with_affected_rows(ROWS))
             }
 
             async fn delete(
