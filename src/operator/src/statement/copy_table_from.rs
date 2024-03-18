@@ -26,6 +26,7 @@ use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
+use common_query::{OutputCost, OutputRows};
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
 use common_recordbatch::DfSendableRecordBatchStream;
 use common_telemetry::{debug, tracing};
@@ -446,7 +447,7 @@ impl StatementExecutor {
 async fn batch_insert(
     pending: &mut Vec<impl Future<Output = Result<Output>>>,
     pending_bytes: &mut usize,
-) -> Result<(usize, usize)> {
+) -> Result<(OutputRows, OutputCost)> {
     let batch = pending.drain(..);
     let result = futures::future::try_join_all(batch)
         .await?

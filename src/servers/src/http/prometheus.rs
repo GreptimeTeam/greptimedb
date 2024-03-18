@@ -43,11 +43,11 @@ use serde_json::Value;
 use session::context::QueryContextRef;
 use snafu::{Location, ResultExt};
 
-use super::header::collect_plan_metrics;
 pub use super::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
     CollectRecordbatchSnafu, Error, InvalidQuerySnafu, Result, UnexpectedResultSnafu,
 };
+use crate::http::header::collect_plan_metrics;
 use crate::prom_store::METRIC_NAME_LABEL;
 use crate::prometheus_handler::PrometheusHandlerRef;
 
