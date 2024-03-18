@@ -30,6 +30,7 @@ use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::alter_table::AlterTableProcedure;
 use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, CreateTablesState};
 use common_meta::ddl::create_table::*;
+use common_meta::ddl::drop_table::executor::DropTableExecutor;
 use common_meta::ddl::drop_table::DropTableProcedure;
 use common_meta::ddl::test_util::create_table::build_raw_table_info_from_expr;
 use common_meta::ddl::test_util::{TestColumnDefBuilder, TestCreateTableExprBuilder};
@@ -38,6 +39,7 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::DeserializedValueWithBytes;
 use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask};
 use common_meta::rpc::router::{find_leaders, RegionRoute};
+use common_meta::table_name::TableName;
 use common_procedure::Status;
 use store_api::storage::RegionId;
 
@@ -322,7 +324,11 @@ async fn test_on_datanode_drop_regions() {
         table_id: 42,
         drop_if_exists: false,
     };
-
+    let drop_table_executor = DropTableExecutor::new(
+        TableName::new("my_catalog", "my_schema", "my_table"),
+        42,
+        false,
+    );
     let (region_server, mut rx) = EchoRegionServer::new();
     let region_routes = test_data::new_region_routes();
     let datanode_manager = new_datanode_manager(&region_server, &region_routes).await;
@@ -357,7 +363,10 @@ async fn test_on_datanode_drop_regions() {
         }
     });
 
-    let status = procedure.on_datanode_drop_regions().await.unwrap();
+    let status = procedure
+        .on_datanode_drop_regions(&drop_table_executor)
+        .await
+        .unwrap();
     assert!(status.is_done());
 
     handle.await.unwrap();
