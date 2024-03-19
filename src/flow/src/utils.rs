@@ -25,7 +25,8 @@ use crate::expr::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
 use crate::repr::{value_to_internal_ts, Diff, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
 
-pub type Spine = BTreeMap<Timestamp, BTreeMap<Row, SmallVec<[DiffRow; 2]>>>;
+pub type Batch = BTreeMap<Row, SmallVec<[DiffRow; 2]>>;
+pub type Spine = BTreeMap<Timestamp, Batch>;
 
 /// Determine when should a key expire according to it's event timestamp in key,
 /// if a key is expired, any future updates to it should be ignored
@@ -184,19 +185,28 @@ impl Arrangement {
 
     /// find out the time of next update in the future
     pub fn get_next_update_time(&self) -> Option<Timestamp> {
-        let mut iter = self.spine.iter();
-        if self.full_arrangement{
-            let _ = iter.next();
+        let next_batch = {
+            let mut iter = self.spine.iter();
+            if self.full_arrangement {
+                iter.next();
+                iter
+            } else {
+                iter
+            }
+        };
+        for (_ts, batch) in next_batch {
+            let min_ts = batch
+                .iter()
+                .flat_map(|(_k, v)| v.iter().map(|(_, ts, _)| *ts))
+                .min();
+            if let Some(min_ts) = min_ts {
+                return Some(min_ts);
+            } else {
+                continue;
+            }
         }
-        let next_batch = iter.next();
-        // find the min time in this batch
-        if let Some(batch) = next_batch {
-            let min_time = batch.1.iter().map(|(k, v)| k).min().cloned();
-            min_time
-        } else {
-            None
-        }
-        todo!()
+        // all batches are empty, return now
+        None
     }
 
     /// get the last compaction time
@@ -205,10 +215,42 @@ impl Arrangement {
     }
 
     /// split spine off at `now`, and return the spine that's before `now`(including `now`)
-    fn split_off(&mut self, now: Timestamp)->Spine{
-        let mut should_compact = self.spine.split_off(&(now + 1));
-        std::mem::swap(&mut should_compact, &mut self.spine);
-        todo!()
+    fn split_lte(&mut self, now: &Timestamp) -> Spine {
+        let mut before = self.spine.split_off(&(now + 1));
+        std::mem::swap(&mut before, &mut self.spine);
+
+        // if before's last key == now, then all the keys we needed are found
+        if before
+            .last_key_value()
+            .map(|(k, _v)| *k == *now)
+            .unwrap_or(false)
+        {
+            return before;
+        }
+
+        // also need to move all keys from the first batch in spine with timestamp<=now to before
+        // we know that all remaining keys to be split off are last key < key <= now, we will make them into a new batch
+        if let Some(mut first_batch) = self.spine.first_entry() {
+            let mut new_batch: Batch = Default::default();
+            // remove all keys with val of empty vec
+            first_batch.get_mut().retain(|key, updates| {
+                // remove keys <= now from updates
+                updates.retain(|(val, ts, diff)| {
+                    if *ts <= *now {
+                        new_batch.entry(key.clone()).or_insert(smallvec![]).push((
+                            val.clone(),
+                            *ts,
+                            *diff,
+                        ));
+                    }
+                    *ts > *now
+                });
+                !updates.is_empty()
+            });
+
+            before.insert(*now, new_batch);
+        }
+        before
     }
 
     /// advance time to `now` and consolidate all older(`now` included) updates to the first key
@@ -217,8 +259,8 @@ impl Arrangement {
     pub fn set_compaction(&mut self, now: Timestamp) -> Result<Option<Duration>, EvalError> {
         let mut max_late_by: Option<Duration> = None;
 
-        let mut should_compact = self.spine.split_off(&(now + 1));
-        std::mem::swap(&mut should_compact, &mut self.spine);
+        let should_compact = self.split_lte(&now);
+
         self.last_compaction_time = Some(now);
         // if a full arrangement is not needed, we can just discard everything before and including now
         if !self.full_arrangement {
@@ -261,15 +303,33 @@ impl Arrangement {
         range: R,
     ) -> Vec<KeyValDiffRow> {
         let mut result = vec![];
+        // three part:
+        // 1.the starting batch with first key >= range.start, which may contain updates that not in range
+        // 2. the batches with key in range
+        // 3. the last batch with first key > range.end, which may contain updates that are in range
+        let mut is_first = true;
         for (_ts, batch) in self.spine.range(range.clone()) {
-            for (key, updates) in batch.clone() {
-                for (val, ts, diff) in updates {
-                    result.push(((key.clone(), val), ts, diff));
+            if is_first {
+                for (key, updates) in batch {
+                    let iter = updates
+                        .iter()
+                        .filter(|(_val, ts, _diff)| range.contains(ts))
+                        .map(|(val, ts, diff)| ((key.clone(), val.clone()), *ts, *diff));
+                    result.extend(iter);
+                }
+                is_first = false;
+            } else {
+                for (key, updates) in batch.clone() {
+                    result.extend(
+                        updates
+                            .iter()
+                            .map(|(val, ts, diff)| ((key.clone(), val.clone()), *ts, *diff)),
+                    );
                 }
             }
         }
 
-        // TODO: deal with boundary include start and end
+        // deal with boundary include start and end
         // and for the next batch with upper_bound >= range.end
         // we need to search for updates within range
         let neg_bound = match range.end_bound() {
@@ -278,8 +338,14 @@ impl Arrangement {
             Bound::Unbounded => return result,
         };
         let search_range = (neg_bound, Bound::Unbounded);
-        if let Some(last_batch) = self.spine.range(search_range).next(){
-
+        if let Some(last_batch) = self.spine.range(search_range).next() {
+            for (key, updates) in last_batch.1 {
+                let iter = updates
+                    .iter()
+                    .filter(|(_val, ts, _diff)| range.contains(ts))
+                    .map(|(val, ts, diff)| ((key.clone(), val.clone()), *ts, *diff));
+                result.extend(iter);
+            }
         };
         result
     }
@@ -320,10 +386,40 @@ impl Arrangement {
         } else {
             // check keys <= now to know current value
             let mut final_val = None;
-            for (_ts, batch) in self.spine.range(..=now) {
+
+            let extra_batch = {
+                let unaligned = self.spine.range(..=now);
+                if unaligned
+                    .clone()
+                    .last()
+                    .map(|(ts, _)| *ts == now)
+                    .unwrap_or(false)
+                {
+                    // this extra chain is there just to make type the same
+                    unaligned.chain(None)
+                } else {
+                    // if the last key is not equal to now, then we need to include the next batch
+                    // because we know last batch key < now < next batch key
+                    // therefore next batch may contain updates that we want
+                    unaligned.chain(
+                        self.spine
+                            .range((Bound::Excluded(now), Bound::Unbounded))
+                            .next(),
+                    )
+                }
+            };
+            for (ts, batch) in extra_batch {
                 if let Some(new_rows) = batch.get(key).map(|v| v.iter()) {
-                    for new_row in new_rows {
-                        final_val = compact_diff_row(final_val, new_row);
+                    if *ts <= now {
+                        for new_row in new_rows {
+                            final_val = compact_diff_row(final_val, new_row);
+                        }
+                    } else {
+                        for new_row in new_rows {
+                            if new_row.1 <= now {
+                                final_val = compact_diff_row(final_val, new_row);
+                            }
+                        }
                     }
                 }
             }
@@ -577,5 +673,55 @@ mod test {
             arr.trunc_expired(12);
             assert_eq!(arr.get(12, &Row::new(vec![1i64.into()])), None);
         }
+    }
+
+    #[test]
+    fn test_split_off() {
+        let mut arr = Arrangement::new();
+        arr.spine.insert(1, Default::default());
+        arr.spine.insert(3, Default::default());
+        arr.apply_updates(
+            2,
+            vec![((Row::new(vec![1.into()]), Row::new(vec![2.into()])), 2, 1)],
+        )
+        .unwrap();
+        let mut arr1 = arr.clone();
+        {
+            assert_eq!(arr.get_next_update_time(), Some(2));
+            let split = &arr.split_lte(&2);
+            assert_eq!(split.len(), 2);
+            assert_eq!(split[&2].len(), 1);
+            let _ = &arr.split_lte(&3);
+            assert_eq!(arr.get_next_update_time(), None);
+        }
+        {
+            let split = &arr1.split_lte(&1);
+            assert_eq!(split.len(), 1);
+        }
+    }
+    // TODO: test get_updates_in_range and get_update_time
+    #[test]
+    fn test_get_by_range() {
+        let mut arr = Arrangement::new();
+
+        // [2, 1], [4,3], [6,5] three batch
+        let updates: Vec<KeyValDiffRow> = vec![
+            ((Row::new(vec![1i64.into()]), Row::empty()), 2, 1),
+            ((Row::new(vec![1i64.into()]), Row::empty()), 1, 1),
+            ((Row::new(vec![2i64.into()]), Row::empty()), 4, 1),
+            ((Row::new(vec![3i64.into()]), Row::empty()), 3, 1),
+            ((Row::new(vec![3i64.into()]), Row::empty()), 6, 1),
+            ((Row::new(vec![1i64.into()]), Row::empty()), 5, 1),
+        ];
+        arr.apply_updates(0, updates).unwrap();
+        assert_eq!(
+            arr.get_updates_in_range(2..=5),
+            vec![
+                ((Row::new(vec![1i64.into()]), Row::empty()), 2, 1),
+                ((Row::new(vec![2i64.into()]), Row::empty()), 4, 1),
+                ((Row::new(vec![3i64.into()]), Row::empty()), 3, 1),
+                ((Row::new(vec![1i64.into()]), Row::empty()), 5, 1),
+            ]
+        );
     }
 }
