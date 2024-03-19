@@ -51,7 +51,7 @@ fn write_rows(c: &mut Criterion) {
         });
     });
     group.bench_function("time_series", |b| {
-        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None);
+        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None, true);
         let kvs =
             memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
         b.iter(|| {
@@ -83,7 +83,7 @@ fn full_scan(c: &mut Criterion) {
         });
     });
     group.bench_function("time_series", |b| {
-        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None);
+        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None, true);
         for kvs in generator.iter() {
             memtable.write(&kvs).unwrap();
         }
@@ -121,7 +121,7 @@ fn filter_1_host(c: &mut Criterion) {
         });
     });
     group.bench_function("time_series", |b| {
-        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None);
+        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None, true);
         for kvs in generator.iter() {
             memtable.write(&kvs).unwrap();
         }

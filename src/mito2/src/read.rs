@@ -334,12 +334,13 @@ impl Batch {
         Ok(())
     }
 
-    /// Sorts and dedup rows in the batch.
+    /// Sorts rows in the batch. If `dedup` is true, it also removes
+    /// duplicated rows according to primary keys.
     ///
     /// It orders rows by timestamp, sequence desc and only keep the latest
     /// row for the same timestamp. It doesn't consider op type as sequence
     /// should already provide uniqueness for a row.
-    pub fn sort_and_dedup(&mut self) -> Result<()> {
+    pub fn sort_and_dedup(&mut self, dedup: bool) -> Result<()> {
         // If building a converter each time is costly, we may allow passing a
         // converter.
         let converter = RowConverter::new(vec![
@@ -362,14 +363,16 @@ impl Batch {
         let mut to_sort: Vec<_> = rows.iter().enumerate().collect();
         to_sort.sort_unstable_by(|left, right| left.1.cmp(&right.1));
 
-        // Dedup by timestamps.
-        to_sort.dedup_by(|left, right| {
-            debug_assert_eq!(18, left.1.as_ref().len());
-            debug_assert_eq!(18, right.1.as_ref().len());
-            let (left_key, right_key) = (left.1.as_ref(), right.1.as_ref());
-            // We only compare the timestamp part and ignore sequence.
-            left_key[..TIMESTAMP_KEY_LEN] == right_key[..TIMESTAMP_KEY_LEN]
-        });
+        if dedup {
+            // Dedup by timestamps.
+            to_sort.dedup_by(|left, right| {
+                debug_assert_eq!(18, left.1.as_ref().len());
+                debug_assert_eq!(18, right.1.as_ref().len());
+                let (left_key, right_key) = (left.1.as_ref(), right.1.as_ref());
+                // We only compare the timestamp part and ignore sequence.
+                left_key[..TIMESTAMP_KEY_LEN] == right_key[..TIMESTAMP_KEY_LEN]
+            });
+        }
 
         let indices = UInt32Vector::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
         self.take_in_place(&indices)
@@ -983,7 +986,7 @@ mod tests {
 
     #[test]
     fn test_sort_and_dedup() {
-        let mut batch = new_batch(
+        let original = new_batch(
             &[2, 3, 1, 4, 5, 2],
             &[1, 2, 3, 4, 5, 6],
             &[
@@ -996,30 +999,67 @@ mod tests {
             ],
             &[21, 22, 23, 24, 25, 26],
         );
-        batch.sort_and_dedup().unwrap();
-        // It should only keep one timestamp 2.
-        let expect = new_batch(
-            &[1, 2, 3, 4, 5],
-            &[3, 6, 2, 4, 5],
-            &[
-                OpType::Put,
-                OpType::Put,
-                OpType::Put,
-                OpType::Put,
-                OpType::Put,
-            ],
-            &[23, 26, 22, 24, 25],
-        );
-        assert_eq!(expect, batch);
 
-        let mut batch = new_batch(
+        let mut batch = original.clone();
+        batch.sort_and_dedup(true).unwrap();
+        // It should only keep one timestamp 2.
+        assert_eq!(
+            new_batch(
+                &[1, 2, 3, 4, 5],
+                &[3, 6, 2, 4, 5],
+                &[
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                ],
+                &[23, 26, 22, 24, 25],
+            ),
+            batch
+        );
+
+        let mut batch = original.clone();
+        batch.sort_and_dedup(false).unwrap();
+
+        // It should only keep one timestamp 2.
+        assert_eq!(
+            new_batch(
+                &[1, 2, 2, 3, 4, 5],
+                &[3, 6, 1, 2, 4, 5],
+                &[
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                ],
+                &[23, 26, 21, 22, 24, 25],
+            ),
+            batch
+        );
+
+        let original = new_batch(
             &[2, 2, 1],
             &[1, 6, 1],
             &[OpType::Delete, OpType::Put, OpType::Put],
             &[21, 22, 23],
         );
-        batch.sort_and_dedup().unwrap();
+
+        let mut batch = original.clone();
+        batch.sort_and_dedup(true).unwrap();
         let expect = new_batch(&[1, 2], &[1, 6], &[OpType::Put, OpType::Put], &[23, 22]);
+        assert_eq!(expect, batch);
+
+        let mut batch = original.clone();
+        batch.sort_and_dedup(false).unwrap();
+        let expect = new_batch(
+            &[1, 2, 2],
+            &[1, 6, 1],
+            &[OpType::Put, OpType::Put, OpType::Delete],
+            &[23, 22, 21],
+        );
         assert_eq!(expect, batch);
     }
 }
