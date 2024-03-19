@@ -49,7 +49,7 @@ pub type MemtableId = u32;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemtableConfig {
-    Experimental(PartitionTreeConfig),
+    PartitionTree(PartitionTreeConfig),
     TimeSeries,
 }
 
@@ -234,7 +234,7 @@ impl MemtableBuilderProvider {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
             )),
-            Some(MemtableOptions::Experimental(opts)) => {
+            Some(MemtableOptions::PartitionTree(opts)) => {
                 Arc::new(PartitionTreeMemtableBuilder::new(
                     PartitionTreeConfig {
                         index_max_keys_per_shard: opts.index_max_keys_per_shard,
@@ -260,14 +260,14 @@ mod tests {
     #[test]
     fn test_deserialize_memtable_config() {
         let s = r#"
-type = "experimental"
+type = "partition_tree"
 index_max_keys_per_shard = 8192
 data_freeze_threshold = 1024
 dedup = true
 fork_dictionary_bytes = "512MiB"
 "#;
         let config: MemtableConfig = toml::from_str(s).unwrap();
-        let MemtableConfig::Experimental(memtable_config) = config else {
+        let MemtableConfig::PartitionTree(memtable_config) = config else {
             unreachable!()
         };
         assert!(memtable_config.dedup);

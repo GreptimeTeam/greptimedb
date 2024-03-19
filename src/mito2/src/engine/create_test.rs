@@ -209,8 +209,8 @@ async fn test_engine_create_with_memtable_opts() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
-        .insert_option("memtable.type", "experimental")
-        .insert_option("memtable.experimental.index_max_keys_per_shard", "2")
+        .insert_option("memtable.type", "partition_tree")
+        .insert_option("memtable.partition_tree.index_max_keys_per_shard", "2")
         .build();
     let column_schemas = rows_schema(&request);
     engine
@@ -218,7 +218,7 @@ async fn test_engine_create_with_memtable_opts() {
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    let Some(MemtableOptions::Experimental(memtable_opts)) = &region.version().options.memtable
+    let Some(MemtableOptions::PartitionTree(memtable_opts)) = &region.version().options.memtable
     else {
         unreachable!();
     };
