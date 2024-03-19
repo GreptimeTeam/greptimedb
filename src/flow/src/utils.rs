@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -24,11 +25,11 @@ use crate::expr::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
 use crate::repr::{value_to_internal_ts, Diff, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
 
+pub type Spine = BTreeMap<Timestamp, BTreeMap<Row, SmallVec<[DiffRow; 2]>>>;
+
 /// Determine when should a key expire according to it's event timestamp in key,
 /// if a key is expired, any future updates to it should be ignored
 /// Note that key is expired by it's event timestamp(contained in the key), not by the time it's inserted(system timestamp)
-///
-/// TODO(discord9): find a better way to handle key expiration, like write to disk or something instead of throw away
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct KeyExpiryManager {
     /// a map from event timestamp to key, used for expire keys
@@ -121,7 +122,8 @@ pub struct Arrangement {
     /// And for consolidated batch(i.e. btach representing now), there should be only one update for each key with `diff==1`
     ///
     /// And since most time a key gots updated by first delete then insert, small vec with size of 2 make sense
-    spine: BTreeMap<Timestamp, BTreeMap<Row, SmallVec<[DiffRow; 2]>>>,
+    /// TODO: batch size balancing
+    spine: Spine,
     /// if set to false, will not update current value of the arrangement, useful for case like `map -> arrange -> reduce`
     full_arrangement: bool,
     /// flag to mark that this arrangement haven't been written to, so that it can be cloned and shared
@@ -163,6 +165,7 @@ impl Arrangement {
                     continue;
                 }
             }
+
             // the first batch with key that's greater or equal to ts
             let batch = if let Some((_, batch)) = self.spine.range_mut(ts..).next() {
                 batch
@@ -179,9 +182,33 @@ impl Arrangement {
         Ok(max_late_by)
     }
 
+    /// find out the time of next update in the future
+    pub fn get_next_update_time(&self) -> Option<Timestamp> {
+        let mut iter = self.spine.iter();
+        if self.full_arrangement{
+            let _ = iter.next();
+        }
+        let next_batch = iter.next();
+        // find the min time in this batch
+        if let Some(batch) = next_batch {
+            let min_time = batch.1.iter().map(|(k, v)| k).min().cloned();
+            min_time
+        } else {
+            None
+        }
+        todo!()
+    }
+
     /// get the last compaction time
     pub fn get_compaction(&self) -> Option<Timestamp> {
         self.last_compaction_time
+    }
+
+    /// split spine off at `now`, and return the spine that's before `now`(including `now`)
+    fn split_off(&mut self, now: Timestamp)->Spine{
+        let mut should_compact = self.spine.split_off(&(now + 1));
+        std::mem::swap(&mut should_compact, &mut self.spine);
+        todo!()
     }
 
     /// advance time to `now` and consolidate all older(`now` included) updates to the first key
@@ -229,18 +256,31 @@ impl Arrangement {
     }
 
     /// get the updates of the arrangement from the given range of time
-    pub fn get_updates_in_range<R: std::ops::RangeBounds<Timestamp>>(
+    pub fn get_updates_in_range<R: std::ops::RangeBounds<Timestamp> + Clone>(
         &self,
         range: R,
     ) -> Vec<KeyValDiffRow> {
         let mut result = vec![];
-        for (_ts, batch) in self.spine.range(range) {
+        for (_ts, batch) in self.spine.range(range.clone()) {
             for (key, updates) in batch.clone() {
                 for (val, ts, diff) in updates {
                     result.push(((key.clone(), val), ts, diff));
                 }
             }
         }
+
+        // TODO: deal with boundary include start and end
+        // and for the next batch with upper_bound >= range.end
+        // we need to search for updates within range
+        let neg_bound = match range.end_bound() {
+            Bound::Included(b) => Bound::Excluded(*b),
+            Bound::Excluded(b) => Bound::Included(*b),
+            Bound::Unbounded => return result,
+        };
+        let search_range = (neg_bound, Bound::Unbounded);
+        if let Some(last_batch) = self.spine.range(search_range).next(){
+
+        };
         result
     }
 

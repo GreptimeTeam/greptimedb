@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -43,7 +43,13 @@ pub struct Arranged {
 }
 
 impl Arranged {
-    fn try_clone_future(&self) -> Option<Self> {
+    pub fn new(arr: ArrangeHandler) -> Self {
+        Self {
+            arrangement: arr,
+            readers: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+    pub fn try_clone_future(&self) -> Option<Self> {
         self.arrangement
             .clone_future_only()
             .map(|arrangement| Arranged {
@@ -51,13 +57,16 @@ impl Arranged {
                 readers: self.readers.clone(),
             })
     }
-    fn try_clone_full(&self) -> Option<Self> {
+    pub fn try_clone_full(&self) -> Option<Self> {
         self.arrangement
             .clone_full_arrange()
             .map(|arrangement| Arranged {
                 arrangement,
                 readers: self.readers.clone(),
             })
+    }
+    pub fn add_reader(&self, id: SubgraphId) {
+        self.readers.blocking_write().push(id)
     }
 }
 
@@ -93,17 +102,23 @@ impl CollectionBundle {
 }
 
 /// A thread local error collector, used to collect errors during the evaluation of the plan
+///
+/// usually only the first error matters, but store all of them just in case
+#[derive(Default, Clone)]
 pub struct ErrCollector {
-    inner: Rc<RefCell<Vec<EvalError>>>,
+    pub inner: Rc<RefCell<VecDeque<EvalError>>>,
 }
 
 impl ErrCollector {
+    pub fn push_err(&self, err: EvalError) {
+        self.inner.borrow_mut().push_back(err)
+    }
     pub fn run<F>(&self, f: F)
     where
         F: FnOnce() -> Result<(), EvalError>,
     {
-        if let Err(err) = f() {
-            self.inner.borrow_mut().push(err);
+        if let Err(e) = f() {
+            self.push_err(e)
         }
     }
 }

@@ -51,6 +51,8 @@ pub type DiffRow = (Row, Timestamp, Diff);
 pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 
 /// Convert a value that is or can be converted to Datetime to internal timestamp
+/// 
+/// support types are: `Date`, `DateTime`, `TimeStamp`, `i64`
 pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
     let is_supported_time_type = |arg: &Value| {
         let ty = arg.data_type();
