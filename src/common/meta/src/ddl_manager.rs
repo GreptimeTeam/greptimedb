@@ -27,6 +27,7 @@ use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
+use crate::ddl::drop_database::DropDatabaseProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::ddl::truncate_table::TruncateTableProcedure;
@@ -151,6 +152,15 @@ impl DdlManager {
                     Box::new(move |json: &str| {
                         let context = context.clone();
                         TruncateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
+                DropDatabaseProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        DropDatabaseProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                     })
                 },
             ),
