@@ -29,6 +29,10 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         "index.inverted_index.ignore_column_ids",
         "index.inverted_index.segment_row_count",
         WAL_OPTIONS_KEY,
+        "memtable.type",
+        "memtable.experimental.index_max_keys_per_shard",
+        "memtable.experimental.data_freeze_threshold",
+        "memtable.experimental.fork_dictionary_bytes",
     ]
     .contains(&key)
 }
@@ -56,6 +60,16 @@ mod tests {
             "index.inverted_index.segment_row_count"
         ));
         assert!(is_mito_engine_option_key("wal_options"));
+        assert!(is_mito_engine_option_key("memtable.type"));
+        assert!(is_mito_engine_option_key(
+            "memtable.experimental.index_max_keys_per_shard"
+        ));
+        assert!(is_mito_engine_option_key(
+            "memtable.experimental.data_freeze_threshold"
+        ));
+        assert!(is_mito_engine_option_key(
+            "memtable.experimental.fork_dictionary_bytes"
+        ));
         assert!(!is_mito_engine_option_key("foo"));
     }
 }

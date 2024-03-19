@@ -28,9 +28,11 @@ use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 pub use crate::memtable::key_values::KeyValues;
-use crate::memtable::merge_tree::MergeTreeConfig;
+use crate::memtable::merge_tree::{MergeTreeConfig, MergeTreeMemtableBuilder};
+use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
+use crate::region::options::MemtableOptions;
 
 pub mod key_values;
 pub mod merge_tree;
@@ -53,7 +55,7 @@ pub enum MemtableConfig {
 
 impl Default for MemtableConfig {
     fn default() -> Self {
-        Self::Experimental(MergeTreeConfig::default())
+        Self::TimeSeries
     }
 }
 
@@ -202,6 +204,46 @@ impl Drop for AllocTracker {
         // Memory tracked by this tracker is freed.
         if let Some(write_buffer_manager) = &self.write_buffer_manager {
             write_buffer_manager.free_mem(bytes_allocated);
+        }
+    }
+}
+
+/// Provider of memtable builders for regions.
+#[derive(Clone)]
+pub(crate) struct MemtableBuilderProvider {
+    write_buffer_manager: Option<WriteBufferManagerRef>,
+    default_memtable_builder: MemtableBuilderRef,
+}
+
+impl MemtableBuilderProvider {
+    pub(crate) fn new(
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        default_memtable_builder: MemtableBuilderRef,
+    ) -> Self {
+        Self {
+            write_buffer_manager,
+            default_memtable_builder,
+        }
+    }
+
+    pub(crate) fn builder_for_options(
+        &self,
+        options: Option<&MemtableOptions>,
+    ) -> MemtableBuilderRef {
+        match options {
+            Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
+                self.write_buffer_manager.clone(),
+            )),
+            Some(MemtableOptions::Experimental(opts)) => Arc::new(MergeTreeMemtableBuilder::new(
+                MergeTreeConfig {
+                    index_max_keys_per_shard: opts.index_max_keys_per_shard,
+                    data_freeze_threshold: opts.data_freeze_threshold,
+                    fork_dictionary_bytes: opts.fork_dictionary_bytes,
+                    ..Default::default()
+                },
+                self.write_buffer_manager.clone(),
+            )),
+            None => self.default_memtable_builder.clone(),
         }
     }
 }

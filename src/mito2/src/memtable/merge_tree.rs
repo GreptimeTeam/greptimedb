@@ -46,6 +46,8 @@ use crate::memtable::{
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
 const DICTIONARY_SIZE_FACTOR: u64 = 8;
+pub(crate) const DEFAULT_MAX_KEYS_PER_SHARD: usize = 8192;
+pub(crate) const DEFAULT_FREEZE_THRESHOLD: usize = 131072;
 
 /// Id of a shard, only unique inside a partition.
 type ShardId = u32;
@@ -59,6 +61,9 @@ struct PkId {
     pk_index: PkIndex,
 }
 
+// TODO(yingwen): `fork_dictionary_bytes` is per region option, if we have multiple merge
+// tree memtable then we will use a lot memory. We should find a better way to control the
+// dictionary size.
 /// Config for the merge tree memtable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -68,6 +73,10 @@ pub struct MergeTreeConfig {
     /// Number of rows to freeze a data part.
     pub data_freeze_threshold: usize,
     /// Whether to delete duplicates rows.
+    ///
+    /// Skips deserializing as it should be determined by whether the
+    /// table is append only.
+    #[serde(skip_deserializing)]
     pub dedup: bool,
     /// Total bytes of dictionary to keep in fork.
     pub fork_dictionary_bytes: ReadableSize,
@@ -538,5 +547,18 @@ mod tests {
             let read = collect_iter_timestamps(iter);
             assert_eq!(timestamps, read);
         }
+    }
+
+    #[test]
+    fn test_deserialize_config() {
+        let config = MergeTreeConfig {
+            dedup: false,
+            ..Default::default()
+        };
+        // Creates a json with dedup = false.
+        let json = serde_json::to_string(&config).unwrap();
+        let config: MergeTreeConfig = serde_json::from_str(&json).unwrap();
+        assert!(config.dedup);
+        assert_eq!(MergeTreeConfig::default(), config);
     }
 }

@@ -27,7 +27,6 @@ use crate::error::{
 };
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
-use crate::memtable::MemtableBuilderRef;
 use crate::region::version::Version;
 use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
@@ -109,9 +108,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Now we can alter the region directly.
-        if let Err(e) =
-            alter_region_schema(&region, &version, request, &self.memtable_builder).await
-        {
+        if let Err(e) = alter_region_schema(&region, &version, request).await {
             error!(e; "Failed to alter region schema, region_id: {}", region_id);
             sender.send(Err(e));
             return;
@@ -134,7 +131,6 @@ async fn alter_region_schema(
     region: &MitoRegionRef,
     version: &Version,
     request: RegionAlterRequest,
-    builder: &MemtableBuilderRef,
 ) -> Result<()> {
     let new_meta = metadata_after_alteration(&version.metadata, request)?;
     // Persist the metadata to region's manifest.
@@ -145,7 +141,9 @@ async fn alter_region_schema(
     region.manifest_manager.update(action_list).await?;
 
     // Apply the metadata to region's version.
-    region.version_control.alter_schema(new_meta, builder);
+    region
+        .version_control
+        .alter_schema(new_meta, &region.memtable_builder);
     Ok(())
 }
 
