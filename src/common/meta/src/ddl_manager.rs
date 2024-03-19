@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use common_procedure::{watcher, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{
+    watcher, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId,
+};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -54,6 +56,8 @@ use crate::ClusterId;
 
 pub type DdlManagerRef = Arc<DdlManager>;
 
+pub type BoxedProcedureLoaderFactory = dyn Fn(DdlContext) -> BoxedProcedureLoader;
+
 /// The [DdlManager] provides the ability to execute Ddl.
 pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
@@ -64,8 +68,8 @@ pub struct DdlManager {
     memory_region_keeper: MemoryRegionKeeperRef,
 }
 
+/// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
 impl DdlManager {
-    /// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
     pub fn try_new(
         procedure_manager: ProcedureManagerRef,
         datanode_clients: DatanodeManagerRef,
@@ -103,75 +107,63 @@ impl DdlManager {
     }
 
     fn register_loaders(&self) -> Result<()> {
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
+        let loaders: Vec<(&str, &BoxedProcedureLoaderFactory)> = vec![
+            (
                 CreateTableProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    CreateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: CreateTableProcedure::TYPE_NAME,
-            })?;
-
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        CreateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
                 CreateLogicalTablesProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    CreateLogicalTablesProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: CreateLogicalTablesProcedure::TYPE_NAME,
-            })?;
-
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
-                DropTableProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: DropTableProcedure::TYPE_NAME,
-            })?;
-
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        CreateLogicalTablesProcedure::from_json(json, context)
+                            .map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
                 AlterTableProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: AlterTableProcedure::TYPE_NAME,
-            })?;
-
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
+                DropTableProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
                 TruncateTableProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    TruncateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: TruncateTableProcedure::TYPE_NAME,
-            })
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        TruncateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+        ];
+
+        for (type_name, loader_factory) in loaders {
+            let context = self.create_context();
+            self.procedure_manager
+                .register_loader(type_name, loader_factory(context))
+                .context(RegisterProcedureLoaderSnafu { type_name })?;
+        }
+
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
