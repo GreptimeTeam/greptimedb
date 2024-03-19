@@ -67,19 +67,8 @@ impl TableResponse {
     pub fn execution_time_ms(&self) -> u64 {
         self.execution_time_ms
     }
-}
-
-impl IntoResponse for TableResponse {
-    fn into_response(mut self) -> Response {
-        debug_assert!(
-            self.output.len() <= 1,
-            "self.output has extra elements: {}",
-            self.output.len()
-        );
-
-        let execution_time = self.execution_time_ms;
-
-        let payload = match self.output.pop() {
+    fn into_payload(&mut self) -> String {
+        match self.output.pop() {
             None => String::default(),
             Some(GreptimeQueryOutput::AffectedRows(n)) => {
                 format!("{n}\n")
@@ -126,14 +115,26 @@ impl IntoResponse for TableResponse {
                 writeln!(result, "└{}┘", footer).unwrap();
                 result
             }
-        };
+        }
+    }
+}
+
+impl IntoResponse for TableResponse {
+    fn into_response(mut self) -> Response {
+        debug_assert!(
+            self.output.len() <= 1,
+            "self.output has extra elements: {}",
+            self.output.len()
+        );
+
+        let execution_time = self.execution_time_ms;
 
         let mut resp = (
             [(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static(mime::PLAIN.as_ref()),
             )],
-            payload,
+            self.into_payload(),
         )
             .into_response();
         resp.headers_mut().insert(
@@ -145,5 +146,27 @@ impl IntoResponse for TableResponse {
             HeaderValue::from(execution_time),
         );
         resp
+    }
+}
+#[cfg(test)]
+mod test {
+
+    use super::TableResponse;
+
+    #[tokio::test]
+    async fn test_table_format() {
+        let data = r#"{"output":[{"records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"ts","data_type":"TimestampMillisecond"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"}]},"rows":[["127.0.0.1",1702433141000,0.5,0.2],["127.0.0.1",1702433146000,0.3,0.2],["127.0.0.1",1702433151000,0.4,0.3],["127.0.0.2",1702433141000,0.3,0.1],["127.0.0.2",1702433146000,0.2,0.4],["127.0.0.2",1702433151000,0.2,0.4]]}}],"execution_time_ms":13}"#;
+        let mut table_response: TableResponse = serde_json::from_str(data).unwrap();
+        let payload = table_response.into_payload();
+        let expected_payload = r#"┌─host────────┬─ts────────────┬─cpu─┬─memory─┐
+│ "127.0.0.1" │ 1702433141000 │ 0.5 │ 0.2    │
+│ "127.0.0.1" │ 1702433146000 │ 0.3 │ 0.2    │
+│ "127.0.0.1" │ 1702433151000 │ 0.4 │ 0.3    │
+│ "127.0.0.2" │ 1702433141000 │ 0.3 │ 0.1    │
+│ "127.0.0.2" │ 1702433146000 │ 0.2 │ 0.4    │
+│ "127.0.0.2" │ 1702433151000 │ 0.2 │ 0.4    │
+└─────────────┴───────────────┴─────┴────────┘
+"#;
+        assert_eq!(payload, expected_payload);
     }
 }
