@@ -675,7 +675,7 @@ DESC TABLE GREPTIME_REGION_PEERS;
 
 drop table my_db.foo;
 
-Affected Rows: 0
+Error: 4001(TableNotFound), Table not found: greptime.my_db.foo
 
 use public;
 
