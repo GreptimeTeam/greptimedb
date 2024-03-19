@@ -39,7 +39,7 @@ use crate::memtable::partition_tree::partition::{
 };
 use crate::memtable::partition_tree::MergeTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
-use crate::metrics::{MERGE_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
+use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
@@ -446,9 +446,9 @@ struct TreeIter {
 impl Drop for TreeIter {
     fn drop(&mut self) {
         READ_ROWS_TOTAL
-            .with_label_values(&["merge_tree_memtable"])
+            .with_label_values(&["partition_tree_memtable"])
             .inc_by(self.metrics.rows_fetched as u64);
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["fetch_next_partition"])
             .observe(self.metrics.fetch_partition_elapsed.as_secs_f64());
         let scan_elapsed = self.metrics.iter_elapsed.as_secs_f64();

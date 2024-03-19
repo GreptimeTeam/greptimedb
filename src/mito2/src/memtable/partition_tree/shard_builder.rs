@@ -30,7 +30,7 @@ use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
 use crate::memtable::partition_tree::shard::Shard;
 use crate::memtable::partition_tree::{MergeTreeConfig, PkId, PkIndex, ShardId};
-use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
+use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
@@ -150,14 +150,14 @@ impl ShardBuilder {
     /// Scans the shard builder.
     pub fn read(&self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReaderBuilder> {
         let dict_reader = {
-            let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+            let _timer = PARTITION_TREE_READ_STAGE_ELAPSED
                 .with_label_values(&["shard_builder_read_pk"])
                 .start_timer();
             self.dict_builder.read()
         };
 
         {
-            let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+            let _timer = PARTITION_TREE_READ_STAGE_ELAPSED
                 .with_label_values(&["sort_pk"])
                 .start_timer();
             dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
@@ -296,7 +296,7 @@ impl ShardBuilderReader {
 impl Drop for ShardBuilderReader {
     fn drop(&mut self) {
         let shard_builder_prune_pk = self.prune_pk_cost.as_secs_f64();
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["shard_builder_prune_pk"])
             .observe(shard_builder_prune_pk);
         if self.keys_before_pruning > 0 {

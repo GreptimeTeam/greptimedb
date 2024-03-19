@@ -279,7 +279,7 @@ lazy_static! {
     // ------- End of index metrics.
 
     /// Partition tree memtable data buffer freeze metrics
-    pub static ref MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+    pub static ref PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_partition_tree_buffer_freeze_stage_elapsed",
         "mito partition tree data buffer freeze stage elapsed",
         &[STAGE_LABEL],
@@ -288,7 +288,7 @@ lazy_static! {
     .unwrap();
 
     /// Partition tree memtable read path metrics
-    pub static ref MERGE_TREE_READ_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+    pub static ref PARTITION_TREE_READ_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_partition_tree_read_stage_elapsed",
         "mito partition tree read stage elapsed",
         &[STAGE_LABEL],

@@ -41,7 +41,7 @@ fn write_rows(c: &mut Criterion) {
 
     // Note that this test only generate one time series.
     let mut group = c.benchmark_group("write");
-    group.bench_function("merge_tree", |b| {
+    group.bench_function("partition_tree", |b| {
         let memtable =
             MergeTreeMemtable::new(1, metadata.clone(), None, &MergeTreeConfig::default());
         let kvs =
@@ -69,7 +69,7 @@ fn full_scan(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("full_scan");
     group.sample_size(10);
-    group.bench_function("merge_tree", |b| {
+    group.bench_function("partition_tree", |b| {
         let memtable = MergeTreeMemtable::new(1, metadata.clone(), None, &config);
         for kvs in generator.iter() {
             memtable.write(&kvs).unwrap();
@@ -106,7 +106,7 @@ fn filter_1_host(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("filter_1_host");
     group.sample_size(10);
-    group.bench_function("merge_tree", |b| {
+    group.bench_function("partition_tree", |b| {
         let memtable = MergeTreeMemtable::new(1, metadata.clone(), None, &config);
         for kvs in generator.iter() {
             memtable.write(&kvs).unwrap();

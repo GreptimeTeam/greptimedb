@@ -36,7 +36,7 @@ use crate::memtable::partition_tree::shard::{
 };
 use crate::memtable::partition_tree::shard_builder::ShardBuilder;
 use crate::memtable::partition_tree::{MergeTreeConfig, PkId};
-use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
+use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
 use crate::row_converter::{McmpRowCodec, RowCodec};
 
@@ -437,11 +437,11 @@ pub(crate) struct ReadPartitionContext {
 impl Drop for ReadPartitionContext {
     fn drop(&mut self) {
         let partition_read_source = self.metrics.read_source.as_secs_f64();
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_read_source"])
             .observe(partition_read_source);
         let partition_data_batch_to_batch = self.metrics.data_batch_to_batch.as_secs_f64();
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_data_batch_to_batch"])
             .observe(partition_data_batch_to_batch);
 

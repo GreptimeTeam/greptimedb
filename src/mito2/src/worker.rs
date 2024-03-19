@@ -340,8 +340,8 @@ impl<S: LogStore> WorkerStarter<S> {
         let running = Arc::new(AtomicBool::new(true));
 
         let default_memtable_builder = match &self.config.memtable {
-            MemtableConfig::Experimental(merge_tree) => Arc::new(MergeTreeMemtableBuilder::new(
-                merge_tree.clone(),
+            MemtableConfig::Experimental(config) => Arc::new(MergeTreeMemtableBuilder::new(
+                config.clone(),
                 Some(self.write_buffer_manager.clone()),
             )) as _,
             MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(Some(

@@ -29,7 +29,7 @@ use crate::memtable::partition_tree::merger::{Merger, Node};
 use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
 use crate::memtable::partition_tree::shard_builder::ShardBuilderReader;
 use crate::memtable::partition_tree::{PkId, PkIndex, ShardId};
-use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
+use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 
 /// Shard stores data related to the same key dictionary.
 pub struct Shard {
@@ -257,7 +257,7 @@ impl ShardReader {
 impl Drop for ShardReader {
     fn drop(&mut self) {
         let shard_prune_pk = self.prune_pk_cost.as_secs_f64();
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["shard_prune_pk"])
             .observe(shard_prune_pk);
         if self.keys_before_pruning > 0 {

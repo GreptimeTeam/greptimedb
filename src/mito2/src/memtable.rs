@@ -265,13 +265,13 @@ dedup = true
 fork_dictionary_bytes = "512MiB"
 "#;
         let config: MemtableConfig = toml::from_str(s).unwrap();
-        let MemtableConfig::Experimental(merge_tree) = config else {
+        let MemtableConfig::Experimental(memtable_config) = config else {
             unreachable!()
         };
-        assert!(merge_tree.dedup);
-        assert_eq!(8192, merge_tree.index_max_keys_per_shard);
-        assert_eq!(1024, merge_tree.data_freeze_threshold);
-        assert_eq!(ReadableSize::mb(512), merge_tree.fork_dictionary_bytes);
+        assert!(memtable_config.dedup);
+        assert_eq!(8192, memtable_config.index_max_keys_per_shard);
+        assert_eq!(1024, memtable_config.data_freeze_threshold);
+        assert_eq!(ReadableSize::mb(512), memtable_config.fork_dictionary_bytes);
     }
 
     #[test]
