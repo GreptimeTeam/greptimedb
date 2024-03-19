@@ -236,6 +236,8 @@ impl<K, V> Stream for PaginationStream<K, V> {
                 PaginationStreamState::Init => {
                     let factory = self.factory.take().expect("lost factory");
                     if !factory.more {
+                        // Ensures the factory always exists.
+                        self.factory = Some(factory);
                         return Poll::Ready(None);
                     }
                     let fut = factory.read_next().boxed();
