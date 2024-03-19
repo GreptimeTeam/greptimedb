@@ -255,18 +255,21 @@ impl Stream for SeriesDivideStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            if let Some(batch) = self.buffer.take() {
+            // It has to be cloned here, otherwise the later ready! will mess things up
+            if let Some(batch) = self.buffer.clone() {
                 let same_length = self.find_first_diff_row(&batch) + 1;
                 if same_length >= batch.num_rows() {
                     let next_batch = match ready!(self.as_mut().fetch_next_batch(cx)) {
-                        Some(Ok(next_batch)) => next_batch,
+                        Some(Ok(batch)) => batch,
                         None => {
+                            self.buffer = None;
                             self.num_series += 1;
                             return Poll::Ready(Some(Ok(batch)));
                         }
                         error => return Poll::Ready(error),
                     };
-                    let new_batch = compute::concat_batches(&batch.schema(), &[batch, next_batch])?;
+                    let new_batch =
+                        compute::concat_batches(&batch.schema(), &[batch.clone(), next_batch])?;
                     self.buffer = Some(new_batch);
                     continue;
                 } else {
