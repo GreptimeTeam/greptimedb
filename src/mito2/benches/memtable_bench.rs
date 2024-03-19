@@ -21,7 +21,7 @@ use datafusion_common::Column;
 use datafusion_expr::{lit, Expr};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use mito2::memtable::merge_tree::{MergeTreeConfig, MergeTreeMemtable};
+use mito2::memtable::partition_tree::{MergeTreeConfig, MergeTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};

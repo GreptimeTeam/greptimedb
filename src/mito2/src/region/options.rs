@@ -29,7 +29,7 @@ use snafu::{ensure, ResultExt};
 use store_api::storage::ColumnId;
 
 use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
-use crate::memtable::merge_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
+use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 

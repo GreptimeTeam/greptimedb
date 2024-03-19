@@ -21,14 +21,14 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{
+use crate::memtable::partition_tree::data::{
     DataBatch, DataParts, DataPartsReader, DataPartsReaderBuilder, DATA_INIT_CAP,
 };
-use crate::memtable::merge_tree::dict::KeyDictRef;
-use crate::memtable::merge_tree::merger::{Merger, Node};
-use crate::memtable::merge_tree::partition::PrimaryKeyFilter;
-use crate::memtable::merge_tree::shard_builder::ShardBuilderReader;
-use crate::memtable::merge_tree::{PkId, PkIndex, ShardId};
+use crate::memtable::partition_tree::dict::KeyDictRef;
+use crate::memtable::partition_tree::merger::{Merger, Node};
+use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
+use crate::memtable::partition_tree::shard_builder::ShardBuilderReader;
+use crate::memtable::partition_tree::{PkId, PkIndex, ShardId};
 use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 
 /// Shard stores data related to the same key dictionary.
@@ -427,10 +427,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::memtable::merge_tree::data::timestamp_array_to_i64_slice;
-    use crate::memtable::merge_tree::dict::KeyDictBuilder;
-    use crate::memtable::merge_tree::metrics::WriteMetrics;
-    use crate::memtable::merge_tree::PkIndex;
+    use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
+    use crate::memtable::partition_tree::dict::KeyDictBuilder;
+    use crate::memtable::partition_tree::metrics::WriteMetrics;
+    use crate::memtable::partition_tree::PkIndex;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, encode_keys, metadata_for_test,

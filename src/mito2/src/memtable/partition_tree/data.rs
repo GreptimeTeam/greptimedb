@@ -45,8 +45,8 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use crate::error;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
-use crate::memtable::merge_tree::PkIndex;
+use crate::memtable::partition_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
+use crate::memtable::partition_tree::PkIndex;
 use crate::metrics::{MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED, MERGE_TREE_READ_STAGE_ELAPSED};
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";

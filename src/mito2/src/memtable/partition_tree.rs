@@ -37,8 +37,8 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::tree::MergeTree;
+use crate::memtable::partition_tree::metrics::WriteMetrics;
+use crate::memtable::partition_tree::tree::MergeTree;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,

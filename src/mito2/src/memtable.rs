@@ -28,14 +28,14 @@ use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 pub use crate::memtable::key_values::KeyValues;
-use crate::memtable::merge_tree::{MergeTreeConfig, MergeTreeMemtableBuilder};
+use crate::memtable::partition_tree::{MergeTreeConfig, MergeTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
 use crate::region::options::MemtableOptions;
 
 pub mod key_values;
-pub mod merge_tree;
+pub mod partition_tree;
 pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;

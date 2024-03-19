@@ -415,7 +415,7 @@ struct PartitionToWrite<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
+    use crate::memtable::partition_tree::MergeTreeMemtableBuilder;
     use crate::test_util::memtable_util::{self, collect_iter_timestamps};
 
     #[test]

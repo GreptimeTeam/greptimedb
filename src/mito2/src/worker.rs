@@ -48,7 +48,7 @@ use crate::config::MitoConfig;
 use crate::error::{InvalidRequestSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::manifest::action::RegionEdit;
-use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
+use crate::memtable::partition_tree::MergeTreeMemtableBuilder;
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::{MemtableBuilderProvider, MemtableConfig};
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};

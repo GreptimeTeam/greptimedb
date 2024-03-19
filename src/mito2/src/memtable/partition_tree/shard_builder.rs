@@ -22,14 +22,14 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{
+use crate::memtable::partition_tree::data::{
     DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts, DATA_INIT_CAP,
 };
-use crate::memtable::merge_tree::dict::{DictBuilderReader, KeyDictBuilder};
-use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::partition::PrimaryKeyFilter;
-use crate::memtable::merge_tree::shard::Shard;
-use crate::memtable::merge_tree::{MergeTreeConfig, PkId, PkIndex, ShardId};
+use crate::memtable::partition_tree::dict::{DictBuilderReader, KeyDictBuilder};
+use crate::memtable::partition_tree::metrics::WriteMetrics;
+use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
+use crate::memtable::partition_tree::shard::Shard;
+use crate::memtable::partition_tree::{MergeTreeConfig, PkId, PkIndex, ShardId};
 use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 
 /// Builder to write keys and data to a shard that the key dictionary
@@ -315,8 +315,8 @@ impl Drop for ShardBuilderReader {
 mod tests {
 
     use super::*;
-    use crate::memtable::merge_tree::data::timestamp_array_to_i64_slice;
-    use crate::memtable::merge_tree::metrics::WriteMetrics;
+    use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
+    use crate::memtable::partition_tree::metrics::WriteMetrics;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, encode_key_by_kv, metadata_for_test,
