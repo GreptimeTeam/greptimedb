@@ -740,7 +740,7 @@ impl Values {
             .collect();
 
         let mut batch = builder.with_fields(fields).build()?;
-        batch.sort_and_dedup(dedup)?;
+        batch.sort(dedup)?;
         Ok(batch)
     }
 

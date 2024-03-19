@@ -340,7 +340,7 @@ impl Batch {
     /// It orders rows by timestamp, sequence desc and only keep the latest
     /// row for the same timestamp. It doesn't consider op type as sequence
     /// should already provide uniqueness for a row.
-    pub fn sort_and_dedup(&mut self, dedup: bool) -> Result<()> {
+    pub fn sort(&mut self, dedup: bool) -> Result<()> {
         // If building a converter each time is costly, we may allow passing a
         // converter.
         let converter = RowConverter::new(vec![
@@ -1001,7 +1001,7 @@ mod tests {
         );
 
         let mut batch = original.clone();
-        batch.sort_and_dedup(true).unwrap();
+        batch.sort(true).unwrap();
         // It should only keep one timestamp 2.
         assert_eq!(
             new_batch(
@@ -1020,7 +1020,7 @@ mod tests {
         );
 
         let mut batch = original.clone();
-        batch.sort_and_dedup(false).unwrap();
+        batch.sort(false).unwrap();
 
         // It should only keep one timestamp 2.
         assert_eq!(
@@ -1048,12 +1048,12 @@ mod tests {
         );
 
         let mut batch = original.clone();
-        batch.sort_and_dedup(true).unwrap();
+        batch.sort(true).unwrap();
         let expect = new_batch(&[1, 2], &[1, 6], &[OpType::Put, OpType::Put], &[23, 22]);
         assert_eq!(expect, batch);
 
         let mut batch = original.clone();
-        batch.sort_and_dedup(false).unwrap();
+        batch.sort(false).unwrap();
         let expect = new_batch(
             &[1, 2, 2],
             &[1, 6, 1],
