@@ -65,7 +65,7 @@ pub trait ProcedureExecutor: Send + Sync {
         request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse>;
 
-    /// Query the  procedure state by its id
+    /// Query the procedure state by its id
     async fn query_procedure_state(
         &self,
         ctx: &ExecutorContext,
