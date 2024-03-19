@@ -471,8 +471,9 @@ impl Inserter {
                     &req.table_name,
                 );
 
-                let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
-                let mut create_table_expr = build_create_table_expr(&table_ref, request_schema)?;
+                let mut request_schema = req.rows.as_ref().unwrap().schema.clone();
+                request_schema.sort_unstable_by(|c1, c2| c1.column_name.cmp(&c2.column_name));
+                let mut create_table_expr = build_create_table_expr(&table_ref, &request_schema)?;
 
                 create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
                 create_table_expr.table_options.insert(
