@@ -39,12 +39,20 @@ impl DropDatabaseCursor {
         Self { target }
     }
 
-    fn handle_reach_end(&mut self) -> Result<(Box<dyn State>, Status)> {
+    fn handle_reach_end(
+        &mut self,
+        ctx: &mut DropDatabaseContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         match self.target {
-            DropTableTarget::Logical => Ok((
-                Box::new(DropDatabaseCursor::new(DropTableTarget::Physical)),
-                Status::executing(true),
-            )),
+            DropTableTarget::Logical => {
+                // Consumes the tables stream.
+                ctx.tables.take();
+
+                Ok((
+                    Box::new(DropDatabaseCursor::new(DropTableTarget::Physical)),
+                    Status::executing(true),
+                ))
+            }
             DropTableTarget::Physical => Ok((
                 Box::new(DropDatabaseRemoveMetadata),
                 Status::executing(true),
@@ -127,7 +135,7 @@ impl State for DropDatabaseCursor {
                     )),
                 }
             }
-            None => self.handle_reach_end(),
+            None => self.handle_reach_end(ctx),
         }
     }
 }
