@@ -49,8 +49,8 @@ use crate::error::{
     ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultiFieldsNotSupportedSnafu,
     MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, Result,
     TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
-    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
-    ZeroRangeSelectorSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
+    UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
@@ -607,6 +607,13 @@ impl PromPlanner {
                     .get_or_insert_default()
                     .push(matcher.clone());
             } else if matcher.name == SCHEMA_COLUMN_MATCHER {
+                ensure!(
+                    matcher.op == MatchOp::Equal,
+                    UnsupportedMatcherOpSnafu {
+                        matcher: matcher.name.to_string(),
+                        matcher_op: matcher.op.to_string(),
+                    }
+                );
                 self.ctx.schema_name = Some(matcher.value.clone());
             } else if matcher.name != METRIC_NAME {
                 let _ = matchers.insert(matcher.clone());
@@ -2830,5 +2837,42 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn only_equals_is_supported_for_special_matcher() {
+        let queries = &[
+            "some_alt_metric{__schema__!=\"greptime_private\"}",
+            "some_alt_metric{__schema__=~\"lalala\"}",
+        ];
+
+        for query in queries {
+            let prom_expr = parser::parse(query).unwrap();
+            let eval_stmt = EvalStmt {
+                expr: prom_expr,
+                start: UNIX_EPOCH,
+                end: UNIX_EPOCH
+                    .checked_add(Duration::from_secs(100_000))
+                    .unwrap(),
+                interval: Duration::from_secs(5),
+                lookback_delta: Duration::from_secs(1),
+            };
+
+            let table_provider = build_test_table_provider(
+                &[
+                    (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                    (
+                        "greptime_private".to_string(),
+                        "some_alt_metric".to_string(),
+                    ),
+                ],
+                1,
+                1,
+            )
+            .await;
+
+            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt).await;
+            assert!(plan.is_err(), "query: {:?}", query);
+        }
     }
 }
