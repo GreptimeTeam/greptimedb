@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Memtable implementation based on a merge tree.
+//! Memtable implementation based on a partition tree.
 
 pub(crate) mod data;
 mod dedup;
@@ -64,7 +64,7 @@ struct PkId {
 // TODO(yingwen): `fork_dictionary_bytes` is per region option, if we have multiple merge
 // tree memtable then we will use a lot memory. We should find a better way to control the
 // dictionary size.
-/// Config for the merge tree memtable.
+/// Config for the partition tree memtable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct MergeTreeConfig {
@@ -102,7 +102,7 @@ impl Default for MergeTreeConfig {
     }
 }
 
-/// Memtable based on a merge tree.
+/// Memtable based on a partition tree.
 pub struct MergeTreeMemtable {
     id: MemtableId,
     tree: MergeTree,

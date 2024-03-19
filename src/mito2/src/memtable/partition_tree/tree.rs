@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Implementation of the merge tree.
+//! Implementation of the partition tree.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
@@ -43,7 +43,7 @@ use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_ST
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
-/// The merge tree.
+/// The partition tree.
 pub struct MergeTree {
     /// Config of the tree.
     config: MergeTreeConfig,
@@ -61,7 +61,7 @@ pub struct MergeTree {
 }
 
 impl MergeTree {
-    /// Creates a new merge tree.
+    /// Creates a new partition tree.
     pub fn new(
         metadata: RegionMetadataRef,
         config: &MergeTreeConfig,

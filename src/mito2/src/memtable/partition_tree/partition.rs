@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Partition of a merge tree.
+//! Partition of a partition tree.
 //!
 //! We only support partitioning the tree by pre-defined internal columns.
 
