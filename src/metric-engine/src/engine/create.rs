@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
+use common_error::ext::BoxedError;
 use common_telemetry::info;
 use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType;
@@ -25,7 +26,12 @@ use object_store::util::join_dir;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
-    ALTER_PHYSICAL_EXTENSION_KEY, DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METADATA_REGION_SUBDIR, METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME, PHYSICAL_TABLE_METADATA_KEY
+    ALTER_PHYSICAL_EXTENSION_KEY, DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+    DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METADATA_REGION_SUBDIR,
+    METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
+    METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
+    METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
+    PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
@@ -35,9 +41,9 @@ use store_api::storage::RegionId;
 use crate::engine::options::set_index_options_for_data_region;
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    ConflictRegionOptionSnafu, CreateMitoRegionSnafu, InternalColumnOccupiedSnafu,
-    MissingRegionOptionSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu, Result,
-    SerializeColumnMetadataSnafu,
+    ColumnNotFoundSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
+    InternalColumnOccupiedSnafu, MissingRegionOptionSnafu, MitoReadOperationSnafu,
+    ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
 };
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils::{to_data_region_id, to_metadata_region_id};
@@ -157,6 +163,7 @@ impl MetricEngineInner {
 
         // find new columns to add
         let mut new_columns = vec![];
+        let mut existing_columns = vec![];
         {
             let state = &self.state.read().unwrap();
             let physical_columns =
@@ -169,6 +176,8 @@ impl MetricEngineInner {
             for col in &request.column_metadatas {
                 if !physical_columns.contains(&col.column_schema.name) {
                     new_columns.push(col.clone());
+                } else {
+                    existing_columns.push(col.column_schema.name.clone());
                 }
             }
         }
@@ -190,9 +199,28 @@ impl MetricEngineInner {
         self.metadata_region
             .add_logical_region(metadata_region_id, logical_region_id)
             .await?;
-        for col in &request.column_metadatas {
+
+        // register existing physical column to this new logical region.
+        let physical_schema = self
+            .data_region
+            .physical_columns(data_region_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(MitoReadOperationSnafu)?;
+        let physical_schema_map = physical_schema
+            .into_iter()
+            .map(|metadata| (metadata.column_schema.name.clone(), metadata))
+            .collect::<HashMap<_, _>>();
+        for col in &existing_columns {
+            let column_metadata = physical_schema_map
+                .get(col)
+                .with_context(|| ColumnNotFoundSnafu {
+                    name: col,
+                    region_id: physical_region_id,
+                })?
+                .clone();
             self.metadata_region
-                .add_column(metadata_region_id, logical_region_id, col)
+                .add_column(metadata_region_id, logical_region_id, &column_metadata)
                 .await?;
         }
 
@@ -373,13 +401,13 @@ impl MetricEngineInner {
         // concat region dir
         data_region_request.region_dir = join_dir(&request.region_dir, DATA_REGION_SUBDIR);
 
-        // convert semantic type
+        // change nullability for tag columns
         data_region_request
             .column_metadatas
             .iter_mut()
             .for_each(|metadata| {
                 if metadata.semantic_type == SemanticType::Tag {
-                    metadata.semantic_type = SemanticType::Field;
+                    metadata.column_schema.set_nullable();
                 }
             });
 

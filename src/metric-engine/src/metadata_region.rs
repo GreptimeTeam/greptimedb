@@ -167,7 +167,7 @@ impl MetadataRegion {
 
     // TODO(ruihang): avoid using `get_all`
     /// Get all the columns of a given logical region.
-    /// Return a list of (column_name, semantic_type).
+    /// Return a list of (column_name, column_metadata).
     pub async fn logical_columns(
         &self,
         physical_region_id: RegionId,

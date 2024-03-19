@@ -70,6 +70,7 @@ impl CreateLogicalTablesProcedure {
     /// - Checks whether physical table exists.
     /// - Checks whether logical tables exist.
     /// - Allocates the table ids.
+    /// - Modify tasks to sort logical columns on their names.
     ///
     /// Abort(non-retry):
     /// - The physical table does not exist.
@@ -130,7 +131,7 @@ impl CreateLogicalTablesProcedure {
             ));
         }
 
-        // Allocates table ids
+        // Allocates table ids and sort columns on their names.
         for (task, table_id) in tasks.iter_mut().zip(already_exists_tables_ids.iter()) {
             let table_id = if let Some(table_id) = table_id {
                 *table_id

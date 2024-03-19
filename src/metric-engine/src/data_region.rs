@@ -121,7 +121,7 @@ impl DataRegion {
             .unwrap_or(0);
 
         // overwrite semantic type
-        let columns = columns
+        let new_columns = columns
             .iter_mut()
             .enumerate()
             .map(|(delta, c)| {
@@ -152,7 +152,9 @@ impl DataRegion {
         // assemble alter request
         let alter_request = RegionRequest::Alter(RegionAlterRequest {
             schema_version: version,
-            kind: AlterKind::AddColumns { columns },
+            kind: AlterKind::AddColumns {
+                columns: new_columns,
+            },
         });
 
         Ok(alter_request)

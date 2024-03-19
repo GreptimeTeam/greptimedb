@@ -649,6 +649,7 @@ impl RegionServerInner {
             .decode(Bytes::from(plan), catalog_list, "", "")
             .await
             .context(DecodeLogicalPlanSnafu)?;
+
         let result = self
             .query_engine
             .execute(logical_plan.into(), ctx)

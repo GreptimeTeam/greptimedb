@@ -143,6 +143,7 @@ impl MetricEngineInner {
             self.default_projection(physical_region_id, logical_region_id)
                 .await?
         };
+
         request.projection = Some(physical_projection);
 
         // add table filter
@@ -186,6 +187,7 @@ impl MetricEngineInner {
             .get_metadata(data_region_id)
             .await
             .context(MitoReadOperationSnafu)?;
+
         for name in projected_logical_names {
             // Safety: logical columns is a strict subset of physical columns
             physical_projection.push(physical_metadata.column_index_by_name(&name).unwrap());
