@@ -138,8 +138,7 @@ impl CatalogManager for KvBackendCatalogManager {
         let stream = self
             .table_metadata_manager
             .catalog_manager()
-            .catalog_names()
-            .await;
+            .catalog_names();
 
         let keys = stream
             .try_collect::<Vec<_>>()
@@ -154,8 +153,7 @@ impl CatalogManager for KvBackendCatalogManager {
         let stream = self
             .table_metadata_manager
             .schema_manager()
-            .schema_names(catalog)
-            .await;
+            .schema_names(catalog);
         let mut keys = stream
             .try_collect::<BTreeSet<_>>()
             .await
@@ -171,8 +169,7 @@ impl CatalogManager for KvBackendCatalogManager {
         let stream = self
             .table_metadata_manager
             .table_name_manager()
-            .tables(catalog, schema)
-            .await;
+            .tables(catalog, schema);
         let mut tables = stream
             .try_collect::<Vec<_>>()
             .await
@@ -297,7 +294,6 @@ impl CatalogManager for KvBackendCatalogManager {
             .table_metadata_manager
             .table_name_manager()
             .tables(catalog, schema)
-            .await
             .map_ok(|(_, v)| v.table_id());
         const BATCH_SIZE: usize = 128;
         let user_tables = try_stream!({
