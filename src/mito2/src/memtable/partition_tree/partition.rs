@@ -35,7 +35,7 @@ use crate::memtable::partition_tree::shard::{
     BoxedDataBatchSource, Shard, ShardMerger, ShardNode, ShardSource,
 };
 use crate::memtable::partition_tree::shard_builder::ShardBuilder;
-use crate::memtable::partition_tree::{MergeTreeConfig, PkId};
+use crate::memtable::partition_tree::{PartitionTreeConfig, PkId};
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
 use crate::row_converter::{McmpRowCodec, RowCodec};
@@ -54,7 +54,7 @@ pub type PartitionRef = Arc<Partition>;
 
 impl Partition {
     /// Creates a new partition.
-    pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+    pub fn new(metadata: RegionMetadataRef, config: &PartitionTreeConfig) -> Self {
         Partition {
             inner: RwLock::new(Inner::new(metadata, config)),
             dedup: config.dedup,
@@ -193,7 +193,7 @@ impl Partition {
     /// Forks the partition.
     ///
     /// Must freeze the partition before fork.
-    pub fn fork(&self, metadata: &RegionMetadataRef, config: &MergeTreeConfig) -> Partition {
+    pub fn fork(&self, metadata: &RegionMetadataRef, config: &PartitionTreeConfig) -> Partition {
         let (shards, shard_builder) = {
             let inner = self.inner.read().unwrap();
             debug_assert!(inner.shard_builder.is_empty());
@@ -558,7 +558,7 @@ struct Inner {
 }
 
 impl Inner {
-    fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+    fn new(metadata: RegionMetadataRef, config: &PartitionTreeConfig) -> Self {
         let (shards, current_shard_id) = if metadata.primary_key.is_empty() {
             let data_parts = DataParts::new(metadata.clone(), DATA_INIT_CAP, config.dedup);
             (

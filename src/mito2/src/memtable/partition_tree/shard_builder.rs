@@ -29,7 +29,7 @@ use crate::memtable::partition_tree::dict::{DictBuilderReader, KeyDictBuilder};
 use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
 use crate::memtable::partition_tree::shard::Shard;
-use crate::memtable::partition_tree::{MergeTreeConfig, PkId, PkIndex, ShardId};
+use crate::memtable::partition_tree::{PartitionTreeConfig, PkId, PkIndex, ShardId};
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 
 /// Builder to write keys and data to a shard that the key dictionary
@@ -50,7 +50,7 @@ impl ShardBuilder {
     /// Returns a new builder.
     pub fn new(
         metadata: RegionMetadataRef,
-        config: &MergeTreeConfig,
+        config: &PartitionTreeConfig,
         shard_id: ShardId,
     ) -> ShardBuilder {
         ShardBuilder {
@@ -355,7 +355,7 @@ mod tests {
     fn test_write_shard_builder() {
         let metadata = metadata_for_test();
         let input = input_with_key(&metadata);
-        let config = MergeTreeConfig::default();
+        let config = PartitionTreeConfig::default();
         let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
         let mut metrics = WriteMetrics::default();
         assert!(shard_builder
@@ -382,7 +382,7 @@ mod tests {
     fn test_write_read_shard_builder() {
         let metadata = metadata_for_test();
         let input = input_with_key(&metadata);
-        let config = MergeTreeConfig::default();
+        let config = PartitionTreeConfig::default();
         let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
         let mut metrics = WriteMetrics::default();
 

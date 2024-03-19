@@ -37,16 +37,16 @@ use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::partition::{
     Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
 };
-use crate::memtable::partition_tree::MergeTreeConfig;
+use crate::memtable::partition_tree::PartitionTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// The partition tree.
-pub struct MergeTree {
+pub struct PartitionTree {
     /// Config of the tree.
-    config: MergeTreeConfig,
+    config: PartitionTreeConfig,
     /// Metadata of the region.
     pub(crate) metadata: RegionMetadataRef,
     /// Primary key codec.
@@ -60,13 +60,13 @@ pub struct MergeTree {
     sparse_encoder: Arc<SparseEncoder>,
 }
 
-impl MergeTree {
+impl PartitionTree {
     /// Creates a new partition tree.
     pub fn new(
         metadata: RegionMetadataRef,
-        config: &MergeTreeConfig,
+        config: &PartitionTreeConfig,
         write_buffer_manager: Option<WriteBufferManagerRef>,
-    ) -> MergeTree {
+    ) -> PartitionTree {
         let row_codec = McmpRowCodec::new(
             metadata
                 .primary_key_columns()
@@ -84,7 +84,7 @@ impl MergeTree {
         };
         let is_partitioned = Partition::has_multi_partitions(&metadata);
 
-        MergeTree {
+        PartitionTree {
             config: config.clone(),
             metadata,
             row_codec: Arc::new(row_codec),
@@ -260,12 +260,12 @@ impl MergeTree {
 
     /// Forks an immutable tree. Returns a mutable tree that inherits the index
     /// of this tree.
-    pub fn fork(&self, metadata: RegionMetadataRef) -> MergeTree {
+    pub fn fork(&self, metadata: RegionMetadataRef) -> PartitionTree {
         if self.metadata.schema_version != metadata.schema_version
             || self.metadata.column_metadatas != metadata.column_metadatas
         {
             // The schema has changed, we can't reuse the tree.
-            return MergeTree::new(metadata, &self.config, self.write_buffer_manager.clone());
+            return PartitionTree::new(metadata, &self.config, self.write_buffer_manager.clone());
         }
 
         let mut total_shared_size = 0;
@@ -313,7 +313,7 @@ impl MergeTree {
             forked.insert(part_key, Arc::new(forked_part));
         }
 
-        MergeTree {
+        PartitionTree {
             config: self.config.clone(),
             metadata,
             row_codec: self.row_codec.clone(),

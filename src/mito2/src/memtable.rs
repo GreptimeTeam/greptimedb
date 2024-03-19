@@ -28,7 +28,7 @@ use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 pub use crate::memtable::key_values::KeyValues;
-use crate::memtable::partition_tree::{MergeTreeConfig, MergeTreeMemtableBuilder};
+use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
@@ -49,7 +49,7 @@ pub type MemtableId = u32;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemtableConfig {
-    Experimental(MergeTreeConfig),
+    Experimental(PartitionTreeConfig),
     TimeSeries,
 }
 
@@ -234,15 +234,17 @@ impl MemtableBuilderProvider {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
             )),
-            Some(MemtableOptions::Experimental(opts)) => Arc::new(MergeTreeMemtableBuilder::new(
-                MergeTreeConfig {
-                    index_max_keys_per_shard: opts.index_max_keys_per_shard,
-                    data_freeze_threshold: opts.data_freeze_threshold,
-                    fork_dictionary_bytes: opts.fork_dictionary_bytes,
-                    ..Default::default()
-                },
-                self.write_buffer_manager.clone(),
-            )),
+            Some(MemtableOptions::Experimental(opts)) => {
+                Arc::new(PartitionTreeMemtableBuilder::new(
+                    PartitionTreeConfig {
+                        index_max_keys_per_shard: opts.index_max_keys_per_shard,
+                        data_freeze_threshold: opts.data_freeze_threshold,
+                        fork_dictionary_bytes: opts.fork_dictionary_bytes,
+                        ..Default::default()
+                    },
+                    self.write_buffer_manager.clone(),
+                ))
+            }
             None => self.default_memtable_builder.clone(),
         }
     }
