@@ -144,7 +144,7 @@ impl ColumnSchema {
 
     /// Set the nullablity to `true` of the column.
     /// Similar to [set_nullable] but take the ownership and return a owned value.
-    /// 
+    ///
     /// [set_nullable]: Self::set_nullable
     pub fn with_nullable_set(mut self) -> Self {
         self.is_nullable = true;
