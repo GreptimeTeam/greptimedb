@@ -128,6 +128,8 @@ pub struct Arrangement {
     is_written: bool,
     /// manage the expire state of the arrangement
     expire_state: Option<KeyExpiryManager>,
+    /// the time that the last compaction happened, also know as current time
+    last_compaction_time: Option<Timestamp>,
 }
 
 impl Arrangement {
@@ -137,6 +139,7 @@ impl Arrangement {
             full_arrangement: false,
             is_written: false,
             expire_state: None,
+            last_compaction_time: None,
         }
     }
 
@@ -176,6 +179,11 @@ impl Arrangement {
         Ok(max_late_by)
     }
 
+    /// get the last compaction time
+    pub fn get_compaction(&self) -> Option<Timestamp> {
+        self.last_compaction_time
+    }
+
     /// advance time to `now` and consolidate all older(`now` included) updates to the first key
     ///
     /// return the maximum expire time(already expire by how much time) of all updates if any keys is already expired
@@ -184,7 +192,7 @@ impl Arrangement {
 
         let mut should_compact = self.spine.split_off(&(now + 1));
         std::mem::swap(&mut should_compact, &mut self.spine);
-
+        self.last_compaction_time = Some(now);
         // if a full arrangement is not needed, we can just discard everything before and including now
         if !self.full_arrangement {
             return Ok(None);
