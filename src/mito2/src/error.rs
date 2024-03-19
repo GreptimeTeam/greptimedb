@@ -572,6 +572,9 @@ pub enum Error {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
     },
+
+    #[snafu(display("Invalid region options, {}", reason))]
+    InvalidRegionOptions { reason: String, location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -621,7 +624,8 @@ impl ErrorExt for Error {
             | FillDefault { .. }
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }
-            | InvalidMetadata { .. } => StatusCode::InvalidArguments,
+            | InvalidMetadata { .. }
+            | InvalidRegionOptions { .. } => StatusCode::InvalidArguments,
 
             InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
 

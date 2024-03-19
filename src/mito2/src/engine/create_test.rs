@@ -14,12 +14,15 @@
 
 use std::time::Duration;
 
+use api::v1::Rows;
+use common_recordbatch::RecordBatches;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::test_util::{CreateRequestBuilder, TestEnv};
+use crate::region::options::MemtableOptions;
+use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_engine_create_new_region() {
@@ -197,4 +200,46 @@ async fn test_engine_create_with_custom_store() {
         .is_exist(region_dir)
         .await
         .unwrap());
+}
+
+#[tokio::test]
+async fn test_engine_create_with_memtable_opts() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "experimental")
+        .insert_option("memtable.experimental.index_max_keys_per_shard", "2")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let Some(MemtableOptions::Experimental(memtable_opts)) = &region.version().options.memtable
+    else {
+        unreachable!();
+    };
+    assert_eq!(2, memtable_opts.index_max_keys_per_shard);
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }

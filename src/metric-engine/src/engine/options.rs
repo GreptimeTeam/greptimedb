@@ -42,3 +42,8 @@ pub fn set_index_options_for_data_region(options: &mut HashMap<String, String>) 
         SEG_ROW_COUNT_FOR_DATA_REGION.to_string(),
     );
 }
+
+/// Set memtable options for the data region.
+pub fn set_memtable_options_for_data_region(options: &mut HashMap<String, String>) {
+    options.insert("memtable.type".to_string(), "experimental".to_string());
+}
