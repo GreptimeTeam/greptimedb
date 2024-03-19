@@ -3482,6 +3482,7 @@ dependencies = [
  "serde_json",
  "servers",
  "session",
+ "smallvec",
  "snafu",
  "tokio",
  "tonic 0.10.2",
