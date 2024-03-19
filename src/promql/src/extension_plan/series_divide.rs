@@ -266,16 +266,13 @@ impl Stream for SeriesDivideStream {
                         }
                         error => return Poll::Ready(error),
                     };
-                    match self.buffer.take() {
-                        None => {
-                            self.buffer = Some(next_batch);
-                        }
-                        Some(batch) => {
-                            let new_batch =
-                                compute::concat_batches(&batch.schema(), &[batch, next_batch])?;
-                            self.buffer = Some(new_batch);
-                        }
-                    }
+                    self.buffer = match self.buffer.take() {
+                        None => Some(next_batch),
+                        Some(batch) => Some(compute::concat_batches(
+                            &batch.schema(),
+                            &[batch, next_batch],
+                        )?),
+                    };
                     continue;
                 } else {
                     let result_batch = batch.slice(0, same_length);
