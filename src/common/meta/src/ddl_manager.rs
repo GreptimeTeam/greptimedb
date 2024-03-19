@@ -42,12 +42,12 @@ use crate::key::table_route::TableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::DdlTask::{
-    AlterLogicalTables, AlterTable, CreateLogicalTables, CreateTable, DropLogicalTables, DropTable,
-    TruncateTable,
+    AlterLogicalTables, AlterTable, CreateLogicalTables, CreateTable, DropDatabase,
+    DropLogicalTables, DropTable, TruncateTable,
 };
 use crate::rpc::ddl::{
-    AlterTableTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    TruncateTableTask,
+    AlterTableTask, CreateTableTask, DropDatabaseTask, DropTableTask, SubmitDdlTaskRequest,
+    SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -257,6 +257,24 @@ impl DdlManager {
             context,
         );
 
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    /// Submits and executes a drop table task.
+    pub async fn submit_drop_database(
+        &self,
+        _cluster_id: ClusterId,
+        DropDatabaseTask {
+            catalog,
+            schema,
+            drop_if_exists,
+        }: DropDatabaseTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = DropDatabaseProcedure::new(catalog, schema, drop_if_exists, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
@@ -531,6 +549,28 @@ async fn handle_create_logical_table_tasks(
     })
 }
 
+async fn handle_drop_database_task(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    drop_database_task: DropDatabaseTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, _) = ddl_manager
+        .submit_drop_database(cluster_id, drop_database_task.clone())
+        .await?;
+
+    let procedure_id = id.to_string();
+    info!(
+        "Database {}.{} is dropped via procedure_id {id:?}",
+        drop_database_task.catalog, drop_database_task.schema
+    );
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        table_id: None,
+        ..Default::default()
+    })
+}
+
 /// TODO(dennis): let [`DdlManager`] implement [`ProcedureExecutor`] looks weird, find some way to refactor it.
 #[async_trait::async_trait]
 impl ProcedureExecutor for DdlManager {
@@ -566,6 +606,9 @@ impl ProcedureExecutor for DdlManager {
                 }
                 DropLogicalTables(_) => todo!(),
                 AlterLogicalTables(_) => todo!(),
+                DropDatabase(drop_database_task) => {
+                    handle_drop_database_task(self, cluster_id, drop_database_task).await
+                }
             }
         }
         .trace(span)

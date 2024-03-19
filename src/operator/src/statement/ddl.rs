@@ -370,6 +370,34 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn drop_database(
+        &self,
+        catalog: String,
+        schema: String,
+        drop_if_exists: bool,
+    ) -> Result<Output> {
+        if self
+            .catalog_manager
+            .schema_exists(&catalog, &schema)
+            .await
+            .context(CatalogSnafu)?
+        {
+            self.drop_database_procedure(catalog, schema, drop_if_exists)
+                .await?;
+
+            Ok(Output::new_with_affected_rows(0))
+        } else if drop_if_exists {
+            // DROP TABLE IF EXISTS meets table not found - ignored
+            Ok(Output::new_with_affected_rows(0))
+        } else {
+            Err(SchemaNotFoundSnafu {
+                schema_info: schema,
+            }
+            .into_error(snafu::NoneError))
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn truncate_table(&self, table_name: TableName) -> Result<Output> {
         let table = self
             .catalog_manager
@@ -537,6 +565,22 @@ impl StatementExecutor {
                 table_id,
                 drop_if_exists,
             ),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    async fn drop_database_procedure(
+        &self,
+        catalog: String,
+        schema: String,
+        drop_if_exists: bool,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_drop_database(catalog, schema, drop_if_exists),
         };
 
         self.procedure_executor

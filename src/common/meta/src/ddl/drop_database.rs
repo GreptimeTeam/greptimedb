@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::async_trait;
 
+use self::start::DropDatabaseStart;
 use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::table_name::TableNameValue;
@@ -69,6 +70,19 @@ pub(crate) trait State: Send + Debug {
 
 impl DropDatabaseProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropDatabase";
+
+    pub fn new(catalog: String, schema: String, drop_if_exists: bool, context: DdlContext) -> Self {
+        Self {
+            runtime_context: context,
+            context: DropDatabaseContext {
+                catalog,
+                schema,
+                drop_if_exists,
+                tables: None,
+            },
+            state: Box::new(DropDatabaseStart),
+        }
+    }
 
     pub fn from_json(json: &str, runtime_context: DdlContext) -> ProcedureResult<Self> {
         let DropDatabaseOwnedData {
