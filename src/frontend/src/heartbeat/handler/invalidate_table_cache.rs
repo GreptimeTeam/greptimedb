@@ -18,7 +18,7 @@ use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{CacheIdent, Instruction, InstructionReply, SimpleReply};
+use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_telemetry::error;
 
 #[derive(Clone)]
@@ -41,27 +41,16 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 
         let (meta, invalidator) = match ctx.incoming_message.take() {
             Some((meta, Instruction::InvalidateCaches(caches))) => (meta, async move {
-                for cache in caches {
-                    // Local cache invalidation always succeeds.
-                    match cache {
-                        CacheIdent::TableId(table_id) => {
-                            let _ = cache_invalidator
-                                .invalidate_table_id(&Context::default(), table_id)
-                                .await;
-                        }
-                        CacheIdent::TableName(table_name) => {
-                            let _ = cache_invalidator
-                                .invalidate_table_name(&Context::default(), table_name)
-                                .await;
-                        }
-                    }
-                }
+                cache_invalidator
+                    .invalidate(&Context::default(), caches)
+                    .await
             }),
             _ => unreachable!("InvalidateTableCacheHandler: should be guarded by 'is_acceptable'"),
         };
 
         let _handle = common_runtime::spawn_bg(async move {
-            invalidator.await;
+            // Local cache invalidation always succeeds.
+            let _ = invalidator.await;
 
             if let Err(e) = mailbox
                 .send((

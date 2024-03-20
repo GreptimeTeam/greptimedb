@@ -24,6 +24,7 @@ use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
+use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::key::NAME_PATTERN;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
@@ -329,12 +330,13 @@ impl StatementExecutor {
 
             // Invalidates local cache ASAP.
             self.cache_invalidator
-                .invalidate_table_id(&Context::default(), table_id)
-                .await
-                .context(error::InvalidateTableCacheSnafu)?;
-
-            self.cache_invalidator
-                .invalidate_table_name(&Context::default(), table_name.clone())
+                .invalidate(
+                    &Context::default(),
+                    vec![
+                        CacheIdent::TableId(table_id),
+                        CacheIdent::TableName(table_name.clone()),
+                    ],
+                )
                 .await
                 .context(error::InvalidateTableCacheSnafu)?;
 
@@ -459,14 +461,12 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate_table_id(&Context::default(), table_id)
-            .await
-            .context(error::InvalidateTableCacheSnafu)?;
-
-        self.cache_invalidator
-            .invalidate_table_name(
+            .invalidate(
                 &Context::default(),
-                TableName::new(catalog_name, schema_name, table_name),
+                vec![
+                    CacheIdent::TableId(table_id),
+                    CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
+                ],
             )
             .await
             .context(error::InvalidateTableCacheSnafu)?;
