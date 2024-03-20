@@ -22,15 +22,15 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{
+use crate::memtable::partition_tree::data::{
     DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts, DATA_INIT_CAP,
 };
-use crate::memtable::merge_tree::dict::{DictBuilderReader, KeyDictBuilder};
-use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::partition::PrimaryKeyFilter;
-use crate::memtable::merge_tree::shard::Shard;
-use crate::memtable::merge_tree::{MergeTreeConfig, PkId, PkIndex, ShardId};
-use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
+use crate::memtable::partition_tree::dict::{DictBuilderReader, KeyDictBuilder};
+use crate::memtable::partition_tree::metrics::WriteMetrics;
+use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
+use crate::memtable::partition_tree::shard::Shard;
+use crate::memtable::partition_tree::{PartitionTreeConfig, PkId, PkIndex, ShardId};
+use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
@@ -50,7 +50,7 @@ impl ShardBuilder {
     /// Returns a new builder.
     pub fn new(
         metadata: RegionMetadataRef,
-        config: &MergeTreeConfig,
+        config: &PartitionTreeConfig,
         shard_id: ShardId,
     ) -> ShardBuilder {
         ShardBuilder {
@@ -150,14 +150,14 @@ impl ShardBuilder {
     /// Scans the shard builder.
     pub fn read(&self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReaderBuilder> {
         let dict_reader = {
-            let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+            let _timer = PARTITION_TREE_READ_STAGE_ELAPSED
                 .with_label_values(&["shard_builder_read_pk"])
                 .start_timer();
             self.dict_builder.read()
         };
 
         {
-            let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+            let _timer = PARTITION_TREE_READ_STAGE_ELAPSED
                 .with_label_values(&["sort_pk"])
                 .start_timer();
             dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
@@ -296,7 +296,7 @@ impl ShardBuilderReader {
 impl Drop for ShardBuilderReader {
     fn drop(&mut self) {
         let shard_builder_prune_pk = self.prune_pk_cost.as_secs_f64();
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["shard_builder_prune_pk"])
             .observe(shard_builder_prune_pk);
         if self.keys_before_pruning > 0 {
@@ -315,8 +315,8 @@ impl Drop for ShardBuilderReader {
 mod tests {
 
     use super::*;
-    use crate::memtable::merge_tree::data::timestamp_array_to_i64_slice;
-    use crate::memtable::merge_tree::metrics::WriteMetrics;
+    use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
+    use crate::memtable::partition_tree::metrics::WriteMetrics;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, encode_key_by_kv, metadata_for_test,
@@ -355,7 +355,7 @@ mod tests {
     fn test_write_shard_builder() {
         let metadata = metadata_for_test();
         let input = input_with_key(&metadata);
-        let config = MergeTreeConfig::default();
+        let config = PartitionTreeConfig::default();
         let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
         let mut metrics = WriteMetrics::default();
         assert!(shard_builder
@@ -382,7 +382,7 @@ mod tests {
     fn test_write_read_shard_builder() {
         let metadata = metadata_for_test();
         let input = input_with_key(&metadata);
-        let config = MergeTreeConfig::default();
+        let config = PartitionTreeConfig::default();
         let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
         let mut metrics = WriteMetrics::default();
 

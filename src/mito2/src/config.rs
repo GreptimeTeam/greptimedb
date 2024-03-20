@@ -328,14 +328,14 @@ mod tests {
     fn test_deserialize_config() {
         let s = r#"
 [memtable]
-type = "experimental"
+type = "partition_tree"
 index_max_keys_per_shard = 8192
 data_freeze_threshold = 1024
 dedup = true
 fork_dictionary_bytes = "512MiB"
 "#;
         let config: MitoConfig = toml::from_str(s).unwrap();
-        let MemtableConfig::Experimental(config) = &config.memtable else {
+        let MemtableConfig::PartitionTree(config) = &config.memtable else {
             unreachable!()
         };
         assert_eq!(1024, config.data_freeze_threshold);

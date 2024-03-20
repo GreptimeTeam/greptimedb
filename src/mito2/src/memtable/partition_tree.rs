@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Memtable implementation based on a merge tree.
+//! Memtable implementation based on a partition tree.
 
 pub(crate) mod data;
 mod dedup;
@@ -37,8 +37,8 @@ use table::predicate::Predicate;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::tree::MergeTree;
+use crate::memtable::partition_tree::metrics::WriteMetrics;
+use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
@@ -61,13 +61,13 @@ struct PkId {
     pk_index: PkIndex,
 }
 
-// TODO(yingwen): `fork_dictionary_bytes` is per region option, if we have multiple merge
-// tree memtable then we will use a lot memory. We should find a better way to control the
+// TODO(yingwen): `fork_dictionary_bytes` is per region option, if we have multiple partition tree
+// memtable then we will use a lot memory. We should find a better way to control the
 // dictionary size.
-/// Config for the merge tree memtable.
+/// Config for the partition tree memtable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct MergeTreeConfig {
+pub struct PartitionTreeConfig {
     /// Max keys in an index shard.
     pub index_max_keys_per_shard: usize,
     /// Number of rows to freeze a data part.
@@ -82,7 +82,7 @@ pub struct MergeTreeConfig {
     pub fork_dictionary_bytes: ReadableSize,
 }
 
-impl Default for MergeTreeConfig {
+impl Default for PartitionTreeConfig {
     fn default() -> Self {
         let mut fork_dictionary_bytes = ReadableSize::gb(1);
         if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
@@ -102,24 +102,24 @@ impl Default for MergeTreeConfig {
     }
 }
 
-/// Memtable based on a merge tree.
-pub struct MergeTreeMemtable {
+/// Memtable based on a partition tree.
+pub struct PartitionTreeMemtable {
     id: MemtableId,
-    tree: MergeTree,
+    tree: PartitionTree,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
 }
 
-impl fmt::Debug for MergeTreeMemtable {
+impl fmt::Debug for PartitionTreeMemtable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MergeTreeMemtable")
+        f.debug_struct("PartitionTreeMemtable")
             .field("id", &self.id)
             .finish()
     }
 }
 
-impl Memtable for MergeTreeMemtable {
+impl Memtable for PartitionTreeMemtable {
     fn id(&self) -> MemtableId {
         self.id
     }
@@ -197,29 +197,29 @@ impl Memtable for MergeTreeMemtable {
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         let tree = self.tree.fork(metadata.clone());
 
-        let memtable = MergeTreeMemtable::with_tree(id, tree);
+        let memtable = PartitionTreeMemtable::with_tree(id, tree);
         Arc::new(memtable)
     }
 }
 
-impl MergeTreeMemtable {
+impl PartitionTreeMemtable {
     /// Returns a new memtable.
     pub fn new(
         id: MemtableId,
         metadata: RegionMetadataRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
-        config: &MergeTreeConfig,
+        config: &PartitionTreeConfig,
     ) -> Self {
         Self::with_tree(
             id,
-            MergeTree::new(metadata, config, write_buffer_manager.clone()),
+            PartitionTree::new(metadata, config, write_buffer_manager.clone()),
         )
     }
 
     /// Creates a mutable memtable from the tree.
     ///
     /// It also adds the bytes used by shared parts (e.g. index) to the memory usage.
-    fn with_tree(id: MemtableId, tree: MergeTree) -> Self {
+    fn with_tree(id: MemtableId, tree: PartitionTree) -> Self {
         let alloc_tracker = AllocTracker::new(tree.write_buffer_manager());
 
         Self {
@@ -278,17 +278,17 @@ impl MergeTreeMemtable {
     }
 }
 
-/// Builder to build a [MergeTreeMemtable].
+/// Builder to build a [PartitionTreeMemtable].
 #[derive(Debug, Default)]
-pub struct MergeTreeMemtableBuilder {
-    config: MergeTreeConfig,
+pub struct PartitionTreeMemtableBuilder {
+    config: PartitionTreeConfig,
     write_buffer_manager: Option<WriteBufferManagerRef>,
 }
 
-impl MergeTreeMemtableBuilder {
+impl PartitionTreeMemtableBuilder {
     /// Creates a new builder with specific `write_buffer_manager`.
     pub fn new(
-        config: MergeTreeConfig,
+        config: PartitionTreeConfig,
         write_buffer_manager: Option<WriteBufferManagerRef>,
     ) -> Self {
         Self {
@@ -298,9 +298,9 @@ impl MergeTreeMemtableBuilder {
     }
 }
 
-impl MemtableBuilder for MergeTreeMemtableBuilder {
+impl MemtableBuilder for PartitionTreeMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(MergeTreeMemtable::new(
+        Arc::new(PartitionTreeMemtable::new(
             id,
             metadata.clone(),
             self.write_buffer_manager.clone(),
@@ -335,7 +335,8 @@ mod tests {
         let timestamps = (0..100).collect::<Vec<_>>();
         let kvs =
             memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
-        let memtable = MergeTreeMemtable::new(1, metadata, None, &MergeTreeConfig::default());
+        let memtable =
+            PartitionTreeMemtable::new(1, metadata, None, &PartitionTreeConfig::default());
         memtable.write(&kvs).unwrap();
 
         let expected_ts = kvs
@@ -371,7 +372,7 @@ mod tests {
             memtable_util::metadata_with_primary_key(vec![], false)
         };
         let memtable =
-            MergeTreeMemtable::new(1, metadata.clone(), None, &MergeTreeConfig::default());
+            PartitionTreeMemtable::new(1, metadata.clone(), None, &PartitionTreeConfig::default());
 
         let kvs = memtable_util::build_key_values(
             &metadata,
@@ -430,8 +431,8 @@ mod tests {
             memtable_util::metadata_with_primary_key(vec![], false)
         };
         // Try to build a memtable via the builder.
-        let memtable =
-            MergeTreeMemtableBuilder::new(MergeTreeConfig::default(), None).build(1, &metadata);
+        let memtable = PartitionTreeMemtableBuilder::new(PartitionTreeConfig::default(), None)
+            .build(1, &metadata);
 
         let expect = (0..100).collect::<Vec<_>>();
         let kvs = memtable_util::build_key_values(&metadata, "hello".to_string(), 10, &expect, 1);
@@ -466,11 +467,11 @@ mod tests {
 
     fn write_iter_multi_keys(max_keys: usize, freeze_threshold: usize) {
         let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
-        let memtable = MergeTreeMemtable::new(
+        let memtable = PartitionTreeMemtable::new(
             1,
             metadata.clone(),
             None,
-            &MergeTreeConfig {
+            &PartitionTreeConfig {
                 index_max_keys_per_shard: max_keys,
                 data_freeze_threshold: freeze_threshold,
                 ..Default::default()
@@ -515,8 +516,8 @@ mod tests {
     fn test_memtable_filter() {
         let metadata = memtable_util::metadata_with_primary_key(vec![0, 1], false);
         // Try to build a memtable via the builder.
-        let memtable = MergeTreeMemtableBuilder::new(
-            MergeTreeConfig {
+        let memtable = PartitionTreeMemtableBuilder::new(
+            PartitionTreeConfig {
                 index_max_keys_per_shard: 40,
                 ..Default::default()
             },
@@ -551,14 +552,14 @@ mod tests {
 
     #[test]
     fn test_deserialize_config() {
-        let config = MergeTreeConfig {
+        let config = PartitionTreeConfig {
             dedup: false,
             ..Default::default()
         };
         // Creates a json with dedup = false.
         let json = serde_json::to_string(&config).unwrap();
-        let config: MergeTreeConfig = serde_json::from_str(&json).unwrap();
+        let config: PartitionTreeConfig = serde_json::from_str(&json).unwrap();
         assert!(config.dedup);
-        assert_eq!(MergeTreeConfig::default(), config);
+        assert_eq!(PartitionTreeConfig::default(), config);
     }
 }
