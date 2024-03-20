@@ -178,6 +178,9 @@ impl Arrangement {
             {
                 let key_updates = batch.entry(key).or_insert(smallvec![]);
                 key_updates.push((val, ts, diff));
+                // a stable sort make updates sort in order of insertion
+                // without changing the order of updates within same tick
+                key_updates.sort_by_key(|r| r.1);
             }
         }
         Ok(max_late_by)
@@ -413,14 +416,11 @@ impl Arrangement {
             for (ts, batch) in with_extra_batch {
                 if let Some(new_rows) = batch.get(key).map(|v| v.iter()) {
                     if *ts <= now {
-                        for new_row in new_rows.sorted_by_key(|r| r.1) {
+                        for new_row in new_rows {
                             final_val = compact_diff_row(final_val, new_row);
                         }
                     } else {
-                        for new_row in new_rows
-                            .filter(|new_row| new_row.1 <= now)
-                            .sorted_by_key(|r| r.1)
-                        {
+                        for new_row in new_rows.filter(|new_row| new_row.1 <= now) {
                             final_val = compact_diff_row(final_val, new_row);
                         }
                     }
@@ -760,5 +760,25 @@ mod test {
         assert_eq!(arr.get(2, &key), Some((Row::new(vec![1i64.into()]), 2, 1)));
         // unaligned with batch boundary
         assert_eq!(arr.get(3, &key), Some((Row::new(vec![4i64.into()]), 3, 1)));
+    }
+
+    /// test if out of order updates can be sorted correctly
+    #[test]
+    fn test_out_of_order_apply_updates() {
+        let mut arr = Arrangement::new();
+
+        let key = Row::new(vec![1i64.into()]);
+        let updates: Vec<KeyValDiffRow> = vec![
+            ((key.clone(), Row::new(vec![5i64.into()])), 6, 1),
+            ((key.clone(), Row::new(vec![2i64.into()])), 2, -1),
+            ((key.clone(), Row::new(vec![1i64.into()])), 2, 1),
+            ((key.clone(), Row::new(vec![2i64.into()])), 1, 1),
+            ((key.clone(), Row::new(vec![3i64.into()])), 4, 1),
+            ((key.clone(), Row::new(vec![4i64.into()])), 3, 1),
+            ((key.clone(), Row::new(vec![6i64.into()])), 5, 1),
+        ];
+        arr.apply_updates(0, updates.clone()).unwrap();
+        let sorted = updates.iter().sorted_by_key(|r| r.1).cloned().collect_vec();
+        assert_eq!(arr.get_updates_in_range(1..7), sorted);
     }
 }
