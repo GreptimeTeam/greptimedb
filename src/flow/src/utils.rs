@@ -184,17 +184,11 @@ impl Arrangement {
     }
 
     /// find out the time of next update in the future
-    pub fn get_next_update_time(&self) -> Option<Timestamp> {
-        let next_batch = {
-            let mut iter = self.spine.iter();
-            if self.full_arrangement {
-                iter.next();
-                iter
-            } else {
-                iter
-            }
-        };
-        for (_ts, batch) in next_batch {
+    /// that is the next update with `timestamp > now`
+    pub fn get_next_update_time(&self, now: &Timestamp) -> Option<Timestamp> {
+        // iter over batches that only have updates of `timestamp>now` and find the first non empty batch, then get the minimum timestamp in that batch
+        let next_batches = self.spine.range((Bound::Excluded(now), Bound::Unbounded));
+        for (_ts, batch) in next_batches {
             let min_ts = batch
                 .iter()
                 .flat_map(|(_k, v)| v.iter().map(|(_, ts, _)| *ts))
@@ -248,7 +242,7 @@ impl Arrangement {
                 !updates.is_empty()
             });
 
-            before.insert(*now, new_batch);
+            before.entry(*now).or_default().extend(new_batch);
         }
         before
     }
@@ -701,13 +695,13 @@ mod test {
         // updates falls into the range of 2..=3
         let mut arr1 = arr.clone();
         {
-            assert_eq!(arr.get_next_update_time(), Some(2));
+            assert_eq!(arr.get_next_update_time(&1), Some(2));
             // split expect to take batch ..=1 and create a new batch 2..=2(which contain update)
             let split = &arr.split_lte(&2);
             assert_eq!(split.len(), 2);
             assert_eq!(split[&2].len(), 1);
             let _ = &arr.split_lte(&3);
-            assert_eq!(arr.get_next_update_time(), None);
+            assert_eq!(arr.get_next_update_time(&1), None);
         }
         {
             // take all updates with timestamp <=1, will get no updates
