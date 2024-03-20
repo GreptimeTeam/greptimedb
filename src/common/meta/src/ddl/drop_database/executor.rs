@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_procedure::Status;
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
@@ -91,16 +92,14 @@ impl State for DropDatabaseExecutor {
     ) -> Result<(Box<dyn State>, Status)> {
         self.register_dropping_regions(ddl_ctx)?;
         let executor = DropTableExecutor::new(self.table_name.clone(), self.table_id, true);
-        // Removes metadata of the table.
         executor
             .on_remove_metadata(ddl_ctx, &self.table_info_value, &self.table_route_value)
             .await?;
-        // Invalidates cache.
         executor.invalidate_table_cache(ddl_ctx).await?;
-        // Drops the region on the datanode.
         executor
             .on_drop_regions(ddl_ctx, &self.table_route_value)
             .await?;
+        info!("Table: {}({}) is dropped", self.table_name, self.table_id);
 
         Ok((
             Box::new(DropDatabaseCursor::new(self.target)),
