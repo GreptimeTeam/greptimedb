@@ -14,14 +14,12 @@
 
 use std::sync::Arc;
 
-use table::metadata::TableId;
-
 use crate::error::Result;
+use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteKey;
 use crate::key::TableMetaKey;
-use crate::table_name::TableName;
 
 /// KvBackend cache invalidator
 #[async_trait::async_trait]
@@ -46,10 +44,7 @@ pub struct Context {
 
 #[async_trait::async_trait]
 pub trait CacheInvalidator: Send + Sync {
-    // Invalidates table cache
-    async fn invalidate_table_id(&self, ctx: &Context, table_id: TableId) -> Result<()>;
-
-    async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> Result<()>;
+    async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> Result<()>;
 }
 
 pub type CacheInvalidatorRef = Arc<dyn CacheInvalidator>;
@@ -58,11 +53,7 @@ pub struct DummyCacheInvalidator;
 
 #[async_trait::async_trait]
 impl CacheInvalidator for DummyCacheInvalidator {
-    async fn invalidate_table_id(&self, _ctx: &Context, _table_id: TableId) -> Result<()> {
-        Ok(())
-    }
-
-    async fn invalidate_table_name(&self, _ctx: &Context, _table_name: TableName) -> Result<()> {
+    async fn invalidate(&self, _ctx: &Context, _caches: Vec<CacheIdent>) -> Result<()> {
         Ok(())
     }
 }
@@ -72,21 +63,22 @@ impl<T> CacheInvalidator for T
 where
     T: KvCacheInvalidator,
 {
-    async fn invalidate_table_name(&self, _ctx: &Context, table_name: TableName) -> Result<()> {
-        let key: TableNameKey = (&table_name).into();
+    async fn invalidate(&self, _ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
+        for cache in caches {
+            match cache {
+                CacheIdent::TableId(table_id) => {
+                    let key = TableInfoKey::new(table_id);
+                    self.invalidate_key(&key.as_raw_key()).await;
 
-        self.invalidate_key(&key.as_raw_key()).await;
-
-        Ok(())
-    }
-
-    async fn invalidate_table_id(&self, _ctx: &Context, table_id: TableId) -> Result<()> {
-        let key = TableInfoKey::new(table_id);
-        self.invalidate_key(&key.as_raw_key()).await;
-
-        let key = &TableRouteKey { table_id };
-        self.invalidate_key(&key.as_raw_key()).await;
-
+                    let key = &TableRouteKey { table_id };
+                    self.invalidate_key(&key.as_raw_key()).await;
+                }
+                CacheIdent::TableName(table_name) => {
+                    let key: TableNameKey = (&table_name).into();
+                    self.invalidate_key(&key.as_raw_key()).await
+                }
+            }
+        }
         Ok(())
     }
 }

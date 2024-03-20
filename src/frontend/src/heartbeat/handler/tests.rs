@@ -22,7 +22,7 @@ use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::instruction::{CacheIdent, Instruction, InstructionReply, SimpleReply};
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::TableMetaKey;
 use partition::manager::TableRouteCacheInvalidator;
@@ -74,7 +74,7 @@ async fn test_invalidate_table_cache_handler() {
     handle_instruction(
         executor.clone(),
         mailbox.clone(),
-        Instruction::InvalidateTableIdCache(table_id),
+        Instruction::InvalidateCaches(vec![CacheIdent::TableId(table_id)]),
     )
     .await;
 
@@ -90,7 +90,12 @@ async fn test_invalidate_table_cache_handler() {
         .contains_key(&table_info_key.as_raw_key()));
 
     // removes a invalid key
-    handle_instruction(executor, mailbox, Instruction::InvalidateTableIdCache(0)).await;
+    handle_instruction(
+        executor,
+        mailbox,
+        Instruction::InvalidateCaches(vec![CacheIdent::TableId(0)]),
+    )
+    .await;
 
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
