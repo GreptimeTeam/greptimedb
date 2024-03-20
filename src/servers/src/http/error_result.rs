@@ -21,7 +21,7 @@ use common_telemetry::logging::{debug, error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::http::header::constants::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
+use crate::http::header::constants::GREPTIME_DB_HEADER_ERROR_CODE;
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::ResponseFormat;
 
@@ -78,15 +78,10 @@ impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
         let ty = self.ty.as_str();
         let code = self.code;
-        let msg = self.error.clone();
         let execution_time = self.execution_time_ms;
         let mut resp = Json(self).into_response();
         resp.headers_mut()
             .insert(GREPTIME_DB_HEADER_ERROR_CODE, HeaderValue::from(code));
-        resp.headers_mut().insert(
-            GREPTIME_DB_HEADER_ERROR_MSG,
-            HeaderValue::from_str(&msg).expect("malformed error msg"),
-        );
         resp.headers_mut()
             .insert(&GREPTIME_DB_HEADER_FORMAT, HeaderValue::from_static(ty));
         resp.headers_mut().insert(

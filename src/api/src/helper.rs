@@ -707,7 +707,6 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
 }
 
 pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
-    // TODO(fys): use macros to optimize code
     match data_type {
         ConcreteDataType::Int64(_) => values
             .i64_values

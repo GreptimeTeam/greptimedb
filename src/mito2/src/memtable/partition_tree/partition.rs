@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Partition of a merge tree.
+//! Partition of a partition tree.
 //!
 //! We only support partitioning the tree by pre-defined internal columns.
 
@@ -28,15 +28,15 @@ use store_api::storage::ColumnId;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
-use crate::memtable::merge_tree::dedup::DedupReader;
-use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::shard::{
+use crate::memtable::partition_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
+use crate::memtable::partition_tree::dedup::DedupReader;
+use crate::memtable::partition_tree::metrics::WriteMetrics;
+use crate::memtable::partition_tree::shard::{
     BoxedDataBatchSource, Shard, ShardMerger, ShardNode, ShardSource,
 };
-use crate::memtable::merge_tree::shard_builder::ShardBuilder;
-use crate::memtable::merge_tree::{MergeTreeConfig, PkId};
-use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
+use crate::memtable::partition_tree::shard_builder::ShardBuilder;
+use crate::memtable::partition_tree::{PartitionTreeConfig, PkId};
+use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
 use crate::row_converter::{McmpRowCodec, RowCodec};
 
@@ -54,7 +54,7 @@ pub type PartitionRef = Arc<Partition>;
 
 impl Partition {
     /// Creates a new partition.
-    pub fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+    pub fn new(metadata: RegionMetadataRef, config: &PartitionTreeConfig) -> Self {
         Partition {
             inner: RwLock::new(Inner::new(metadata, config)),
             dedup: config.dedup,
@@ -193,7 +193,7 @@ impl Partition {
     /// Forks the partition.
     ///
     /// Must freeze the partition before fork.
-    pub fn fork(&self, metadata: &RegionMetadataRef, config: &MergeTreeConfig) -> Partition {
+    pub fn fork(&self, metadata: &RegionMetadataRef, config: &PartitionTreeConfig) -> Partition {
         let (shards, shard_builder) = {
             let inner = self.inner.read().unwrap();
             debug_assert!(inner.shard_builder.is_empty());
@@ -437,11 +437,11 @@ pub(crate) struct ReadPartitionContext {
 impl Drop for ReadPartitionContext {
     fn drop(&mut self) {
         let partition_read_source = self.metrics.read_source.as_secs_f64();
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_read_source"])
             .observe(partition_read_source);
         let partition_data_batch_to_batch = self.metrics.data_batch_to_batch.as_secs_f64();
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["partition_data_batch_to_batch"])
             .observe(partition_data_batch_to_batch);
 
@@ -558,7 +558,7 @@ struct Inner {
 }
 
 impl Inner {
-    fn new(metadata: RegionMetadataRef, config: &MergeTreeConfig) -> Self {
+    fn new(metadata: RegionMetadataRef, config: &PartitionTreeConfig) -> Self {
         let (shards, current_shard_id) = if metadata.primary_key.is_empty() {
             let data_parts = DataParts::new(metadata.clone(), DATA_INIT_CAP, config.dedup);
             (

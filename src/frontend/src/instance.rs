@@ -473,7 +473,8 @@ pub fn check_permission(
         // These are executed by query engine, and will be checked there.
         Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
         // database ops won't be checked
-        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {}
+        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::DropDatabase(_) => {
+        }
         // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
         }

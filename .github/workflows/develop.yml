@@ -117,7 +117,7 @@ jobs:
           artifacts-dir: bins
           version: current
 
-  fuzztest: 
+  fuzztest:
     name: Fuzz Test
     needs: build
     runs-on: ubuntu-latest
@@ -148,7 +148,7 @@ jobs:
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
       - name: Run GreptimeDB
-        run: | 
+        run: |
           ./bins/greptime standalone start&
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
@@ -279,6 +279,10 @@ jobs:
         with:
           # Shares cross multiple jobs
           shared-key: "coverage-test"
+      - name: Docker Cache
+        uses: ScribeMD/docker-cache@0.3.7
+        with:
+          key: docker-${{ runner.os }}-coverage
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov

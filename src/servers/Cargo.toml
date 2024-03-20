@@ -67,7 +67,7 @@ openmetrics-parser = "0.4"
 opensrv-mysql = "0.7.0"
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
-pgwire = "0.19.1"
+pgwire = "0.20"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 pprof = { version = "0.13", features = [
@@ -103,7 +103,7 @@ tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 tonic-reflection = "0.10"
 tower = { version = "0.4", features = ["full"] }
-tower-http = { version = "0.3", features = ["full"] }
+tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
 
 [target.'cfg(not(windows))'.dependencies]
@@ -120,6 +120,7 @@ criterion = "0.4"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
+permutation = "0.4"
 rand.workspace = true
 script = { workspace = true, features = ["python"] }
 serde_json.workspace = true

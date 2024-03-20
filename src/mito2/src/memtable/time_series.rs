@@ -38,6 +38,7 @@ use table::predicate::Predicate;
 
 use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
@@ -70,6 +71,7 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
             metadata.clone(),
             id,
             self.write_buffer_manager.clone(),
+            true, // todo(hl): set according to region option
         ))
     }
 }
@@ -83,6 +85,7 @@ pub struct TimeSeriesMemtable {
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
+    dedup: bool,
 }
 
 impl TimeSeriesMemtable {
@@ -90,6 +93,7 @@ impl TimeSeriesMemtable {
         region_metadata: RegionMetadataRef,
         id: MemtableId,
         write_buffer_manager: Option<WriteBufferManagerRef>,
+        dedup: bool,
     ) -> Self {
         let row_codec = Arc::new(McmpRowCodec::new(
             region_metadata
@@ -106,52 +110,79 @@ impl TimeSeriesMemtable {
             alloc_tracker: AllocTracker::new(write_buffer_manager),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
+            dedup,
         }
     }
 
     /// Updates memtable stats.
-    fn update_stats(&self, request_size: usize, min: i64, max: i64) {
-        self.alloc_tracker.on_allocation(request_size);
+    fn update_stats(&self, stats: LocalStats) {
+        self.alloc_tracker.on_allocation(stats.allocated);
 
         loop {
             let current_min = self.min_timestamp.load(Ordering::Relaxed);
-            if min >= current_min {
+            if stats.min_ts >= current_min {
                 break;
             }
 
             let Err(updated) = self.min_timestamp.compare_exchange(
                 current_min,
-                min,
+                stats.min_ts,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) else {
                 break;
             };
 
-            if updated == min {
+            if updated == stats.min_ts {
                 break;
             }
         }
 
         loop {
             let current_max = self.max_timestamp.load(Ordering::Relaxed);
-            if max <= current_max {
+            if stats.max_ts <= current_max {
                 break;
             }
 
             let Err(updated) = self.max_timestamp.compare_exchange(
                 current_max,
-                max,
+                stats.max_ts,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) else {
                 break;
             };
 
-            if updated == max {
+            if updated == stats.max_ts {
                 break;
             }
         }
+    }
+
+    fn write_key_value(&self, kv: KeyValue, stats: &mut LocalStats) -> Result<()> {
+        ensure!(
+            kv.num_primary_keys() == self.row_codec.num_fields(),
+            PrimaryKeyLengthMismatchSnafu {
+                expect: self.row_codec.num_fields(),
+                actual: kv.num_primary_keys()
+            }
+        );
+        let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
+        let fields = kv.fields().collect::<Vec<_>>();
+
+        stats.allocated += fields.iter().map(|v| v.data_size()).sum::<usize>();
+        let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
+        stats.allocated += series_allocated;
+
+        // safety: timestamp of kv must be both present and a valid timestamp value.
+        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        stats.min_ts = stats.min_ts.min(ts);
+        stats.max_ts = stats.max_ts.max(ts);
+
+        let mut guard = series.write().unwrap();
+        guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), fields);
+
+        Ok(())
     }
 }
 
@@ -167,41 +198,28 @@ impl Memtable for TimeSeriesMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
-        let mut allocated = 0;
-        let mut min_ts = i64::MAX;
-        let mut max_ts = i64::MIN;
+        let mut local_stats = LocalStats::default();
 
         for kv in kvs.iter() {
-            ensure!(
-                kv.num_primary_keys() == self.row_codec.num_fields(),
-                PrimaryKeyLengthMismatchSnafu {
-                    expect: self.row_codec.num_fields(),
-                    actual: kv.num_primary_keys()
-                }
-            );
-            let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
-            let fields = kv.fields().collect::<Vec<_>>();
-
-            allocated += fields.iter().map(|v| v.data_size()).sum::<usize>();
-            let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
-            allocated += series_allocated;
-
-            // safety: timestamp of kv must be both present and a valid timestamp value.
-            let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
-            min_ts = min_ts.min(ts);
-            max_ts = max_ts.max(ts);
-
-            let mut guard = series.write().unwrap();
-            guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), fields);
+            self.write_key_value(kv, &mut local_stats)?;
         }
-        allocated += kvs.num_rows() * std::mem::size_of::<Timestamp>();
-        allocated += kvs.num_rows() * std::mem::size_of::<OpType>();
+        local_stats.allocated += kvs.num_rows() * std::mem::size_of::<Timestamp>();
+        local_stats.allocated += kvs.num_rows() * std::mem::size_of::<OpType>();
 
         // TODO(hl): this maybe inaccurate since for-iteration may return early.
         // We may lift the primary key length check out of Memtable::write
         // so that we can ensure writing to memtable will succeed.
-        self.update_stats(allocated, min_ts, max_ts);
+        self.update_stats(local_stats);
         Ok(())
+    }
+
+    fn write_one(&self, key_value: KeyValue) -> Result<()> {
+        let mut local_stats = LocalStats::default();
+        let res = self.write_key_value(key_value, &mut local_stats);
+        local_stats.allocated += std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>();
+
+        self.update_stats(local_stats);
+        res
     }
 
     fn iter(
@@ -218,7 +236,7 @@ impl Memtable for TimeSeriesMemtable {
                 .collect()
         };
 
-        let iter = self.series_set.iter_series(projection, filters);
+        let iter = self.series_set.iter_series(projection, filters, self.dedup);
         Ok(Box::new(iter))
     }
 
@@ -263,7 +281,24 @@ impl Memtable for TimeSeriesMemtable {
             metadata.clone(),
             id,
             self.alloc_tracker.write_buffer_manager(),
+            self.dedup,
         ))
+    }
+}
+
+struct LocalStats {
+    allocated: usize,
+    min_ts: i64,
+    max_ts: i64,
+}
+
+impl Default for LocalStats {
+    fn default() -> Self {
+        LocalStats {
+            allocated: 0,
+            min_ts: i64::MAX,
+            max_ts: i64::MIN,
+        }
     }
 }
 
@@ -306,7 +341,12 @@ impl SeriesSet {
     }
 
     /// Iterates all series in [SeriesSet].
-    fn iter_series(&self, projection: HashSet<ColumnId>, predicate: Option<Predicate>) -> Iter {
+    fn iter_series(
+        &self,
+        projection: HashSet<ColumnId>,
+        predicate: Option<Predicate>,
+        dedup: bool,
+    ) -> Iter {
         let primary_key_schema = primary_key_schema(&self.region_metadata);
         let primary_key_datatypes = self
             .region_metadata
@@ -322,6 +362,7 @@ impl SeriesSet {
             primary_key_schema,
             primary_key_datatypes,
             self.codec.clone(),
+            dedup,
         )
     }
 }
@@ -368,10 +409,12 @@ struct Iter {
     pk_schema: arrow::datatypes::SchemaRef,
     pk_datatypes: Vec<ConcreteDataType>,
     codec: Arc<McmpRowCodec>,
+    dedup: bool,
     metrics: Metrics,
 }
 
 impl Iter {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         metadata: RegionMetadataRef,
         series: Arc<SeriesRwLockMap>,
@@ -380,6 +423,7 @@ impl Iter {
         pk_schema: arrow::datatypes::SchemaRef,
         pk_datatypes: Vec<ConcreteDataType>,
         codec: Arc<McmpRowCodec>,
+        dedup: bool,
     ) -> Self {
         let simple_filters = predicate
             .map(|p| {
@@ -398,6 +442,7 @@ impl Iter {
             pk_schema,
             pk_datatypes,
             codec,
+            dedup,
             metrics: Metrics::default(),
         }
     }
@@ -454,8 +499,9 @@ impl Iterator for Iter {
             self.last_key = Some(primary_key.clone());
 
             let values = series.compact(&self.metadata);
-            let batch =
-                values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection));
+            let batch = values.and_then(|v| {
+                v.to_batch(primary_key, &self.metadata, &self.projection, self.dedup)
+            });
 
             // Update metrics.
             self.metrics.num_batches += 1;
@@ -673,6 +719,7 @@ impl Values {
         primary_key: &[u8],
         metadata: &RegionMetadataRef,
         projection: &HashSet<ColumnId>,
+        dedup: bool,
     ) -> Result<Batch> {
         let builder = BatchBuilder::with_required_columns(
             primary_key.to_vec(),
@@ -693,7 +740,7 @@ impl Values {
             .collect();
 
         let mut batch = builder.with_fields(fields).build()?;
-        batch.sort_and_dedup()?;
+        batch.sort(dedup)?;
         Ok(batch)
     }
 
@@ -766,7 +813,7 @@ impl From<ValueBuilder> for Values {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::value::ValueData;
@@ -953,7 +1000,12 @@ mod tests {
         };
 
         let batch = values
-            .to_batch(b"test", &schema, &[0, 1, 2, 3, 4].into_iter().collect())
+            .to_batch(
+                b"test",
+                &schema,
+                &[0, 1, 2, 3, 4].into_iter().collect(),
+                true,
+            )
             .unwrap();
         check_value(
             &batch,
@@ -1117,18 +1169,29 @@ mod tests {
     #[test]
     fn test_memtable() {
         common_telemetry::init_default_ut_logging();
+        check_memtable_dedup(true);
+        check_memtable_dedup(false);
+    }
+
+    fn check_memtable_dedup(dedup: bool) {
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42, None);
+        let memtable = TimeSeriesMemtable::new(schema, 42, None, dedup);
+        memtable.write(&kvs).unwrap();
         memtable.write(&kvs).unwrap();
 
-        let expected_ts = kvs
+        let mut expected_ts: HashMap<i64, usize> = HashMap::new();
+        for ts in kvs
             .iter()
             .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
-            .collect::<HashSet<_>>();
+        {
+            *expected_ts.entry(ts).or_default() += if dedup { 1 } else { 2 };
+        }
 
         let iter = memtable.iter(None, None).unwrap();
-        let read = iter
+        let mut read = HashMap::new();
+
+        for ts in iter
             .flat_map(|batch| {
                 batch
                     .unwrap()
@@ -1141,7 +1204,9 @@ mod tests {
                     .into_iter()
             })
             .map(|v| v.unwrap().0.value())
-            .collect::<HashSet<_>>();
+        {
+            *read.entry(ts).or_default() += 1;
+        }
         assert_eq!(expected_ts, read);
 
         let stats = memtable.stats();
@@ -1160,7 +1225,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42, None);
+        let memtable = TimeSeriesMemtable::new(schema, 42, None, true);
         memtable.write(&kvs).unwrap();
 
         let iter = memtable.iter(Some(&[3]), None).unwrap();

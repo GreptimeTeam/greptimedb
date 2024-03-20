@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Implementation of the merge tree.
+//! Implementation of the partition tree.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
@@ -33,20 +33,20 @@ use table::predicate::Predicate;
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::metrics::WriteMetrics;
-use crate::memtable::merge_tree::partition::{
+use crate::memtable::partition_tree::metrics::WriteMetrics;
+use crate::memtable::partition_tree::partition::{
     Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
 };
-use crate::memtable::merge_tree::MergeTreeConfig;
+use crate::memtable::partition_tree::PartitionTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
-use crate::metrics::{MERGE_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
+use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
-/// The merge tree.
-pub struct MergeTree {
+/// The partition tree.
+pub struct PartitionTree {
     /// Config of the tree.
-    config: MergeTreeConfig,
+    config: PartitionTreeConfig,
     /// Metadata of the region.
     pub(crate) metadata: RegionMetadataRef,
     /// Primary key codec.
@@ -60,13 +60,13 @@ pub struct MergeTree {
     sparse_encoder: Arc<SparseEncoder>,
 }
 
-impl MergeTree {
-    /// Creates a new merge tree.
+impl PartitionTree {
+    /// Creates a new partition tree.
     pub fn new(
         metadata: RegionMetadataRef,
-        config: &MergeTreeConfig,
+        config: &PartitionTreeConfig,
         write_buffer_manager: Option<WriteBufferManagerRef>,
-    ) -> MergeTree {
+    ) -> PartitionTree {
         let row_codec = McmpRowCodec::new(
             metadata
                 .primary_key_columns()
@@ -84,7 +84,7 @@ impl MergeTree {
         };
         let is_partitioned = Partition::has_multi_partitions(&metadata);
 
-        MergeTree {
+        PartitionTree {
             config: config.clone(),
             metadata,
             row_codec: Arc::new(row_codec),
@@ -144,6 +144,54 @@ impl MergeTree {
 
         metrics.value_bytes +=
             kvs.num_rows() * (std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>());
+
+        Ok(())
+    }
+
+    /// Write one key value pair into the tree.
+    ///
+    /// # Panics
+    /// Panics if the tree is immutable (frozen).
+    pub fn write_one(
+        &self,
+        kv: KeyValue,
+        pk_buffer: &mut Vec<u8>,
+        metrics: &mut WriteMetrics,
+    ) -> Result<()> {
+        let has_pk = !self.metadata.primary_key.is_empty();
+
+        ensure!(
+            kv.num_primary_keys() == self.row_codec.num_fields(),
+            PrimaryKeyLengthMismatchSnafu {
+                expect: self.row_codec.num_fields(),
+                actual: kv.num_primary_keys(),
+            }
+        );
+        // Safety: timestamp of kv must be both present and a valid timestamp value.
+        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        metrics.min_ts = metrics.min_ts.min(ts);
+        metrics.max_ts = metrics.max_ts.max(ts);
+        metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
+
+        if !has_pk {
+            // No primary key.
+            return self.write_no_key(kv);
+        }
+
+        // Encode primary key.
+        pk_buffer.clear();
+        if self.is_partitioned {
+            // Use sparse encoder for metric engine.
+            self.sparse_encoder
+                .encode_to_vec(kv.primary_keys(), pk_buffer)?;
+        } else {
+            self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+        }
+
+        // Write rows with
+        self.write_with_key(pk_buffer, kv, metrics)?;
+
+        metrics.value_bytes += std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>();
 
         Ok(())
     }
@@ -212,12 +260,12 @@ impl MergeTree {
 
     /// Forks an immutable tree. Returns a mutable tree that inherits the index
     /// of this tree.
-    pub fn fork(&self, metadata: RegionMetadataRef) -> MergeTree {
+    pub fn fork(&self, metadata: RegionMetadataRef) -> PartitionTree {
         if self.metadata.schema_version != metadata.schema_version
             || self.metadata.column_metadatas != metadata.column_metadatas
         {
             // The schema has changed, we can't reuse the tree.
-            return MergeTree::new(metadata, &self.config, self.write_buffer_manager.clone());
+            return PartitionTree::new(metadata, &self.config, self.write_buffer_manager.clone());
         }
 
         let mut total_shared_size = 0;
@@ -265,7 +313,7 @@ impl MergeTree {
             forked.insert(part_key, Arc::new(forked_part));
         }
 
-        MergeTree {
+        PartitionTree {
             config: self.config.clone(),
             metadata,
             row_codec: self.row_codec.clone(),
@@ -398,9 +446,9 @@ struct TreeIter {
 impl Drop for TreeIter {
     fn drop(&mut self) {
         READ_ROWS_TOTAL
-            .with_label_values(&["merge_tree_memtable"])
+            .with_label_values(&["partition_tree_memtable"])
             .inc_by(self.metrics.rows_fetched as u64);
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["fetch_next_partition"])
             .observe(self.metrics.fetch_partition_elapsed.as_secs_f64());
         let scan_elapsed = self.metrics.iter_elapsed.as_secs_f64();

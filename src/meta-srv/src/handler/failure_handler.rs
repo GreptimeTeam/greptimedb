@@ -107,6 +107,9 @@ impl HeartbeatHandler for RegionFailureHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
+    use common_meta::key::MAINTENANCE_KEY;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
@@ -162,5 +165,38 @@ mod tests {
         handler.handle(req, &mut ctx, acc).await.unwrap();
         let dump = handler.failure_detect_runner.dump().await;
         assert_eq!(dump.iter().collect::<Vec<_>>().len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_maintenance_mode() {
+        let region_failover_manager = create_region_failover_manager();
+        let kv_backend = region_failover_manager.create_context().kv_backend.clone();
+        let _handler = RegionFailureHandler::try_new(
+            None,
+            region_failover_manager.clone(),
+            PhiAccrualFailureDetectorOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let kv_req = common_meta::rpc::store::PutRequest {
+            key: Vec::from(MAINTENANCE_KEY),
+            value: vec![],
+            prev_kv: false,
+        };
+        let _ = kv_backend.put(kv_req.clone()).await.unwrap();
+        assert_matches!(
+            region_failover_manager.is_maintenance_mode().await,
+            Ok(true)
+        );
+
+        let _ = kv_backend
+            .delete(MAINTENANCE_KEY.as_bytes(), false)
+            .await
+            .unwrap();
+        assert_matches!(
+            region_failover_manager.is_maintenance_mode().await,
+            Ok(false)
+        );
     }
 }

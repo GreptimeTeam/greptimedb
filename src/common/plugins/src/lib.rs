@@ -17,4 +17,4 @@
 /// since `plugins` crate is at the top depending on crates like `frontend` and `datanode`
 mod consts;
 
-pub use consts::{GREPTIME_EXEC_COST, GREPTIME_EXEC_PREFIX};
+pub use consts::{GREPTIME_EXEC_PREFIX, GREPTIME_EXEC_READ_COST, GREPTIME_EXEC_WRITE_COST};

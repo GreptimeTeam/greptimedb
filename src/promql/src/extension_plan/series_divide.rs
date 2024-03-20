@@ -255,6 +255,7 @@ impl Stream for SeriesDivideStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
+            // It has to be cloned here, otherwise the later ready! will mess things up
             if let Some(batch) = self.buffer.clone() {
                 let same_length = self.find_first_diff_row(&batch) + 1;
                 if same_length >= batch.num_rows() {

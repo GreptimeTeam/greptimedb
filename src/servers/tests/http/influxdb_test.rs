@@ -55,7 +55,7 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
-    async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<()> {
+    async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<Output> {
         let requests: RowInsertRequests = request.try_into()?;
         for expr in requests.inserts {
             let _ = self
@@ -64,7 +64,7 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
                 .await;
         }
 
-        Ok(())
+        Ok(Output::new_with_affected_rows(0))
     }
 }
 

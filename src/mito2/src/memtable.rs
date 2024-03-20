@@ -26,13 +26,17 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::key_values::KeyValue;
 pub use crate::memtable::key_values::KeyValues;
-use crate::memtable::merge_tree::MergeTreeConfig;
+use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
+use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
+use crate::region::options::MemtableOptions;
 
 pub mod key_values;
-pub mod merge_tree;
+pub mod partition_tree;
+pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;
 
@@ -45,13 +49,13 @@ pub type MemtableId = u32;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemtableConfig {
-    Experimental(MergeTreeConfig),
+    PartitionTree(PartitionTreeConfig),
     TimeSeries,
 }
 
 impl Default for MemtableConfig {
     fn default() -> Self {
-        Self::Experimental(MergeTreeConfig::default())
+        Self::TimeSeries
     }
 }
 
@@ -82,8 +86,11 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns the id of this memtable.
     fn id(&self) -> MemtableId;
 
-    /// Write key values into the memtable.
+    /// Writes key values into the memtable.
     fn write(&self, kvs: &KeyValues) -> Result<()>;
+
+    /// Writes one key value pair into the memtable.
+    fn write_one(&self, key_value: KeyValue) -> Result<()>;
 
     /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.
@@ -201,6 +208,48 @@ impl Drop for AllocTracker {
     }
 }
 
+/// Provider of memtable builders for regions.
+#[derive(Clone)]
+pub(crate) struct MemtableBuilderProvider {
+    write_buffer_manager: Option<WriteBufferManagerRef>,
+    default_memtable_builder: MemtableBuilderRef,
+}
+
+impl MemtableBuilderProvider {
+    pub(crate) fn new(
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        default_memtable_builder: MemtableBuilderRef,
+    ) -> Self {
+        Self {
+            write_buffer_manager,
+            default_memtable_builder,
+        }
+    }
+
+    pub(crate) fn builder_for_options(
+        &self,
+        options: Option<&MemtableOptions>,
+    ) -> MemtableBuilderRef {
+        match options {
+            Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
+                self.write_buffer_manager.clone(),
+            )),
+            Some(MemtableOptions::PartitionTree(opts)) => {
+                Arc::new(PartitionTreeMemtableBuilder::new(
+                    PartitionTreeConfig {
+                        index_max_keys_per_shard: opts.index_max_keys_per_shard,
+                        data_freeze_threshold: opts.data_freeze_threshold,
+                        fork_dictionary_bytes: opts.fork_dictionary_bytes,
+                        ..Default::default()
+                    },
+                    self.write_buffer_manager.clone(),
+                ))
+            }
+            None => self.default_memtable_builder.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use common_base::readable_size::ReadableSize;
@@ -211,20 +260,20 @@ mod tests {
     #[test]
     fn test_deserialize_memtable_config() {
         let s = r#"
-type = "experimental"
+type = "partition_tree"
 index_max_keys_per_shard = 8192
 data_freeze_threshold = 1024
 dedup = true
 fork_dictionary_bytes = "512MiB"
 "#;
         let config: MemtableConfig = toml::from_str(s).unwrap();
-        let MemtableConfig::Experimental(merge_tree) = config else {
+        let MemtableConfig::PartitionTree(memtable_config) = config else {
             unreachable!()
         };
-        assert!(merge_tree.dedup);
-        assert_eq!(8192, merge_tree.index_max_keys_per_shard);
-        assert_eq!(1024, merge_tree.data_freeze_threshold);
-        assert_eq!(ReadableSize::mb(512), merge_tree.fork_dictionary_bytes);
+        assert!(memtable_config.dedup);
+        assert_eq!(8192, memtable_config.index_max_keys_per_shard);
+        assert_eq!(1024, memtable_config.data_freeze_threshold);
+        assert_eq!(ReadableSize::mb(512), memtable_config.fork_dictionary_bytes);
     }
 
     #[test]

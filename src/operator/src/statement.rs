@@ -124,10 +124,7 @@ impl StatementExecutor {
                         .copy_table_to(req, query_ctx)
                         .await
                         .map(Output::new_with_affected_rows),
-                    CopyDirection::Import => self
-                        .copy_table_from(req, query_ctx)
-                        .await
-                        .map(Output::new_with_affected_rows),
+                    CopyDirection::Import => self.copy_table_from(req, query_ctx).await,
                 }
             }
 
@@ -170,6 +167,13 @@ impl StatementExecutor {
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
                 self.drop_table(table_name, stmt.drop_if_exists()).await
+            }
+            Statement::DropDatabase(_stmt) => {
+                // TODO(weny): implement the drop database procedure
+                error::NotSupportedSnafu {
+                    feat: "Drop Database",
+                }
+                .fail()
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =

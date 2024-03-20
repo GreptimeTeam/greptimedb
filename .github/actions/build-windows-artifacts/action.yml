@@ -70,7 +70,7 @@ runs:
 
     - name: Build greptime binary
       shell: pwsh
-      run: cargo build --profile ${{ inputs.cargo-profile }} --features ${{ inputs.features }} --target ${{ inputs.arch }}
+      run: cargo build --profile ${{ inputs.cargo-profile }} --features ${{ inputs.features }} --target ${{ inputs.arch }} --bin greptime
 
     - name: Upload artifacts
       uses: ./.github/actions/upload-artifacts

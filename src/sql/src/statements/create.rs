@@ -206,6 +206,16 @@ pub struct CreateDatabase {
     pub if_not_exists: bool,
 }
 
+impl CreateDatabase {
+    /// Creates a statement for `CREATE DATABASE`
+    pub fn new(name: ObjectName, if_not_exists: bool) -> Self {
+        Self {
+            name,
+            if_not_exists,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct CreateExternalTable {
     /// Table name

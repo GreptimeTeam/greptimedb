@@ -22,6 +22,7 @@ use api::v1::{
     RowInsertRequests, SemanticType,
 };
 use catalog::CatalogManagerRef;
+use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
@@ -110,8 +111,7 @@ impl Inserter {
         .convert(requests)
         .await?;
 
-        let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(Output::new_with_affected_rows(affected_rows))
+        self.do_request(inserts, &ctx).await
     }
 
     /// Handle row inserts request with metric engine.
@@ -148,15 +148,14 @@ impl Inserter {
                 .convert(requests)
                 .await?;
 
-        let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(Output::new_with_affected_rows(affected_rows))
+        self.do_request(inserts, &ctx).await
     }
 
     pub async fn handle_table_insert(
         &self,
         request: TableInsertRequest,
         ctx: QueryContextRef,
-    ) -> Result<AffectedRows> {
+    ) -> Result<Output> {
         let catalog = request.catalog_name.as_str();
         let schema = request.schema_name.as_str();
         let table_name = request.table_name.as_str();
@@ -170,8 +169,7 @@ impl Inserter {
             .convert(request)
             .await?;
 
-        let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(affected_rows as _)
+        self.do_request(inserts, &ctx).await
     }
 
     pub async fn handle_statement_insert(
@@ -184,8 +182,7 @@ impl Inserter {
                 .convert(insert, ctx)
                 .await?;
 
-        let affected_rows = self.do_request(inserts, ctx).await?;
-        Ok(Output::new_with_affected_rows(affected_rows))
+        self.do_request(inserts, ctx).await
     }
 }
 
@@ -194,8 +191,8 @@ impl Inserter {
         &self,
         requests: RegionInsertRequests,
         ctx: &QueryContextRef,
-    ) -> Result<AffectedRows> {
-        write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
+    ) -> Result<Output> {
+        let write_cost = write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: ctx.get_db_string(),
@@ -221,7 +218,10 @@ impl Inserter {
 
         let affected_rows = results.into_iter().sum::<Result<AffectedRows>>()?;
         crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(affected_rows as u64);
-        Ok(affected_rows)
+        Ok(Output::new(
+            OutputData::AffectedRows(affected_rows),
+            OutputMeta::new_with_cost(write_cost as _),
+        ))
     }
 
     async fn group_requests_by_peer(

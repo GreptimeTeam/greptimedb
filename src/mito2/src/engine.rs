@@ -373,6 +373,7 @@ impl MitoEngine {
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
+        time_provider: crate::time_provider::TimeProviderRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -385,6 +386,7 @@ impl MitoEngine {
                     object_store_manager,
                     write_buffer_manager,
                     listener,
+                    time_provider,
                 )
                 .await?,
                 config,

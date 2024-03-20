@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use client::Output;
 use common_base::AffectedRows;
 use common_error::ext::BoxedError;
 use common_function::handlers::TableMutationHandler;
@@ -52,7 +53,7 @@ impl TableMutationHandler for TableMutationOperator {
         &self,
         request: TableInsertRequest,
         ctx: QueryContextRef,
-    ) -> QueryResult<AffectedRows> {
+    ) -> QueryResult<Output> {
         self.inserter
             .handle_table_insert(request, ctx)
             .await

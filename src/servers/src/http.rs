@@ -45,9 +45,11 @@ use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
+use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
+use self::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
 use crate::http::arrow_result::ArrowResponse;
@@ -89,6 +91,7 @@ mod dashboard;
 pub mod error_result;
 pub mod greptime_result_v1;
 pub mod influxdb_result_v1;
+pub mod table_result;
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
@@ -253,6 +256,7 @@ pub enum GreptimeQueryOutput {
 pub enum ResponseFormat {
     Arrow,
     Csv,
+    Table,
     #[default]
     GreptimedbV1,
     InfluxdbV1,
@@ -263,6 +267,7 @@ impl ResponseFormat {
         match s {
             "arrow" => Some(ResponseFormat::Arrow),
             "csv" => Some(ResponseFormat::Csv),
+            "table" => Some(ResponseFormat::Table),
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
             _ => None,
@@ -273,6 +278,7 @@ impl ResponseFormat {
         match self {
             ResponseFormat::Arrow => "arrow",
             ResponseFormat::Csv => "csv",
+            ResponseFormat::Table => "table",
             ResponseFormat::GreptimedbV1 => "greptimedb_v1",
             ResponseFormat::InfluxdbV1 => "influxdb_v1",
         }
@@ -327,6 +333,7 @@ impl Display for Epoch {
 pub enum HttpResponse {
     Arrow(ArrowResponse),
     Csv(CsvResponse),
+    Table(TableResponse),
     Error(ErrorResponse),
     GreptimedbV1(GreptimedbV1Response),
     InfluxdbV1(InfluxdbV1Response),
@@ -337,6 +344,7 @@ impl HttpResponse {
         match self {
             HttpResponse::Arrow(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::Csv(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::Table(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::GreptimedbV1(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::InfluxdbV1(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::Error(resp) => resp.with_execution_time(execution_time).into(),
@@ -349,6 +357,7 @@ impl IntoResponse for HttpResponse {
         match self {
             HttpResponse::Arrow(resp) => resp.into_response(),
             HttpResponse::Csv(resp) => resp.into_response(),
+            HttpResponse::Table(resp) => resp.into_response(),
             HttpResponse::GreptimedbV1(resp) => resp.into_response(),
             HttpResponse::InfluxdbV1(resp) => resp.into_response(),
             HttpResponse::Error(resp) => resp.into_response(),
@@ -369,6 +378,12 @@ impl From<ArrowResponse> for HttpResponse {
 impl From<CsvResponse> for HttpResponse {
     fn from(value: CsvResponse) -> Self {
         HttpResponse::Csv(value)
+    }
+}
+
+impl From<TableResponse> for HttpResponse {
+    fn from(value: TableResponse) -> Self {
+        HttpResponse::Table(value)
     }
 }
 
@@ -698,6 +713,11 @@ impl HttpServer {
         Router::new()
             .route("/write", routing::post(influxdb_write_v1))
             .route("/api/v2/write", routing::post(influxdb_write_v2))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(RequestDecompressionLayer::new()),
+            )
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
             .with_state(influxdb_handler)
@@ -965,6 +985,7 @@ mod test {
             ResponseFormat::GreptimedbV1,
             ResponseFormat::InfluxdbV1,
             ResponseFormat::Csv,
+            ResponseFormat::Table,
             ResponseFormat::Arrow,
         ] {
             let recordbatches =
@@ -973,6 +994,7 @@ mod test {
             let json_resp = match format {
                 ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
                 ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+                ResponseFormat::Table => TableResponse::from_output(outputs).await,
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
                 ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
             };
@@ -1015,6 +1037,21 @@ mod test {
                         panic!("invalid output type");
                     }
                 }
+
+                HttpResponse::Table(resp) => {
+                    let output = &resp.output()[0];
+                    if let GreptimeQueryOutput::Records(r) = output {
+                        assert_eq!(r.num_rows(), 4);
+                        assert_eq!(r.num_cols(), 2);
+                        assert_eq!(r.schema.column_schemas[0].name, "numbers");
+                        assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
+                        assert_eq!(r.rows[0][0], serde_json::Value::from(1));
+                        assert_eq!(r.rows[0][1], serde_json::Value::Null);
+                    } else {
+                        panic!("invalid output type");
+                    }
+                }
+
                 HttpResponse::Arrow(resp) => {
                     let output = resp.data;
                     let mut reader =
