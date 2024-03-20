@@ -27,7 +27,7 @@ function retry_fetch() {
         echo "Failed to download $url"
         echo "You may try to set http_proxy and https_proxy environment variables."
         if [[ -z "$GITHUB_PROXY_URL" ]]; then
-          echo "You may try to set GITHUB_PROXY_URL=http://mirror.ghproxy.com/"
+          echo "You may try to set GITHUB_PROXY_URL=http://mirror.ghproxy.com/https://github.com/"
         fi
         exit 1
      }
@@ -39,7 +39,7 @@ function retry_fetch() {
 retry_fetch "${GITHUB_URL}/GreptimeTeam/dashboard/releases/download/${RELEASE_VERSION}/sha256.txt" sha256.txt
 
 # Download the tar file containing the built dashboard assets.
-retry_fetch "${GITHUB_URL}/GreptimeTeam/dashboard/releases/download/$RELEASE_VERSION/build.tar.gz" build.tar.gz
+retry_fetch "${GITHUB_URL}/GreptimeTeam/dashboard/releases/download/${RELEASE_VERSION}/build.tar.gz" build.tar.gz
 
 # Verify the checksums match; exit if they don't.
 case "$(uname -s)" in
