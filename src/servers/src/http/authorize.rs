@@ -88,7 +88,7 @@ pub async fn inner_auth<B>(
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
-            return Err(err_response(is_influxdb_request(&req), e).into_response());
+            return Err(err_response(e));
         }
     };
 
@@ -112,7 +112,7 @@ pub async fn inner_auth<B>(
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
-            Err(err_response(is_influxdb_request(&req), e).into_response())
+            Err(err_response(e))
         }
     }
 }
@@ -128,8 +128,8 @@ pub async fn check_http_auth<B>(
     }
 }
 
-fn err_response(is_influxdb: bool, err: impl ErrorExt) -> impl IntoResponse {
-    (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(err))
+fn err_response(err: impl ErrorExt) -> Response {
+    (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(err)).into_response()
 }
 
 pub fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {
