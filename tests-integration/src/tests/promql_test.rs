@@ -524,3 +524,85 @@ async fn binary_op_plain_columns(instance: Arc<dyn MockInstance>) {
     )
     .await;
 }
+
+#[apply(both_instances_cases)]
+async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    instance
+        .do_query(
+            AGGREGATORS_CREATE_TABLE,
+            QueryContext::with_db_name(Some("greptime_private")),
+        )
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
+    instance
+        .do_query(
+            AGGREGATORS_INSERT_DATA,
+            QueryContext::with_db_name(Some("greptime_private")),
+        )
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
+
+    let promql = r#"http_requests{__schema__="greptime_private"}"#;
+    let query = PromQuery {
+        query: promql.to_string(),
+        ..PromQuery::default()
+    };
+    let QueryStatement::Promql(mut eval_stmt) =
+        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
+    else {
+        unreachable!()
+    };
+    eval_stmt.start = UNIX_EPOCH;
+    eval_stmt.end = unix_epoch_plus_100s();
+    eval_stmt.interval = Duration::from_secs(60);
+    eval_stmt.lookback_delta = Duration::from_secs(0);
+
+    let query_output = instance
+        .statement_executor()
+        .execute_stmt(QueryStatement::Promql(eval_stmt), QueryContext::arc())
+        .await
+        .unwrap();
+    let expected = r#"+------------+----------+------------+-------+---------------------+
+| job        | instance | group      | value | ts                  |
++------------+----------+------------+-------+---------------------+
+| api-server | 0        | production | 100.0 | 1970-01-01T00:00:00 |
+| api-server | 0        | canary     | 300.0 | 1970-01-01T00:00:00 |
+| api-server | 1        | production | 200.0 | 1970-01-01T00:00:00 |
+| api-server | 1        | canary     | 400.0 | 1970-01-01T00:00:00 |
+| app-server | 0        | canary     | 700.0 | 1970-01-01T00:00:00 |
+| app-server | 0        | production | 500.0 | 1970-01-01T00:00:00 |
+| app-server | 1        | canary     | 800.0 | 1970-01-01T00:00:00 |
+| app-server | 1        | production | 600.0 | 1970-01-01T00:00:00 |
++------------+----------+------------+-------+---------------------+"#;
+
+    check_unordered_output_stream(query_output, expected).await;
+
+    let promql = r#"http_requests"#;
+    let query = PromQuery {
+        query: promql.to_string(),
+        ..PromQuery::default()
+    };
+    let QueryStatement::Promql(mut eval_stmt) =
+        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
+    else {
+        unreachable!()
+    };
+    eval_stmt.start = UNIX_EPOCH;
+    eval_stmt.end = unix_epoch_plus_100s();
+    eval_stmt.interval = Duration::from_secs(60);
+    eval_stmt.lookback_delta = Duration::from_secs(0);
+
+    let query_output = instance
+        .statement_executor()
+        .execute_stmt(QueryStatement::Promql(eval_stmt), QueryContext::arc())
+        .await;
+
+    assert!(query_output.is_err());
+}
