@@ -40,9 +40,8 @@ impl CsvResponse {
             Ok((output, _)) => {
                 if output.len() > 1 {
                     HttpResponse::Error(ErrorResponse::from_error_message(
-                        ResponseFormat::Csv,
                         StatusCode::InvalidArguments,
-                        "Multi-statements are not allowed".to_string(),
+                        "cannot output multi-statements result in csv format".to_string(),
                     ))
                 } else {
                     HttpResponse::Csv(CsvResponse {
