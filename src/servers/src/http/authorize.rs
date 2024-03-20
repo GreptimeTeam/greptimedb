@@ -33,7 +33,7 @@ use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
-use super::{ResponseFormat, PUBLIC_APIS};
+use super::PUBLIC_APIS;
 use crate::error::{
     self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,

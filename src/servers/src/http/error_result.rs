@@ -22,8 +22,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::http::header::constants::GREPTIME_DB_HEADER_ERROR_CODE;
-use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
-use crate::http::ResponseFormat;
+use crate::http::header::GREPTIME_DB_HEADER_EXECUTION_TIME;
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct ErrorResponse {

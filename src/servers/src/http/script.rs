@@ -26,7 +26,7 @@ use snafu::ResultExt;
 
 use crate::error::{HyperSnafu, InvalidUtf8ValueSnafu};
 use crate::http::error_result::ErrorResponse;
-use crate::http::{ApiState, GreptimedbV1Response, HttpResponse, ResponseFormat};
+use crate::http::{ApiState, GreptimedbV1Response, HttpResponse};
 
 macro_rules! json_err {
     ($e: expr) => {{
@@ -34,10 +34,7 @@ macro_rules! json_err {
     }};
 
     ($msg: expr, $code: expr) => {{
-        return HttpResponse::Error(ErrorResponse::from_error_message(
-            $code,
-            $msg.to_string(),
-        ));
+        return HttpResponse::Error(ErrorResponse::from_error_message($code, $msg.to_string()));
     }};
 }
 

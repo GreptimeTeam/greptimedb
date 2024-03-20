@@ -15,7 +15,6 @@
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::{util, RecordBatch};
 use schemars::JsonSchema;
