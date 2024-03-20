@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, Context};
 use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_meta::instruction::Instruction;
+use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::table_name::TableName;
 use snafu::ResultExt;
 use table::metadata::TableId;
@@ -66,12 +66,12 @@ impl MetasrvCacheInvalidator {
 #[async_trait]
 impl CacheInvalidator for MetasrvCacheInvalidator {
     async fn invalidate_table_id(&self, ctx: &Context, table_id: TableId) -> MetaResult<()> {
-        let instruction = Instruction::InvalidateTableIdCache(table_id);
+        let instruction = Instruction::InvalidateCaches(vec![CacheIdent::TableId(table_id)]);
         self.broadcast(ctx, instruction).await
     }
 
     async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> MetaResult<()> {
-        let instruction = Instruction::InvalidateTableNameCache(table_name);
+        let instruction = Instruction::InvalidateCaches(vec![CacheIdent::TableName(table_name)]);
         self.broadcast(ctx, instruction).await
     }
 }
