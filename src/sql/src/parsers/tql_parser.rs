@@ -176,8 +176,7 @@ impl<'a> ParserContext<'a> {
             .map_err(|err| {
                 ParserError::ParserError(format!("Failed to convert to expression: {err:?}"))
             })?;
-
-        let sql_to_rel = SqlToRel::new(&DummyContextProvider {});
+        let sql_to_rel = SqlToRel::new(&StubContextProvider {});
         let logical_expr = sql_to_rel
             .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
             .map_err(|err| {
@@ -193,7 +192,8 @@ impl<'a> ParserContext<'a> {
             })?;
 
         match simplified_expr {
-            Expr::Literal(ScalarValue::TimestampNanosecond(v, _)) => v,
+            Expr::Literal(ScalarValue::TimestampNanosecond(v, _))
+            | Expr::Literal(ScalarValue::DurationNanosecond(v)) => v,
             _ => None,
         }
         .map(|timestamp_nanos| (timestamp_nanos / 1_000_000_000).to_string())
@@ -270,9 +270,9 @@ impl<'a> ParserContext<'a> {
 }
 
 #[derive(Default)]
-struct DummyContextProvider {}
+struct StubContextProvider {}
 
-impl ContextProvider for DummyContextProvider {
+impl ContextProvider for StubContextProvider {
     fn get_table_provider(&self, _name: TableReference) -> DFResult<Arc<dyn TableSource>> {
         unimplemented!()
     }
@@ -316,20 +316,13 @@ mod tests {
 
     #[test]
     fn test_parse_tql_eval_with_functions() {
-        let sql = "TQL EVAL (now() - '10 minutes'::interval, now(), '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
-        let assert_time = Utc::now()
-            .timestamp_nanos_opt()
-            .map(|x| x / 1_000_000_000)
-            .unwrap_or(0);
-        // TODO `Utc::now()` introduces the flakiness in a test,
-        //  left: "1710514410"
-        //  right: "1710514409"
+        let sql = "TQL EVAL (now() - now(), now() -  (now() - '10 seconds'::interval), '1s') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let statement = parse_into_statement(sql);
         match statement {
             Statement::Tql(Tql::Eval(eval)) => {
-                assert_eq!(eval.start, (assert_time - 600).to_string());
-                assert_eq!(eval.end, assert_time.to_string());
-                assert_eq!(eval.step, "1m");
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "10");
+                assert_eq!(eval.step, "1s");
                 assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
             }
