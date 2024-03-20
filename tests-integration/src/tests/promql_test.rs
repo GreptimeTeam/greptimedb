@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use common_query::Output;
 use frontend::instance::Instance;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use rstest::rstest;
@@ -26,6 +27,30 @@ use super::test_util::{
     both_instances_cases, check_unordered_output_stream, distributed, standalone,
 };
 use crate::tests::test_util::MockInstance;
+
+async fn promql_query(
+    ins: Arc<Instance>,
+    promql: &str,
+    query_ctx: Arc<QueryContext>,
+) -> operator::error::Result<Output> {
+    let query = PromQuery {
+        query: promql.to_string(),
+        ..PromQuery::default()
+    };
+    let QueryStatement::Promql(mut eval_stmt) =
+        QueryLanguageParser::parse_promql(&query, &query_ctx).unwrap()
+    else {
+        unreachable!()
+    };
+    eval_stmt.start = UNIX_EPOCH;
+    eval_stmt.end = unix_epoch_plus_100s();
+    eval_stmt.interval = Duration::from_secs(60);
+    eval_stmt.lookback_delta = Duration::from_secs(0);
+
+    ins.statement_executor()
+        .execute_stmt(QueryStatement::Promql(eval_stmt), query_ctx)
+        .await
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn create_insert_query_assert(
@@ -527,48 +552,35 @@ async fn binary_op_plain_columns(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
-    let instance = instance.frontend();
-    instance
-        .do_query(
-            AGGREGATORS_CREATE_TABLE,
-            QueryContext::with_db_name(Some("greptime_private")),
-        )
-        .await
-        .into_iter()
-        .for_each(|v| {
-            let _ = v.unwrap();
-        });
-    instance
-        .do_query(
-            AGGREGATORS_INSERT_DATA,
-            QueryContext::with_db_name(Some("greptime_private")),
-        )
-        .await
-        .into_iter()
-        .for_each(|v| {
-            let _ = v.unwrap();
-        });
+    let ins = instance.frontend();
 
-    let promql = r#"http_requests{__schema__="greptime_private"}"#;
-    let query = PromQuery {
-        query: promql.to_string(),
-        ..PromQuery::default()
-    };
-    let QueryStatement::Promql(mut eval_stmt) =
-        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
-    else {
-        unreachable!()
-    };
-    eval_stmt.start = UNIX_EPOCH;
-    eval_stmt.end = unix_epoch_plus_100s();
-    eval_stmt.interval = Duration::from_secs(60);
-    eval_stmt.lookback_delta = Duration::from_secs(0);
+    ins.do_query(
+        AGGREGATORS_CREATE_TABLE,
+        QueryContext::with_db_name(Some("greptime_private")),
+    )
+    .await
+    .into_iter()
+    .for_each(|v| {
+        let _ = v.unwrap();
+    });
+    ins.do_query(
+        AGGREGATORS_INSERT_DATA,
+        QueryContext::with_db_name(Some("greptime_private")),
+    )
+    .await
+    .into_iter()
+    .for_each(|v| {
+        let _ = v.unwrap();
+    });
 
-    let query_output = instance
-        .statement_executor()
-        .execute_stmt(QueryStatement::Promql(eval_stmt), QueryContext::arc())
-        .await
-        .unwrap();
+    let query_output = promql_query(
+        ins.clone(),
+        r#"http_requests{__schema__="greptime_private"}"#,
+        QueryContext::arc(),
+    )
+    .await
+    .unwrap();
+
     let expected = r#"+------------+----------+------------+-------+---------------------+
 | job        | instance | group      | value | ts                  |
 +------------+----------+------------+-------+---------------------+
@@ -584,25 +596,16 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
 
     check_unordered_output_stream(query_output, expected).await;
 
-    let promql = r#"http_requests"#;
-    let query = PromQuery {
-        query: promql.to_string(),
-        ..PromQuery::default()
-    };
-    let QueryStatement::Promql(mut eval_stmt) =
-        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
-    else {
-        unreachable!()
-    };
-    eval_stmt.start = UNIX_EPOCH;
-    eval_stmt.end = unix_epoch_plus_100s();
-    eval_stmt.interval = Duration::from_secs(60);
-    eval_stmt.lookback_delta = Duration::from_secs(0);
-
-    let query_output = instance
-        .statement_executor()
-        .execute_stmt(QueryStatement::Promql(eval_stmt), QueryContext::arc())
-        .await;
-
+    let query_output = promql_query(ins.clone(), r#"http_requests"#, QueryContext::arc()).await;
     assert!(query_output.is_err());
+
+    let query_output = promql_query(
+        ins.clone(),
+        r#"http_requests"#,
+        QueryContext::with_db_name(Some("greptime_private")),
+    )
+    .await
+    .unwrap();
+
+    check_unordered_output_stream(query_output, expected).await;
 }
