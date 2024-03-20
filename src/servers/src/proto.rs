@@ -40,7 +40,10 @@ pub struct PromLabel {
 }
 
 impl Clear for PromLabel {
-    fn clear(&mut self) {}
+    fn clear(&mut self) {
+        self.name.clear();
+        self.value.clear();
+    }
 }
 
 impl PromLabel {
