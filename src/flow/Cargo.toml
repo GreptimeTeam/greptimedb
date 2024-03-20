@@ -29,7 +29,8 @@ snafu.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 # using a git dependency to get our own fork of hydroflow crate
-hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow", branch = "tee_port", features = [] }
+hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow", rev = "9616fdb86164c20a7b7f7e362c6dcd336bb3dc22", features = [
+] }
 
 [dev-dependencies]
 serde_json = "1.0"

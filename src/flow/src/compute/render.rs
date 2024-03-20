@@ -27,12 +27,24 @@ pub struct Context<'referred, 'df> {
     local_scope: Vec<BTreeMap<LocalId, CollectionBundle>>,
     // Collect all errors in this operator's evaluation
     err_collector: ErrCollector,
-    /// Frontier (in sys time) before which updates should not be emitted.
-    ///
-    /// We *must* apply it to sinks, to ensure correct outputs.
-    /// We *should* apply it to sources and imported shared state, because it improves performance.
-    /// Which means it's the  current time in temporal filter to get current correct result
-    as_of: Rc<RefCell<repr::Timestamp>>,
+}
+
+impl<'referred, 'df> Drop for Context<'referred, 'df> {
+    fn drop(&mut self) {
+        for bundle in std::mem::take(&mut self.input_collection)
+            .into_values()
+            .chain(
+                std::mem::take(&mut self.local_scope)
+                    .into_iter()
+                    .flat_map(|v| v.into_iter())
+                    .map(|(_k, v)| v),
+            )
+        {
+            bundle.collection.stream.drop(self.df);
+            drop(bundle.arranged);
+        }
+        // The automatically generated "drop glue" which recursively calls the destructors of all the other fields of this value.
+    }
 }
 
 // There is a false positive in using `Vec<ScalarExpr>` as key
@@ -68,6 +80,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
             .add_subgraph_source("Constant", send_port, move |_ctx, send_port| {
                 send_port.give(std::mem::take(&mut rows));
             });
+
         CollectionBundle::from_collection(Collection::from_port(recv_port))
     }
 
@@ -120,11 +133,10 @@ impl<'referred, 'df> Context<'referred, 'df> {
         mfp: MapFilterProject,
     ) -> Result<CollectionBundle, Error> {
         let input = self.render_plan(*input)?;
-        // TODO(discord9): check if contain temporal to determine if
-        // need arrange or not
+        // TODO(discord9): consider if check if contain temporal to determine if
+        // need arrange or not, or does this added complexity worth it
         let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff>("mfp");
         let input_arity = mfp.input_arity;
-        let mfp_plan = MfpPlan::create_from(mfp).context(EvalSnafu)?;
 
         // default to have a arrange with only future updates, so it can be empty if no temporal filter is applied
         // as stream only sends current updates and etc.
@@ -132,14 +144,18 @@ impl<'referred, 'df> Context<'referred, 'df> {
             let arrangement = Arrangement::new();
             ArrangeHandler::from(arrangement)
         };
-        // to be use inside closure
+
+        // This closure capture following variables:
+        let mfp_plan = MfpPlan::create_from(mfp).context(EvalSnafu)?;
         let arrange_inner = arrange.clone_future_only().context(InvalidQuerySnafu {
             reason: "Failed to clone future only arrangement".to_string(),
         })?;
-
-        let as_of = self.as_of.clone();
+        let as_of = self.compute_state.as_of.clone();
         let err_collector = self.err_collector.clone();
-        self.df.add_subgraph_in_out(
+        let scheduler = self.compute_state.get_scheduler();
+        let cur_subgraph = scheduler.cur_subgraph.clone();
+
+        let subgraph = self.df.add_subgraph_in_out(
             "mfp",
             input.collection.stream,
             out_send_port,
@@ -152,7 +168,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 for (mut row, _sys_time, diff) in data.into_iter().flat_map(|v| v.into_iter()) {
                     let updates = mfp_plan.evaluate::<EvalError>(&mut row.inner, now, diff);
                     // TODO(discord9): refactor error handling
-                    // Expect error in a sinlge row to not interrupt the whole evaluation
+                    // Expect error in a single row to not interrupt the whole evaluation
                     let updates = updates
                         .filter_map(|r| match r {
                             Ok(r) => Some(((r.0, Row::empty()), r.1, r.2)),
@@ -162,9 +178,14 @@ impl<'referred, 'df> Context<'referred, 'df> {
                             }
                         })
                         .collect_vec();
-                    dbg!(&updates);
-                    err_collector.run(|| arrange.write().apply_updates(now, updates));
+
+                    err_collector.run(|| {
+                        arrange.write().apply_updates(now, updates)?;
+                        Ok(())
+                    });
                 }
+
+                // deal with output
                 let old_now = arrange.read().get_compaction();
                 let output_kv = if let Some(old) = old_now {
                     arrange.read().get_updates_in_range((old + 1)..=now)
@@ -177,9 +198,19 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     .map(|((k, _v), t, d)| (k, t, d))
                     .collect_vec();
                 send.give(output);
-                err_collector.run(|| arrange.write().set_compaction(now));
+                err_collector.run(|| {
+                    arrange.write().set_compaction(now)?;
+                    Ok(())
+                });
+                // schedule the next time this operator should run
+                if let Some(i) = arrange.read().get_next_update_time() {
+                    scheduler.schedule_at(i)
+                }
             },
         );
+        // register current subgraph in scheduler for future scheduling
+        cur_subgraph.replace(Some(subgraph));
+
         let arranged = BTreeMap::from([(
             (0..input_arity).map(ScalarExpr::Column).collect_vec(),
             Arranged::new(arrange),
@@ -212,17 +243,19 @@ mod test {
         df: &'r mut Hydroflow<'h>,
         state: &'r mut ComputeState,
     ) -> Context<'r, 'h> {
+        let err_collector = state.err_collector.clone();
         Context {
             id: GlobalId::User(0),
             df,
             compute_state: state,
             input_collection: BTreeMap::new(),
             local_scope: Default::default(),
-            err_collector: ErrCollector::default(),
-            as_of: Rc::new(RefCell::new(0)),
+            err_collector,
         }
     }
 
+    /// test if temporal filter works properly
+    /// namely: if mfp operator can schedule a delete at the correct time
     #[test]
     fn test_render_mfp_with_temporal() {
         let mut df = Hydroflow::new();
@@ -263,21 +296,55 @@ mod test {
 
         let mut bundle = ctx.render_mfp(Box::new(input_plan), mfp).unwrap();
         let collection = bundle.collection;
-        let arranged = bundle.arranged.pop_first().unwrap().1;
-        let subgraph = ctx.df.add_subgraph_sink(
+        let _arranged = bundle.arranged.pop_first().unwrap().1;
+        let output = Rc::new(RefCell::new(vec![]));
+        let output_inner = output.clone();
+        let _subgraph = ctx.df.add_subgraph_sink(
             "test_render_constant",
             collection.stream,
             move |_ctx, recv| {
                 let data = recv.take_inner();
                 let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
-                dbg!(&res);
+                output_inner.borrow_mut().clear();
+                output_inner.borrow_mut().extend(res);
             },
         );
+        // drop ctx here to simulate actual process of compile first, run later scenario
+        drop(ctx);
+        // expected output at given time
+        let expected_output = BTreeMap::from([
+            (
+                0, // time
+                vec![
+                    (Row::new(vec![1i64.into()]), 0, 1),
+                    (Row::new(vec![2i64.into()]), 0, 1),
+                    (Row::new(vec![3i64.into()]), 0, 1),
+                ],
+            ),
+            (
+                2, // time
+                vec![(Row::new(vec![1i64.into()]), 2, -1)],
+            ),
+            (
+                3, // time
+                vec![(Row::new(vec![2i64.into()]), 3, -1)],
+            ),
+            (
+                4, // time
+                vec![(Row::new(vec![3i64.into()]), 4, -1)],
+            ),
+        ]);
+
         for now in 0i64..5 {
-            ctx.as_of.replace(now);
-            ctx.df.schedule_subgraph(subgraph);
-            ctx.df.run_available();
-            dbg!(&ctx.err_collector.inner.borrow());
+            state.as_of.replace(now);
+            state.run_available_with_schedule(&mut df);
+            assert!(state.err_collector.inner.borrow().is_empty());
+            if let Some(expected) = expected_output.get(&now) {
+                assert_eq!(*output.borrow(), *expected);
+            } else {
+                assert_eq!(*output.borrow(), vec![]);
+            };
+            output.borrow_mut().clear();
         }
     }
 

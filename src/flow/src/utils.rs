@@ -123,7 +123,7 @@ pub struct Arrangement {
     /// And for consolidated batch(i.e. btach representing now), there should be only one update for each key with `diff==1`
     ///
     /// And since most time a key gots updated by first delete then insert, small vec with size of 2 make sense
-    /// TODO: batch size balancing
+    /// TODO: batch size balancing?
     spine: Spine,
     /// if set to false, will not update current value of the arrangement, useful for case like `map -> arrange -> reduce`
     full_arrangement: bool,
@@ -675,9 +675,13 @@ mod test {
         }
     }
 
+    /// test if split_lte get ranges that are not aligned with batch boundaries
+    /// this split_lte can correctly retrieve all updates in the range, including updates that are in the batches
+    /// near the boundary of input range
     #[test]
     fn test_split_off() {
         let mut arr = Arrangement::new();
+        // manually create batch ..=1 and 2..=3
         arr.spine.insert(1, Default::default());
         arr.spine.insert(3, Default::default());
         arr.apply_updates(
@@ -685,9 +689,11 @@ mod test {
             vec![((Row::new(vec![1.into()]), Row::new(vec![2.into()])), 2, 1)],
         )
         .unwrap();
+        // updates falls into the range of 2..=3
         let mut arr1 = arr.clone();
         {
             assert_eq!(arr.get_next_update_time(), Some(2));
+            // split expect to take batch ..=1 and create a new batch 2..=2(which contain update)
             let split = &arr.split_lte(&2);
             assert_eq!(split.len(), 2);
             assert_eq!(split[&2].len(), 1);
@@ -695,16 +701,20 @@ mod test {
             assert_eq!(arr.get_next_update_time(), None);
         }
         {
+            // take all updates with timestamp <=1, will get no updates
             let split = &arr1.split_lte(&1);
             assert_eq!(split.len(), 1);
         }
     }
-    // TODO: test get_updates_in_range and get_update_time
+
+    /// test if get ranges is not aligned with boundary of batch,
+    /// whether can get correct result
     #[test]
     fn test_get_by_range() {
         let mut arr = Arrangement::new();
 
-        // [2, 1], [4,3], [6,5] three batch
+        // will form [2, 1], [4,3], [6,5] three batch
+        // TODO(discord9): manually set batch
         let updates: Vec<KeyValDiffRow> = vec![
             ((Row::new(vec![1i64.into()]), Row::empty()), 2, 1),
             ((Row::new(vec![1i64.into()]), Row::empty()), 1, 1),

@@ -36,17 +36,20 @@ impl<T: 'static + Clone> Collection<T> {
     }
 }
 
+/// Arranged is a wrapper around `ArrangeHandler` that maintain a list of readers and a writer
 pub struct Arranged {
     pub arrangement: ArrangeHandler,
+    pub writer: Rc<RefCell<Option<SubgraphId>>>,
     /// maintain a list of readers for the arrangement for the ease of scheduling
-    pub readers: Arc<RwLock<Vec<SubgraphId>>>,
+    pub readers: Rc<RefCell<Vec<SubgraphId>>>,
 }
 
 impl Arranged {
     pub fn new(arr: ArrangeHandler) -> Self {
         Self {
             arrangement: arr,
-            readers: Arc::new(RwLock::new(Vec::new())),
+            writer: Default::default(),
+            readers: Default::default(),
         }
     }
     pub fn try_clone_future(&self) -> Option<Self> {
@@ -55,6 +58,7 @@ impl Arranged {
             .map(|arrangement| Arranged {
                 arrangement,
                 readers: self.readers.clone(),
+                writer: self.writer.clone(),
             })
     }
     pub fn try_clone_full(&self) -> Option<Self> {
@@ -63,10 +67,11 @@ impl Arranged {
             .map(|arrangement| Arranged {
                 arrangement,
                 readers: self.readers.clone(),
+                writer: self.writer.clone(),
             })
     }
     pub fn add_reader(&self, id: SubgraphId) {
-        self.readers.blocking_write().push(id)
+        self.readers.borrow_mut().push(id)
     }
 }
 
