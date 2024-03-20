@@ -91,10 +91,13 @@ impl State for DropDatabaseExecutor {
     ) -> Result<(Box<dyn State>, Status)> {
         self.register_dropping_regions(ddl_ctx)?;
         let executor = DropTableExecutor::new(self.table_name.clone(), self.table_id, true);
+        // Removes metadata of the table.
         executor
             .on_remove_metadata(ddl_ctx, &self.table_info_value, &self.table_route_value)
             .await?;
+        // Invalidates cache.
         executor.invalidate_table_cache(ddl_ctx).await?;
+        // Drops the region on the datanode.
         executor
             .on_drop_regions(ddl_ctx, &self.table_route_value)
             .await?;

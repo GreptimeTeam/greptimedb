@@ -37,7 +37,7 @@ impl State for DropDatabaseStart {
         ddl_ctx: &DdlContext,
         ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        let exist = ddl_ctx
+        let exists = ddl_ctx
             .table_metadata_manager
             .schema_manager()
             .exists(SchemaNameKey {
@@ -46,12 +46,12 @@ impl State for DropDatabaseStart {
             })
             .await?;
 
-        if !exist && ctx.drop_if_exists {
+        if !exists && ctx.drop_if_exists {
             return Ok((Box::new(DropDatabaseEnd), Status::done()));
         }
 
         ensure!(
-            exist,
+            exists,
             error::SchemaNotFoundSnafu {
                 table_schema: &ctx.schema,
             }
