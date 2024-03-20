@@ -77,7 +77,7 @@ impl IntoResponse for GreptimedbV1Response {
 
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_FORMAT,
-            HeaderValue::from_static("greptimedb_v1"),
+            HeaderValue::from_static(ResponseFormat::GreptimedbV1.as_str()),
         );
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_EXECUTION_TIME,

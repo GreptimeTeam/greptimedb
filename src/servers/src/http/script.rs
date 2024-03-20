@@ -30,12 +30,11 @@ use crate::http::{ApiState, GreptimedbV1Response, HttpResponse, ResponseFormat};
 
 macro_rules! json_err {
     ($e: expr) => {{
-        return HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::GreptimedbV1, $e));
+        return HttpResponse::Error(ErrorResponse::from_error($e));
     }};
 
     ($msg: expr, $code: expr) => {{
         return HttpResponse::Error(ErrorResponse::from_error_message(
-            ResponseFormat::GreptimedbV1,
             $code,
             $msg.to_string(),
         ));

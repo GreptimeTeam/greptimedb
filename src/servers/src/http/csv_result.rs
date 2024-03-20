@@ -99,8 +99,10 @@ impl IntoResponse for CsvResponse {
             payload,
         )
             .into_response();
-        resp.headers_mut()
-            .insert(&GREPTIME_DB_HEADER_FORMAT, HeaderValue::from_static("CSV"));
+        resp.headers_mut().insert(
+            &GREPTIME_DB_HEADER_FORMAT,
+            HeaderValue::from_static(ResponseFormat::Csv.as_str()),
+        );
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),

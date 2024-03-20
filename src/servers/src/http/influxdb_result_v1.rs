@@ -143,10 +143,6 @@ impl InfluxdbV1Response {
         outputs: Vec<crate::error::Result<Output>>,
         epoch: Option<Epoch>,
     ) -> HttpResponse {
-        fn make_error_response(error: impl ErrorExt) -> HttpResponse {
-            HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::InfluxdbV1, error))
-        }
-
         // TODO(sunng87): this api response structure cannot represent error well.
         //  It hides successful execution results from error response
         let mut results = Vec::with_capacity(outputs.len());
@@ -172,11 +168,11 @@ impl InfluxdbV1Response {
                                         });
                                     }
                                     Err(err) => {
-                                        return make_error_response(err);
+                                        return HttpResponse::Error(ErrorResponse::from_error(err));
                                     }
                                 },
                                 Err(err) => {
-                                    return make_error_response(err);
+                                    return HttpResponse::Error(ErrorResponse::from_error(err));
                                 }
                             }
                         }
@@ -189,14 +185,14 @@ impl InfluxdbV1Response {
                                     });
                                 }
                                 Err(err) => {
-                                    return make_error_response(err);
+                                    return HttpResponse::Error(ErrorResponse::from_error(err));
                                 }
                             }
                         }
                     }
                 }
                 Err(err) => {
-                    return make_error_response(err);
+                    return HttpResponse::Error(ErrorResponse::from_error(err));
                 }
             }
         }
@@ -222,7 +218,7 @@ impl IntoResponse for InfluxdbV1Response {
         let mut resp = Json(self).into_response();
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_FORMAT,
-            HeaderValue::from_static("influxdb_v1"),
+            HeaderValue::from_static(ResponseFormat::InfluxdbV1.as_str()),
         );
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_EXECUTION_TIME,

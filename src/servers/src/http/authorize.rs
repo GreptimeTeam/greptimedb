@@ -129,12 +129,7 @@ pub async fn check_http_auth<B>(
 }
 
 fn err_response(is_influxdb: bool, err: impl ErrorExt) -> impl IntoResponse {
-    let ty = if is_influxdb {
-        ResponseFormat::InfluxdbV1
-    } else {
-        ResponseFormat::GreptimedbV1
-    };
-    (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(ty, err))
+    (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(err))
 }
 
 pub fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {

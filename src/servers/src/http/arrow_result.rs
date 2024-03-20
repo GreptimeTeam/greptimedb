@@ -124,7 +124,7 @@ impl IntoResponse for ArrowResponse {
                 ),
                 (
                     &GREPTIME_DB_HEADER_FORMAT,
-                    HeaderValue::from_static("ARROW"),
+                    HeaderValue::from_static(ResponseFormat::Arrow.as_str()),
                 ),
                 (
                     &GREPTIME_DB_HEADER_EXECUTION_TIME,
