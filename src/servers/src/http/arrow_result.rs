@@ -73,7 +73,7 @@ impl ArrowResponse {
                 data: vec![],
                 execution_time_ms: 0,
             }),
-            Some(Ok(output)) => match output {
+            Some(Ok(output)) => match output.data {
                 OutputData::AffectedRows(_) => HttpResponse::Arrow(ArrowResponse {
                     data: vec![],
                     execution_time_ms: 0,
