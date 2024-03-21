@@ -109,6 +109,7 @@ impl<'a> ParserContext<'a> {
                             let _consume_verbose_token = self.parser.next_token();
                         }
                         self.parse_tql_explain(is_verbose)
+                            .context(error::SyntaxSnafu)
                     }
 
                     Keyword::ANALYZE => {
@@ -146,8 +147,76 @@ impl<'a> ParserContext<'a> {
             start,
             end,
             step,
+            lookback,
+            query,
+        })))
+    }
+
+    fn parse_tql_explain(
+        &mut self,
+        is_verbose: bool,
+    ) -> std::result::Result<Statement, ParserError> {
+        let parser = &mut self.parser;
+
+        let (start, end, step, lookback) = match parser.peek_token().token {
+            Token::LParen => {
+                let _consume_lparen_token = parser.next_token();
+                let start = Self::parse_string_or_number_or_word(parser, Token::Comma)
+                    .unwrap_or("0".to_string());
+                let end = Self::parse_string_or_number_or_word(parser, Token::Comma)
+                    .unwrap_or("0".to_string());
+                let delimiter_token = Self::find_next_delimiter_token(parser);
+                let (step, lookback) = if Self::is_comma(&delimiter_token) {
+                    let step = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+                    let lookback = Self::parse_string_or_number_or_word(parser, Token::RParen).ok();
+                    (step, lookback)
+                } else {
+                    let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
+                    (step, None)
+                };
+                (start, end, step, lookback)
+            }
+            _ => ("0".to_string(), "0".to_string(), "5m".to_string(), None),
+        };
+
+        let query = Self::parse_tql_query(parser, self.sql)?;
+
+        Ok(Statement::Tql(Tql::Explain(TqlExplain {
+            query,
+            start,
+            end,
+            step,
+            lookback,
+            is_verbose,
+        })))
+    }
+
+    fn parse_tql_analyze(
+        &mut self,
+        is_verbose: bool,
+    ) -> std::result::Result<Statement, ParserError> {
+        let parser = &mut self.parser;
+        parser.expect_token(&Token::LParen)?;
+        let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+        let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+        let delimiter_token = Self::find_next_delimiter_token(parser);
+        let (step, lookback) = if Self::is_comma(&delimiter_token) {
+            let step = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+            let lookback = Self::parse_string_or_number_or_word(parser, Token::RParen).ok();
+            (step, lookback)
+        } else {
+            let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
+            (step, None)
+        };
+        let query = Self::parse_tql_query(parser, self.sql)?;
+
+        Ok(Statement::Tql(Tql::Analyze(TqlAnalyze {
+            start,
+            end,
+            step,
             query,
             lookback,
+            is_verbose,
         })))
     }
 
@@ -273,54 +342,6 @@ impl<'a> ParserContext<'a> {
         // remove the last ';' or tailing space if exists
         Ok(query.trim().trim_end_matches(';').to_string())
     }
-
-    fn parse_tql_explain(&mut self, is_verbose: bool) -> Result<Statement> {
-        let parser = &mut self.parser;
-
-        let (start, end, step) = match parser.peek_token().token {
-            Token::LParen => {
-                let _consume_lparen_token = parser.next_token();
-                let start = Self::parse_string_or_number_or_word(parser, Token::Comma)
-                    .unwrap_or("0".to_string());
-                let end = Self::parse_string_or_number_or_word(parser, Token::Comma)
-                    .unwrap_or("0".to_string());
-                let step = Self::parse_string_or_number_or_word(parser, Token::RParen)
-                    .unwrap_or("5m".to_string());
-                (start, end, step)
-            }
-            _ => ("0".to_string(), "0".to_string(), "5m".to_string()),
-        };
-
-        let query = Self::parse_tql_query(parser, self.sql).context(error::SyntaxSnafu)?;
-
-        Ok(Statement::Tql(Tql::Explain(TqlExplain {
-            query,
-            start,
-            end,
-            step,
-            is_verbose,
-        })))
-    }
-
-    fn parse_tql_analyze(
-        &mut self,
-        is_verbose: bool,
-    ) -> std::result::Result<Statement, ParserError> {
-        let parser = &mut self.parser;
-
-        parser.expect_token(&Token::LParen)?;
-        let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-        let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-        let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
-        let query = Self::parse_tql_query(parser, self.sql)?;
-        Ok(Statement::Tql(Tql::Analyze(TqlAnalyze {
-            start,
-            end,
-            step,
-            query,
-            is_verbose,
-        })))
-    }
 }
 
 #[derive(Default)]
@@ -442,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tql_eval_with_lookback_values() {
+    fn test_parse_tql_with_lookback_values() {
         let sql = "TQL EVAL (1676887657, 1676887659, '1m', '5m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Eval(eval)) => {
@@ -466,6 +487,58 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        let sql = "TQL EXPLAIN (20, 100, 10, '3m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Explain(explain)) => {
+                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(explain.start, "20");
+                assert_eq!(explain.end, "100");
+                assert_eq!(explain.step, "10");
+                assert_eq!(explain.lookback, Some("3m".to_string()));
+                assert!(!explain.is_verbose);
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "TQL EXPLAIN VERBOSE (20, 100, 10, '3m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Explain(explain)) => {
+                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(explain.start, "20");
+                assert_eq!(explain.end, "100");
+                assert_eq!(explain.step, "10");
+                assert_eq!(explain.lookback, Some("3m".to_string()));
+                assert!(explain.is_verbose);
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "TQL ANALYZE (1676887657, 1676887659, '1m', '9m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Analyze(analyze)) => {
+                assert_eq!(analyze.start, "1676887657");
+                assert_eq!(analyze.end, "1676887659");
+                assert_eq!(analyze.step, "1m");
+                assert_eq!(analyze.lookback, Some("9m".to_string()));
+                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert!(!analyze.is_verbose);
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "TQL ANALYZE VERBOSE (1676887657, 1676887659, '1m', '9m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Analyze(analyze)) => {
+                assert_eq!(analyze.start, "1676887657");
+                assert_eq!(analyze.end, "1676887659");
+                assert_eq!(analyze.step, "1m");
+                assert_eq!(analyze.lookback, Some("9m".to_string()));
+                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert!(analyze.is_verbose);
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -477,6 +550,7 @@ mod tests {
                 assert_eq!(explain.start, "0");
                 assert_eq!(explain.end, "0");
                 assert_eq!(explain.step, "5m");
+                assert_eq!(explain.lookback, None);
                 assert!(!explain.is_verbose);
             }
             _ => unreachable!(),
@@ -489,6 +563,7 @@ mod tests {
                 assert_eq!(explain.start, "0");
                 assert_eq!(explain.end, "0");
                 assert_eq!(explain.step, "5m");
+                assert_eq!(explain.lookback, None);
                 assert!(explain.is_verbose);
             }
             _ => unreachable!(),
@@ -501,6 +576,7 @@ mod tests {
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
+                assert_eq!(explain.lookback, None);
                 assert!(!explain.is_verbose);
             }
             _ => unreachable!(),
@@ -513,6 +589,7 @@ mod tests {
                 assert_eq!(explain.start, "300");
                 assert_eq!(explain.end, "1200");
                 assert_eq!(explain.step, "10");
+                assert_eq!(explain.lookback, None);
                 assert!(!explain.is_verbose);
             }
             _ => unreachable!(),
@@ -525,6 +602,7 @@ mod tests {
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
+                assert_eq!(explain.lookback, None);
                 assert!(explain.is_verbose);
             }
             _ => unreachable!(),
@@ -537,6 +615,7 @@ mod tests {
                 assert_eq!(explain.start, "300");
                 assert_eq!(explain.end, "1200");
                 assert_eq!(explain.step, "10");
+                assert_eq!(explain.lookback, None);
                 assert!(explain.is_verbose);
             }
             _ => unreachable!(),
@@ -551,6 +630,7 @@ mod tests {
                 assert_eq!(analyze.start, "1676887657.1");
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
+                assert_eq!(analyze.lookback, None);
                 assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert!(!analyze.is_verbose);
             }
@@ -563,6 +643,7 @@ mod tests {
                 assert_eq!(analyze.start, "300");
                 assert_eq!(analyze.end, "1200");
                 assert_eq!(analyze.step, "10");
+                assert_eq!(analyze.lookback, None);
                 assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert!(!analyze.is_verbose);
             }
@@ -575,6 +656,7 @@ mod tests {
                 assert_eq!(analyze.start, "1676887657.1");
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
+                assert_eq!(analyze.lookback, None);
                 assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert!(analyze.is_verbose);
             }
@@ -587,6 +669,7 @@ mod tests {
                 assert_eq!(analyze.start, "300");
                 assert_eq!(analyze.end, "1200");
                 assert_eq!(analyze.step, "10");
+                assert_eq!(analyze.lookback, None);
                 assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert!(analyze.is_verbose);
             }
@@ -603,6 +686,7 @@ mod tests {
                 assert_eq!(eval.start, "0");
                 assert_eq!(eval.end, "30");
                 assert_eq!(eval.step, "10s");
+                assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "data + (1 < bool 2)");
             }
             _ => unreachable!(),
@@ -613,6 +697,7 @@ mod tests {
                 assert_eq!(eval.start, "0");
                 assert_eq!(eval.end, "10");
                 assert_eq!(eval.step, "5s");
+                assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "'1+1'");
             }
             _ => unreachable!(),
@@ -624,6 +709,7 @@ mod tests {
                 assert_eq!(eval.start, "300");
                 assert_eq!(eval.end, "300");
                 assert_eq!(eval.step, "1s");
+                assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "10 atan2 20");
             }
             _ => unreachable!(),
@@ -636,6 +722,7 @@ mod tests {
                 assert_eq!(eval.start, "0");
                 assert_eq!(eval.end, "30");
                 assert_eq!(eval.step, "10s");
+                assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "(sum by(host) (irate(host_cpu_seconds_total{mode!='idle'}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100");
             }
             _ => unreachable!(),
@@ -647,6 +734,7 @@ mod tests {
                 assert_eq!(eval.start, "0");
                 assert_eq!(eval.end, "10");
                 assert_eq!(eval.step, "5s");
+                assert_eq!(eval.lookback, None);
                 assert_eq!(eval.query, "{__name__=\"test\"}");
             }
             _ => unreachable!(),
