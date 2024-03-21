@@ -73,13 +73,18 @@ clippy.implicit_clone = "warn"
 rust.unknown_lints = "deny"
 
 [workspace.dependencies]
+# We turn off default-features for some dependencies here so the workspaces which inherit them can
+# selectively turn them on if needed, since we can override default-features = true (from false)
+# for the inherited dependency but cannot do the reverse (override from true to false).
+#
+# See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.3"
-arrow = { version = "47.0" }
-arrow-array = "47.0"
-arrow-flight = "47.0"
-arrow-ipc = { version = "47.0", features = ["lz4"] }
-arrow-schema = { version = "47.0", features = ["serde"] }
+arrow = { version = "51.0.0", features = ["prettyprint"] }
+arrow-array = { version = "51.0.0", default-features = false, features = ["chrono-tz"] }
+arrow-flight = "51.0"
+arrow-ipc = { version = "51.0.0", default-features = false, features = ["lz4"] }
+arrow-schema = { version = "51.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.6", features = ["headers"] }
@@ -91,20 +96,22 @@ bytes = { version = "1.5", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
 dashmap = "5.4"
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "56c735c458c6d6dd7696941457dd4bbe95eaa2e0" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "56c735c458c6d6dd7696941457dd4bbe95eaa2e0" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "56c735c458c6d6dd7696941457dd4bbe95eaa2e0" }
+datafusion-functions = { git = "https://github.com/apache/arrow-datafusion.git", rev = "56c735c458c6d6dd7696941457dd4bbe95eaa2e0" }
+datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "56c735c458c6d6dd7696941457dd4bbe95eaa2e0" }
+datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "56c735c458c6d6dd7696941457dd4bbe95eaa2e0" }
+datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "56c735c458c6d6dd7696941457dd4bbe95eaa2e0" }
+datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "56c735c458c6d6dd7696941457dd4bbe95eaa2e0" }
 derive_builder = "0.12"
 dotenv = "0.15"
-etcd-client = "0.12"
+# TODO(LFC): Wait for https://github.com/etcdv3/etcd-client/pull/76
+etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev = "4c371e9b3ea8e0a8ee2f9cbd7ded26e54a45df3b" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "04d78b6e025ceb518040fdd10858c2a9d9345820" }
+greptime-proto = { git = "https://github.com/MichaelScofield/greptime-proto.git", rev = "7aa0c648dc60889956b620cea4544b47ddb01c3a" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -115,12 +122,12 @@ moka = "0.12"
 notify = "6.1"
 num_cpus = "1.16"
 once_cell = "1.18"
-opentelemetry-proto = { git = "https://github.com/waynexia/opentelemetry-rust.git", rev = "33841b38dda79b15f2024952be5f32533325ca02", features = [
+opentelemetry-proto = { version = "0.5", features = [
     "gen-tonic",
     "metrics",
     "trace",
 ] }
-parquet = "47.0"
+parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
@@ -144,18 +151,18 @@ serde_with = "3"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.7"
 sysinfo = "0.30"
-# on branch v0.38.x
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "6a93567ae38d42be5c8d08b13c8ff4dde26502ef", features = [
+# on branch v0.44.x
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "c919990bf62ad38d2b0c0a3bc90b26ad919d51b0", features = [
     "visitor",
 ] }
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
-tokio = { version = "1.28", features = ["full"] }
+tokio = { version = "1.36", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-tonic = { version = "0.10", features = ["tls"] }
-uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
+tonic = { version = "0.11", features = ["tls"] }
+uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
 zstd = "0.13"
 
 ## workspaces members

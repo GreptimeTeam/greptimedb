@@ -435,7 +435,7 @@ impl QueryExecutor for DatafusionQueryEngine {
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
-        match plan.output_partitioning().partition_count() {
+        match plan.properties().output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => {
                 let stream = plan
@@ -453,7 +453,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                 // merge into a single partition
                 let plan = CoalescePartitionsExec::new(df_plan.clone());
                 // CoalescePartitionsExec must produce a single partition
-                assert_eq!(1, plan.output_partitioning().partition_count());
+                assert_eq!(1, plan.properties().output_partitioning().partition_count());
                 let df_stream = plan
                     .execute(0, task_ctx)
                     .context(error::DatafusionSnafu)
@@ -628,6 +628,12 @@ mod tests {
                 true
             )
         );
-        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[SUM(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
+        assert_eq!(
+            r#"Projection: SUM(numbers.number)
+  Limit: skip=0, fetch=20
+    Aggregate: groupBy=[[]], aggr=[[SUM(CAST(numbers.number AS UInt64))]]
+      TableScan: numbers"#,
+            format!("{}", logical_plan.display_indent())
+        );
     }
 }

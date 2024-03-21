@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(10, c.len());
         assert!(c.validity().is_all_valid());
         assert!(!c.only_null());
-        assert_eq!(64, c.memory_size());
+        assert_eq!(4, c.memory_size());
 
         for i in 0..10 {
             assert!(!c.is_null(i));

@@ -104,10 +104,7 @@ where
             .map(|&n| n.into())
             .collect::<Vec<Value>>();
         Ok(vec![
-            Value::List(ListValue::new(
-                Some(Box::new(nums)),
-                T::LogicalType::build_data_type(),
-            )),
+            Value::List(ListValue::new(nums, T::LogicalType::build_data_type())),
             self.p.into(),
         ])
     }

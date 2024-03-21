@@ -21,7 +21,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use datafusion::catalog::CatalogList;
+use datafusion::catalog::CatalogProviderList;
+use datafusion::execution::context::SessionState;
 pub use substrait_proto;
 
 pub use crate::df_substrait::DFLogicalSubstraitConvertor;
@@ -35,9 +36,8 @@ pub trait SubstraitPlan {
     async fn decode<B: Buf + Send>(
         &self,
         message: B,
-        catalog_list: Arc<dyn CatalogList>,
-        catalog: &str,
-        schema: &str,
+        catalog_list: Arc<dyn CatalogProviderList>,
+        state: SessionState,
     ) -> Result<Self::Plan, Self::Error>;
 
     fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error>;

@@ -69,7 +69,10 @@ pub fn current_time_rfc3339() -> String {
 /// Returns the yesterday time in rfc3339 format.
 pub fn yesterday_rfc3339() -> String {
     let now = chrono::Utc::now();
-    let day_before = now - chrono::Duration::days(1);
+    let day_before = now
+        - chrono::Duration::try_days(1).unwrap_or_else(|| {
+            panic!("now time ('{now}') is too early to calculate the day before")
+        });
     day_before.to_rfc3339()
 }
 

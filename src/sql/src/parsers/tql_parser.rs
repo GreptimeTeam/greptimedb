@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use datafusion::execution::context::SessionState;
 use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext};
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::{DFSchema, Result as DFResult, ScalarValue, TableReference};
@@ -205,7 +206,7 @@ impl<'a> ParserContext<'a> {
 
     fn parse_to_logical_expr(expr: sqlparser::ast::Expr) -> std::result::Result<Expr, TQLError> {
         let empty_df_schema = DFSchema::empty();
-        SqlToRel::new(&StubContextProvider {})
+        SqlToRel::new(&StubContextProvider::default())
             .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
             .context(ConvertToLogicalExpressionSnafu)
     }
@@ -262,20 +263,29 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-#[derive(Default)]
-struct StubContextProvider {}
+struct StubContextProvider {
+    state: SessionState,
+}
+
+impl Default for StubContextProvider {
+    fn default() -> Self {
+        Self {
+            state: SessionState::new_with_config_rt(Default::default(), Default::default()),
+        }
+    }
+}
 
 impl ContextProvider for StubContextProvider {
-    fn get_table_provider(&self, _name: TableReference) -> DFResult<Arc<dyn TableSource>> {
+    fn get_table_source(&self, _name: TableReference) -> DFResult<Arc<dyn TableSource>> {
         unimplemented!()
     }
 
-    fn get_function_meta(&self, _name: &str) -> Option<Arc<ScalarUDF>> {
-        None
+    fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
+        self.state.scalar_functions().get(name).cloned()
     }
 
-    fn get_aggregate_meta(&self, _name: &str) -> Option<Arc<AggregateUDF>> {
-        unimplemented!()
+    fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
+        self.state.aggregate_functions().get(name).cloned()
     }
 
     fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
@@ -288,6 +298,18 @@ impl ContextProvider for StubContextProvider {
 
     fn options(&self) -> &ConfigOptions {
         unimplemented!()
+    }
+
+    fn udfs_names(&self) -> Vec<String> {
+        self.state.scalar_functions().keys().cloned().collect()
+    }
+
+    fn udafs_names(&self) -> Vec<String> {
+        self.state.aggregate_functions().keys().cloned().collect()
+    }
+
+    fn udwfs_names(&self) -> Vec<String> {
+        self.state.window_functions().keys().cloned().collect()
     }
 }
 

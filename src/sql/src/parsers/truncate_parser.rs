@@ -27,8 +27,7 @@ impl<'a> ParserContext<'a> {
         let _ = self.parser.parse_keyword(Keyword::TABLE);
 
         let raw_table_ident =
-            self.parser
-                .parse_object_name()
+            self.parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
                     sql: self.sql,
                     expected: "a table name",

@@ -36,7 +36,7 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, warn};
 use dashmap::DashMap;
 use datafusion::catalog::schema::SchemaProvider;
-use datafusion::catalog::{CatalogList, CatalogProvider};
+use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
@@ -643,10 +643,14 @@ impl RegionServerInner {
             .await?;
 
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
-
+        let query_engine_ctx = self.query_engine.engine_context(ctx.clone());
         // decode substrait plan to logical plan and execute it
         let logical_plan = DFLogicalSubstraitConvertor
-            .decode(Bytes::from(plan), catalog_list, "", "")
+            .decode(
+                Bytes::from(plan),
+                catalog_list,
+                query_engine_ctx.state().clone(),
+            )
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
@@ -728,7 +732,7 @@ impl DummyCatalogList {
     }
 }
 
-impl CatalogList for DummyCatalogList {
+impl CatalogProviderList for DummyCatalogList {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -786,8 +790,8 @@ impl SchemaProvider for DummySchemaProvider {
         vec![]
     }
 
-    async fn table(&self, _name: &str) -> Option<Arc<dyn TableProvider>> {
-        Some(self.table.clone())
+    async fn table(&self, _name: &str) -> DfResult<Option<Arc<dyn TableProvider>>> {
+        Ok(Some(self.table.clone()))
     }
 
     fn table_exist(&self, _name: &str) -> bool {

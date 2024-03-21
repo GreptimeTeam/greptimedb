@@ -31,8 +31,7 @@ impl<'a> ParserContext<'a> {
 
     fn parse_describe_table(&mut self) -> Result<Statement> {
         let raw_table_idents =
-            self.parser
-                .parse_object_name()
+            self.parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
                     sql: self.sql,
                     expected: "a table name",

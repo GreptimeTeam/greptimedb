@@ -126,6 +126,10 @@ impl Function for PyUDF {
     }
 
     fn signature(&self) -> common_query::prelude::Signature {
+        if self.copr.arg_types.is_empty() {
+            return Signature::any(0, Volatility::Volatile);
+        }
+
         // try our best to get a type signature
         let mut arg_types = Vec::with_capacity(self.copr.arg_types.len());
         let mut know_all_types = true;
