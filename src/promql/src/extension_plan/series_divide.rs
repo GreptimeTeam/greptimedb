@@ -258,22 +258,20 @@ impl Stream for SeriesDivideStream {
             if let Some(batch) = self.buffer.as_ref() {
                 let same_length = self.find_first_diff_row(batch) + 1;
                 if same_length >= batch.num_rows() {
-                    let next_batch = match ready!(self.as_mut().fetch_next_batch(cx)) {
-                        Some(Ok(next_batch)) => next_batch,
-                        None => {
-                            self.num_series += 1;
-                            return Poll::Ready(self.buffer.take().map(Ok));
-                        }
-                        error => return Poll::Ready(error),
-                    };
-                    self.buffer = match self.buffer.take() {
-                        None => Some(next_batch),
-                        Some(batch) => Some(compute::concat_batches(
+                    let next_batch = ready!(self.as_mut().fetch_next_batch(cx)).transpose()?;
+                    // SAFETY: if-let guards the buffer is not None;
+                    //   and we cannot change the buffer at this point.
+                    let batch = self.buffer.take().expect("this batch must exist");
+                    if let Some(next_batch) = next_batch {
+                        self.buffer = Some(compute::concat_batches(
                             &batch.schema(),
                             &[batch, next_batch],
-                        )?),
-                    };
-                    continue;
+                        )?);
+                        continue;
+                    } else {
+                        self.num_series += 1;
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
                 } else {
                     let result_batch = batch.slice(0, same_length);
                     let remaining_batch = batch.slice(same_length, batch.num_rows() - same_length);
