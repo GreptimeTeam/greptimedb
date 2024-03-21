@@ -506,12 +506,36 @@ mod tests {
             _ => unreachable!(),
         }
 
+        let sql = "TQL EXPLAIN ('1970-01-01T00:05:00'::timestamp, '1970-01-01T00:10:00'::timestamp + '10 minutes'::interval, 10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Explain(explain)) => {
+                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(explain.start, "300");
+                assert_eq!(explain.end, "1200");
+                assert_eq!(explain.step, "10");
+                assert!(!explain.is_verbose);
+            }
+            _ => unreachable!(),
+        }
+
         let sql = "TQL EXPLAIN VERBOSE (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
                 assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
+                assert_eq!(explain.step, "10");
+                assert!(explain.is_verbose);
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "TQL EXPLAIN VERBOSE ('1970-01-01T00:05:00'::timestamp, '1970-01-01T00:10:00'::timestamp + '10 minutes'::interval, 10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Explain(explain)) => {
+                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(explain.start, "300");
+                assert_eq!(explain.end, "1200");
                 assert_eq!(explain.step, "10");
                 assert!(explain.is_verbose);
             }
@@ -533,12 +557,36 @@ mod tests {
             _ => unreachable!(),
         }
 
+        let sql = "TQL ANALYZE ('1970-01-01T00:05:00'::timestamp, '1970-01-01T00:10:00'::timestamp + '10 minutes'::interval, 10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Analyze(analyze)) => {
+                assert_eq!(analyze.start, "300");
+                assert_eq!(analyze.end, "1200");
+                assert_eq!(analyze.step, "10");
+                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert!(!analyze.is_verbose);
+            }
+            _ => unreachable!(),
+        }
+
         let sql = "TQL ANALYZE VERBOSE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Analyze(analyze)) => {
                 assert_eq!(analyze.start, "1676887657.1");
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
+                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert!(analyze.is_verbose);
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "TQL ANALYZE VERBOSE ('1970-01-01T00:05:00'::timestamp, '1970-01-01T00:10:00'::timestamp + '10 minutes'::interval, 10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Analyze(analyze)) => {
+                assert_eq!(analyze.start, "300");
+                assert_eq!(analyze.end, "1200");
+                assert_eq!(analyze.step, "10");
                 assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
                 assert!(analyze.is_verbose);
             }
