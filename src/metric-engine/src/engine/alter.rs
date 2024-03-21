@@ -15,12 +15,16 @@
 use std::collections::HashMap;
 
 use common_telemetry::{error, info};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use store_api::region_request::{AffectedRows, AlterKind, RegionAlterRequest};
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
-use crate::error::{ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result};
+use crate::error::{
+    ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
+};
 use crate::metrics::FORBIDDEN_OPERATION_COUNT;
 use crate::utils::{to_data_region_id, to_metadata_region_id};
 
@@ -37,19 +41,32 @@ impl MetricEngineInner {
         let result = if is_altering_physical_region {
             self.alter_physical_region(region_id, request).await
         } else {
-            self.alter_logical_region(region_id, request, extension_return_value)
-                .await
+            let physical_region_id = self.alter_logical_region(region_id, request).await?;
+
+            // Add physical table's column to extension map.
+            // It's ok to overwrite existing key, as the latter come schema is more up-to-date
+            let physical_columns = self
+                .data_region
+                .physical_columns(physical_region_id)
+                .await?;
+            extension_return_value.insert(
+                ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
+                ColumnMetadata::encode_list(&physical_columns)
+                    .context(SerializeColumnMetadataSnafu)?,
+            );
+
+            Ok(())
         };
 
         result.map(|_| 0)
     }
 
+    /// Return the physical region id behind this logical region
     async fn alter_logical_region(
         &self,
         region_id: RegionId,
         request: RegionAlterRequest,
-        new_columns: &mut HashMap<String, Vec<u8>>,
-    ) -> Result<()> {
+    ) -> Result<RegionId> {
         let physical_region_id = {
             let state = &self.state.read().unwrap();
             state.get_physical_region_id(region_id).with_context(|| {
@@ -60,7 +77,7 @@ impl MetricEngineInner {
 
         // only handle adding column
         let AlterKind::AddColumns { columns } = request.kind else {
-            return Ok(());
+            return Ok(physical_region_id);
         };
 
         let metadata_region_id = to_metadata_region_id(physical_region_id);
@@ -87,7 +104,6 @@ impl MetricEngineInner {
             metadata_region_id,
             region_id,
             columns_to_add,
-            new_columns,
         )
         .await?;
 
@@ -98,7 +114,7 @@ impl MetricEngineInner {
                 .await?;
         }
 
-        Ok(())
+        Ok(physical_region_id)
     }
 
     async fn alter_physical_region(
@@ -172,7 +188,7 @@ mod test {
 
         let region_id = env.default_logical_region_id();
         engine_inner
-            .alter_logical_region(region_id, request, &mut HashMap::new())
+            .alter_logical_region(region_id, request)
             .await
             .unwrap();
         let semantic_type = metadata_region

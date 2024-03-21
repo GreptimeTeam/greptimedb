@@ -63,8 +63,21 @@ impl MetricEngineInner {
         let result = if request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY) {
             self.create_physical_region(region_id, request).await
         } else if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
-            self.create_logical_region(region_id, request, extension_return_value)
-                .await
+            let physical_region_id = self.create_logical_region(region_id, request).await?;
+
+            // Add physical table's column to extension map.
+            // It's ok to overwrite existing key, as the latter come schema is more up-to-date
+            let physical_columns = self
+                .data_region
+                .physical_columns(physical_region_id)
+                .await?;
+            extension_return_value.insert(
+                ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
+                ColumnMetadata::encode_list(&physical_columns)
+                    .context(SerializeColumnMetadataSnafu)?,
+            );
+
+            Ok(())
         } else {
             MissingRegionOptionSnafu {}.fail()
         };
@@ -134,12 +147,13 @@ impl MetricEngineInner {
     ///
     /// `alter_request` is a hashmap that stores the alter requests that were executed
     /// to the physical region.
+    ///
+    /// Return the physical region id of this logical region
     async fn create_logical_region(
         &self,
         logical_region_id: RegionId,
         request: RegionCreateRequest,
-        alter_request: &mut HashMap<String, Vec<u8>>,
-    ) -> Result<()> {
+    ) -> Result<RegionId> {
         // transform IDs
         let physical_region_id_raw = request
             .options
@@ -160,7 +174,7 @@ impl MetricEngineInner {
             .await?
         {
             info!("Create a existing logical region {logical_region_id}. Skipped");
-            return Ok(());
+            return Ok(data_region_id);
         }
 
         // find new columns to add
@@ -192,7 +206,6 @@ impl MetricEngineInner {
                 metadata_region_id,
                 logical_region_id,
                 new_columns,
-                alter_request,
             )
             .await?;
         }
@@ -235,7 +248,7 @@ impl MetricEngineInner {
         info!("Created new logical region {logical_region_id} on physical region {data_region_id}");
         LOGICAL_REGION_COUNT.inc();
 
-        Ok(())
+        Ok(data_region_id)
     }
 
     /// Execute corresponding alter requests to mito region. New added columns' [ColumnMetadata] will be
@@ -246,7 +259,6 @@ impl MetricEngineInner {
         metadata_region_id: RegionId,
         logical_region_id: RegionId,
         mut new_columns: Vec<ColumnMetadata>,
-        added_columns: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
         // alter data region
         self.data_region
@@ -269,12 +281,6 @@ impl MetricEngineInner {
         );
         info!("Create region {logical_region_id} leads to adding columns {new_columns:?} to physical region {data_region_id}");
         PHYSICAL_COLUMN_COUNT.add(new_columns.len() as _);
-
-        // store the new column metadata into alter request
-        added_columns.insert(
-            ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-            serde_json::to_vec(&new_columns).context(SerializeColumnMetadataSnafu)?,
-        );
 
         Ok(())
     }
