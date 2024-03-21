@@ -24,6 +24,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
+use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
@@ -212,17 +213,17 @@ impl Drop for AllocTracker {
 #[derive(Clone)]
 pub(crate) struct MemtableBuilderProvider {
     write_buffer_manager: Option<WriteBufferManagerRef>,
-    default_memtable_builder: MemtableBuilderRef,
+    config: Arc<MitoConfig>,
 }
 
 impl MemtableBuilderProvider {
     pub(crate) fn new(
         write_buffer_manager: Option<WriteBufferManagerRef>,
-        default_memtable_builder: MemtableBuilderRef,
+        config: Arc<MitoConfig>,
     ) -> Self {
         Self {
             write_buffer_manager,
-            default_memtable_builder,
+            config,
         }
     }
 
@@ -247,7 +248,24 @@ impl MemtableBuilderProvider {
                     self.write_buffer_manager.clone(),
                 ))
             }
-            None => self.default_memtable_builder.clone(),
+            None => self.default_memtable_builder(dedup),
+        }
+    }
+
+    fn default_memtable_builder(&self, dedup: bool) -> MemtableBuilderRef {
+        match &self.config.memtable {
+            MemtableConfig::PartitionTree(config) => {
+                let mut config = config.clone();
+                config.dedup = dedup;
+                Arc::new(PartitionTreeMemtableBuilder::new(
+                    config,
+                    self.write_buffer_manager.clone(),
+                ))
+            }
+            MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(
+                self.write_buffer_manager.clone(),
+                dedup,
+            )),
         }
     }
 }

@@ -169,6 +169,7 @@ impl Default for TwcsOptions {
 
 /// We need to define a new struct without enum fields as `#[serde(default)]` does not
 /// support external tagging.
+#[serde_as]
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct RegionOptionsWithoutEnum {
@@ -176,6 +177,7 @@ struct RegionOptionsWithoutEnum {
     #[serde(with = "humantime_serde")]
     ttl: Option<Duration>,
     storage: Option<String>,
+    #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
 }
 
