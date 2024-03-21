@@ -239,7 +239,7 @@ fn check_op_type(append_mode: bool, request: &WriteRequest) -> Result<()> {
             request.op_type == OpType::Put,
             InvalidRequestSnafu {
                 region_id: request.region_id,
-                reason: format!("Only put is allowed under append mode"),
+                reason: "Only put is allowed under append mode",
             }
         );
     }

@@ -96,21 +96,21 @@ async fn test_append_mode_compaction() {
     // Flush 2 SSTs for compaction.
     // a, field 1, 2
     let rows = Rows {
-        schema: column_schemas.to_vec(),
+        schema: column_schemas.clone(),
         rows: build_rows_for_key("a", 1, 3, 1),
     };
     put_rows(&engine, region_id, rows).await;
     flush_region(&engine, region_id, None).await;
     // a, field 0, 1
     let rows = Rows {
-        schema: column_schemas.to_vec(),
+        schema: column_schemas.clone(),
         rows: build_rows_for_key("a", 0, 2, 0),
     };
     put_rows(&engine, region_id, rows).await;
     flush_region(&engine, region_id, None).await;
     // b, field 0, 1
     let rows = Rows {
-        schema: column_schemas.to_vec(),
+        schema: column_schemas.clone(),
         rows: build_rows_for_key("b", 0, 2, 0),
     };
     put_rows(&engine, region_id, rows).await;
@@ -124,7 +124,7 @@ async fn test_append_mode_compaction() {
 
     // a, field 2, 3
     let rows = Rows {
-        schema: column_schemas.to_vec(),
+        schema: column_schemas,
         rows: build_rows_for_key("a", 2, 4, 2),
     };
     put_rows(&engine, region_id, rows).await;
