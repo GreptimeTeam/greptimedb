@@ -28,10 +28,15 @@ use super::test_util::{
 };
 use crate::tests::test_util::MockInstance;
 
+#[allow(clippy::too_many_arguments)]
 async fn promql_query(
     ins: Arc<Instance>,
     promql: &str,
     query_ctx: Arc<QueryContext>,
+    start: SystemTime,
+    end: SystemTime,
+    interval: Duration,
+    lookback: Duration,
 ) -> operator::error::Result<Output> {
     let query = PromQuery {
         query: promql.to_string(),
@@ -42,10 +47,10 @@ async fn promql_query(
     else {
         unreachable!()
     };
-    eval_stmt.start = UNIX_EPOCH;
-    eval_stmt.end = unix_epoch_plus_100s();
-    eval_stmt.interval = Duration::from_secs(60);
-    eval_stmt.lookback_delta = Duration::from_secs(0);
+    eval_stmt.start = start;
+    eval_stmt.end = end;
+    eval_stmt.interval = interval;
+    eval_stmt.lookback_delta = lookback;
 
     ins.statement_executor()
         .execute_stmt(QueryStatement::Promql(eval_stmt), query_ctx)
@@ -79,25 +84,17 @@ async fn create_insert_query_assert(
             let _ = v.unwrap();
         });
 
-    let query = PromQuery {
-        query: promql.to_string(),
-        ..PromQuery::default()
-    };
-    let QueryStatement::Promql(mut eval_stmt) =
-        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
-    else {
-        unreachable!()
-    };
-    eval_stmt.start = start;
-    eval_stmt.end = end;
-    eval_stmt.interval = interval;
-    eval_stmt.lookback_delta = lookback;
-
-    let query_output = instance
-        .statement_executor()
-        .execute_stmt(QueryStatement::Promql(eval_stmt), QueryContext::arc())
-        .await
-        .unwrap();
+    let query_output = promql_query(
+        instance,
+        promql,
+        QueryContext::arc(),
+        start,
+        end,
+        interval,
+        lookback,
+    )
+    .await
+    .unwrap();
     check_unordered_output_stream(query_output, expected).await;
 }
 
@@ -573,10 +570,19 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
         let _ = v.unwrap();
     });
 
+    let start = UNIX_EPOCH;
+    let end = unix_epoch_plus_100s();
+    let interval = Duration::from_secs(60);
+    let lookback_delta = Duration::from_secs(0);
+
     let query_output = promql_query(
         ins.clone(),
         r#"http_requests{__schema__="greptime_private"}"#,
         QueryContext::arc(),
+        start,
+        end,
+        interval,
+        lookback_delta,
     )
     .await
     .unwrap();
@@ -596,13 +602,26 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
 
     check_unordered_output_stream(query_output, expected).await;
 
-    let query_output = promql_query(ins.clone(), r#"http_requests"#, QueryContext::arc()).await;
+    let query_output = promql_query(
+        ins.clone(),
+        r#"http_requests"#,
+        QueryContext::arc(),
+        start,
+        end,
+        interval,
+        lookback_delta,
+    )
+    .await;
     assert!(query_output.is_err());
 
     let query_output = promql_query(
         ins.clone(),
         r#"http_requests"#,
         QueryContext::with_db_name(Some("greptime_private")),
+        start,
+        end,
+        interval,
+        lookback_delta,
     )
     .await
     .unwrap();
