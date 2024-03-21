@@ -14,7 +14,7 @@
 
 //! Internal metrics of the memtable.
 
-/// Metrics of writing the merge tree.
+/// Metrics of writing the partition tree.
 pub struct WriteMetrics {
     /// Size allocated by keys.
     pub key_bytes: usize,

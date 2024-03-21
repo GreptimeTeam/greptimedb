@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info, warn};
-use common_time::util::current_time_millis;
 use common_wal::options::WalOptions;
 use futures::StreamExt;
 use object_store::manager::ObjectStoreManagerRef;
@@ -38,7 +37,7 @@ use crate::error::{
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::MemtableBuilderRef;
+use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
@@ -47,13 +46,14 @@ use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::{EntryId, Wal};
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
     region_id: RegionId,
     metadata: Option<RegionMetadata>,
-    memtable_builder: MemtableBuilderRef,
+    memtable_builder_provider: MemtableBuilderProvider,
     object_store_manager: ObjectStoreManagerRef,
     region_dir: String,
     scheduler: SchedulerRef,
@@ -61,6 +61,7 @@ pub(crate) struct RegionOpener {
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
     intermediate_manager: IntermediateManager,
+    time_provider: Option<TimeProviderRef>,
 }
 
 impl RegionOpener {
@@ -68,7 +69,7 @@ impl RegionOpener {
     pub(crate) fn new(
         region_id: RegionId,
         region_dir: &str,
-        memtable_builder: MemtableBuilderRef,
+        memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
         scheduler: SchedulerRef,
         intermediate_manager: IntermediateManager,
@@ -76,7 +77,7 @@ impl RegionOpener {
         RegionOpener {
             region_id,
             metadata: None,
-            memtable_builder,
+            memtable_builder_provider,
             object_store_manager,
             region_dir: normalize_dir(region_dir),
             scheduler,
@@ -84,6 +85,7 @@ impl RegionOpener {
             cache_manager: None,
             skip_wal_replay: false,
             intermediate_manager,
+            time_provider: None,
         }
     }
 
@@ -169,11 +171,14 @@ impl RegionOpener {
         let manifest_manager =
             RegionManifestManager::new(metadata.clone(), region_manifest_options).await?;
 
+        let memtable_builder = self
+            .memtable_builder_provider
+            .builder_for_options(options.memtable.as_ref());
         // Initial memtable id is 0.
         let part_duration = options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
-            self.memtable_builder,
+            memtable_builder.clone(),
             0,
             part_duration,
         ));
@@ -189,6 +194,9 @@ impl RegionOpener {
             object_store,
             self.intermediate_manager,
         ));
+        let time_provider = self
+            .time_provider
+            .unwrap_or_else(|| Arc::new(StdTimeProvider));
 
         Ok(MitoRegion {
             region_id,
@@ -201,9 +209,11 @@ impl RegionOpener {
                 self.cache_manager,
             )),
             wal_options,
-            last_flush_millis: AtomicI64::new(current_time_millis()),
+            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
+            time_provider,
+            memtable_builder,
         })
     }
 
@@ -271,11 +281,14 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
         ));
+        let memtable_builder = self
+            .memtable_builder_provider
+            .builder_for_options(region_options.memtable.as_ref());
         // Initial memtable id is 0.
         let part_duration = region_options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
-            self.memtable_builder.clone(),
+            memtable_builder.clone(),
             0,
             part_duration,
         ));
@@ -307,6 +320,10 @@ impl RegionOpener {
         } else {
             info!("Skip the WAL replay for region: {}", region_id);
         }
+        let time_provider = self
+            .time_provider
+            .clone()
+            .unwrap_or_else(|| Arc::new(StdTimeProvider));
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -315,9 +332,11 @@ impl RegionOpener {
             manifest_manager,
             file_purger,
             wal_options,
-            last_flush_millis: AtomicI64::new(current_time_millis()),
+            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
+            time_provider,
+            memtable_builder,
         };
         Ok(Some(region))
     }

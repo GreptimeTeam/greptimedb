@@ -43,7 +43,7 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
-    self, InitMetadataSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
+    InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
     StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
@@ -357,7 +357,7 @@ impl MetaSrv {
             self.leader_cached_kv_backend
                 .load()
                 .await
-                .context(error::KvBackendSnafu)?;
+                .context(KvBackendSnafu)?;
             self.procedure_manager
                 .start()
                 .await

@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use client::Output;
+use client::{Output, OutputData, OutputMeta};
 use common_datasource::file_format::Format;
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
@@ -129,7 +129,9 @@ impl StatementExecutor {
             .get(CONTINUE_ON_ERROR_KEY)
             .and_then(|v| bool::from_str(v).ok())
             .unwrap_or(false);
+
         let mut rows_inserted = 0;
+        let mut insert_cost = 0;
 
         for e in entries {
             let table_name = match parse_file_name_to_copy(&e) {
@@ -156,8 +158,10 @@ impl StatementExecutor {
             };
             debug!("Copy table, arg: {:?}", req);
             match self.copy_table_from(req, ctx.clone()).await {
-                Ok(rows) => {
+                Ok(o) => {
+                    let (rows, cost) = o.extract_rows_and_cost();
                     rows_inserted += rows;
+                    insert_cost += cost;
                 }
                 Err(err) => {
                     if continue_on_error {
@@ -169,7 +173,10 @@ impl StatementExecutor {
                 }
             }
         }
-        Ok(Output::new_with_affected_rows(rows_inserted))
+        Ok(Output::new(
+            OutputData::AffectedRows(rows_inserted),
+            OutputMeta::new_with_cost(insert_cost),
+        ))
     }
 }
 

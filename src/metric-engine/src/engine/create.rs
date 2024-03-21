@@ -38,7 +38,9 @@ use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 
-use crate::engine::options::set_index_options_for_data_region;
+use crate::engine::options::{
+    set_index_options_for_data_region, set_memtable_options_for_data_region,
+};
 use crate::engine::MetricEngineInner;
 use crate::error::{
     ColumnNotFoundSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
@@ -420,6 +422,9 @@ impl MetricEngineInner {
 
         // set index options
         set_index_options_for_data_region(&mut data_region_request.options);
+
+        // Set memtable options.
+        set_memtable_options_for_data_region(&mut data_region_request.options);
 
         data_region_request
     }

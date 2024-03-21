@@ -14,14 +14,11 @@
 
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use client::Output;
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
-use opentelemetry_proto::tonic::collector::metrics::v1::{
-    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
-};
-use opentelemetry_proto::tonic::collector::trace::v1::{
-    ExportTraceServiceRequest, ExportTraceServiceResponse,
-};
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
@@ -40,7 +37,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> ServerResult<ExportMetricsServiceResponse> {
+    ) -> ServerResult<Output> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -53,19 +50,12 @@ impl OpenTelemetryProtocolHandler for Instance {
         interceptor_ref.pre_execute(ctx.clone())?;
 
         let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request)?;
-        let _ = self
-            .handle_row_inserts(requests, ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)?;
-
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
-        let resp = ExportMetricsServiceResponse {
-            // TODO(sunng87): add support for partial_success in future patch
-            partial_success: None,
-        };
-        Ok(resp)
+        self.handle_row_inserts(requests, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)
     }
 
     #[tracing::instrument(skip_all)]
@@ -73,7 +63,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         &self,
         request: ExportTraceServiceRequest,
         ctx: QueryContextRef,
-    ) -> ServerResult<ExportTraceServiceResponse> {
+    ) -> ServerResult<Output> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -95,18 +85,11 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         let (requests, rows) = otlp::trace::to_grpc_insert_requests(table_name, spans)?;
 
-        let _ = self
-            .handle_row_inserts(requests, ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)?;
-
         OTLP_TRACES_ROWS.inc_by(rows as u64);
 
-        let resp = ExportTraceServiceResponse {
-            // TODO(fys): add support for partial_success in future patch
-            partial_success: None,
-        };
-        Ok(resp)
+        self.handle_row_inserts(requests, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)
     }
 }

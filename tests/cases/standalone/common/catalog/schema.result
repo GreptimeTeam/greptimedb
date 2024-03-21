@@ -120,7 +120,7 @@ SHOW TABLES FROM public WHERE Tables = 'numbers';
 
 DROP SCHEMA test_public_schema;
 
-Error: 1001(Unsupported), SQL statement is not supported: DROP SCHEMA test_public_schema;, keyword: SCHEMA
+Error: 1001(Unsupported), Not supported: Drop Database
 
 SELECT * FROM test_public_schema.hello;
 

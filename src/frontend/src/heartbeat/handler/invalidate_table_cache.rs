@@ -20,7 +20,6 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_telemetry::error;
-use futures::future::Either;
 
 #[derive(Clone)]
 pub struct InvalidateTableCacheHandler {
@@ -32,8 +31,7 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
             ctx.incoming_message.as_ref(),
-            Some((_, Instruction::InvalidateTableIdCache { .. }))
-                | Some((_, Instruction::InvalidateTableNameCache { .. }))
+            Some((_, Instruction::InvalidateCaches(_)))
         )
     }
 
@@ -42,22 +40,11 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
         let cache_invalidator = self.cache_invalidator.clone();
 
         let (meta, invalidator) = match ctx.incoming_message.take() {
-            Some((meta, Instruction::InvalidateTableIdCache(table_id))) => (
-                meta,
-                Either::Left(async move {
-                    cache_invalidator
-                        .invalidate_table_id(&Context::default(), table_id)
-                        .await
-                }),
-            ),
-            Some((meta, Instruction::InvalidateTableNameCache(table_name))) => (
-                meta,
-                Either::Right(async move {
-                    cache_invalidator
-                        .invalidate_table_name(&Context::default(), table_name)
-                        .await
-                }),
-            ),
+            Some((meta, Instruction::InvalidateCaches(caches))) => (meta, async move {
+                cache_invalidator
+                    .invalidate(&Context::default(), caches)
+                    .await
+            }),
             _ => unreachable!("InvalidateTableCacheHandler: should be guarded by 'is_acceptable'"),
         };
 

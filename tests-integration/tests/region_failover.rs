@@ -352,6 +352,7 @@ async fn run_region_failover_procedure(
         RegionFailoverContext {
             region_lease_secs: 10,
             in_memory: meta_srv.in_memory().clone(),
+            kv_backend: meta_srv.kv_backend().clone(),
             mailbox: meta_srv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {

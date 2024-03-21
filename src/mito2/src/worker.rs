@@ -33,6 +33,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
+use rand::{thread_rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::region_engine::SetReadonlyResponse;
@@ -47,21 +48,27 @@ use crate::config::MitoConfig;
 use crate::error::{InvalidRequestSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::manifest::action::RegionEdit;
-use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
+use crate::memtable::partition_tree::PartitionTreeMemtableBuilder;
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
-use crate::memtable::{MemtableBuilderRef, MemtableConfig};
+use crate::memtable::{MemtableBuilderProvider, MemtableConfig};
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
 
 pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
+
+/// Interval to check whether regions should flush.
+pub(crate) const CHECK_REGION_INTERVAL: Duration = Duration::from_secs(60);
+/// Max delay to check region periodical tasks.
+pub(crate) const MAX_INITIAL_CHECK_DELAY_SECS: u64 = 60 * 3;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
@@ -140,6 +147,7 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
+        let time_provider = Arc::new(StdTimeProvider);
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -153,6 +161,7 @@ impl WorkerGroup {
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
                     intermediate_manager: intermediate_manager.clone(),
+                    time_provider: time_provider.clone(),
                 }
                 .start()
             })
@@ -223,6 +232,7 @@ impl WorkerGroup {
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
+        time_provider: TimeProviderRef,
     ) -> Result<WorkerGroup> {
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
             Arc::new(WriteBufferManagerImpl::new(
@@ -260,6 +270,7 @@ impl WorkerGroup {
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
                     intermediate_manager: intermediate_manager.clone(),
+                    time_provider: time_provider.clone(),
                 }
                 .start()
             })
@@ -300,6 +311,12 @@ async fn write_cache_from_config(
     Ok(Some(Arc::new(cache)))
 }
 
+/// Computes a initial check delay for a worker.
+pub(crate) fn worker_init_check_delay() -> Duration {
+    let init_check_delay = thread_rng().gen_range(0..MAX_INITIAL_CHECK_DELAY_SECS);
+    Duration::from_secs(init_check_delay)
+}
+
 /// Worker start config.
 struct WorkerStarter<S> {
     id: WorkerId,
@@ -311,6 +328,7 @@ struct WorkerStarter<S> {
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
     intermediate_manager: IntermediateManager,
+    time_provider: TimeProviderRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -321,15 +339,16 @@ impl<S: LogStore> WorkerStarter<S> {
 
         let running = Arc::new(AtomicBool::new(true));
 
-        let memtable_builder = match &self.config.memtable {
-            MemtableConfig::Experimental(merge_tree) => Arc::new(MergeTreeMemtableBuilder::new(
-                merge_tree.clone(),
+        let default_memtable_builder = match &self.config.memtable {
+            MemtableConfig::PartitionTree(config) => Arc::new(PartitionTreeMemtableBuilder::new(
+                config.clone(),
                 Some(self.write_buffer_manager.clone()),
             )) as _,
             MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(Some(
                 self.write_buffer_manager.clone(),
             ))) as _,
         };
+        let now = self.time_provider.current_time_millis();
         let mut worker_thread = RegionWorkerLoop {
             id: self.id,
             config: self.config,
@@ -340,7 +359,10 @@ impl<S: LogStore> WorkerStarter<S> {
             wal: Wal::new(self.log_store),
             object_store_manager: self.object_store_manager.clone(),
             running: running.clone(),
-            memtable_builder,
+            memtable_builder_provider: MemtableBuilderProvider::new(
+                Some(self.write_buffer_manager.clone()),
+                default_memtable_builder,
+            ),
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
@@ -353,6 +375,8 @@ impl<S: LogStore> WorkerStarter<S> {
             listener: self.listener,
             cache_manager: self.cache_manager,
             intermediate_manager: self.intermediate_manager,
+            time_provider: self.time_provider,
+            last_periodical_check_millis: now,
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -493,8 +517,8 @@ struct RegionWorkerLoop<S> {
     object_store_manager: ObjectStoreManagerRef,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
-    /// Memtable builder for each region.
-    memtable_builder: MemtableBuilderRef,
+    /// Memtable builder provider for each region.
+    memtable_builder_provider: MemtableBuilderProvider,
     /// Background job scheduler.
     scheduler: SchedulerRef,
     /// Engine write buffer manager.
@@ -511,12 +535,21 @@ struct RegionWorkerLoop<S> {
     cache_manager: CacheManagerRef,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
+    /// Provider to get current time.
+    time_provider: TimeProviderRef,
+    /// Last time to check regions periodically.
+    last_periodical_check_millis: i64,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
-        info!("Start region worker thread {}", self.id);
+        let init_check_delay = worker_init_check_delay();
+        info!(
+            "Start region worker thread {}, init_check_delay: {:?}",
+            self.id, init_check_delay
+        );
+        self.last_periodical_check_millis += init_check_delay.as_millis() as i64;
 
         // Buffer to retrieve requests from receiver.
         let mut buffer = RequestBuffer::with_capacity(self.config.worker_request_batch_size);
@@ -525,9 +558,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // Clear the buffer before handling next batch of requests.
             buffer.clear();
 
-            match self.receiver.recv().await {
-                Some(request) => buffer.push(request),
-                None => break,
+            let max_wait_time = self.time_provider.wait_duration(CHECK_REGION_INTERVAL);
+            match tokio::time::timeout(max_wait_time, self.receiver.recv()).await {
+                Ok(Some(request)) => buffer.push(request),
+                // The channel is disconnected.
+                Ok(None) => break,
+                Err(_) => {
+                    // Timeout. Checks periodical tasks.
+                    self.handle_periodical_tasks();
+                    continue;
+                }
             }
 
             // Try to recv more requests from the channel.
@@ -541,6 +581,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
 
             self.handle_requests(&mut buffer).await;
+
+            self.handle_periodical_tasks();
         }
 
         self.clean().await;
@@ -626,6 +668,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             };
 
             ddl.sender.send(res);
+        }
+    }
+
+    /// Handle periodical tasks such as region auto flush.
+    fn handle_periodical_tasks(&mut self) {
+        let interval = CHECK_REGION_INTERVAL.as_millis() as i64;
+        if self
+            .time_provider
+            .elapsed_since(self.last_periodical_check_millis)
+            < interval
+        {
+            return;
+        }
+
+        self.last_periodical_check_millis = self.time_provider.current_time_millis();
+
+        if let Err(e) = self.flush_periodically() {
+            error!(e; "Failed to flush regions periodically");
         }
     }
 

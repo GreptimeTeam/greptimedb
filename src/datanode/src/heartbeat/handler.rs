@@ -81,9 +81,7 @@ impl RegionHeartbeatResponseHandler {
             Instruction::UpgradeRegion(upgrade_region) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_upgrade_region_instruction(upgrade_region)
             })),
-            Instruction::InvalidateTableIdCache(_) | Instruction::InvalidateTableNameCache(_) => {
-                InvalidHeartbeatResponseSnafu.fail()
-            }
+            Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
         }
     }
 }

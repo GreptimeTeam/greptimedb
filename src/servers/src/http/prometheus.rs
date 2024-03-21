@@ -39,6 +39,7 @@ use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use session::context::QueryContextRef;
 use snafu::{Location, ResultExt};
 
@@ -46,6 +47,7 @@ pub use super::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
     CollectRecordbatchSnafu, Error, InvalidQuerySnafu, Result, UnexpectedResultSnafu,
 };
+use crate::http::header::collect_plan_metrics;
 use crate::prom_store::METRIC_NAME_LABEL;
 use crate::prometheus_handler::PrometheusHandlerRef;
 
@@ -275,6 +277,7 @@ pub async fn labels_query(
     let mut labels = HashSet::new();
     let _ = labels.insert(METRIC_NAME.to_string());
 
+    let mut merge_map = HashMap::new();
     for query in queries {
         let prom_query = PromQuery {
             query,
@@ -284,10 +287,9 @@ pub async fn labels_query(
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
-
-        let response = retrieve_labels_name_from_query_result(result, &mut labels).await;
-
-        if let Err(err) = response {
+        if let Err(err) =
+            retrieve_labels_name_from_query_result(result, &mut labels, &mut merge_map).await
+        {
             // Prometheus won't report error if querying nonexist label and metric
             if err.status_code() != StatusCode::TableNotFound
                 && err.status_code() != StatusCode::TableColumnNotFound
@@ -305,7 +307,13 @@ pub async fn labels_query(
 
     let mut sorted_labels: Vec<String> = labels.into_iter().collect();
     sorted_labels.sort();
-    PrometheusJsonResponse::success(PrometheusResponse::Labels(sorted_labels))
+    let merge_map = merge_map
+        .into_iter()
+        .map(|(k, v)| (k, Value::from(v)))
+        .collect();
+    let mut resp = PrometheusJsonResponse::success(PrometheusResponse::Labels(sorted_labels));
+    resp.resp_metrics = merge_map;
+    resp
 }
 
 async fn get_all_column_names(
@@ -335,48 +343,53 @@ async fn retrieve_series_from_query_result(
     result: Result<Output>,
     series: &mut Vec<HashMap<String, String>>,
     table_name: &str,
+    metrics: &mut HashMap<String, u64>,
 ) -> Result<()> {
-    match result?.data {
-        OutputData::RecordBatches(batches) => {
-            record_batches_to_series(batches, series, table_name)?;
-            Ok(())
-        }
+    let result = result?;
+    match result.data {
+        OutputData::RecordBatches(batches) => record_batches_to_series(batches, series, table_name),
         OutputData::Stream(stream) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
-            record_batches_to_series(batches, series, table_name)?;
-            Ok(())
+            record_batches_to_series(batches, series, table_name)
         }
         OutputData::AffectedRows(_) => Err(Error::UnexpectedResult {
             reason: "expected data result, but got affected rows".to_string(),
             location: Location::default(),
         }),
+    }?;
+
+    if let Some(ref plan) = result.meta.plan {
+        collect_plan_metrics(plan.clone(), &mut [metrics]);
     }
+    Ok(())
 }
 
 /// Retrieve labels name from query result
 async fn retrieve_labels_name_from_query_result(
     result: Result<Output>,
     labels: &mut HashSet<String>,
+    metrics: &mut HashMap<String, u64>,
 ) -> Result<()> {
-    match result?.data {
-        OutputData::RecordBatches(batches) => {
-            record_batches_to_labels_name(batches, labels)?;
-            Ok(())
-        }
+    let result = result?;
+    match result.data {
+        OutputData::RecordBatches(batches) => record_batches_to_labels_name(batches, labels),
         OutputData::Stream(stream) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
-            record_batches_to_labels_name(batches, labels)?;
-            Ok(())
+            record_batches_to_labels_name(batches, labels)
         }
         OutputData::AffectedRows(_) => UnexpectedResultSnafu {
             reason: "expected data result, but got affected rows".to_string(),
         }
         .fail(),
+    }?;
+    if let Some(ref plan) = result.meta.plan {
+        collect_plan_metrics(plan.clone(), &mut [metrics]);
     }
+    Ok(())
 }
 
 fn record_batches_to_series(
@@ -537,6 +550,7 @@ pub async fn label_values_query(
 
     let mut label_values = HashSet::new();
 
+    let mut merge_map = HashMap::new();
     for query in queries {
         let prom_query = PromQuery {
             query,
@@ -545,8 +559,9 @@ pub async fn label_values_query(
             step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
-        let result = retrieve_label_values(result, &label_name, &mut label_values).await;
-        if let Err(err) = result {
+        if let Err(err) =
+            retrieve_label_values(result, &label_name, &mut label_values, &mut merge_map).await
+        {
             // Prometheus won't report error if querying nonexist label and metric
             if err.status_code() != StatusCode::TableNotFound
                 && err.status_code() != StatusCode::TableColumnNotFound
@@ -559,17 +574,26 @@ pub async fn label_values_query(
         }
     }
 
+    let merge_map = merge_map
+        .into_iter()
+        .map(|(k, v)| (k, Value::from(v)))
+        .collect();
+
     let mut label_values: Vec<_> = label_values.into_iter().collect();
     label_values.sort();
-    PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values))
+    let mut resp = PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values));
+    resp.resp_metrics = merge_map;
+    resp
 }
 
 async fn retrieve_label_values(
     result: Result<Output>,
     label_name: &str,
     labels_values: &mut HashSet<String>,
+    metrics: &mut HashMap<String, u64>,
 ) -> Result<()> {
-    match result?.data {
+    let result = result?;
+    match result.data {
         OutputData::RecordBatches(batches) => {
             retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
         }
@@ -583,7 +607,13 @@ async fn retrieve_label_values(
             reason: "expected data result, but got affected rows".to_string(),
         }
         .fail(),
+    }?;
+
+    if let Some(ref plan) = result.meta.plan {
+        collect_plan_metrics(plan.clone(), &mut [metrics]);
     }
+
+    Ok(())
 }
 
 async fn retrieve_label_values_from_record_batch(
@@ -658,6 +688,7 @@ pub async fn series_query(
         .unwrap_or_else(current_time_rfc3339);
 
     let mut series = Vec::new();
+    let mut merge_map = HashMap::new();
     for query in queries {
         let table_name = query.clone();
         let prom_query = PromQuery {
@@ -668,10 +699,19 @@ pub async fn series_query(
             step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
-        if let Err(err) = retrieve_series_from_query_result(result, &mut series, &table_name).await
+
+        if let Err(err) =
+            retrieve_series_from_query_result(result, &mut series, &table_name, &mut merge_map)
+                .await
         {
             return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg());
         }
     }
-    PrometheusJsonResponse::success(PrometheusResponse::Series(series))
+    let merge_map = merge_map
+        .into_iter()
+        .map(|(k, v)| (k, Value::from(v)))
+        .collect();
+    let mut resp = PrometheusJsonResponse::success(PrometheusResponse::Series(series));
+    resp.resp_metrics = merge_map;
+    resp
 }

@@ -40,7 +40,7 @@ pub struct Output {
 /// Original Output struct
 /// carrying result data to response/client/user interface
 pub enum OutputData {
-    AffectedRows(usize),
+    AffectedRows(OutputRows),
     RecordBatches(RecordBatches),
     Stream(SendableRecordBatchStream),
 }
@@ -50,11 +50,11 @@ pub enum OutputData {
 pub struct OutputMeta {
     /// May exist for query output. One can retrieve execution metrics from this plan.
     pub plan: Option<Arc<dyn PhysicalPlan>>,
-    pub cost: usize,
+    pub cost: OutputCost,
 }
 
 impl Output {
-    pub fn new_with_affected_rows(affected_rows: usize) -> Self {
+    pub fn new_with_affected_rows(affected_rows: OutputRows) -> Self {
         Self {
             data: OutputData::AffectedRows(affected_rows),
             meta: Default::default(),
@@ -77,6 +77,13 @@ impl Output {
 
     pub fn new(data: OutputData, meta: OutputMeta) -> Self {
         Self { data, meta }
+    }
+
+    pub fn extract_rows_and_cost(&self) -> (OutputRows, OutputCost) {
+        match self.data {
+            OutputData::AffectedRows(rows) => (rows, self.meta.cost),
+            _ => (0, self.meta.cost),
+        }
     }
 }
 
@@ -133,3 +140,6 @@ impl From<&AddColumnLocation> for Location {
         }
     }
 }
+
+pub type OutputRows = usize;
+pub type OutputCost = usize;

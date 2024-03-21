@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
-use common_meta::instruction::Instruction;
+use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
@@ -321,7 +321,7 @@ impl Context {
     /// Broadcasts the invalidate table cache message.
     pub async fn invalidate_table_cache(&self) -> Result<()> {
         let table_id = self.region_id().table_id();
-        let instruction = Instruction::InvalidateTableIdCache(table_id);
+        let instruction = Instruction::InvalidateCaches(vec![CacheIdent::TableId(table_id)]);
 
         let msg = &MailboxMessage::json_message(
             "Invalidate Table Cache",
@@ -582,7 +582,10 @@ mod tests {
         let msg = resp.mailbox_message.unwrap();
 
         let instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
-        assert_matches!(instruction, Instruction::InvalidateTableIdCache(1024));
+        assert_eq!(
+            instruction,
+            Instruction::InvalidateCaches(vec![CacheIdent::TableId(1024)])
+        );
     }
 
     fn procedure_flow_steps(from_peer_id: u64, to_peer_id: u64) -> Vec<Step> {

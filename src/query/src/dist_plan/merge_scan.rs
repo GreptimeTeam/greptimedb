@@ -22,7 +22,7 @@ use common_base::bytes::Bytes;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
 use common_meta::table_name::TableName;
-use common_plugins::GREPTIME_EXEC_COST;
+use common_plugins::GREPTIME_EXEC_READ_COST;
 use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::error::ExternalSnafu;
@@ -338,7 +338,7 @@ impl MergeScanMetric {
             first_consume_time: MetricBuilder::new(metric).subset_time("first_consume_time", 1),
             finish_time: MetricBuilder::new(metric).subset_time("finish_time", 1),
             output_rows: MetricBuilder::new(metric).output_rows(1),
-            greptime_exec_cost: MetricBuilder::new(metric).gauge(GREPTIME_EXEC_COST, 1),
+            greptime_exec_cost: MetricBuilder::new(metric).gauge(GREPTIME_EXEC_READ_COST, 1),
         }
     }
 

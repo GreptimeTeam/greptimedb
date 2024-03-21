@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use common_base::AffectedRows;
 use common_meta::rpc::procedure::{MigrateRegionRequest, ProcedureStateResponse};
 use common_query::error::Result;
+use common_query::Output;
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
 use table::requests::{CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest};
@@ -26,7 +27,7 @@ use table::requests::{CompactTableRequest, DeleteRequest, FlushTableRequest, Ins
 #[async_trait]
 pub trait TableMutationHandler: Send + Sync {
     /// Inserts rows into the table.
-    async fn insert(&self, request: InsertRequest, ctx: QueryContextRef) -> Result<AffectedRows>;
+    async fn insert(&self, request: InsertRequest, ctx: QueryContextRef) -> Result<Output>;
 
     /// Delete rows from the table.
     async fn delete(&self, request: DeleteRequest, ctx: QueryContextRef) -> Result<AffectedRows>;

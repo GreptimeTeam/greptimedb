@@ -1,0 +1,21 @@
+name: Auto Unassign
+on:
+  schedule:
+    - cron: '4 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  auto-unassign:
+    name: Auto Unassign
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto Unassign
+        uses: tisonspieces/auto-unassign@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
