@@ -124,7 +124,7 @@ impl PromPlannerContext {
     }
 
     /// Reset table name and schema to empty
-    fn set_empty_table_name(&mut self) {
+    fn reset_table_name_and_schema(&mut self) {
         self.table_name = Some(String::new());
         self.schema_name = None;
     }
@@ -216,7 +216,7 @@ impl PromPlanner {
                     (Some(lhs), Some(rhs)) => {
                         self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
                         self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
-                        self.ctx.set_empty_table_name();
+                        self.ctx.reset_table_name_and_schema();
                         let field_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
                         let mut field_expr = field_expr_builder(lhs, rhs)?;
 
@@ -386,7 +386,7 @@ impl PromPlanner {
             PromExpr::NumberLiteral(NumberLiteral { val }) => {
                 self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
                 self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
-                self.ctx.set_empty_table_name();
+                self.ctx.reset_table_name_and_schema();
                 let literal_expr = df_prelude::lit(*val);
 
                 LogicalPlan::Extension(Extension {
@@ -406,7 +406,7 @@ impl PromPlanner {
             PromExpr::StringLiteral(StringLiteral { val }) => {
                 self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
                 self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
-                self.ctx.set_empty_table_name();
+                self.ctx.reset_table_name_and_schema();
                 let literal_expr = df_prelude::lit(val.to_string());
 
                 LogicalPlan::Extension(Extension {
@@ -500,7 +500,7 @@ impl PromPlanner {
                     self.prom_expr_to_plan(prom_expr).await?
                 } else {
                     self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
-                    self.ctx.set_empty_table_name();
+                    self.ctx.reset_table_name_and_schema();
                     LogicalPlan::Extension(Extension {
                         node: Arc::new(
                             EmptyMetric::new(
@@ -1389,7 +1389,7 @@ impl PromPlanner {
 
         // reuse `SPECIAL_TIME_FUNCTION` as name of time index column
         self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
-        self.ctx.set_empty_table_name();
+        self.ctx.reset_table_name_and_schema();
         self.ctx.tag_columns = vec![];
         self.ctx.field_columns = vec![GREPTIME_VALUE.to_string()];
         Ok(LogicalPlan::Extension(Extension {
@@ -2049,12 +2049,12 @@ mod test {
     use super::*;
 
     async fn build_test_table_provider(
-        table_names: &[(String, String)],
+        table_name_tuples: &[(String, String)],
         num_tag: usize,
         num_field: usize,
     ) -> DfTableSourceProvider {
         let catalog_list = MemoryCatalogManager::with_default_setup();
-        for (schema_name, table_name) in table_names {
+        for (schema_name, table_name) in table_name_tuples {
             let mut columns = vec![];
             for i in 0..num_tag {
                 columns.push(ColumnSchema::new(
