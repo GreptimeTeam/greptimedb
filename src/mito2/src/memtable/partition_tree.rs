@@ -45,7 +45,7 @@ use crate::memtable::{
 };
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
-const DICTIONARY_SIZE_FACTOR: u64 = 8;
+pub(crate) const DICTIONARY_SIZE_FACTOR: u64 = 8;
 pub(crate) const DEFAULT_MAX_KEYS_PER_SHARD: usize = 8192;
 pub(crate) const DEFAULT_FREEZE_THRESHOLD: usize = 131072;
 
@@ -84,7 +84,7 @@ pub struct PartitionTreeConfig {
 
 impl Default for PartitionTreeConfig {
     fn default() -> Self {
-        let mut fork_dictionary_bytes = ReadableSize::gb(1);
+        let mut fork_dictionary_bytes = ReadableSize::mb(512);
         if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
             let adjust_dictionary_bytes =
                 std::cmp::min(sys_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
