@@ -347,13 +347,12 @@ impl MergeReader {
 }
 
 /// Builder to build and initialize a [MergeReader].
-#[derive(Default)]
 pub struct MergeReaderBuilder {
     /// Input sources.
     ///
     /// All source must yield batches with the same schema.
     sources: Vec<Source>,
-    /// Remove duplicate timestamps.
+    /// Remove duplicate timestamps. Default is true.
     dedup: bool,
 }
 
@@ -393,6 +392,15 @@ impl MergeReaderBuilder {
     pub async fn build(&mut self) -> Result<MergeReader> {
         let sources = mem::take(&mut self.sources);
         MergeReader::new(sources, self.dedup).await
+    }
+}
+
+impl Default for MergeReaderBuilder {
+    fn default() -> Self {
+        MergeReaderBuilder {
+            sources: Vec::new(),
+            dedup: true,
+        }
     }
 }
 
@@ -943,5 +951,40 @@ mod tests {
             .map(|ts| new_batch(b"k1", &[ts], &[9], &[OpType::Put], &[100]))
             .collect();
         check_reader_result(&mut reader, &expect).await;
+    }
+
+    #[tokio::test]
+    async fn test_merge_keep_duplicate() {
+        let reader1 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[1, 2],
+            &[10, 10],
+            &[OpType::Put, OpType::Put],
+            &[21, 22],
+        )]);
+        let reader2 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[2, 3],
+            &[11, 11],
+            &[OpType::Put, OpType::Put],
+            &[32, 33],
+        )]);
+        let mut reader = MergeReaderBuilder::new()
+            .push_batch_reader(Box::new(reader1))
+            .push_batch_iter(Box::new(reader2))
+            .dedup(false)
+            .build()
+            .await
+            .unwrap();
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch(b"k1", &[1], &[10], &[OpType::Put], &[21]),
+                new_batch(b"k1", &[2], &[11], &[OpType::Put], &[32]),
+                new_batch(b"k1", &[2], &[10], &[OpType::Put], &[22]),
+                new_batch(b"k1", &[3], &[11], &[OpType::Put], &[33]),
+            ],
+        )
+        .await;
     }
 }
