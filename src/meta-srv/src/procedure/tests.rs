@@ -32,8 +32,10 @@ use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, Crea
 use common_meta::ddl::create_table::*;
 use common_meta::ddl::drop_table::executor::DropTableExecutor;
 use common_meta::ddl::drop_table::DropTableProcedure;
-use common_meta::ddl::test_util::create_table::build_raw_table_info_from_expr;
-use common_meta::ddl::test_util::{TestColumnDefBuilder, TestCreateTableExprBuilder};
+use common_meta::ddl::test_util::columns::TestColumnDefBuilder;
+use common_meta::ddl::test_util::create_table::{
+    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::DeserializedValueWithBytes;
@@ -303,7 +305,7 @@ async fn test_on_datanode_create_logical_regions() {
     let status = procedure.on_datanode_create_regions().await.unwrap();
     assert!(matches!(status, Status::Executing { persist: false }));
     assert!(matches!(
-        procedure.creator.data.state(),
+        procedure.data.state(),
         &CreateTablesState::CreateMetadata
     ));
 

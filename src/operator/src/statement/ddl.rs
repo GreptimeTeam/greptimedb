@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -57,8 +57,8 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    CreateLogicalTablesSnafu, CreateTableInfoSnafu, CreateTableWithMultiCatalogsSnafu,
-    CreateTableWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyCreateTableExprSnafu,
+    CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
+    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu,
     InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
     ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, TableAlreadyExistsSnafu,
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
@@ -242,20 +242,18 @@ impl StatementExecutor {
         create_table_exprs: &[CreateTableExpr],
     ) -> Result<Vec<TableRef>> {
         let _timer = crate::metrics::DIST_CREATE_TABLES.start_timer();
-        ensure!(!create_table_exprs.is_empty(), EmptyCreateTableExprSnafu);
+        ensure!(
+            !create_table_exprs.is_empty(),
+            EmptyDdlExprSnafu {
+                name: "create table"
+            }
+        );
         ensure!(
             create_table_exprs
                 .windows(2)
                 .all(|expr| expr[0].catalog_name == expr[1].catalog_name),
-            CreateTableWithMultiCatalogsSnafu {
-                catalog_names: create_table_exprs
-                    .iter()
-                    .map(|x| x.catalog_name.as_str())
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(",")
-                    .to_string()
+            DdlWithMultiCatalogsSnafu {
+                ddl_name: "create tables"
             }
         );
         let catalog_name = create_table_exprs[0].catalog_name.to_string();
@@ -264,15 +262,8 @@ impl StatementExecutor {
             create_table_exprs
                 .windows(2)
                 .all(|expr| expr[0].schema_name == expr[1].schema_name),
-            CreateTableWithMultiSchemasSnafu {
-                schema_names: create_table_exprs
-                    .iter()
-                    .map(|x| x.schema_name.as_str())
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(",")
-                    .to_string()
+            DdlWithMultiSchemasSnafu {
+                ddl_name: "create tables"
             }
         );
         let schema_name = create_table_exprs[0].schema_name.to_string();
@@ -327,6 +318,38 @@ impl StatementExecutor {
             .into_iter()
             .map(|x| DistTable::table(Arc::new(x)))
             .collect())
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn alter_logical_tables(&self, alter_table_exprs: Vec<AlterExpr>) -> Result<Output> {
+        let _timer = crate::metrics::DIST_ALTER_TABLES.start_timer();
+        ensure!(
+            !alter_table_exprs.is_empty(),
+            EmptyDdlExprSnafu {
+                name: "alter table"
+            }
+        );
+        ensure!(
+            alter_table_exprs
+                .windows(2)
+                .all(|expr| expr[0].catalog_name == expr[1].catalog_name),
+            DdlWithMultiCatalogsSnafu {
+                ddl_name: "alter tables",
+            }
+        );
+        ensure!(
+            alter_table_exprs
+                .windows(2)
+                .all(|expr| expr[0].schema_name == expr[1].schema_name),
+            DdlWithMultiSchemasSnafu {
+                ddl_name: "alter tables",
+            }
+        );
+
+        self.alter_logical_tables_procedure(alter_table_exprs)
+            .await?;
+
+        Ok(Output::new_with_affected_rows(0))
     }
 
     #[tracing::instrument(skip_all)]
@@ -443,7 +466,7 @@ impl StatementExecutor {
 
         let _ = table_info
             .meta
-            .builder_with_alter_kind(table_name, &request.alter_kind)
+            .builder_with_alter_kind(table_name, &request.alter_kind, false)
             .context(error::TableSnafu)?
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
@@ -543,6 +566,20 @@ impl StatementExecutor {
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
             task: DdlTask::new_create_logical_tables(tables_data),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    async fn alter_logical_tables_procedure(
+        &self,
+        tables_data: Vec<AlterExpr>,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_alter_logical_tables(tables_data),
         };
 
         self.procedure_executor

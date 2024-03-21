@@ -19,9 +19,7 @@ use snafu::{ensure, location, Location, OptionExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use table::metadata::TableId;
 
-use crate::error::{
-    EmptyCreateTableTasksSnafu, Error, Result, TableNotFoundSnafu, UnsupportedSnafu,
-};
+use crate::error::{Error, Result, TableNotFoundSnafu, UnsupportedSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::key::TableMetadataManagerRef;
 use crate::peer::Peer;
@@ -98,7 +96,8 @@ pub async fn check_and_get_physical_table_id(
             None => Some(current_physical_table_name),
         };
     }
-    let physical_table_name = physical_table_name.context(EmptyCreateTableTasksSnafu)?;
+    // Safety: `physical_table_name` is `Some` here
+    let physical_table_name = physical_table_name.unwrap();
     table_metadata_manager
         .table_name_manager()
         .get(physical_table_name)
@@ -107,4 +106,23 @@ pub async fn check_and_get_physical_table_id(
             table_name: physical_table_name.to_string(),
         })
         .map(|table| table.table_id())
+}
+
+pub async fn get_physical_table_id(
+    table_metadata_manager: &TableMetadataManagerRef,
+    logical_table_name: TableNameKey<'_>,
+) -> Result<TableId> {
+    let logical_table_id = table_metadata_manager
+        .table_name_manager()
+        .get(logical_table_name)
+        .await?
+        .context(TableNotFoundSnafu {
+            table_name: logical_table_name.to_string(),
+        })
+        .map(|table| table.table_id())?;
+
+    table_metadata_manager
+        .table_route_manager()
+        .get_physical_table_id(logical_table_id)
+        .await
 }

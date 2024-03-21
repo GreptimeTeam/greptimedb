@@ -28,6 +28,7 @@ use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 
+pub mod alter_logical_tables;
 pub mod alter_table;
 pub mod create_logical_tables;
 pub mod create_table;

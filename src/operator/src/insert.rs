@@ -256,6 +256,7 @@ impl Inserter {
         statement_executor: &StatementExecutor,
     ) -> Result<()> {
         let mut create_tables = vec![];
+        let mut alter_tables = vec![];
         for req in &requests.inserts {
             let catalog = ctx.current_catalog();
             let schema = ctx.current_schema();
@@ -264,16 +265,19 @@ impl Inserter {
                 Some(table) => {
                     // TODO(jeremy): alter in batch? (from `handle_metric_row_inserts`)
                     validate_request_with_table(req, &table)?;
-                    self.alter_table_on_demand(req, table, ctx, statement_executor)
-                        .await?
+                    let alter_expr = self.get_alter_table_expr_on_demand(req, table, ctx)?;
+                    if let Some(alter_expr) = alter_expr {
+                        alter_tables.push(alter_expr);
+                    }
                 }
                 None => {
                     create_tables.push(req);
                 }
             }
         }
-        if !create_tables.is_empty() {
-            if let Some(on_physical_table) = on_physical_table {
+
+        if let Some(on_physical_table) = on_physical_table {
+            if !create_tables.is_empty() {
                 // Creates logical tables in batch.
                 self.create_logical_tables(
                     create_tables,
@@ -282,10 +286,19 @@ impl Inserter {
                     statement_executor,
                 )
                 .await?;
-            } else {
-                for req in create_tables {
-                    self.create_table(req, ctx, statement_executor).await?;
-                }
+            }
+            if !alter_tables.is_empty() {
+                // Alter logical tables in batch.
+                statement_executor
+                    .alter_logical_tables(alter_tables)
+                    .await?;
+            }
+        } else {
+            for req in create_tables {
+                self.create_table(req, ctx, statement_executor).await?;
+            }
+            for alter_expr in alter_tables.into_iter() {
+                statement_executor.alter_table_inner(alter_expr).await?;
             }
         }
 
@@ -364,13 +377,12 @@ impl Inserter {
             .context(CatalogSnafu)
     }
 
-    async fn alter_table_on_demand(
+    fn get_alter_table_expr_on_demand(
         &self,
         req: &RowInsertRequest,
         table: TableRef,
         ctx: &QueryContextRef,
-        statement_executor: &StatementExecutor,
-    ) -> Result<()> {
+    ) -> Result<Option<AlterExpr>> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
@@ -380,39 +392,15 @@ impl Inserter {
         let add_columns = extract_new_columns(&table.schema(), column_exprs)
             .context(FindNewColumnsOnInsertionSnafu)?;
         let Some(add_columns) = add_columns else {
-            return Ok(());
+            return Ok(None);
         };
 
-        info!(
-            "Adding new columns: {:?} to table: {}.{}.{}",
-            add_columns, catalog_name, schema_name, table_name
-        );
-
-        let alter_table_expr = AlterExpr {
+        Ok(Some(AlterExpr {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
             table_name: table_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
-        };
-
-        let res = statement_executor.alter_table_inner(alter_table_expr).await;
-
-        match res {
-            Ok(_) => {
-                info!(
-                    "Successfully added new columns to table: {}.{}.{}",
-                    catalog_name, schema_name, table_name
-                );
-                Ok(())
-            }
-            Err(err) => {
-                error!(
-                    "Failed to add new columns to table: {}.{}.{}: {}",
-                    catalog_name, schema_name, table_name, err
-                );
-                Err(err)
-            }
-        }
+        }))
     }
 
     /// Create a table with schema from insert request.

@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod alter_table;
+pub mod columns;
 pub mod create_table;
-
-pub use create_table::{
-    TestColumnDef, TestColumnDefBuilder, TestCreateTableExpr, TestCreateTableExprBuilder,
-};
