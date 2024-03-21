@@ -58,7 +58,7 @@ impl HandleResponse {
         }
     }
 
-    /// Create one response without extension
+    /// Creates one response without extension
     pub fn new(affected_rows: AffectedRows) -> Self {
         Self {
             affected_rows,
