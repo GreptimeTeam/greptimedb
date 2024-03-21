@@ -84,6 +84,9 @@ async fn test_append_mode_compaction() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.max_active_window_files", "2")
+        .insert_option("compaction.twcs.max_inactive_window_files", "2")
         .insert_option("append_mode", "true")
         .build();
 
@@ -129,8 +132,9 @@ async fn test_append_mode_compaction() {
     };
     put_rows(&engine, region_id, rows).await;
 
-    let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(1, scanner.num_files());
+    let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
