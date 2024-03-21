@@ -17,7 +17,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext};
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::{DFSchema, Result as DFResult, ScalarValue, TableReference};
+use datafusion_common::{
+    DFSchema, DataFusionError, Result as DFResult, ScalarValue, TableReference,
+};
 use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_sql::planner::{ContextProvider, SqlToRel};
@@ -40,6 +42,46 @@ use datatypes::arrow::datatypes::DataType;
 use sqlparser::parser::Parser;
 
 use crate::dialect::GreptimeDbDialect;
+
+pub enum TQLError {
+    Parser(String),
+    Simplification(String),
+    Evaluation(String),
+}
+
+impl From<ParserError> for TQLError {
+    fn from(err: ParserError) -> Self {
+        TQLError::Parser(err.to_string())
+    }
+}
+
+impl From<DataFusionError> for TQLError {
+    fn from(err: DataFusionError) -> Self {
+        match err {
+            DataFusionError::SQL(parser_err) => TQLError::Parser(parser_err.to_string()),
+            DataFusionError::Plan(plan_err) => TQLError::Evaluation(plan_err),
+            unspecified => {
+                TQLError::Evaluation(format!("Failed to evaluate due to: {unspecified:?}"))
+            }
+        }
+    }
+}
+
+impl From<TQLError> for ParserError {
+    fn from(tql_err: TQLError) -> Self {
+        match tql_err {
+            TQLError::Parser(s) => {
+                ParserError::ParserError(format!("Failed to parse the query: {s}"))
+            }
+            TQLError::Simplification(s) => {
+                ParserError::ParserError(format!("Failed to simplify the query: {s}"))
+            }
+            TQLError::Evaluation(s) => {
+                ParserError::ParserError(format!("Failed to evaluate the query: {s}"))
+            }
+        }
+    }
+}
 
 /// TQL extension parser, including:
 /// - `TQL EVAL <query>`
@@ -140,7 +182,7 @@ impl<'a> ParserContext<'a> {
     fn parse_string_or_number_or_word(
         parser: &mut Parser,
         delimiter_token: Token,
-    ) -> std::result::Result<String, ParserError> {
+    ) -> std::result::Result<String, TQLError> {
         let mut tokens = vec![];
 
         while !Self::is_delimiter_token(&parser.peek_token().token, &delimiter_token) {
@@ -148,14 +190,14 @@ impl<'a> ParserContext<'a> {
             tokens.push(token.token);
         }
         let result = match tokens.len() {
-            0 => Err(ParserError::ParserError("Expected tokens".to_string())),
+            0 => Err(TQLError::Parser("Expected tokens".to_string())),
             1 => {
                 let value = match tokens[0].clone() {
                     Token::Number(n, _) => n,
                     Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
                     Token::Word(_) => Self::parse_tokens(tokens)?,
                     unexpected => {
-                        return Err(ParserError::ParserError(format!(
+                        return Err(TQLError::Parser(format!(
                             "Expect number, string or word, but is {unexpected:?}"
                         )));
                     }
@@ -168,36 +210,48 @@ impl<'a> ParserContext<'a> {
         result
     }
 
-    fn parse_tokens(tokens: Vec<Token>) -> std::result::Result<String, ParserError> {
-        let empty_df_schema = DFSchema::empty();
-        let expr = Parser::new(&GreptimeDbDialect {})
+    fn parse_tokens(tokens: Vec<Token>) -> std::result::Result<String, TQLError> {
+        Self::parse_to_expr(tokens)
+            .and_then(Self::parse_to_logical_expr)
+            .and_then(Self::simplify_expr)
+            .and_then(Self::evaluate_expr)
+    }
+
+    fn parse_to_expr(tokens: Vec<Token>) -> std::result::Result<sqlparser::ast::Expr, TQLError> {
+        Parser::new(&GreptimeDbDialect {})
             .with_tokens(tokens)
             .parse_expr()
-            .map_err(|err| {
-                ParserError::ParserError(format!("Failed to convert to expression: {err:?}"))
-            })?;
-        let sql_to_rel = SqlToRel::new(&StubContextProvider {});
-        let logical_expr = sql_to_rel
+            .map_err(|err| TQLError::Parser(format!("Failed to convert to expression: {err:?}")))
+    }
+
+    fn parse_to_logical_expr(expr: sqlparser::ast::Expr) -> std::result::Result<Expr, TQLError> {
+        let empty_df_schema = DFSchema::empty();
+        SqlToRel::new(&StubContextProvider {})
             .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
             .map_err(|err| {
-                ParserError::ParserError(format!("Failed to convert to logical expression {err:?}"))
-            })?;
+                TQLError::Parser(format!("Failed to convert to logical expression {err:?}"))
+            })
+    }
 
+    fn simplify_expr(logical_expr: Expr) -> std::result::Result<Expr, TQLError> {
+        let empty_df_schema = DFSchema::empty();
         let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
         let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema));
-        let simplified_expr = ExprSimplifier::new(info)
+        ExprSimplifier::new(info)
             .simplify(logical_expr)
             .map_err(|err| {
-                ParserError::ParserError(format!("Failed to simplify expression {err:?}"))
-            })?;
+                TQLError::Simplification(format!("Failed to simplify expression {err:?}"))
+            })
+    }
 
+    fn evaluate_expr(simplified_expr: Expr) -> std::result::Result<String, TQLError> {
         match simplified_expr {
             Expr::Literal(ScalarValue::TimestampNanosecond(v, _))
             | Expr::Literal(ScalarValue::DurationNanosecond(v)) => v,
             _ => None,
         }
         .map(|timestamp_nanos| (timestamp_nanos / 1_000_000_000).to_string())
-        .ok_or(ParserError::ParserError(format!(
+        .ok_or(TQLError::Evaluation(format!(
             "Failed to extract a timestamp value {simplified_expr:?}"
         )))
     }

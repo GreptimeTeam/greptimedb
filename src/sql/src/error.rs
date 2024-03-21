@@ -28,7 +28,7 @@ use crate::ast::{Expr, Value as SqlValue};
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// SQL parser errors.
-// Now the error in parser does not contains backtrace to avoid generating backtrace
+// Now the error in parser does not contain backtrace to avoid generating backtrace
 // every time the parser parses an invalid SQL.
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
