@@ -17,14 +17,12 @@
 #[cfg(test)]
 mod test;
 
-use std::sync::Arc;
-
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::ColumnarValue as DFColValue;
 use datafusion_physical_expr::AggregateExpr;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::compute;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
 use rustpython_vm::{pymodule, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
@@ -61,10 +59,6 @@ fn collect_diff_types_string(values: &[ScalarValue], ty: &ArrowDataType) -> Stri
             acc
         })
         .unwrap_or_else(|| "Nothing".to_string())
-}
-
-fn new_item_field(data_type: ArrowDataType) -> Field {
-    Field::new("item", data_type, false)
 }
 
 /// try to turn a Python Object into a PyVector or a scalar that can be use for calculate
@@ -119,8 +113,7 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
         if ret.is_empty() {
             // TODO(dennis): empty list, we set type as null.
             return Ok(DFColValue::Scalar(ScalarValue::List(
-                None,
-                Arc::new(new_item_field(ArrowDataType::Null)),
+                ScalarValue::new_list(&[], &ArrowDataType::Null),
             )));
         }
 
@@ -132,8 +125,7 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
             )));
         }
         Ok(DFColValue::Scalar(ScalarValue::List(
-            Some(ret),
-            Arc::new(new_item_field(ty)),
+            ScalarValue::new_list(&ret, &ty),
         )))
     } else {
         Err(vm.new_type_error(format!(
@@ -176,9 +168,11 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
         ScalarValue::Float64(Some(v)) => Ok(PyFloat::from(v).into_pyobject(vm)),
         ScalarValue::Int64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
         ScalarValue::UInt64(Some(v)) => Ok(PyInt::from(v).into_pyobject(vm)),
-        ScalarValue::List(Some(col), _) => {
-            let list = col
+        ScalarValue::List(list) => {
+            let list = ScalarValue::convert_array_to_scalar_vec(list.as_ref())
+                .map_err(|e| from_df_err(e, vm))?
                 .into_iter()
+                .flatten()
                 .map(|v| scalar_val_try_into_py_obj(v, vm))
                 .collect::<Result<_, _>>()?;
             let list = vm.ctx.new_list(list);
@@ -512,7 +506,11 @@ pub(crate) mod greptime_builtin {
     /// simple math function, the backing implement is datafusion's `tan` math function
     #[pyfunction]
     fn tan(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        bind_call_unary_math_function!(tan, vm, val);
+        let args = &[try_into_columnar_value(val, vm).and_then(|x| all_to_f64(x, vm))?];
+        datafusion_functions::math::tan()
+            .invoke(args)
+            .map_err(|e| from_df_err(e, vm))
+            .and_then(|x| try_into_py_obj(x, vm))
     }
 
     /// simple math function, the backing implement is datafusion's `asin` math function
@@ -548,8 +546,10 @@ pub(crate) mod greptime_builtin {
     #[pyfunction]
     fn round(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         let value = try_into_columnar_value(val, vm)?;
-        let array = value.into_array(1);
-        let result = math_expressions::round(&[array]).map_err(|e| from_df_err(e, vm))?;
+        let result = value
+            .into_array(1)
+            .and_then(|x| math_expressions::round(&[x]))
+            .map_err(|e| from_df_err(e, vm))?;
         try_into_py_obj(DFColValue::Array(result), vm)
     }
 
@@ -563,7 +563,11 @@ pub(crate) mod greptime_builtin {
     /// simple math function, the backing implement is datafusion's `abs` math function
     #[pyfunction]
     fn abs(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        bind_call_unary_math_function!(abs, vm, val);
+        let args = &[try_into_columnar_value(val, vm).and_then(|x| all_to_f64(x, vm))?];
+        datafusion_functions::math::abs()
+            .invoke(args)
+            .map_err(|e| from_df_err(e, vm))
+            .and_then(|x| try_into_py_obj(x, vm))
     }
 
     /// simple math function, the backing implement is datafusion's `signum` math function
@@ -673,13 +677,16 @@ pub(crate) mod greptime_builtin {
     /// effectively equals to `list(vector)`
     #[pyfunction]
     fn array_agg(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        bind_aggr_fn!(
-            ArrayAgg,
-            vm,
+        eval_aggr_fn(
+            expressions::ArrayAgg::new(
+                Arc::new(expressions::Column::new("expr0", 0)) as _,
+                "ArrayAgg",
+                values.arrow_data_type(),
+                false,
+            ),
             &[values.to_arrow_array()],
-            values.arrow_data_type(),
-            expr0
-        );
+            vm,
+        )
     }
 
     /// directly port from datafusion's `avg` function

@@ -378,7 +378,7 @@ pub async fn show_index(
         lit("").alias(INDEX_COMMENT_COLUMN),
         lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
         null().alias(INDEX_EXPRESSION_COLUMN),
-        Expr::Wildcard,
+        Expr::Wildcard { qualifier: None },
     ];
 
     let projects = vec![

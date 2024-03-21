@@ -25,7 +25,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::TableReference;
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion_optimizer::analyzer::Analyzer;
@@ -125,6 +125,7 @@ impl DistExtensionPlanner {
     /// Apply the fully resolved table name to the TableScan plan
     fn plan_with_full_table_name(plan: LogicalPlan, name: &TableName) -> Result<LogicalPlan> {
         plan.transform(&|plan| TableNameRewriter::rewrite_table_name(plan, name))
+            .map(|x| x.data)
     }
 
     async fn get_regions(&self, table_name: &TableName) -> Result<Vec<RegionId>> {
@@ -163,9 +164,9 @@ struct TableNameExtractor {
 }
 
 impl TreeNodeVisitor for TableNameExtractor {
-    type N = LogicalPlan;
+    type Node = LogicalPlan;
 
-    fn pre_visit(&mut self, node: &Self::N) -> Result<VisitRecursion> {
+    fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
         match node {
             LogicalPlan::TableScan(scan) => {
                 if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
@@ -182,7 +183,7 @@ impl TreeNodeVisitor for TableNameExtractor {
                                 info.name.clone(),
                             ));
                         }
-                        return Ok(VisitRecursion::Stop);
+                        return Ok(TreeNodeRecursion::Stop);
                     }
                 }
                 match &scan.table_name {
@@ -196,7 +197,7 @@ impl TreeNodeVisitor for TableNameExtractor {
                             schema.clone(),
                             table.clone(),
                         ));
-                        Ok(VisitRecursion::Stop)
+                        Ok(TreeNodeRecursion::Stop)
                     }
                     // TODO(ruihang): Maybe the following two cases should not be valid
                     TableReference::Partial { schema, table } => {
@@ -205,7 +206,7 @@ impl TreeNodeVisitor for TableNameExtractor {
                             schema.clone(),
                             table.clone(),
                         ));
-                        Ok(VisitRecursion::Stop)
+                        Ok(TreeNodeRecursion::Stop)
                     }
                     TableReference::Bare { table } => {
                         self.table_name = Some(TableName::new(
@@ -213,11 +214,11 @@ impl TreeNodeVisitor for TableNameExtractor {
                             DEFAULT_SCHEMA_NAME.to_string(),
                             table.clone(),
                         ));
-                        Ok(VisitRecursion::Stop)
+                        Ok(TreeNodeRecursion::Stop)
                     }
                 }
             }
-            _ => Ok(VisitRecursion::Continue),
+            _ => Ok(TreeNodeRecursion::Continue),
         }
     }
 }
@@ -236,9 +237,9 @@ impl TableNameRewriter {
                     name.schema_name.clone(),
                     name.table_name.clone(),
                 );
-                Transformed::Yes(LogicalPlan::TableScan(table_scan))
+                Transformed::yes(LogicalPlan::TableScan(table_scan))
             }
-            _ => Transformed::No(plan),
+            _ => Transformed::no(plan),
         })
     }
 }

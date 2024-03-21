@@ -23,14 +23,14 @@ use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Field, SchemaRef};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::stats::Precision;
 use datafusion::common::{DFField, DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
 use datafusion::sql::TableReference;
@@ -258,12 +258,8 @@ impl ExecutionPlan for RangeManipulateExec {
         self.output_schema.clone()
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        self.input.output_partitioning()
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        self.input.output_ordering()
+    fn properties(&self) -> &PlanProperties {
+        self.input.properties()
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -333,23 +329,25 @@ impl ExecutionPlan for RangeManipulateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> Statistics {
-        let input_stats = self.input.statistics();
+    fn statistics(&self) -> DataFusionResult<Statistics> {
+        let input_stats = self.input.statistics()?;
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
             .total_byte_size
-            .zip(input_stats.num_rows)
-            .map(|(size, rows)| (size as f64 / rows as f64) * estimated_row_num)
-            .map(|size| size.floor() as _);
+            .get_value()
+            .zip(input_stats.num_rows.get_value())
+            .map(|(size, rows)| {
+                Precision::Inexact(((*size as f64 / *rows as f64) * estimated_row_num).floor() as _)
+            })
+            .unwrap_or_default();
 
-        Statistics {
-            num_rows: Some(estimated_row_num.floor() as _),
+        Ok(Statistics {
+            num_rows: Precision::Inexact(estimated_row_num as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
-            column_statistics: None,
-            is_exact: false,
-        }
+            column_statistics: Statistics::unknown_column(&self.schema()),
+        })
     }
 }
 
@@ -452,7 +450,7 @@ impl RangeManipulateStream {
 
         RecordBatch::try_new(self.output_schema.clone(), new_columns)
             .map(Some)
-            .map_err(DataFusionError::ArrowError)
+            .map_err(|e| DataFusionError::ArrowError(e, None))
     }
 
     fn calculate_range(&self, input: &RecordBatch) -> (ArrayRef, Vec<(u32, u32)>) {

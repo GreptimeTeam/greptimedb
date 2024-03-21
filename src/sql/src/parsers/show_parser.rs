@@ -59,14 +59,13 @@ impl<'a> ParserContext<'a> {
                 self.unsupported(self.peek_token_as_string())
             }
         } else if self.consume_token("VARIABLES") {
-            let variable =
-                self.parser
-                    .parse_object_name()
-                    .with_context(|_| error::UnexpectedSnafu {
-                        sql: self.sql,
-                        expected: "a variable name",
-                        actual: self.peek_token_as_string(),
-                    })?;
+            let variable = self
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a variable name",
+                    actual: self.peek_token_as_string(),
+                })?;
             Ok(Statement::ShowVariables(ShowVariables { variable }))
         } else {
             self.unsupported(self.peek_token_as_string())
@@ -75,14 +74,13 @@ impl<'a> ParserContext<'a> {
 
     /// Parse SHOW CREATE TABLE statement
     fn parse_show_create_table(&mut self) -> Result<Statement> {
-        let raw_table_name =
-            self.parser
-                .parse_object_name()
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a table name",
-                    actual: self.peek_token_as_string(),
-                })?;
+        let raw_table_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a table name",
+                actual: self.peek_token_as_string(),
+            })?;
         let table_name = Self::canonicalize_object_name(raw_table_name);
         ensure!(
             !table_name.0.is_empty(),
@@ -95,14 +93,13 @@ impl<'a> ParserContext<'a> {
 
     fn parse_show_table_name(&mut self) -> Result<String> {
         let _ = self.parser.next_token();
-        let table_name =
-            self.parser
-                .parse_object_name()
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a table name",
-                    actual: self.peek_token_as_string(),
-                })?;
+        let table_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a table name",
+                actual: self.peek_token_as_string(),
+            })?;
 
         ensure!(
             table_name.0.len() == 1,
@@ -120,7 +117,6 @@ impl<'a> ParserContext<'a> {
     fn parse_db_name(&mut self) -> Result<Option<String>> {
         let _ = self.parser.next_token();
         let db_name = self
-            .parser
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
                 sql: self.sql,
@@ -182,7 +178,7 @@ impl<'a> ParserContext<'a> {
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => {
                     let _ = self.parser.next_token();
-                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+                    ShowKind::Like(self.parse_identifier().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
                             expected: "LIKE",
@@ -298,7 +294,7 @@ impl<'a> ParserContext<'a> {
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => {
                     let _ = self.parser.next_token();
-                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+                    ShowKind::Like(self.parse_identifier().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
                             expected: "LIKE",
@@ -337,7 +333,7 @@ impl<'a> ParserContext<'a> {
             }
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => Ok(Statement::ShowDatabases(ShowDatabases::new(
-                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+                    ShowKind::Like(self.parse_identifier().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
                             expected: "LIKE",

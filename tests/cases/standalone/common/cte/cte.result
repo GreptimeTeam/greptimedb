@@ -109,7 +109,7 @@ WITH RECURSIVE cte(d) AS (
 )
 SELECT max(d) FROM cte;
 
-Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Recursive CTEs are not supported
+Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Recursive CTE is not implemented
 
 -- Nested aliases is not supported in datafusion
 with cte (a) as (

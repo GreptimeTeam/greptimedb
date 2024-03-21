@@ -27,6 +27,7 @@ use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
+use table::predicate::Predicate;
 
 use crate::cache::file_cache::FileType;
 use crate::sst::file::FileId;
@@ -575,6 +576,13 @@ pub enum Error {
 
     #[snafu(display("Invalid region options, {}", reason))]
     InvalidRegionOptions { reason: String, location: Location },
+
+    #[snafu(display("Failed to create filter from predicate {:?}", predicate))]
+    CreateFilterFromPredicate {
+        predicate: Predicate,
+        source: common_recordbatch::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -676,7 +684,11 @@ impl ErrorExt for Error {
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
-            FilterRecordBatch { source, .. } => source.status_code(),
+
+            FilterRecordBatch { source, .. } | CreateFilterFromPredicate { source, .. } => {
+                source.status_code()
+            }
+
             Upload { .. } => StatusCode::StorageUnavailable,
             BiError { .. } => StatusCode::Internal,
             EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,

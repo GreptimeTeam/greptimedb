@@ -21,8 +21,10 @@ use std::sync::{Arc, Weak};
 
 use common_query::OutputData;
 use common_recordbatch::{RecordBatch, RecordBatches};
+use datafusion_common::ScalarValue;
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::prelude::Value;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
 // use crate::python::builtins::greptime_builtin;
@@ -42,7 +44,9 @@ use vm::{pyclass as rspyclass, PyObjectRef, PyPayload, PyResult, VirtualMachine}
 
 use super::py_recordbatch::PyRecordBatch;
 use crate::engine::EvalContext;
-use crate::python::error::{ensure, ArrowSnafu, OtherSnafu, Result, TypeCastSnafu};
+use crate::python::error::{
+    ensure, ArrowSnafu, DataFusionSnafu, OtherSnafu, Result, TypeCastSnafu,
+};
 use crate::python::ffi_types::PyVector;
 #[cfg(feature = "pyo3_backend")]
 use crate::python::pyo3::pyo3_exec_parsed;
@@ -179,6 +183,25 @@ impl Coprocessor {
 
     /// check if real types and annotation types(if have) is the same, if not try cast columns to annotated type
     pub(crate) fn check_and_cast_type(&self, cols: &mut [VectorRef]) -> Result<()> {
+        for col in cols.iter_mut() {
+            if let ConcreteDataType::List(x) = col.data_type() {
+                let values =
+                    ScalarValue::convert_array_to_scalar_vec(col.to_arrow_array().as_ref())
+                        .context(DataFusionSnafu)?
+                        .into_iter()
+                        .flatten()
+                        .map(Value::try_from)
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .context(TypeCastSnafu)?;
+
+                let mut builder = x.item_type().create_mutable_vector(values.len());
+                for v in values.iter() {
+                    builder.push_value_ref(v.as_value_ref());
+                }
+                *col = builder.to_vector();
+            }
+        }
+
         let return_types = &self.return_types;
         // allow ignore Return Type Annotation
         if return_types.is_empty() {

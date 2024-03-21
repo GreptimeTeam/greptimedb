@@ -18,8 +18,8 @@ use std::borrow::Borrow;
 use std::collections::HashSet;
 
 use datafusion::physical_optimizer::pruning::PruningStatistics;
-use datafusion_common::Column;
-use datatypes::arrow::array::ArrayRef;
+use datafusion_common::{Column, ScalarValue};
+use datatypes::arrow::array::{ArrayRef, BooleanArray};
 use parquet::file::metadata::RowGroupMetaData;
 use store_api::storage::ColumnId;
 
@@ -80,5 +80,15 @@ impl<'a, T: Borrow<RowGroupMetaData>> PruningStatistics for RowGroupPruningStats
     fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
         let column_id = self.column_id_to_prune(&column.name)?;
         self.read_format.null_counts(self.row_groups, column_id)
+    }
+
+    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        // TODO(LFC): Impl it.
+        None
+    }
+
+    fn contained(&self, _column: &Column, _values: &HashSet<ScalarValue>) -> Option<BooleanArray> {
+        // TODO(LFC): Impl it.
+        None
     }
 }

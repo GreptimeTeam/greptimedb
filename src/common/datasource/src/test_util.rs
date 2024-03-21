@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use datafusion::common::Statistics;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{FileScanConfig, FileStream};
@@ -72,17 +73,16 @@ pub fn test_basic_schema() -> SchemaRef {
 pub fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str) -> FileScanConfig {
     // object_store only recognize the Unix style path, so make it happy.
     let filename = &filename.replace('\\', "/");
-
+    let statistics = Statistics::new_unknown(file_schema.as_ref());
     FileScanConfig {
         object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
         file_schema,
         file_groups: vec![vec![PartitionedFile::new(filename.to_string(), 10)]],
-        statistics: Default::default(),
+        statistics,
         projection: None,
         limit,
         table_partition_cols: vec![],
         output_ordering: vec![],
-        infinite_source: false,
     }
 }
 

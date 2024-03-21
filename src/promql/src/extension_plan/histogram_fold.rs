@@ -24,16 +24,17 @@ use datafusion::arrow::array::AsArray;
 use datafusion::arrow::compute::{self, concat_batches, SortOptions};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::common::stats::Precision;
+use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef, Statistics};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{PhysicalSortExpr, PhysicalSortRequirement};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortRequirement};
 use datafusion::physical_plan::expressions::{CastExpr as PhyCast, Column as PhyColumn};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PhysicalExpr,
-    RecordBatchStream, SendableRecordBatchStream, Statistics,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionMode, ExecutionPlan, PhysicalExpr,
+    PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion::prelude::{Column, Expr};
 use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
@@ -150,6 +151,7 @@ impl HistogramFold {
                             .map(|f| f.qualified_column())
                             .collect(),
                     },
+                    Box::new(None),
                 ));
             } else {
                 Ok(())
@@ -177,14 +179,21 @@ impl HistogramFold {
             .unwrap()
             .unwrap();
 
+        let output_schema: SchemaRef = Arc::new(self.output_schema.as_ref().into());
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
         Arc::new(HistogramFoldExec {
             le_column_index,
             field_column_index,
             ts_column_index,
             input: exec_input,
             quantile: self.quantile.into(),
-            output_schema: Arc::new(self.output_schema.as_ref().into()),
+            output_schema,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
         })
     }
 
@@ -220,6 +229,7 @@ pub struct HistogramFoldExec {
     ts_column_index: usize,
     quantile: f64,
     metric: ExecutionPlanMetricsSet,
+    properties: PlanProperties,
 }
 
 impl ExecutionPlan for HistogramFoldExec {
@@ -227,16 +237,8 @@ impl ExecutionPlan for HistogramFoldExec {
         self
     }
 
-    fn schema(&self) -> SchemaRef {
-        self.output_schema.clone()
-    }
-
-    fn output_partitioning(&self) -> Partitioning {
-        self.input.output_partitioning()
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        self.input.output_ordering()
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
     }
 
     fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
@@ -302,6 +304,7 @@ impl ExecutionPlan for HistogramFoldExec {
             quantile: self.quantile,
             output_schema: self.output_schema.clone(),
             field_column_index: self.field_column_index,
+            properties: self.properties.clone(),
         }))
     }
 
@@ -343,13 +346,16 @@ impl ExecutionPlan for HistogramFoldExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> Statistics {
-        Statistics {
-            num_rows: None,
-            total_byte_size: None,
-            column_statistics: None,
-            is_exact: false,
-        }
+    fn statistics(&self) -> DataFusionResult<Statistics> {
+        Ok(Statistics {
+            num_rows: Precision::Absent,
+            total_byte_size: Precision::Absent,
+            column_statistics: vec![
+                ColumnStatistics::new_unknown();
+                // plus one more for the removed column by function `convert_schema`
+                self.schema().all_fields().len() + 1
+            ],
+        })
     }
 }
 
@@ -594,7 +600,7 @@ impl HistogramFoldStream {
         self.output_buffered_rows = 0;
         RecordBatch::try_new(self.output_schema.clone(), columns)
             .map(Some)
-            .map_err(DataFusionError::ArrowError)
+            .map_err(|e| DataFusionError::ArrowError(e, None))
     }
 
     /// Find the first `+Inf` which indicates the end of the bucket group
@@ -759,7 +765,7 @@ mod test {
     #[tokio::test]
     async fn fold_overall() {
         let memory_exec = Arc::new(prepare_test_data());
-        let output_schema = Arc::new(
+        let output_schema: SchemaRef = Arc::new(
             (*HistogramFold::convert_schema(
                 &Arc::new(memory_exec.schema().to_dfschema().unwrap()),
                 "le",
@@ -769,6 +775,11 @@ mod test {
             .clone()
             .into(),
         );
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
         let fold_exec = Arc::new(HistogramFoldExec {
             le_column_index: 1,
             field_column_index: 2,
@@ -777,6 +788,7 @@ mod test {
             input: memory_exec,
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
         });
 
         let session_context = SessionContext::default();

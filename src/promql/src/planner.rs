@@ -22,18 +22,21 @@ use catalog::table_source::DfTableSourceProvider;
 use common_query::prelude::GREPTIME_VALUE;
 use datafusion::common::{DFSchemaRef, OwnedTableReference, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
-use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction, ScalarUDF};
+use datafusion::logical_expr::expr::{
+    AggregateFunction, AggregateFunctionDefinition, Alias, ScalarFunction,
+};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast, Extension,
-    LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF as ScalarUdfDef,
+    LogicalPlan, LogicalPlanBuilder, Operator, ScalarFunctionDefinition, ScalarUDF as ScalarUdfDef,
 };
-use datafusion::optimizer::utils::{self, conjunction};
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
+use datafusion_expr::utils::conjunction;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use itertools::Itertools;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::{
     token, AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
@@ -1128,7 +1131,9 @@ impl PromPlanner {
                     right: Box::new(interval_1day_lit_expr),
                 });
                 let date_trunc_expr = DfExpr::ScalarFunction(ScalarFunction {
-                    fun: BuiltinScalarFunction::DateTrunc,
+                    func_def: ScalarFunctionDefinition::UDF(
+                        datafusion_functions::datetime::date_trunc(),
+                    ),
                     args: vec![month_lit_expr, self.create_time_index_column_expr()?],
                 });
                 let date_trunc_plus_interval_expr = DfExpr::BinaryExpr(BinaryExpr {
@@ -1137,21 +1142,30 @@ impl PromPlanner {
                     right: Box::new(the_1month_minus_1day_expr),
                 });
                 let date_part_expr = DfExpr::ScalarFunction(ScalarFunction {
-                    fun: BuiltinScalarFunction::DatePart,
+                    func_def: ScalarFunctionDefinition::UDF(
+                        datafusion_functions::datetime::date_part(),
+                    ),
                     args: vec![day_lit_expr, date_trunc_plus_interval_expr],
                 });
 
                 exprs.push(date_part_expr);
                 ScalarFunc::GeneratedExpr
             }
-            _ => ScalarFunc::DataFusionBuiltin(
-                BuiltinScalarFunction::from_str(func.name).map_err(|_| {
-                    UnsupportedExprSnafu {
+            _ => {
+                if let Ok(f) = BuiltinScalarFunction::from_str(func.name) {
+                    ScalarFunc::DataFusionBuiltin(f)
+                } else if let Some(f) = datafusion_functions::math::functions()
+                    .iter()
+                    .find(|f| f.name() == func.name)
+                {
+                    ScalarFunc::DataFusionUdf(f.clone())
+                } else {
+                    return UnsupportedExprSnafu {
                         name: func.name.to_string(),
                     }
-                    .build()
-                })?,
-            ),
+                    .fail();
+                }
+            }
         };
 
         for value in &self.ctx.field_columns {
@@ -1161,11 +1175,23 @@ impl PromPlanner {
                 ScalarFunc::DataFusionBuiltin(fun) => {
                     other_input_exprs.insert(field_column_pos, col_expr);
                     let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
-                        fun,
+                        func_def: ScalarFunctionDefinition::BuiltIn(fun),
                         args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
                     let _ = other_input_exprs.remove(field_column_pos);
+                }
+                ScalarFunc::DataFusionUdf(f) => {
+                    let args = itertools::chain!(
+                        other_input_exprs.iter().take(field_column_pos).cloned(),
+                        std::iter::once(col_expr),
+                        other_input_exprs.iter().skip(field_column_pos).cloned()
+                    )
+                    .collect_vec();
+                    exprs.push(DfExpr::ScalarFunction(ScalarFunction {
+                        func_def: ScalarFunctionDefinition::UDF(f),
+                        args,
+                    }))
                 }
                 ScalarFunc::Udf(fun) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
@@ -1175,8 +1201,8 @@ impl PromPlanner {
                     ));
                     other_input_exprs.insert(field_column_pos, ts_range_expr);
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
-                    let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
-                        fun: Arc::new(fun),
+                    let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
+                        func_def: ScalarFunctionDefinition::UDF(Arc::new(fun)),
                         args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
@@ -1193,8 +1219,8 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
                     other_input_exprs
                         .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
-                    let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
-                        fun: Arc::new(fun),
+                    let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
+                        func_def: ScalarFunctionDefinition::UDF(Arc::new(fun)),
                         args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
@@ -1258,7 +1284,7 @@ impl PromPlanner {
             exprs.push(expr);
         }
 
-        utils::conjunction(exprs).context(ValueNotFoundSnafu {
+        conjunction(exprs).context(ValueNotFoundSnafu {
             table: self.table_ref()?.to_quoted_string(),
         })
     }
@@ -1299,11 +1325,12 @@ impl PromPlanner {
             .iter()
             .map(|col| {
                 DfExpr::AggregateFunction(AggregateFunction {
-                    fun: aggr.clone(),
+                    func_def: AggregateFunctionDefinition::BuiltIn(aggr.clone()),
                     args: vec![DfExpr::Column(Column::from_name(col))],
                     distinct: false,
                     filter: None,
                     order_by: None,
+                    null_treatment: None,
                 })
             })
             .collect();
@@ -1515,13 +1542,13 @@ impl PromPlanner {
             token::T_LTE => Ok(Box::new(|lhs, rhs| Ok(lhs.lt_eq(rhs)))),
             token::T_POW => Ok(Box::new(|lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
-                    fun: BuiltinScalarFunction::Power,
+                    func_def: ScalarFunctionDefinition::BuiltIn(BuiltinScalarFunction::Power),
                     args: vec![lhs, rhs],
                 }))
             })),
             token::T_ATAN2 => Ok(Box::new(|lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
-                    fun: BuiltinScalarFunction::Atan2,
+                    func_def: ScalarFunctionDefinition::BuiltIn(BuiltinScalarFunction::Atan2),
                     args: vec![lhs, rhs],
                 }))
             })),
@@ -1953,7 +1980,7 @@ impl PromPlanner {
         let field_columns_iter = result_field_columns
             .into_iter()
             .zip(self.ctx.field_columns.iter())
-            .map(|(expr, name)| Ok(DfExpr::Alias(Alias::new(expr, name.to_string()))));
+            .map(|(expr, name)| Ok(DfExpr::Alias(Alias::new(expr, None::<String>, name))));
 
         // chain non-field columns (unchanged) and field columns (applied computation then alias)
         let project_fields = non_field_columns_iter
@@ -2007,7 +2034,7 @@ impl PromPlanner {
                 })?,
         );
         let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
-            fun: BuiltinScalarFunction::DatePart,
+            func_def: ScalarFunctionDefinition::UDF(datafusion_functions::datetime::date_part()),
             args: vec![lit_expr, input_expr],
         });
         Ok(fn_expr)
@@ -2023,6 +2050,8 @@ struct FunctionArgs {
 #[derive(Debug, Clone)]
 enum ScalarFunc {
     DataFusionBuiltin(BuiltinScalarFunction),
+    /// The UDF that is defined by Datafusion itself.
+    DataFusionUdf(Arc<ScalarUdfDef>),
     Udf(ScalarUdfDef),
     // todo(ruihang): maybe merge with Udf later
     /// UDF that require extra information like range length to be evaluated.
@@ -2436,7 +2465,7 @@ mod test {
 
     #[tokio::test]
     async fn aggregate_stdvar() {
-        do_aggregate_expr_plan("stdvar", "VARIANCE_POP").await;
+        do_aggregate_expr_plan("stdvar", "VAR_POP").await;
     }
 
     #[tokio::test]
