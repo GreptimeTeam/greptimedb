@@ -24,12 +24,12 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{PhysicalSortExpr, PhysicalSortRequirement};
+use datafusion::physical_expr::PhysicalSortRequirement;
 use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, RecordBatchStream,
-    SendableRecordBatchStream, Statistics,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream,
 };
 use datatypes::arrow::compute;
 use futures::{ready, Stream, StreamExt};
@@ -130,8 +130,8 @@ impl ExecutionPlan for SeriesDivideExec {
         self.input.schema()
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(1)
+    fn properties(&self) -> &PlanProperties {
+        self.input.properties()
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
@@ -154,10 +154,6 @@ impl ExecutionPlan for SeriesDivideExec {
         } else {
             vec![None]
         }
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        self.input.output_ordering()
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -211,16 +207,6 @@ impl ExecutionPlan for SeriesDivideExec {
 
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
-    }
-
-    fn statistics(&self) -> Statistics {
-        Statistics {
-            num_rows: None,
-            total_byte_size: None,
-            // TODO(ruihang): support this column statistics
-            column_statistics: None,
-            is_exact: false,
-        }
     }
 }
 

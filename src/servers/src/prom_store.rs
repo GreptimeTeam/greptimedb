@@ -103,11 +103,11 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
             }
             // Case sensitive regexp match
             MatcherType::Re => {
-                conditions.push(regexp_match(vec![col(name), lit(value)]).is_not_null());
+                conditions.push(regexp_match(col(name), lit(value)).is_not_null());
             }
             // Case sensitive regexp not match
             MatcherType::Nre => {
-                conditions.push(regexp_match(vec![col(name), lit(value)]).is_null());
+                conditions.push(regexp_match(col(name), lit(value)).is_null());
             }
         }
     }

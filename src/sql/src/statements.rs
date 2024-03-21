@@ -345,7 +345,7 @@ pub fn has_primary_key_option(column_def: &ColumnDef) -> bool {
         .options
         .iter()
         .any(|options| match options.option {
-            ColumnOption::Unique { is_primary } => is_primary,
+            ColumnOption::Unique { is_primary, .. } => is_primary,
             _ => false,
         })
 }
@@ -414,10 +414,15 @@ pub fn sql_column_def_to_grpc_column_def(
         .context(ConvertToGrpcDataTypeSnafu)?
         .to_parts();
 
-    let is_primary_key = col
-        .options
-        .iter()
-        .any(|o| matches!(o.option, ColumnOption::Unique { is_primary: true }));
+    let is_primary_key = col.options.iter().any(|o| {
+        matches!(
+            o.option,
+            ColumnOption::Unique {
+                is_primary: true,
+                ..
+            }
+        )
+    });
 
     let semantic_type = if is_primary_key {
         SemanticType::Tag
@@ -438,7 +443,7 @@ pub fn sql_column_def_to_grpc_column_def(
 
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
     match data_type {
-        SqlDataType::BigInt(_) => Ok(ConcreteDataType::int64_datatype()),
+        SqlDataType::BigInt(_) | SqlDataType::Int64 => Ok(ConcreteDataType::int64_datatype()),
         SqlDataType::UnsignedBigInt(_) => Ok(ConcreteDataType::uint64_datatype()),
         SqlDataType::Int(_) | SqlDataType::Integer(_) => Ok(ConcreteDataType::int32_datatype()),
         SqlDataType::UnsignedInt(_) | SqlDataType::UnsignedInteger(_) => {
@@ -453,9 +458,9 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Char(_)
         | SqlDataType::Varchar(_)
         | SqlDataType::Text
-        | SqlDataType::String => Ok(ConcreteDataType::string_datatype()),
+        | SqlDataType::String(_) => Ok(ConcreteDataType::string_datatype()),
         SqlDataType::Float(_) => Ok(ConcreteDataType::float32_datatype()),
-        SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
+        SqlDataType::Double | SqlDataType::Float64 => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
         SqlDataType::Binary(_)
@@ -502,7 +507,7 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::UInt16(_) => Ok(SqlDataType::UnsignedSmallInt(None)),
         ConcreteDataType::Int8(_) => Ok(SqlDataType::TinyInt(None)),
         ConcreteDataType::UInt8(_) => Ok(SqlDataType::UnsignedTinyInt(None)),
-        ConcreteDataType::String(_) => Ok(SqlDataType::String),
+        ConcreteDataType::String(_) => Ok(SqlDataType::String(None)),
         ConcreteDataType::Float32(_) => Ok(SqlDataType::Float(None)),
         ConcreteDataType::Float64(_) => Ok(SqlDataType::Double),
         ConcreteDataType::Boolean(_) => Ok(SqlDataType::Boolean),
@@ -588,7 +593,10 @@ mod tests {
             ConcreteDataType::string_datatype(),
         );
         check_type(SqlDataType::Text, ConcreteDataType::string_datatype());
-        check_type(SqlDataType::String, ConcreteDataType::string_datatype());
+        check_type(
+            SqlDataType::String(None),
+            ConcreteDataType::string_datatype(),
+        );
         check_type(
             SqlDataType::Float(None),
             ConcreteDataType::float32_datatype(),
@@ -966,7 +974,10 @@ mod tests {
             collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
-                option: ColumnOption::Unique { is_primary: true },
+                option: ColumnOption::Unique {
+                    is_primary: true,
+                    characteristics: None,
+                },
             }],
         };
 
@@ -1044,7 +1055,10 @@ mod tests {
             collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
-                option: ColumnOption::Unique { is_primary: true },
+                option: ColumnOption::Unique {
+                    is_primary: true,
+                    characteristics: None,
+                },
             }],
         };
         assert!(has_primary_key_option(&column_def));
@@ -1081,7 +1095,7 @@ mod tests {
 
         let column_def = ColumnDef {
             name: "col2".into(),
-            data_type: SqlDataType::String,
+            data_type: SqlDataType::String(None),
             collation: None,
             options: vec![
                 ColumnOptionDef {

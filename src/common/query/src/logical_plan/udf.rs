@@ -70,6 +70,8 @@ impl ScalarUdf {
 
 impl From<ScalarUdf> for DfScalarUDF {
     fn from(udf: ScalarUdf) -> Self {
+        // TODO(LFC): remove deprecated
+        #[allow(deprecated)]
         DfScalarUDF::new(
             &udf.name,
             &udf.signature.into(),

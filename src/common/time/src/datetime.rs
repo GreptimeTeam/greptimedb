@@ -35,11 +35,11 @@ pub struct DateTime(i64);
 
 impl Display for DateTime {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(abs_time) = NaiveDateTime::from_timestamp_millis(self.0) {
+        if let Some(abs_time) = chrono::DateTime::from_timestamp_millis(self.0) {
             write!(
                 f,
                 "{}",
-                format_utc_datetime(&abs_time, DATETIME_FORMAT_WITH_TZ)
+                format_utc_datetime(&abs_time.naive_utc(), DATETIME_FORMAT_WITH_TZ)
             )
         } else {
             write!(f, "DateTime({})", self.0)
@@ -55,7 +55,7 @@ impl From<DateTime> for serde_json::Value {
 
 impl From<NaiveDateTime> for DateTime {
     fn from(value: NaiveDateTime) -> Self {
-        DateTime::from(value.timestamp_millis())
+        DateTime::from(value.and_utc().timestamp_millis())
     }
 }
 
@@ -87,13 +87,15 @@ impl DateTime {
     pub fn from_str(s: &str, timezone: Option<&Timezone>) -> Result<Self> {
         let s = s.trim();
         let timestamp_millis = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-            dt.naive_utc().timestamp_millis()
+            dt.naive_utc().and_utc().timestamp_millis()
         } else if let Ok(d) = NaiveDateTime::parse_from_str(s, DATETIME_FORMAT) {
             match datetime_to_utc(&d, get_timezone(timezone)) {
                 LocalResult::None => {
                     return InvalidDateStrSnafu { raw: s }.fail();
                 }
-                LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => utc.timestamp_millis(),
+                LocalResult::Single(t) | LocalResult::Ambiguous(t, _) => {
+                    t.and_utc().timestamp_millis()
+                }
             }
         } else if let Ok(v) = chrono::DateTime::parse_from_str(s, DATETIME_FORMAT_WITH_TZ) {
             v.timestamp_millis()
@@ -116,7 +118,7 @@ impl DateTime {
 
     /// Convert to [NaiveDateTime].
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
-        NaiveDateTime::from_timestamp_millis(self.0)
+        chrono::DateTime::from_timestamp_millis(self.0).map(|x| x.naive_utc())
     }
 
     /// Format DateTime for given format and timezone.

@@ -25,11 +25,11 @@ use datafusion::common::DFSchemaRef;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortExpr;
+use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    hash_utils, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning,
-    RecordBatchStream, SendableRecordBatchStream, Statistics,
+    hash_utils, DisplayAs, DisplayFormatType, Distribution, ExecutionMode, ExecutionPlan,
+    Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::arrow::compute;
 use futures::future::BoxFuture;
@@ -91,13 +91,20 @@ impl UnionDistinctOn {
         left_exec: Arc<dyn ExecutionPlan>,
         right_exec: Arc<dyn ExecutionPlan>,
     ) -> Arc<dyn ExecutionPlan> {
+        let output_schema: SchemaRef = Arc::new(self.output_schema.as_ref().into());
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        ));
         Arc::new(UnionDistinctOnExec {
             left: left_exec,
             right: right_exec,
             compare_keys: self.compare_keys.clone(),
             ts_col: self.ts_col.clone(),
-            output_schema: Arc::new(self.output_schema.as_ref().into()),
+            output_schema,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
             random_state: RandomState::new(),
         })
     }
@@ -151,6 +158,7 @@ pub struct UnionDistinctOnExec {
     ts_col: String,
     output_schema: SchemaRef,
     metric: ExecutionPlanMetricsSet,
+    properties: Arc<PlanProperties>,
 
     /// Shared the `RandomState` for the hashing algorithm
     random_state: RandomState,
@@ -169,14 +177,8 @@ impl ExecutionPlan for UnionDistinctOnExec {
         vec![Distribution::SinglePartition, Distribution::SinglePartition]
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(1)
-    }
-
-    /// [UnionDistinctOnExec] will output left first, then right.
-    /// So the order of the output is not maintained.
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
+    fn properties(&self) -> &PlanProperties {
+        self.properties.as_ref()
     }
 
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
@@ -198,6 +200,7 @@ impl ExecutionPlan for UnionDistinctOnExec {
             ts_col: self.ts_col.clone(),
             output_schema: self.output_schema.clone(),
             metric: self.metric.clone(),
+            properties: self.properties.clone(),
             random_state: self.random_state.clone(),
         }))
     }
@@ -248,10 +251,6 @@ impl ExecutionPlan for UnionDistinctOnExec {
 
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
-    }
-
-    fn statistics(&self) -> Statistics {
-        Statistics::default()
     }
 }
 
@@ -472,7 +471,8 @@ fn interleave_batches(
     }
 
     // assemble new record batch
-    RecordBatch::try_new(schema.clone(), interleaved_arrays).map_err(DataFusionError::ArrowError)
+    RecordBatch::try_new(schema.clone(), interleaved_arrays)
+        .map_err(|e| DataFusionError::ArrowError(e, None))
 }
 
 /// Utility function to take rows from a record batch. Based on [take](datafusion::arrow::compute::take)
@@ -490,9 +490,10 @@ fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<Record
         .iter()
         .map(|array| compute::take(array, &indices_array, None))
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(DataFusionError::ArrowError)?;
+        .map_err(|e| DataFusionError::ArrowError(e, None))?;
 
-    let result = RecordBatch::try_new(schema, arrays).map_err(DataFusionError::ArrowError)?;
+    let result =
+        RecordBatch::try_new(schema, arrays).map_err(|e| DataFusionError::ArrowError(e, None))?;
     Ok(result)
 }
 

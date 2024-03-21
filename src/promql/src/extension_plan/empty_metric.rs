@@ -20,16 +20,17 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use datafusion::arrow::array::ArrayRef;
-use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
+use datafusion::common::stats::Precision;
 use datafusion::common::{DFField, DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::{SessionState, TaskContext};
 use datafusion::logical_expr::{ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{PhysicalExprRef, PhysicalSortExpr};
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExprRef};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
-    SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
+    RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion::physical_planner::PhysicalPlanner;
 use datafusion::prelude::{col, lit, Expr};
@@ -102,22 +103,23 @@ impl EmptyMetric {
             .expr
             .as_ref()
             .map(|expr| {
-                physical_planner.create_physical_expr(
-                    expr,
-                    &self.time_index_schema,
-                    &ArrowSchema::from(self.time_index_schema.as_ref()),
-                    session_state,
-                )
+                physical_planner.create_physical_expr(expr, &self.time_index_schema, session_state)
             })
             .transpose()?;
-
+        let result_schema: SchemaRef = Arc::new(self.result_schema.as_ref().into());
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(result_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        ));
         Ok(Arc::new(EmptyMetricExec {
             start: self.start,
             end: self.end,
             interval: self.interval,
             time_index_schema: Arc::new(self.time_index_schema.as_ref().into()),
-            result_schema: Arc::new(self.result_schema.as_ref().into()),
+            result_schema,
             expr: physical_expr,
+            properties,
             metric: ExecutionPlanMetricsSet::new(),
         }))
     }
@@ -164,7 +166,7 @@ pub struct EmptyMetricExec {
     /// Schema of the output record batch
     result_schema: SchemaRef,
     expr: Option<PhysicalExprRef>,
-
+    properties: Arc<PlanProperties>,
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -177,12 +179,8 @@ impl ExecutionPlan for EmptyMetricExec {
         self.result_schema.clone()
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(1)
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
+    fn properties(&self) -> &PlanProperties {
+        self.properties.as_ref()
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -222,16 +220,15 @@ impl ExecutionPlan for EmptyMetricExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> Statistics {
+    fn statistics(&self) -> DataFusionResult<Statistics> {
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let total_byte_size = estimated_row_num * std::mem::size_of::<Millisecond>() as f64;
 
-        Statistics {
-            num_rows: Some(estimated_row_num.floor() as _),
-            total_byte_size: Some(total_byte_size.floor() as _),
-            column_statistics: None,
-            is_exact: true,
-        }
+        Ok(Statistics {
+            num_rows: Precision::Inexact(estimated_row_num.floor() as _),
+            total_byte_size: Precision::Inexact(total_byte_size.floor() as _),
+            column_statistics: Statistics::unknown_column(&self.schema()),
+        })
     }
 }
 
@@ -285,21 +282,21 @@ impl Stream for EmptyMetricStream {
             let num_rows = time_array.len();
             let input_record_batch =
                 RecordBatch::try_new(self.time_index_schema.clone(), vec![time_array.clone()])
-                    .map_err(DataFusionError::ArrowError)?;
+                    .map_err(|e| DataFusionError::ArrowError(e, None))?;
             let mut result_arrays: Vec<ArrayRef> = vec![time_array];
 
             // evaluate the field expr and get the result
             if let Some(field_expr) = &self.expr {
                 result_arrays.push(
                     field_expr
-                        .evaluate(&input_record_batch)?
-                        .into_array(num_rows),
+                        .evaluate(&input_record_batch)
+                        .and_then(|x| x.into_array(num_rows))?,
                 );
             }
 
             // assemble the output record batch
             let batch = RecordBatch::try_new(self.result_schema.clone(), result_arrays)
-                .map_err(DataFusionError::ArrowError);
+                .map_err(|e| DataFusionError::ArrowError(e, None));
 
             Poll::Ready(Some(batch))
         } else {

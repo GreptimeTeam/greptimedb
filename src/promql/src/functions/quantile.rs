@@ -40,15 +40,17 @@ impl QuantileOverTime {
     }
 
     pub fn scalar_udf(quantile: f64) -> ScalarUDF {
-        ScalarUDF {
-            name: Self::name().to_string(),
-            signature: Signature::new(
+        // TODO(LFC): Use the new Datafusion UDF impl.
+        #[allow(deprecated)]
+        ScalarUDF::new(
+            Self::name(),
+            &Signature::new(
                 TypeSignature::Exact(Self::input_type()),
                 Volatility::Immutable,
             ),
-            return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
-            fun: Arc::new(move |input| Self::new(quantile).calc(input)),
-        }
+            &(Arc::new(|_: &_| Ok(Arc::new(Self::return_type()))) as _),
+            &(Arc::new(move |input: &_| Self::new(quantile).calc(input)) as _),
+        )
     }
 
     // time index column and value column

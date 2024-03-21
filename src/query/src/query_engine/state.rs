@@ -26,7 +26,6 @@ use common_function::state::FunctionState;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
 use common_telemetry::warn;
-use datafusion::catalog::MemoryCatalogList;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
@@ -101,18 +100,35 @@ impl QueryEngineState {
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
-        let session_state = SessionState::new_with_config_rt_and_catalog_list(
-            session_config,
-            runtime_env,
-            Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
-        )
-        .with_serializer_registry(Arc::new(ExtensionSerializer))
-        .with_analyzer_rules(analyzer.rules)
-        .with_query_planner(Arc::new(DfQueryPlanner::new(
-            catalog_list.clone(),
-            region_query_handler,
-        )))
-        .with_optimizer_rules(optimizer.rules);
+        // For some unknown reasons, the "optimize_projections" rule will make the projections
+        // disappeared when facing the `SELECT COUNT(*)` query.
+        //
+        // For example, for a simple query `select count(*) from foo` against a simple table created
+        // by `create table foo (ts timestamp time index)`, before the rule, the plan is:
+        //
+        // Projection: COUNT(UInt8(1))
+        //   Aggregate: groupBy=[[]], aggr=[[COUNT(UInt8(1))]]
+        //     TableScan: greptime.public.foo projection=[ts]
+        //
+        // after the rule, it becomes:
+        //
+        // Aggregate: groupBy=[[]], aggr=[[COUNT(UInt8(1))]]
+        //   TableScan: greptime.public.foo projection=[]
+        //
+        // Which could cause some errors when later been executed.
+        // TODO(LFC): Add the "optimize_projections" rule back.
+        optimizer
+            .rules
+            .retain(|r| r.name() != "optimize_projections");
+
+        let session_state = SessionState::new_with_config_rt(session_config, runtime_env)
+            .with_serializer_registry(Arc::new(ExtensionSerializer))
+            .with_analyzer_rules(analyzer.rules)
+            .with_query_planner(Arc::new(DfQueryPlanner::new(
+                catalog_list.clone(),
+                region_query_handler,
+            )))
+            .with_optimizer_rules(optimizer.rules);
 
         let df_context = SessionContext::new_with_state(session_state);
 

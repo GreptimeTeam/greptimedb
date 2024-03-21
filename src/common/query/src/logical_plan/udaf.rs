@@ -90,6 +90,8 @@ impl AggregateFunction {
 
 impl From<AggregateFunction> for DfAggregateUdf {
     fn from(udaf: AggregateFunction) -> Self {
+        // TODO(LFC): See how to fit the new DataFusion UDAF implementation.
+        #[allow(deprecated)]
         DfAggregateUdf::new(
             &udaf.name,
             &udaf.signature.into(),

@@ -295,9 +295,9 @@ mod test {
             sort_by: [], \
             having: None, \
             named_window: [], \
-            qualify: None \
-            }), order_by: [], limit: None, offset: None, fetch: None, locks: [] } }))");
-
+            qualify: None, \
+            value_table_mode: None \
+            }), order_by: [], limit: None, limit_by: [], offset: None, fetch: None, locks: [], for_clause: None } }))");
         assert_eq!(format!("{stmt:?}"), expected);
     }
 

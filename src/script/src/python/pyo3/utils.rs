@@ -75,9 +75,10 @@ pub fn val_to_py_any(py: Python<'_>, val: Value) -> PyResult<PyObject> {
         Value::DateTime(val) => val.val().to_object(py),
         Value::Timestamp(val) => val.value().to_object(py),
         Value::List(val) => {
-            let list = val.items().clone().unwrap_or(Default::default());
-            let list = list
-                .into_iter()
+            let list = val
+                .items()
+                .iter()
+                .cloned()
                 .map(|v| val_to_py_any(py, v))
                 .collect::<PyResult<Vec<_>>>()?;
             list.to_object(py)

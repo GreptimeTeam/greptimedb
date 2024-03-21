@@ -41,7 +41,7 @@ impl<'a> ParserContext<'a> {
         let if_exists = self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
         let raw_table_ident =
             self.parser
-                .parse_object_name()
+                .parse_object_name(false)
                 .with_context(|_| error::UnexpectedSnafu {
                     sql: self.sql,
                     expected: "a table name",
@@ -64,7 +64,7 @@ impl<'a> ParserContext<'a> {
         let if_exists = self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
         let database_name =
             self.parser
-                .parse_object_name()
+                .parse_object_name(false)
                 .with_context(|_| error::UnexpectedSnafu {
                     sql: self.sql,
                     expected: "a database name",

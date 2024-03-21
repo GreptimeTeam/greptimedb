@@ -18,14 +18,11 @@ use std::sync::Arc;
 
 use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
 use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
-use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 pub use datafusion::execution::context::{SessionContext, TaskContext};
-use datafusion::physical_plan::expressions::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 pub use datafusion::physical_plan::Partitioning;
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, Statistics};
-use datatypes::schema::SchemaRef;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, PlanProperties};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -44,16 +41,9 @@ pub trait PhysicalPlan: Debug + Send + Sync {
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
-    /// Get the schema for this physical plan
-    fn schema(&self) -> SchemaRef;
-
-    /// Specifies the output partitioning scheme of this plan
-    fn output_partitioning(&self) -> Partitioning;
-
-    /// returns `Some(keys)` that describes how the output was sorted.
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
-    }
+    /// Return properties of the output of the [PhysicalPlan], such as output
+    /// ordering(s), partitioning information etc.
+    fn properties(&self) -> &PlanProperties;
 
     /// Get a list of child physical plans that provide the input for this plan. The returned list
     /// will be empty for leaf nodes, will contain a single value for unary nodes, or two
@@ -79,15 +69,13 @@ pub trait PhysicalPlan: Debug + Send + Sync {
 /// Adapt DataFusion's [`ExecutionPlan`](DfPhysicalPlan) to GreptimeDB's [`PhysicalPlan`].
 #[derive(Debug)]
 pub struct PhysicalPlanAdapter {
-    schema: SchemaRef,
     df_plan: Arc<dyn DfPhysicalPlan>,
     metric: ExecutionPlanMetricsSet,
 }
 
 impl PhysicalPlanAdapter {
-    pub fn new(schema: SchemaRef, df_plan: Arc<dyn DfPhysicalPlan>) -> Self {
+    pub fn new(df_plan: Arc<dyn DfPhysicalPlan>) -> Self {
         Self {
-            schema,
             df_plan,
             metric: ExecutionPlanMetricsSet::new(),
         }
@@ -103,19 +91,15 @@ impl PhysicalPlan for PhysicalPlanAdapter {
         self
     }
 
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn output_partitioning(&self) -> Partitioning {
-        self.df_plan.output_partitioning()
+    fn properties(&self) -> &PlanProperties {
+        self.df_plan.properties()
     }
 
     fn children(&self) -> Vec<PhysicalPlanRef> {
         self.df_plan
             .children()
             .into_iter()
-            .map(|x| Arc::new(PhysicalPlanAdapter::new(self.schema(), x)) as _)
+            .map(|x| Arc::new(PhysicalPlanAdapter::new(x)) as _)
             .collect()
     }
 
@@ -129,7 +113,7 @@ impl PhysicalPlan for PhysicalPlanAdapter {
             .clone()
             .with_new_children(children)
             .context(error::GeneralDataFusionSnafu)?;
-        Ok(Arc::new(PhysicalPlanAdapter::new(self.schema(), plan)))
+        Ok(Arc::new(PhysicalPlanAdapter::new(plan)))
     }
 
     fn execute(
@@ -166,18 +150,6 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
         self
     }
 
-    fn schema(&self) -> DfSchemaRef {
-        self.0.schema().arrow_schema().clone()
-    }
-
-    fn output_partitioning(&self) -> Partitioning {
-        self.0.output_partitioning()
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        self.0.output_ordering()
-    }
-
     fn children(&self) -> Vec<Arc<dyn DfPhysicalPlan>> {
         self.0
             .children()
@@ -190,15 +162,9 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
         self: Arc<Self>,
         children: Vec<Arc<dyn DfPhysicalPlan>>,
     ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
-        let df_schema = self.schema();
-        let schema: SchemaRef = Arc::new(
-            df_schema
-                .try_into()
-                .context(error::ConvertArrowSchemaSnafu)?,
-        );
         let children = children
             .into_iter()
-            .map(|x| Arc::new(PhysicalPlanAdapter::new(schema.clone(), x)) as _)
+            .map(|x| Arc::new(PhysicalPlanAdapter::new(x)) as _)
             .collect();
         let plan = self.0.with_new_children(children)?;
         Ok(Arc::new(DfPhysicalPlanAdapter(plan)))
@@ -213,12 +179,12 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
     }
 
-    fn statistics(&self) -> Statistics {
-        Statistics::default()
-    }
-
     fn metrics(&self) -> Option<MetricsSet> {
         self.0.metrics()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        self.0.properties()
     }
 }
 
@@ -232,10 +198,12 @@ impl DisplayAs for DfPhysicalPlanAdapter {
 mod test {
     use async_trait::async_trait;
     use common_recordbatch::{RecordBatch, RecordBatches};
+    use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
     use datafusion::datasource::{DefaultTableSource, TableProvider as DfTableProvider, TableType};
     use datafusion::execution::context::{SessionContext, SessionState};
-    use datafusion::physical_plan::collect;
+    use datafusion::physical_expr::EquivalenceProperties;
     use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::{collect, ExecutionMode};
     use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
     use datafusion_expr::{Expr, TableSource};
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
@@ -272,10 +240,13 @@ mod test {
             _filters: &[Expr],
             _limit: Option<usize>,
         ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
-            let schema = Schema::try_from(self.schema()).unwrap();
-            let my_plan = Arc::new(MyExecutionPlan {
-                schema: Arc::new(schema),
-            });
+            let schema = Arc::new(Schema::try_from(self.schema()).unwrap());
+            let properties = PlanProperties::new(
+                EquivalenceProperties::new(schema.arrow_schema().clone()),
+                Partitioning::UnknownPartitioning(1),
+                ExecutionMode::Bounded,
+            );
+            let my_plan = Arc::new(MyExecutionPlan { properties });
             let df_plan = DfPhysicalPlanAdapter(my_plan);
             Ok(Arc::new(df_plan))
         }
@@ -289,9 +260,9 @@ mod test {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct MyExecutionPlan {
-        schema: SchemaRef,
+        properties: PlanProperties,
     }
 
     impl PhysicalPlan for MyExecutionPlan {
@@ -299,12 +270,8 @@ mod test {
             self
         }
 
-        fn schema(&self) -> SchemaRef {
-            self.schema.clone()
-        }
-
-        fn output_partitioning(&self) -> Partitioning {
-            Partitioning::UnknownPartitioning(1)
+        fn properties(&self) -> &PlanProperties {
+            &self.properties
         }
 
         fn children(&self) -> Vec<PhysicalPlanRef> {
@@ -312,7 +279,7 @@ mod test {
         }
 
         fn with_new_children(&self, _children: Vec<PhysicalPlanRef>) -> Result<PhysicalPlanRef> {
-            unimplemented!()
+            Ok(Arc::new(self.clone()))
         }
 
         fn execute(
@@ -320,7 +287,8 @@ mod test {
             _partition: usize,
             _context: Arc<TaskContext>,
         ) -> Result<SendableRecordBatchStream> {
-            let schema = self.schema();
+            let schema =
+                Arc::new(Schema::try_from(self.properties.eq_properties.schema().clone()).unwrap());
             let recordbatches = RecordBatches::try_new(
                 schema.clone(),
                 vec![
@@ -379,10 +347,7 @@ mod test {
             true,
         )]));
 
-        let plan = PhysicalPlanAdapter::new(
-            Arc::new(Schema::try_from(df_schema.clone()).unwrap()),
-            Arc::new(EmptyExec::new(true, df_schema.clone())),
-        );
+        let plan = PhysicalPlanAdapter::new(Arc::new(EmptyExec::new(df_schema.clone())));
         let _ = plan.df_plan.as_any().downcast_ref::<EmptyExec>().unwrap();
 
         let df_plan = DfPhysicalPlanAdapter(Arc::new(plan));

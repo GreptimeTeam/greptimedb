@@ -550,7 +550,7 @@ async fn test_region_usage() {
     flush_region(&engine, region_id, None).await;
 
     let region_stat = region.region_usage().await;
-    assert_eq!(region_stat.sst_usage, 2962);
+    assert_eq!(region_stat.sst_usage, 3010);
 
     // region total usage
     // Some memtables may share items.

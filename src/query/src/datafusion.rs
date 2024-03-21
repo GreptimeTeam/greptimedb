@@ -47,9 +47,9 @@ use table::TableRef;
 use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
-    CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu, MissingTableMutationHandlerSnafu,
-    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
-    TableNotFoundSnafu, UnsupportedExprSnafu,
+    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
+    MissingTableMutationHandlerSnafu, MissingTimestampColumnSnafu, QueryExecutionSnafu, Result,
+    TableMutationSnafu, TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -361,17 +361,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
 
-                Ok(Arc::new(PhysicalPlanAdapter::new(
-                    Arc::new(
-                        physical_plan
-                            .schema()
-                            .try_into()
-                            .context(error::ConvertSchemaSnafu)
-                            .map_err(BoxedError::new)
-                            .context(QueryExecutionSnafu)?,
-                    ),
-                    physical_plan,
-                )))
+                Ok(Arc::new(PhysicalPlanAdapter::new(physical_plan)))
             }
         }
     }
@@ -418,10 +408,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
                 new_plan
             };
 
-        Ok(Arc::new(PhysicalPlanAdapter::new(
-            plan.schema(),
-            optimized_plan,
-        )))
+        Ok(Arc::new(PhysicalPlanAdapter::new(optimized_plan)))
     }
 }
 
@@ -435,8 +422,17 @@ impl QueryExecutor for DatafusionQueryEngine {
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
-        match plan.output_partitioning().partition_count() {
-            0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
+        match plan.properties().output_partitioning().partition_count() {
+            0 => {
+                let schema = plan
+                    .properties()
+                    .eq_properties
+                    .schema()
+                    .clone()
+                    .try_into()
+                    .context(ConvertSchemaSnafu)?;
+                Ok(Box::pin(EmptyRecordBatchStream::new(Arc::new(schema))))
+            }
             1 => {
                 let stream = plan
                     .execute(0, task_ctx)
@@ -453,7 +449,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                 // merge into a single partition
                 let plan = CoalescePartitionsExec::new(df_plan.clone());
                 // CoalescePartitionsExec must produce a single partition
-                assert_eq!(1, plan.output_partitioning().partition_count());
+                assert_eq!(1, plan.properties().output_partitioning().partition_count());
                 let df_stream = plan
                     .execute(0, task_ctx)
                     .context(error::DatafusionSnafu)

@@ -26,10 +26,11 @@ use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::ContextProvider;
+use datafusion::variable::VarType;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::{DataFusionError, OwnedTableReference};
+use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::{TableSource, WindowUDF};
-use datafusion_physical_expr::var_provider::{is_system_variables, VarType};
 use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -102,7 +103,7 @@ async fn resolve_tables(
 }
 
 impl ContextProvider for DfContextProviderAdapter {
-    fn get_table_provider(&self, name: TableReference) -> DfResult<Arc<dyn TableSource>> {
+    fn get_table_source(&self, name: TableReference) -> DfResult<Arc<dyn TableSource>> {
         let table_ref = self.table_provider.resolve_table_ref(name)?;
         self.tables
             .get(&table_ref.to_string())
@@ -158,5 +159,20 @@ impl ContextProvider for DfContextProviderAdapter {
 
     fn options(&self) -> &ConfigOptions {
         self.session_state.config_options()
+    }
+
+    fn udfs_names(&self) -> Vec<String> {
+        // TODO(LFC): Impl it.
+        vec![]
+    }
+
+    fn udafs_names(&self) -> Vec<String> {
+        // TODO(LFC): Impl it.
+        vec![]
+    }
+
+    fn udwfs_names(&self) -> Vec<String> {
+        // TODO(LFC): Impl it.
+        vec![]
     }
 }

@@ -21,7 +21,7 @@ use api::v1::GreptimeRequest;
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
-    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
+    HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
 };
 use async_trait::async_trait;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
@@ -93,6 +93,13 @@ impl<T: FlightCraft> FlightService for FlightCraftWrapper<T> {
         &self,
         _: Request<FlightDescriptor>,
     ) -> TonicResult<Response<FlightInfo>> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    async fn poll_flight_info(
+        &self,
+        _: Request<FlightDescriptor>,
+    ) -> TonicResult<Response<PollInfo>> {
         Err(Status::unimplemented("Not yet implemented"))
     }
 

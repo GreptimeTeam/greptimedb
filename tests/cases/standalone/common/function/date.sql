@@ -53,9 +53,15 @@ SELECT date_sub(ts, INTERVAL '1 year 2 month 3 day') from dates;
 
 SELECT date_sub(ts, '1 year 2 month 3 day') from dates;
 
---- date_format ---
-SELECT date_format(d, '%Y-%m-%d %H:%M:%S:%3f') from dates;
+--- date_format with date ---
+--- It seems in new Datafusion, a date cannot be formatted to a finer granularity than itself:
+SELECT date_format(d, '%Y-%m-%d %H') from dates;
 
+SELECT date_format(d, '%Y-%m-%d') from dates;
+
+SELECT date_format(d, '%Y-%m') from dates;
+
+--- date_format with timestamp ---
 SELECT date_format(ts, '%Y-%m-%d %H:%M:%S:%3f') from dates;
 
 DROP TABLE dates;

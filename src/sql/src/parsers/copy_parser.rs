@@ -49,7 +49,7 @@ impl<'a> ParserContext<'a> {
     fn parser_copy_database(&mut self) -> Result<CopyDatabase> {
         let database_name =
             self.parser
-                .parse_object_name()
+                .parse_object_name(false)
                 .with_context(|_| error::UnexpectedSnafu {
                     sql: self.sql,
                     expected: "a database name",
@@ -84,7 +84,7 @@ impl<'a> ParserContext<'a> {
     fn parse_copy_table(&mut self) -> Result<CopyTable> {
         let raw_table_name =
             self.parser
-                .parse_object_name()
+                .parse_object_name(false)
                 .with_context(|_| error::UnexpectedSnafu {
                     sql: self.sql,
                     expected: "a table name",

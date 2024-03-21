@@ -28,7 +28,8 @@ use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion::physical_plan::{ExecutionMode, PlanProperties};
+use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::OptionExt;
@@ -38,29 +39,32 @@ use crate::table::metrics::MemoryUsageMetrics;
 /// Adapt greptime's [SendableRecordBatchStream] to GreptimeDB's [PhysicalPlan].
 pub struct StreamScanAdapter {
     stream: Mutex<Option<SendableRecordBatchStream>>,
-    schema: SchemaRef,
     output_ordering: Option<Vec<PhysicalSortExpr>>,
     metric: ExecutionPlanMetricsSet,
+    properties: PlanProperties,
 }
 
 impl Debug for StreamScanAdapter {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamScanAdapter")
             .field("stream", &"<SendableRecordBatchStream>")
-            .field("schema", &self.schema.arrow_schema().fields)
+            .field("schema", &self.properties.eq_properties.schema().fields)
             .finish()
     }
 }
 
 impl StreamScanAdapter {
     pub fn new(stream: SendableRecordBatchStream) -> Self {
-        let schema = stream.schema();
-
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(stream.schema().arrow_schema().clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
         Self {
             stream: Mutex::new(Some(stream)),
-            schema,
             output_ordering: None,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
         }
     }
 
@@ -75,16 +79,8 @@ impl PhysicalPlan for StreamScanAdapter {
         self
     }
 
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(1)
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        self.output_ordering.as_deref()
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
     }
 
     fn children(&self) -> Vec<PhysicalPlanRef> {
@@ -198,8 +194,15 @@ mod test {
         let stream = recordbatches.as_stream();
 
         let scan = StreamScanAdapter::new(stream);
-
-        assert_eq!(scan.schema(), schema);
+        let actual: SchemaRef = Arc::new(
+            scan.properties
+                .eq_properties
+                .schema()
+                .clone()
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(actual, schema);
 
         let stream = scan.execute(0, ctx.task_ctx()).unwrap();
         let recordbatches = util::collect(stream).await.unwrap();

@@ -224,10 +224,15 @@ fn find_primary_keys(
     let columns_pk = columns
         .iter()
         .filter_map(|x| {
-            if x.options
-                .iter()
-                .any(|o| matches!(o.option, ColumnOption::Unique { is_primary: true }))
-            {
+            if x.options.iter().any(|o| {
+                matches!(
+                    o.option,
+                    ColumnOption::Unique {
+                        is_primary: true,
+                        ..
+                    }
+                )
+            }) {
                 Some(x.name.value.clone())
             } else {
                 None
@@ -249,6 +254,7 @@ fn find_primary_keys(
                 name: _,
                 columns,
                 is_primary: true,
+                ..
             } => Some(columns.iter().map(|ident| ident.value.clone())),
             _ => None,
         })
@@ -276,6 +282,7 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
                 name: Some(name),
                 columns,
                 is_primary: false,
+                ..
             } => {
                 if name.value == TIME_INDEX {
                     Some(columns.iter().map(|ident| &ident.value))

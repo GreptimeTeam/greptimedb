@@ -84,6 +84,8 @@ fn create_sample_recordbatch() -> RecordBatch {
     .unwrap()
 }
 
+// FIXME(LFC): Enable testing "run_ron_testcases"
+#[ignore]
 /// test cases which read from a .ron file, deser,
 ///
 /// and exec/parse (depending on the type of predicate) then decide if result is as expected

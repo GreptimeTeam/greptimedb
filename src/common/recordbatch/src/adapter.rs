@@ -103,7 +103,7 @@ where
                         "Trying to cast a RecordBatch into an incompatible schema. RecordBatch: {}, Target: {}",
                         projected_column.schema(),
                         projected_schema,
-                    ))));
+                    )), None));
                 }
 
                 let mut columns = Vec::with_capacity(projected_schema.fields.len());
@@ -218,6 +218,10 @@ impl RecordBatchStreamAdapter {
 }
 
 impl RecordBatchStream for RecordBatchStreamAdapter {
+    fn name(&self) -> &str {
+        "RecordBatchStreamAdapter"
+    }
+
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

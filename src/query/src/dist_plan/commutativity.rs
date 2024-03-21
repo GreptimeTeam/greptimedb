@@ -107,6 +107,7 @@ impl Categorizer {
             LogicalPlan::Dml(_) => Commutativity::Unsupported,
             LogicalPlan::Ddl(_) => Commutativity::Unsupported,
             LogicalPlan::Copy(_) => Commutativity::Unsupported,
+            LogicalPlan::RecursiveQuery(_) => Commutativity::Unsupported,
         }
     }
 
@@ -142,8 +143,7 @@ impl Categorizer {
             | Expr::Between(_)
             | Expr::Sort(_)
             | Expr::Exists(_)
-            | Expr::ScalarFunction(_)
-            | Expr::ScalarUDF(_) => Commutativity::Commutative,
+            | Expr::ScalarFunction(_) => Commutativity::Commutative,
 
             Expr::Like(_)
             | Expr::SimilarTo(_)
@@ -155,14 +155,13 @@ impl Categorizer {
             | Expr::TryCast(_)
             | Expr::AggregateFunction(_)
             | Expr::WindowFunction(_)
-            | Expr::AggregateUDF(_)
             | Expr::InList(_)
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)
-            | Expr::Wildcard => Commutativity::Unimplemented,
+            | Expr::Wildcard { .. } => Commutativity::Unimplemented,
 
             Expr::Alias(_)
-            | Expr::QualifiedWildcard { .. }
+            | Expr::Unnest(_)
             | Expr::GroupingSet(_)
             | Expr::Placeholder(_)
             | Expr::OuterReferenceColumn(_, _) => Commutativity::Unimplemented,

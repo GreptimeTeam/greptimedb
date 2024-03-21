@@ -28,7 +28,7 @@ impl<'a> ParserContext<'a> {
 
         let raw_table_ident =
             self.parser
-                .parse_object_name()
+                .parse_object_name(false)
                 .with_context(|_| error::UnexpectedSnafu {
                     sql: self.sql,
                     expected: "a table name",

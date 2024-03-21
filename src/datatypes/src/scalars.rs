@@ -437,10 +437,8 @@ mod tests {
 
     #[test]
     fn test_list_value_scalar() {
-        let list_value = ListValue::new(
-            Some(Box::new(vec![Value::Int32(123)])),
-            ConcreteDataType::int32_datatype(),
-        );
+        let list_value =
+            ListValue::new(vec![Value::Int32(123)], ConcreteDataType::int32_datatype());
         let list_ref = ListValueRef::Ref { val: &list_value };
         assert_eq!(list_ref, list_value.as_scalar_ref());
         assert_eq!(list_value, list_ref.to_owned_scalar());
