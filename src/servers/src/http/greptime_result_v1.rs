@@ -40,7 +40,7 @@ pub struct GreptimedbV1Response {
 
 impl GreptimedbV1Response {
     pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
-        match handler::from_output(ResponseFormat::GreptimedbV1, outputs).await {
+        match handler::from_output(outputs).await {
             Ok((output, resp_metrics)) => HttpResponse::GreptimedbV1(Self {
                 output,
                 execution_time_ms: 0,
@@ -77,7 +77,7 @@ impl IntoResponse for GreptimedbV1Response {
 
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_FORMAT,
-            HeaderValue::from_static("greptimedb_v1"),
+            HeaderValue::from_static(ResponseFormat::GreptimedbV1.as_str()),
         );
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_EXECUTION_TIME,

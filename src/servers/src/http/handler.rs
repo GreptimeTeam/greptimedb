@@ -110,7 +110,7 @@ pub async fn sql(
     let outputs = match result {
         Err((status, msg)) => {
             return HttpResponse::Error(
-                ErrorResponse::from_error_message(format, status, msg)
+                ErrorResponse::from_error_message(status, msg)
                     .with_execution_time(start.elapsed().as_millis() as u64),
             );
         }
@@ -130,7 +130,6 @@ pub async fn sql(
 
 /// Create a response from query result
 pub async fn from_output(
-    ty: ResponseFormat,
     outputs: Vec<crate::error::Result<Output>>,
 ) -> Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
     // TODO(sunng87): this api response structure cannot represent error well.
@@ -154,11 +153,11 @@ pub async fn from_output(
                         Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
                             Ok(rows) => rows,
                             Err(err) => {
-                                return Err(ErrorResponse::from_error(ty, err));
+                                return Err(ErrorResponse::from_error(err));
                             }
                         },
                         Err(err) => {
-                            return Err(ErrorResponse::from_error(ty, err));
+                            return Err(ErrorResponse::from_error(err));
                         }
                     };
                     if let Some(physical_plan) = o.meta.plan {
@@ -180,14 +179,14 @@ pub async fn from_output(
                             results.push(GreptimeQueryOutput::Records(rows));
                         }
                         Err(err) => {
-                            return Err(ErrorResponse::from_error(ty, err));
+                            return Err(ErrorResponse::from_error(err));
                         }
                     }
                 }
             },
 
             Err(err) => {
-                return Err(ErrorResponse::from_error(ty, err));
+                return Err(ErrorResponse::from_error(err));
             }
         }
     }
@@ -239,7 +238,7 @@ pub async fn promql(
     let resp = if let Some((status, msg)) =
         validate_schema(sql_handler.clone(), query_ctx.clone()).await
     {
-        let resp = ErrorResponse::from_error_message(ResponseFormat::GreptimedbV1, status, msg);
+        let resp = ErrorResponse::from_error_message(status, msg);
         HttpResponse::Error(resp)
     } else {
         let prom_query = params.into();
