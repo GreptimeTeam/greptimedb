@@ -28,6 +28,7 @@ use crate::cache_invalidator::Context;
 use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
+use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -120,13 +121,14 @@ impl DropTableExecutor {
             subject: Some("Invalidate table cache by dropping table".to_string()),
         };
 
-        // TODO(weny): merge these two invalidation instructions.
         cache_invalidator
-            .invalidate_table_name(&ctx, self.table.table_ref().into())
-            .await?;
-
-        cache_invalidator
-            .invalidate_table_id(&ctx, self.table_id)
+            .invalidate(
+                &ctx,
+                vec![
+                    CacheIdent::TableName(self.table.table_ref().into()),
+                    CacheIdent::TableId(self.table_id),
+                ],
+            )
             .await?;
 
         Ok(())

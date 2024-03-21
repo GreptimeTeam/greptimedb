@@ -48,7 +48,7 @@ use crate::config::MitoConfig;
 use crate::error::{InvalidRequestSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::manifest::action::RegionEdit;
-use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
+use crate::memtable::partition_tree::PartitionTreeMemtableBuilder;
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::{MemtableBuilderProvider, MemtableConfig};
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
@@ -340,8 +340,8 @@ impl<S: LogStore> WorkerStarter<S> {
         let running = Arc::new(AtomicBool::new(true));
 
         let default_memtable_builder = match &self.config.memtable {
-            MemtableConfig::Experimental(merge_tree) => Arc::new(MergeTreeMemtableBuilder::new(
-                merge_tree.clone(),
+            MemtableConfig::PartitionTree(config) => Arc::new(PartitionTreeMemtableBuilder::new(
+                config.clone(),
                 Some(self.write_buffer_manager.clone()),
             )) as _,
             MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(Some(

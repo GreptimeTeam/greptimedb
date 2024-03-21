@@ -15,9 +15,9 @@
 use std::ops::Range;
 
 use crate::error::Result;
-use crate::memtable::merge_tree::data::DataBatch;
-use crate::memtable::merge_tree::shard::DataBatchSource;
-use crate::memtable::merge_tree::PkId;
+use crate::memtable::partition_tree::data::DataBatch;
+use crate::memtable::partition_tree::shard::DataBatchSource;
+use crate::memtable::partition_tree::PkId;
 
 /// A reader that dedup sorted batches from a merger.
 pub struct DedupReader<T> {
@@ -112,7 +112,7 @@ mod tests {
     use store_api::metadata::RegionMetadataRef;
 
     use super::*;
-    use crate::memtable::merge_tree::data::{DataBuffer, DataParts, DataPartsReader};
+    use crate::memtable::partition_tree::data::{DataBuffer, DataParts, DataPartsReader};
     use crate::test_util::memtable_util::{
         extract_data_batch, metadata_for_test, write_rows_to_buffer,
     };

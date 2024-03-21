@@ -27,7 +27,6 @@ use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
 use servers::http::header::constants::GREPTIME_DB_HEADER_NAME;
-use servers::http::header::GREPTIME_DB_HEADER_FORMAT;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -183,10 +182,6 @@ async fn test_influxdb_write() {
         .await;
     assert_eq!(result.status(), 401);
     assert_eq!(
-        result.headers().get(&GREPTIME_DB_HEADER_FORMAT).unwrap(),
-        "influxdb_v1",
-    );
-    assert_eq!(
         "{\"code\":7002,\"error\":\"Username and password does not match, username: greptime\",\"execution_time_ms\":0}",
         result.text().await
     );
@@ -198,10 +193,6 @@ async fn test_influxdb_write() {
         .send()
         .await;
     assert_eq!(result.status(), 401);
-    assert_eq!(
-        result.headers().get(&GREPTIME_DB_HEADER_FORMAT).unwrap(),
-        "influxdb_v1",
-    );
     assert_eq!(
         "{\"code\":7003,\"error\":\"Not found influx http authorization info\",\"execution_time_ms\":0}",
         result.text().await

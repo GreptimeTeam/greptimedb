@@ -22,20 +22,17 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::http::header::constants::GREPTIME_DB_HEADER_ERROR_CODE;
-use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
-use crate::http::ResponseFormat;
+use crate::http::header::GREPTIME_DB_HEADER_EXECUTION_TIME;
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct ErrorResponse {
-    #[serde(skip)]
-    ty: ResponseFormat,
     code: u32,
     error: String,
     execution_time_ms: u64,
 }
 
 impl ErrorResponse {
-    pub fn from_error(ty: ResponseFormat, error: impl ErrorExt) -> Self {
+    pub fn from_error(error: impl ErrorExt) -> Self {
         let code = error.status_code();
 
         if code.should_log_error() {
@@ -44,12 +41,11 @@ impl ErrorResponse {
             debug!("Failed to handle HTTP request, err: {:?}", error);
         }
 
-        Self::from_error_message(ty, code, error.output_msg())
+        Self::from_error_message(code, error.output_msg())
     }
 
-    pub fn from_error_message(ty: ResponseFormat, code: StatusCode, msg: String) -> Self {
+    pub fn from_error_message(code: StatusCode, msg: String) -> Self {
         ErrorResponse {
-            ty,
             code: code as u32,
             error: msg,
             execution_time_ms: 0,
@@ -76,14 +72,11 @@ impl ErrorResponse {
 
 impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
-        let ty = self.ty.as_str();
         let code = self.code;
         let execution_time = self.execution_time_ms;
         let mut resp = Json(self).into_response();
         resp.headers_mut()
             .insert(GREPTIME_DB_HEADER_ERROR_CODE, HeaderValue::from(code));
-        resp.headers_mut()
-            .insert(&GREPTIME_DB_HEADER_FORMAT, HeaderValue::from_static(ty));
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),

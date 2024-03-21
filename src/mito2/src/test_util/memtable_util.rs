@@ -30,7 +30,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
+use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRef,
     MemtableStats,

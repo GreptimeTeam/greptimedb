@@ -14,7 +14,7 @@
 
 use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
-use common_meta::instruction::Instruction;
+use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,7 @@ impl InvalidateCache {
         ctx: &RegionFailoverContext,
         table_id: TableId,
     ) -> Result<()> {
-        let instruction = Instruction::InvalidateTableIdCache(table_id);
+        let instruction = Instruction::InvalidateCaches(vec![CacheIdent::TableId(table_id)]);
 
         let msg = &MailboxMessage::json_message(
             "Invalidate Table Cache",
@@ -133,7 +133,10 @@ mod tests {
             assert_eq!(
                 received.payload,
                 Some(Payload::Json(
-                    serde_json::to_string(&Instruction::InvalidateTableIdCache(table_id)).unwrap(),
+                    serde_json::to_string(&Instruction::InvalidateCaches(vec![
+                        CacheIdent::TableId(table_id)
+                    ]))
+                    .unwrap(),
                 ))
             );
         }

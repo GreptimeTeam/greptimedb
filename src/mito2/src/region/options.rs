@@ -29,7 +29,7 @@ use snafu::{ensure, ResultExt};
 use store_api::storage::ColumnId;
 
 use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
-use crate::memtable::merge_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
+use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 
@@ -225,17 +225,17 @@ impl Default for InvertedIndexOptions {
 #[serde(tag = "memtable.type", rename_all = "snake_case")]
 pub enum MemtableOptions {
     TimeSeries,
-    #[serde(with = "prefix_experimental")]
-    Experimental(ExperimentalOptions),
+    #[serde(with = "prefix_partition_tree")]
+    PartitionTree(PartitionTreeOptions),
 }
 
-with_prefix!(prefix_experimental "memtable.experimental.");
+with_prefix!(prefix_partition_tree "memtable.partition_tree.");
 
-/// Experimental memtable options.
+/// Partition tree memtable options.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
-pub struct ExperimentalOptions {
+pub struct PartitionTreeOptions {
     /// Max keys in an index shard.
     #[serde_as(as = "DisplayFromStr")]
     pub index_max_keys_per_shard: usize,
@@ -246,7 +246,7 @@ pub struct ExperimentalOptions {
     pub fork_dictionary_bytes: ReadableSize,
 }
 
-impl Default for ExperimentalOptions {
+impl Default for PartitionTreeOptions {
     fn default() -> Self {
         Self {
             index_max_keys_per_shard: DEFAULT_MAX_KEYS_PER_SHARD,
@@ -442,10 +442,12 @@ mod tests {
         };
         assert_eq!(expect, options);
 
-        let map = make_map(&[("memtable.type", "experimental")]);
+        let map = make_map(&[("memtable.type", "partition_tree")]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
-            memtable: Some(MemtableOptions::Experimental(ExperimentalOptions::default())),
+            memtable: Some(MemtableOptions::PartitionTree(
+                PartitionTreeOptions::default(),
+            )),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -476,10 +478,10 @@ mod tests {
                 WAL_OPTIONS_KEY,
                 &serde_json::to_string(&wal_options).unwrap(),
             ),
-            ("memtable.type", "experimental"),
-            ("memtable.experimental.index_max_keys_per_shard", "2048"),
-            ("memtable.experimental.data_freeze_threshold", "2048"),
-            ("memtable.experimental.fork_dictionary_bytes", "128M"),
+            ("memtable.type", "partition_tree"),
+            ("memtable.partition_tree.index_max_keys_per_shard", "2048"),
+            ("memtable.partition_tree.data_freeze_threshold", "2048"),
+            ("memtable.partition_tree.fork_dictionary_bytes", "128M"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -497,7 +499,7 @@ mod tests {
                     segment_row_count: 512,
                 },
             },
-            memtable: Some(MemtableOptions::Experimental(ExperimentalOptions {
+            memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
