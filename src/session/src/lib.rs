@@ -45,13 +45,18 @@ pub type SessionRef = Arc<Session>;
 
 impl Session {
     pub fn new(addr: Option<SocketAddr>, channel: Channel) -> Self {
+        let configuration_variables = DashMap::new();
+        configuration_variables.insert(
+            "BYTEA_OUTPUT".to_string(),
+            Value::SingleQuotedString("DEFAULT".to_string()),
+        );
         Session {
             catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),
             schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
             user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
             conn_info: ConnInfo::new(addr, channel),
             timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
-            configuration_variables: DashMap::new(),
+            configuration_variables,
         }
     }
 
@@ -64,6 +69,7 @@ impl Session {
             .current_catalog(self.catalog.load().to_string())
             .current_schema(self.schema.load().to_string())
             .sql_dialect(self.conn_info.channel.dialect())
+            .configuration_parameter(self.configuration_variables.clone())
             .timezone(self.timezone())
             .build()
     }

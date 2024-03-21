@@ -12,25 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::BufMut;
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
 use common_telemetry::tracing;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::SchemaRef;
+use datatypes::types::StringType;
+use datatypes::value::Value;
 use futures::{future, stream, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
-    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
+    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, QueryResponse,
+    Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::types::ToSqlText;
+use postgres_types::{IsNull, ToSql};
 use query::query_engine::DescribeResult;
+use session::context::QueryContextRef;
 use session::Session;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
@@ -64,15 +73,115 @@ impl SimpleQueryHandler for PostgresServerHandler {
         let mut results = Vec::with_capacity(outputs.len());
 
         for output in outputs {
-            let resp = output_to_query_response(output, &Format::UnifiedText)?;
+            let resp = output_to_query_response(query_ctx.clone(), output, &Format::UnifiedText)?;
             results.push(resp);
         }
 
         Ok(results)
     }
 }
+#[derive(Debug)]
+struct HexOutputBytea<'a>(&'a [u8]);
+impl ToSqlText for HexOutputBytea<'_> {
+    fn to_sql_text(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
+    where
+        Self: Sized,
+    {
+        out.put_slice(b"\\x");
+        let _ = self.0.to_sql_text(ty, out);
+        Ok(IsNull::No)
+    }
+}
+
+impl ToSql for HexOutputBytea<'_> {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
+    where
+        Self: Sized,
+    {
+        self.0.to_sql(ty, out)
+    }
+
+    fn accepts(ty: &Type) -> bool
+    where
+        Self: Sized,
+    {
+        <&[u8] as ToSql>::accepts(ty)
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        self.0.to_sql_checked(ty, out)
+    }
+}
+#[derive(Debug)]
+struct EscapeOutputBytea<'a>(&'a [u8]);
+impl EscapeOutputBytea<'_> {
+    fn datatype(&self) -> Type {
+        // to show as string, use string as type
+        type_gt_to_pg(&ConcreteDataType::String(StringType)).unwrap()
+    }
+}
+impl ToSqlText for EscapeOutputBytea<'_> {
+    fn to_sql_text(
+        &self,
+        _ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
+    where
+        Self: Sized,
+    {
+        self.0.iter().for_each(|b| match b {
+            0..=31 | 127..=255 => {
+                out.put_slice(b"\\");
+                out.put_slice(format!("{:03o}", b).as_bytes());
+            }
+            92 => out.put_slice(b"\\\\"),
+            32..=126 => out.put_u8(*b),
+        });
+        Ok(IsNull::No)
+    }
+}
+impl ToSql for EscapeOutputBytea<'_> {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
+    where
+        Self: Sized,
+    {
+        self.0.to_sql(ty, out)
+    }
+
+    fn accepts(ty: &Type) -> bool
+    where
+        Self: Sized,
+    {
+        <&[u8] as ToSql>::accepts(ty)
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        self.0.to_sql_checked(ty, out)
+    }
+}
 
 fn output_to_query_response<'a>(
+    query_ctx: QueryContextRef,
     output: Result<Output>,
     field_format: &Format,
 ) -> PgWireResult<Response<'a>> {
@@ -83,11 +192,16 @@ fn output_to_query_response<'a>(
             }
             OutputData::Stream(record_stream) => {
                 let schema = record_stream.schema();
-                recordbatches_to_query_response(record_stream, schema, field_format)
+                recordbatches_to_query_response(query_ctx, record_stream, schema, field_format)
             }
             OutputData::RecordBatches(recordbatches) => {
                 let schema = recordbatches.schema();
-                recordbatches_to_query_response(recordbatches.as_stream(), schema, field_format)
+                recordbatches_to_query_response(
+                    query_ctx,
+                    recordbatches.as_stream(),
+                    schema,
+                    field_format,
+                )
             }
         },
         Err(e) => Ok(Response::Error(Box::new(ErrorInfo::new(
@@ -99,6 +213,7 @@ fn output_to_query_response<'a>(
 }
 
 fn recordbatches_to_query_response<'a, S>(
+    query_ctx: QueryContextRef,
     recordbatches_stream: S,
     schema: SchemaRef,
     field_format: &Format,
@@ -106,6 +221,13 @@ fn recordbatches_to_query_response<'a, S>(
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
+    let bytea_output = match query_ctx
+        .get_configuration_parameter("BYTEA_OUTPUT")
+        .unwrap()
+    {
+        sql::ast::Value::SingleQuotedString(s) | sql::ast::Value::DoubleQuotedString(s) => s,
+        _ => unimplemented!(),
+    };
     let pg_schema = Arc::new(
         schema_to_pg(schema.as_ref(), field_format)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
@@ -125,8 +247,27 @@ where
         .map(move |row| {
             row.and_then(|row| {
                 let mut encoder = DataRowEncoder::new(pg_schema_ref.clone());
-                for value in row.iter() {
-                    encode_value(value, &mut encoder)?;
+                for (idx, value) in row.iter().enumerate() {
+                    if let Value::Binary(v) = value {
+                        match bytea_output.to_uppercase().as_str() {
+                            "HEX" => encoder.encode_field(&HexOutputBytea(v.deref()))?,
+                            "ESCAPE" => match (*pg_schema_ref)[idx].format() {
+                                FieldFormat::Text => {
+                                    let value = EscapeOutputBytea(v.deref());
+                                    encoder.encode_field_with_type_and_format(
+                                        &value,
+                                        &value.datatype(),
+                                        FieldFormat::Text,
+                                    )?
+                                }
+                                FieldFormat::Binary => encode_value(value, &mut encoder)?,
+                            },
+                            "DEFAULT" => encode_value(value, &mut encoder)?,
+                            _ => unimplemented!("impossible"),
+                        }
+                    } else {
+                        encode_value(value, &mut encoder)?
+                    }
                 }
                 encoder.finish()
             })
@@ -225,7 +366,9 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             let plan = plan
                 .replace_params_with_values(parameters_to_scalar_values(plan, portal)?.as_ref())
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            self.query_handler.do_exec_plan(plan, query_ctx).await
+            self.query_handler
+                .do_exec_plan(plan, query_ctx.clone())
+                .await
         } else {
             // manually replace variables in prepared statement when no
             // logical_plan is generated. This happens when logical plan is not
@@ -235,10 +378,13 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                 sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
             }
 
-            self.query_handler.do_query(&sql, query_ctx).await.remove(0)
+            self.query_handler
+                .do_query(&sql, query_ctx.clone())
+                .await
+                .remove(0)
         };
 
-        output_to_query_response(output, &portal.result_column_format)
+        output_to_query_response(query_ctx, output, &portal.result_column_format)
     }
 
     async fn do_describe_statement<C>(

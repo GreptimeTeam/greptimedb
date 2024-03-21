@@ -163,6 +163,9 @@ impl QueryContext {
         self.configuration_parameter
             .insert(name.to_uppercase(), value);
     }
+    pub fn get_configuration_parameter(&self, name: &str) -> Option<Value> {
+        self.configuration_parameter.get(name).map(|v| v.clone())
+    }
 
     pub fn set_timezone(&self, timezone: Timezone) {
         let _ = self.timezone.swap(Arc::new(timezone));
