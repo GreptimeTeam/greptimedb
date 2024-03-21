@@ -12,8 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use sql::ast::Value;
+
 mod federated;
 pub mod handler;
 mod helper;
 pub mod server;
 pub mod writer;
+
+pub fn validate_parameter_value(_name: &str, _value: &Value) -> bool {
+    true
+}

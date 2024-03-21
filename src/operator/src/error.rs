@@ -531,6 +531,14 @@ pub enum Error {
 
     #[snafu(display("Invalid partition rule: {}", reason))]
     InvalidPartitionRule { reason: String, location: Location },
+
+    #[snafu(display("Invalid parameter value {} for '{}'", value, name))]
+    InvalidParameterValue {
+        // source: Error
+        name: String,
+        value: Value,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -539,6 +547,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::InvalidSql { .. }
+            | Error::InvalidParameterValue { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }
             | Error::IllegalPrimaryKeysDef { .. }

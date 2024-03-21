@@ -25,6 +25,8 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::timezone::get_timezone;
 use common_time::Timezone;
 use context::QueryContextBuilder;
+use dashmap::DashMap;
+use sql::ast::Value;
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
 
@@ -36,6 +38,7 @@ pub struct Session {
     user_info: ArcSwap<UserInfoRef>,
     conn_info: ConnInfo,
     timezone: ArcSwap<Timezone>,
+    configuration_variables: DashMap<String, Value>,
 }
 
 pub type SessionRef = Arc<Session>;
@@ -48,6 +51,7 @@ impl Session {
             user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
             conn_info: ConnInfo::new(addr, channel),
             timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
+            configuration_variables: DashMap::new(),
         }
     }
 

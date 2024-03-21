@@ -35,6 +35,7 @@ use pgwire::api::ClientInfo;
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::Session;
+use sql::ast::Value;
 
 use self::auth_handler::PgLoginVerifier;
 use self::handler::DefaultQueryParser;
@@ -98,5 +99,18 @@ impl MakePostgresServerHandler {
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
         }
+    }
+}
+
+/// checks if the parameter value provided by 'set' statement is valid
+pub fn validate_parameter_value(name: &str, value: &Value) -> bool {
+    match name {
+        "BYTEA_OUTPUT" => match value {
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+                matches!(s.to_uppercase().as_str(), "HEX" | "ESCAPE" | "DEFAULT")
+            }
+            _ => false,
+        },
+        _ => true,
     }
 }

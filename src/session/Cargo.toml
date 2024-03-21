@@ -17,6 +17,7 @@ auth.workspace = true
 common-catalog.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+dashmap.workspace = true
 derive_builder.workspace = true
 snafu.workspace = true
 sql.workspace = true

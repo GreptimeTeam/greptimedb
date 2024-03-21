@@ -59,6 +59,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
             .start_timer();
         let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
         query_ctx.update_session(&self.session);
+        query_ctx.update_configuration_parameter(&self.session);
 
         let mut results = Vec::with_capacity(outputs.len());
 

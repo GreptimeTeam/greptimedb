@@ -24,7 +24,9 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
 use common_time::timezone::get_timezone;
 use common_time::Timezone;
+use dashmap::DashMap;
 use derive_builder::Builder;
+use sql::ast::Value;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 use crate::SessionRef;
@@ -44,6 +46,9 @@ pub struct QueryContext {
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extension: HashMap<String, String>,
+    // The configuration parameter are used to store the parameters that are set by the user
+    #[builder(default)]
+    configuration_parameter: DashMap<String, Value>,
 }
 
 impl QueryContextBuilder {
@@ -73,6 +78,7 @@ impl Clone for QueryContext {
             timezone: self.timezone.load().clone().into(),
             sql_dialect: self.sql_dialect.clone(),
             extension: self.extension.clone(),
+            configuration_parameter: self.configuration_parameter.clone(),
         }
     }
 }
@@ -88,6 +94,7 @@ impl From<&RegionRequestHeader> for QueryContext {
             timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
             sql_dialect: Arc::new(GreptimeDbDialect {}),
             extension: Default::default(),
+            configuration_parameter: Default::default(),
         }
     }
 }
@@ -152,6 +159,11 @@ impl QueryContext {
         let _ = self.current_user.swap(Arc::new(user));
     }
 
+    pub fn set_configuration_parameter(&self, name: String, value: Value) {
+        self.configuration_parameter
+            .insert(name.to_uppercase(), value);
+    }
+
     pub fn set_timezone(&self, timezone: Timezone) {
         let _ = self.timezone.swap(Arc::new(timezone));
     }
@@ -171,6 +183,15 @@ impl QueryContext {
         if *session.timezone() != *tz {
             session.set_timezone(tz.as_ref().clone())
         }
+    }
+
+    pub fn update_configuration_parameter(&self, session: &SessionRef) {
+        self.configuration_parameter
+            .clone()
+            .into_iter()
+            .for_each(|(key, value)| {
+                session.configuration_variables.insert(key, value);
+            });
     }
 
     /// Default to double quote and fallback to back quote
@@ -204,6 +225,7 @@ impl QueryContextBuilder {
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extension: self.extension.unwrap_or_default(),
+            configuration_parameter: self.configuration_parameter.unwrap_or_default(),
         })
     }
 

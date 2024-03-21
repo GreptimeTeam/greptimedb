@@ -21,6 +21,7 @@ mod dml;
 mod show;
 mod tql;
 
+use std::any::Any;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -38,9 +39,11 @@ use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
+use servers::{mysql, postgres};
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::dialect::{MySqlDialect, PostgreSqlDialect};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::set_variables::SetVariables;
 use sql::statements::statement::Statement;
@@ -52,8 +55,8 @@ use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidParameterValueSnafu,
+    InvalidSqlSnafu, NotSupportedSnafu, PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -219,7 +222,9 @@ impl StatementExecutor {
                     // Since the "bytea_output" only determines the output format of binary values,
                     // it won't cause much trouble if we do so.
                     // TODO(#3438): Remove this temporary workaround after the feature is implemented.
-                    "BYTEA_OUTPUT" => (),
+                    "BYTEA_OUTPUT" => {
+                        set_configuration_parameter(var_name, set_var.value, query_ctx)?
+                    }
 
                     // Same as "bytea_output", we just ignore it here.
                     // Not harmful since it only relates to how date is viewed in client app's output.
@@ -336,6 +341,42 @@ fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
         }
         .fail(),
     }
+}
+
+fn set_configuration_parameter(
+    var_name: String,
+    var_value: Vec<Expr>,
+    ctx: QueryContextRef,
+) -> Result<()> {
+    let Some((var_value, [])) = var_value.split_first() else {
+        return (NotSupportedSnafu {
+            feat: format!(
+                "Set variable value must have one and only one value for '{}'",
+                var_name
+            ),
+        })
+        .fail();
+    };
+    let Expr::Value(value) = var_value else {
+        return (NotSupportedSnafu {
+            feat: "Set variable value must be a value",
+        })
+        .fail();
+    };
+    // TODO(j0hn50n133): find a better way to match the sql dialect
+    if (ctx.sql_dialect().type_id() == (PostgreSqlDialect {}).type_id()
+        && !postgres::validate_parameter_value(&var_name, value))
+        || (ctx.sql_dialect().type_id() == (MySqlDialect {}).type_id()
+            && !mysql::validate_parameter_value(&var_name, value))
+    {
+        return (InvalidParameterValueSnafu {
+            name: var_name,
+            value: value.to_string(),
+        })
+        .fail();
+    }
+    ctx.set_configuration_parameter(var_name, value.clone());
+    Ok(())
 }
 
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
