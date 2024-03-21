@@ -344,9 +344,11 @@ impl<S: LogStore> WorkerStarter<S> {
                 config.clone(),
                 Some(self.write_buffer_manager.clone()),
             )) as _,
-            MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(Some(
-                self.write_buffer_manager.clone(),
-            ))) as _,
+            // Dedup by default.
+            MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(
+                Some(self.write_buffer_manager.clone()),
+                true,
+            )) as _,
         };
         let now = self.time_provider.current_time_millis();
         let mut worker_thread = RegionWorkerLoop {

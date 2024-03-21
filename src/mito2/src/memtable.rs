@@ -229,10 +229,12 @@ impl MemtableBuilderProvider {
     pub(crate) fn builder_for_options(
         &self,
         options: Option<&MemtableOptions>,
+        dedup: bool,
     ) -> MemtableBuilderRef {
         match options {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
+                dedup,
             )),
             Some(MemtableOptions::PartitionTree(opts)) => {
                 Arc::new(PartitionTreeMemtableBuilder::new(
@@ -240,7 +242,7 @@ impl MemtableBuilderProvider {
                         index_max_keys_per_shard: opts.index_max_keys_per_shard,
                         data_freeze_threshold: opts.data_freeze_threshold,
                         fork_dictionary_bytes: opts.fork_dictionary_bytes,
-                        ..Default::default()
+                        dedup,
                     },
                     self.write_buffer_manager.clone(),
                 ))

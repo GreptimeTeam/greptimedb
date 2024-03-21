@@ -93,6 +93,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             ttl: options.ttl,
             compaction,
             storage: options.storage,
+            append_mode: options.append_mode,
             wal_options,
             index_options,
             memtable,
@@ -175,6 +176,7 @@ struct RegionOptionsWithoutEnum {
     #[serde(with = "humantime_serde")]
     ttl: Option<Duration>,
     storage: Option<String>,
+    append_mode: bool,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -183,6 +185,7 @@ impl Default for RegionOptionsWithoutEnum {
         RegionOptionsWithoutEnum {
             ttl: options.ttl,
             storage: options.storage,
+            append_mode: options.append_mode,
         }
     }
 }

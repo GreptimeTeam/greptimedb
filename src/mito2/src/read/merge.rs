@@ -363,11 +363,8 @@ impl MergeReaderBuilder {
     }
 
     /// Creates a builder from sources.
-    pub fn from_sources(sources: Vec<Source>) -> MergeReaderBuilder {
-        MergeReaderBuilder {
-            sources,
-            dedup: true,
-        }
+    pub fn from_sources(sources: Vec<Source>, dedup: bool) -> MergeReaderBuilder {
+        MergeReaderBuilder { sources, dedup }
     }
 
     /// Pushes a batch reader to sources.
@@ -379,12 +376,6 @@ impl MergeReaderBuilder {
     /// Pushes a batch iterator to sources.
     pub fn push_batch_iter(&mut self, iter: BoxedBatchIterator) -> &mut Self {
         self.sources.push(Source::Iter(iter));
-        self
-    }
-
-    /// Sets whether to remove duplicate timestamps.
-    pub fn dedup(&mut self, dedup: bool) -> &mut Self {
-        self.dedup = dedup;
         self
     }
 
@@ -969,10 +960,11 @@ mod tests {
             &[OpType::Put, OpType::Put],
             &[32, 33],
         )]);
-        let mut reader = MergeReaderBuilder::new()
-            .push_batch_reader(Box::new(reader1))
-            .push_batch_iter(Box::new(reader2))
-            .dedup(false)
+        let sources = vec![
+            Source::Reader(Box::new(reader1)),
+            Source::Iter(Box::new(reader2)),
+        ];
+        let mut reader = MergeReaderBuilder::from_sources(sources, false)
             .build()
             .await
             .unwrap();
