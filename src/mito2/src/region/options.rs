@@ -46,6 +46,8 @@ pub struct RegionOptions {
     pub compaction: CompactionOptions,
     /// Custom storage. Uses default storage if it is `None`.
     pub storage: Option<String>,
+    /// If append mode is enabled, the region keeps duplicate rows.
+    pub append_mode: bool,
     /// Wal options.
     pub wal_options: WalOptions,
     /// Index options.
@@ -482,6 +484,7 @@ mod tests {
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
             ("storage", "S3"),
+            ("append_mode", "true"),
             ("index.inverted_index.ignore_column_ids", "1,2,3"),
             ("index.inverted_index.segment_row_count", "512"),
             (
@@ -502,6 +505,7 @@ mod tests {
                 time_window: Some(Duration::from_secs(3600 * 2)),
             }),
             storage: Some("S3".to_string()),
+            append_mode: true,
             wal_options,
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
