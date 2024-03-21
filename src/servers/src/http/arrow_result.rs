@@ -60,49 +60,46 @@ async fn write_arrow_bytes(
 }
 
 impl ArrowResponse {
-    pub async fn from_output(mut outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
-        if outputs.len() != 1 {
+    pub async fn from_output(mut outputs: Vec<error::Result<Output>>) -> HttpResponse {
+        if outputs.len() > 1 {
             return HttpResponse::Error(ErrorResponse::from_error_message(
-                ResponseFormat::Arrow,
                 StatusCode::InvalidArguments,
-                "Multi-statements and empty query are not allowed".to_string(),
+                "cannot output multi-statements result in arrow format".to_string(),
             ));
         }
 
-        match outputs.remove(0) {
-            Ok(output) => match output.data {
-                OutputData::AffectedRows(_rows) => HttpResponse::Arrow(ArrowResponse {
+        match outputs.pop() {
+            None => HttpResponse::Arrow(ArrowResponse {
+                data: vec![],
+                execution_time_ms: 0,
+            }),
+            Some(Ok(output)) => match output.data {
+                OutputData::AffectedRows(_) => HttpResponse::Arrow(ArrowResponse {
                     data: vec![],
                     execution_time_ms: 0,
                 }),
-                OutputData::RecordBatches(recordbatches) => {
-                    let schema = recordbatches.schema();
-                    match write_arrow_bytes(recordbatches.as_stream(), schema.arrow_schema()).await
-                    {
+                OutputData::RecordBatches(batches) => {
+                    let schema = batches.schema();
+                    match write_arrow_bytes(batches.as_stream(), schema.arrow_schema()).await {
                         Ok(payload) => HttpResponse::Arrow(ArrowResponse {
                             data: payload,
                             execution_time_ms: 0,
                         }),
-                        Err(e) => {
-                            HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::Arrow, e))
-                        }
+                        Err(e) => HttpResponse::Error(ErrorResponse::from_error(e)),
                     }
                 }
-
-                OutputData::Stream(recordbatches) => {
-                    let schema = recordbatches.schema();
-                    match write_arrow_bytes(recordbatches, schema.arrow_schema()).await {
+                OutputData::Stream(batches) => {
+                    let schema = batches.schema();
+                    match write_arrow_bytes(batches, schema.arrow_schema()).await {
                         Ok(payload) => HttpResponse::Arrow(ArrowResponse {
                             data: payload,
                             execution_time_ms: 0,
                         }),
-                        Err(e) => {
-                            HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::Arrow, e))
-                        }
+                        Err(e) => HttpResponse::Error(ErrorResponse::from_error(e)),
                     }
                 }
             },
-            Err(e) => HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::Arrow, e)),
+            Some(Err(e)) => HttpResponse::Error(ErrorResponse::from_error(e)),
         }
     }
 
@@ -127,7 +124,7 @@ impl IntoResponse for ArrowResponse {
                 ),
                 (
                     &GREPTIME_DB_HEADER_FORMAT,
-                    HeaderValue::from_static("ARROW"),
+                    HeaderValue::from_static(ResponseFormat::Arrow.as_str()),
                 ),
                 (
                     &GREPTIME_DB_HEADER_EXECUTION_TIME,
