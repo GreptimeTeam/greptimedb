@@ -40,7 +40,7 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
     match name {
         STATIC_USER_PROVIDER => {
             let provider =
-                StaticUserProvider::try_from(content).map(|p| Arc::new(p) as UserProviderRef)?;
+                StaticUserProvider::new(content.into()).map(|p| Arc::new(p) as UserProviderRef)?;
             Ok(provider)
         }
         _ => InvalidConfigSnafu {

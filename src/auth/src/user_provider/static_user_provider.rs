@@ -23,7 +23,7 @@ use secrecy::ExposeSecret;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    Error, IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
+    IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
     UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
 use crate::user_info::DefaultUserInfo;
@@ -31,15 +31,37 @@ use crate::{auth_mysql, Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const STATIC_USER_PROVIDER: &str = "static_user_provider";
 
-impl TryFrom<&str> for StaticUserProvider {
-    type Error = Error;
+pub(crate) struct StaticUserProvider {
+    ident: String,
+    users: HashMap<String, Vec<u8>>,
+}
 
-    fn try_from(value: &str) -> Result<Self> {
+impl StaticUserProvider {
+    pub(crate) fn new(ident: String) -> Result<Self> {
+        let mut this = StaticUserProvider {
+            ident,
+            users: HashMap::new(),
+        };
+        this.reload()?;
+        Ok(this)
+    }
+
+    pub fn reload(&mut self) -> Result<()> {
+        let value = self.ident.as_str();
         let (mode, content) = value.split_once(':').context(InvalidConfigSnafu {
             value: value.to_string(),
             msg: "StaticUserProviderOption must be in format `<option>:<value>`",
         })?;
-        return match mode {
+
+        ensure!(
+            matches!(mode, "file" | "cmd"),
+            InvalidConfigSnafu {
+                value: mode.to_string(),
+                msg: "StaticUserProviderOption must be in format `file:<path>` or `cmd:<values>`",
+            }
+        );
+
+        match mode {
             "file" => {
                 // check valid path
                 let path = Path::new(content);
@@ -66,30 +88,28 @@ impl TryFrom<&str> for StaticUserProvider {
                     msg: "StaticUserProviderOption file must contains at least one valid credential",
                 });
 
-                Ok(StaticUserProvider { users: credential, })
+                self.users = credential;
             }
-            "cmd" => content
-                .split(',')
-                .map(|kv| {
-                    let (k, v) = kv.split_once('=').context(InvalidConfigSnafu {
-                        value: kv.to_string(),
-                        msg: "StaticUserProviderOption cmd values must be in format `user=pwd[,user=pwd]`",
-                    })?;
-                    Ok((k.to_string(), v.as_bytes().to_vec()))
-                })
-                .collect::<Result<HashMap<String, Vec<u8>>>>()
-                .map(|users| StaticUserProvider { users }),
-            _ => InvalidConfigSnafu {
-                value: mode.to_string(),
-                msg: "StaticUserProviderOption must be in format `file:<path>` or `cmd:<values>`",
-            }
-            .fail(),
+            "cmd" => {
+                // cmd is immutable - need not reload
+                if self.users.is_empty() {
+                    self.users = content
+                        .split(',')
+                        .map(|kv| {
+                            let (k, v) = kv.split_once('=').context(InvalidConfigSnafu {
+                                value: kv.to_string(),
+                                msg: "StaticUserProviderOption cmd values must be in format `user=pwd[,user=pwd]`",
+                            })?;
+                            Ok((k.to_string(), v.as_bytes().to_vec()))
+                        })
+                        .collect::<Result<HashMap<String, Vec<u8>>>>()?;
+                }
+            },
+            mode => unreachable!("invalid mode {} must be filtered above", mode),
         };
-    }
-}
 
-pub(crate) struct StaticUserProvider {
-    users: HashMap<String, Vec<u8>>,
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -181,7 +201,7 @@ pub mod test {
     #[tokio::test]
     async fn test_authorize() {
         let user_info = DefaultUserInfo::with_name("root");
-        let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
+        let provider = StaticUserProvider::new("cmd:root=123456,admin=654321".into()).unwrap();
         provider
             .authorize("catalog", "schema", &user_info)
             .await
@@ -190,7 +210,7 @@ pub mod test {
 
     #[tokio::test]
     async fn test_inline_provider() {
-        let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
+        let provider = StaticUserProvider::new("cmd:root=123456,admin=654321".into()).unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
     }
@@ -214,7 +234,7 @@ admin=654321",
         }
 
         let param = format!("file:{file_path}");
-        let provider = StaticUserProvider::try_from(param.as_str()).unwrap();
+        let provider = StaticUserProvider::new(param).unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
     }
