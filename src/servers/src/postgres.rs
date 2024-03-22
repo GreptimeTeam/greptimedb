@@ -37,7 +37,6 @@ use pgwire::api::ClientInfo;
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::{Session, SessionConfigValue};
-use sql::ast::Value;
 
 use self::auth_handler::PgLoginVerifier;
 use self::config_parameters::BYTEA_OUTPUT;

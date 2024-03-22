@@ -26,7 +26,6 @@ use common_time::timezone::get_timezone;
 use common_time::Timezone;
 use dashmap::DashMap;
 use derive_builder::Builder;
-use sql::ast::Value;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 use crate::{SessionConfigValue, SessionRef};
