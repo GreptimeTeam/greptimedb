@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::channel;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::info;
 use notify::{EventKind, RecursiveMode, Watcher};
+use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use snafu::ResultExt;
 
+use common_telemetry::info;
+
+use crate::{Identity, Password, UserInfoRef, UserProvider};
 use crate::error::{FileWatchSnafu, Result};
 use crate::user_provider::{authenticate_with_credential, load_credential_from_file};
-use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const WATCH_FILE_USER_PROVIDER: &str = "watch_file_user_provider";
 
@@ -26,18 +29,24 @@ impl WatchFileUserProvider {
             users: users.clone(),
         };
 
-        let (tx, rx) = channel::<notify::Result<notify::Event>>();
-        let mut watcher = notify::recommended_watcher(tx).context(FileWatchSnafu)?;
-        watcher
+        let (tx, rx) = channel::<DebounceEventResult>();
+
+        let mut debouncer =
+            new_debouncer(Duration::from_secs(1), None, tx).context(FileWatchSnafu)?;
+        debouncer
+            .watcher()
             .watch(Path::new(filepath), RecursiveMode::NonRecursive)
             .context(FileWatchSnafu)?;
         let filepath = filepath.to_string();
         std::thread::spawn(move || {
-            let _watcher = watcher;
+            let _hold = debouncer;
             while let Ok(res) = rx.recv() {
-                if let Ok(event) = res {
-                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                        info!("Detected user provider file change: {:?}", event);
+                if let Ok(events) = res {
+                    if events
+                        .iter()
+                        .any(|e| matches!(e.kind, EventKind::Modify(_) | EventKind::Create(_)))
+                    {
+                        info!("User provider file {} changed", &filepath);
                         if let Ok(credential) = load_credential_from_file(&filepath) {
                             *users.lock().expect("users credential must be valid") = credential;
                         }
