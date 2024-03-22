@@ -119,14 +119,14 @@ fn authenticate_with_credential(
                             msg: "blank password"
                         }
                     );
-                    return if save_pwd == pwd.expose_secret().as_bytes() {
+                    if save_pwd == pwd.expose_secret().as_bytes() {
                         Ok(DefaultUserInfo::with_name(username))
                     } else {
                         UserPasswordMismatchSnafu {
                             username: username.to_string(),
                         }
                         .fail()
-                    };
+                    }
                 }
                 Password::MysqlNativePassword(auth_data, salt) => {
                     auth_mysql(auth_data, salt, username, save_pwd)
