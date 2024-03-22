@@ -248,10 +248,20 @@ pub struct PartitionTreeOptions {
 
 impl Default for PartitionTreeOptions {
     fn default() -> Self {
+        let mut fork_dictionary_bytes = ReadableSize::mb(512);
+        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+            let adjust_dictionary_bytes = std::cmp::min(
+                sys_memory / crate::memtable::partition_tree::DICTIONARY_SIZE_FACTOR,
+                fork_dictionary_bytes,
+            );
+            if adjust_dictionary_bytes.0 > 0 {
+                fork_dictionary_bytes = adjust_dictionary_bytes;
+            }
+        }
         Self {
             index_max_keys_per_shard: DEFAULT_MAX_KEYS_PER_SHARD,
             data_freeze_threshold: DEFAULT_FREEZE_THRESHOLD,
-            fork_dictionary_bytes: ReadableSize::mb(64),
+            fork_dictionary_bytes,
         }
     }
 }

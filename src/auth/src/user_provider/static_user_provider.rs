@@ -23,7 +23,7 @@ use secrecy::ExposeSecret;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    Error, IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
+    IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
     UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
 use crate::user_info::DefaultUserInfo;
@@ -31,10 +31,12 @@ use crate::{auth_mysql, Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const STATIC_USER_PROVIDER: &str = "static_user_provider";
 
-impl TryFrom<&str> for StaticUserProvider {
-    type Error = Error;
+pub(crate) struct StaticUserProvider {
+    users: HashMap<String, Vec<u8>>,
+}
 
-    fn try_from(value: &str) -> Result<Self> {
+impl StaticUserProvider {
+    pub(crate) fn new(value: &str) -> Result<Self> {
         let (mode, content) = value.split_once(':').context(InvalidConfigSnafu {
             value: value.to_string(),
             msg: "StaticUserProviderOption must be in format `<option>:<value>`",
@@ -83,13 +85,9 @@ impl TryFrom<&str> for StaticUserProvider {
                 value: mode.to_string(),
                 msg: "StaticUserProviderOption must be in format `file:<path>` or `cmd:<values>`",
             }
-            .fail(),
+                .fail(),
         };
     }
-}
-
-pub(crate) struct StaticUserProvider {
-    users: HashMap<String, Vec<u8>>,
 }
 
 #[async_trait]
@@ -181,7 +179,7 @@ pub mod test {
     #[tokio::test]
     async fn test_authorize() {
         let user_info = DefaultUserInfo::with_name("root");
-        let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
+        let provider = StaticUserProvider::new("cmd:root=123456,admin=654321").unwrap();
         provider
             .authorize("catalog", "schema", &user_info)
             .await
@@ -190,7 +188,7 @@ pub mod test {
 
     #[tokio::test]
     async fn test_inline_provider() {
-        let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
+        let provider = StaticUserProvider::new("cmd:root=123456,admin=654321").unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
     }
@@ -214,7 +212,7 @@ admin=654321",
         }
 
         let param = format!("file:{file_path}");
-        let provider = StaticUserProvider::try_from(param.as_str()).unwrap();
+        let provider = StaticUserProvider::new(param.as_str()).unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
     }

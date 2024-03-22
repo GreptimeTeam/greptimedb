@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::prom_store::remote::{ReadRequest, WriteRequest};
+use api::prom_store::remote::ReadRequest;
 use api::v1::RowInsertRequests;
 use axum::extract::{Query, RawBody, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -75,13 +75,14 @@ pub async fn route_write_without_metric_engine(
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    let request = decode_remote_write_request(body).await?;
+    let (request, samples) = decode_remote_write_request(body).await?;
     // reject if physical table is specified when metric engine is disabled
     if params.physical_table.is_some() {
         return UnexpectedPhysicalTableSnafu {}.fail();
     }
 
     let output = handler.write(request, query_ctx, false).await?;
+    crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
     Ok((
         StatusCode::NO_CONTENT,
         write_cost_header_map(output.meta.cost),
@@ -104,7 +105,7 @@ pub async fn remote_write(
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    let request = decode_remote_write_request_to_row_inserts(body).await?;
+    let (request, samples) = decode_remote_write_request_to_row_inserts(body).await?;
 
     if let Some(physical_table) = params.physical_table {
         let mut new_query_ctx = query_ctx.as_ref().clone();
@@ -112,7 +113,8 @@ pub async fn remote_write(
         query_ctx = Arc::new(new_query_ctx);
     }
 
-    let output = handler.write_fast(request, query_ctx, true).await?;
+    let output = handler.write(request, query_ctx, true).await?;
+    crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
     Ok((
         StatusCode::NO_CONTENT,
         write_cost_header_map(output.meta.cost),
@@ -159,7 +161,9 @@ pub async fn remote_read(
     handler.read(request, query_ctx).await
 }
 
-async fn decode_remote_write_request_to_row_inserts(body: Body) -> Result<RowInsertRequests> {
+async fn decode_remote_write_request_to_row_inserts(
+    body: Body,
+) -> Result<(RowInsertRequests, usize)> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
     let body = hyper::body::to_bytes(body)
         .await
@@ -171,24 +175,22 @@ async fn decode_remote_write_request_to_row_inserts(body: Body) -> Result<RowIns
     request
         .merge(buf)
         .context(error::DecodePromRemoteRequestSnafu)?;
-    let (requests, samples) = request.as_row_insert_requests();
-    crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_NUM_SERIES.observe(samples as f64);
-    Ok(requests)
+    Ok(request.as_row_insert_requests())
 }
 
-async fn decode_remote_write_request(body: Body) -> Result<WriteRequest> {
+async fn decode_remote_write_request(body: Body) -> Result<(RowInsertRequests, usize)> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
     let body = hyper::body::to_bytes(body)
         .await
         .context(error::HyperSnafu)?;
 
-    let buf = snappy_decompress(&body[..])?;
+    let buf = Bytes::from(snappy_decompress(&body[..])?);
 
-    let request = WriteRequest::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)?;
-    crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_NUM_SERIES
-        .observe(request.timeseries.len() as f64);
-
-    Ok(request)
+    let mut request = PromWriteRequest::default();
+    request
+        .merge(buf)
+        .context(error::DecodePromRemoteRequestSnafu)?;
+    Ok(request.as_row_insert_requests())
 }
 
 async fn decode_remote_read_request(body: Body) -> Result<ReadRequest> {
