@@ -13,7 +13,6 @@
 // limitations under the License.
 
 mod auth_handler;
-pub mod config_parameters;
 mod handler;
 mod server;
 mod types;
@@ -36,10 +35,12 @@ use pgwire::api::auth::ServerParameterProvider;
 use pgwire::api::ClientInfo;
 pub use server::PostgresServer;
 use session::context::Channel;
-use session::{Session, SessionConfigValue};
+use session::session_config::{
+    postgres_config_value, postgres_option, ByteaOutputValue, PostgresConfigValue, PostgresOption,
+};
+use session::Session;
 
 use self::auth_handler::PgLoginVerifier;
-use self::config_parameters::bytea_output;
 use self::handler::DefaultQueryParser;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -93,8 +94,8 @@ impl MakePostgresServerHandler {
     fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
         let configuration_variables = DashMap::new();
         configuration_variables.insert(
-            bytea_output::NAME.to_string(),
-            SessionConfigValue::String(bytea_output::DEFAULT.to_string()),
+            postgres_option(PostgresOption::ByteaOutput),
+            postgres_config_value(PostgresConfigValue::ByteaOutput(ByteaOutputValue::DEFAULT)),
         );
         let session = Arc::new(Session::new(
             addr,
@@ -110,21 +111,5 @@ impl MakePostgresServerHandler {
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
         }
-    }
-}
-
-// return true if the parameter value provided by 'set' statement is valid
-pub fn validate_config_value(name: &str, value: &SessionConfigValue) -> bool {
-    match name {
-        bytea_output::NAME => match value {
-            SessionConfigValue::String(s) => {
-                matches!(
-                    s.as_str(),
-                    bytea_output::HEX | bytea_output::ESCAPE | bytea_output::DEFAULT
-                )
-            }
-            _ => false,
-        },
-        _ => true,
     }
 }

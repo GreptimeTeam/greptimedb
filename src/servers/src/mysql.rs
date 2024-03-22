@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use session::SessionConfigValue;
-
 mod federated;
 pub mod handler;
 mod helper;
 pub mod server;
 pub mod writer;
-
-pub fn validate_config_value(_name: &str, _value: &SessionConfigValue) -> bool {
-    true
-}

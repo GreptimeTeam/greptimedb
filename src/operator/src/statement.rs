@@ -39,10 +39,9 @@ use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
-use servers::{mysql, postgres};
 use session::context::QueryContextRef;
+use session::session_config::{try_into_mysql_config, try_into_postgres_config};
 use session::table_name::table_idents_to_full_name;
-use session::SessionConfigValue;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::dialect::{MySqlDialect, PostgreSqlDialect};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
@@ -56,7 +55,7 @@ use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidParameterValueSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidConfigValueSnafu,
     InvalidSqlSnafu, NotSupportedSnafu, PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
@@ -359,19 +358,18 @@ fn set_session_config(var_name: String, var_value: Vec<Expr>, ctx: QueryContextR
         .fail();
     };
     // TODO(j0hn50n133): find a better way to match the sql dialect
-    let config_value: SessionConfigValue = value.clone().into();
-    if (ctx.sql_dialect().type_id() == (PostgreSqlDialect {}).type_id()
-        && !postgres::validate_config_value(&var_name, &config_value))
-        || (ctx.sql_dialect().type_id() == (MySqlDialect {}).type_id()
-            && !mysql::validate_config_value(&var_name, &config_value))
-    {
-        return (InvalidParameterValueSnafu {
-            name: var_name,
-            value: value.to_string(),
-        })
+    let (option, value) = if ctx.sql_dialect().type_id() == (PostgreSqlDialect {}).type_id() {
+        try_into_postgres_config(&var_name, value)
+    } else if ctx.sql_dialect().type_id() == (MySqlDialect {}).type_id() {
+        try_into_mysql_config(&var_name, value)
+    } else {
+        return NotSupportedSnafu {
+            feat: "Set session configuration value only support Postgres and Mysql SQL",
+        }
         .fail();
     }
-    ctx.set_session_config(var_name, config_value);
+    .context(InvalidConfigValueSnafu)?;
+    ctx.set_session_config(option, value);
     Ok(())
 }
 

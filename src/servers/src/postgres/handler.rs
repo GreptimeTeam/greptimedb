@@ -35,12 +35,15 @@ use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
-use session::{Session, SessionConfigValue};
+use session::session_config::{
+    postgres_config_value, postgres_option, ByteaOutputValue, PostgresConfigValue, PostgresOption,
+    SessionConfigValue,
+};
+use session::Session;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
 use self::bytea::{EscapeOutputBytea, HexOutputBytea};
-use super::config_parameters::bytea_output;
 use super::types::*;
 use super::PostgresServerHandler;
 use crate::error::Result;
@@ -125,10 +128,10 @@ where
     );
     let pg_schema_ref = pg_schema.clone();
     let bytea_output = query_ctx
-        .get_configuration_parameter(bytea_output::NAME)
-        .unwrap_or(SessionConfigValue::String(
-            bytea_output::DEFAULT.to_string(),
-        ));
+        .get_configuration_parameter(&postgres_option(PostgresOption::ByteaOutput))
+        .unwrap_or(postgres_config_value(PostgresConfigValue::ByteaOutput(
+            ByteaOutputValue::DEFAULT,
+        )));
     let data_row_stream = recordbatches_stream
         .map(|record_batch_result| match record_batch_result {
             Ok(rb) => stream::iter(
@@ -144,27 +147,32 @@ where
             row.and_then(|row| {
                 let mut encoder = DataRowEncoder::new(pg_schema_ref.clone());
                 for (idx, value) in row.iter().enumerate() {
-                    if let Value::Binary(v) = value {
-                        match bytea_output.as_str().unwrap() {
-                            bytea_output::HEX => {
-                                encoder.encode_field(&HexOutputBytea(v.deref()))?
+                    match value {
+                        Value::Binary(v) => {
+                            match bytea_output {
+                                SessionConfigValue::Postgres(PostgresConfigValue::ByteaOutput(
+                                    ByteaOutputValue::DEFAULT,
+                                )) => encode_value(value, &mut encoder)?,
+                                SessionConfigValue::Postgres(PostgresConfigValue::ByteaOutput(
+                                    ByteaOutputValue::ESCAPE,
+                                )) => match (*pg_schema_ref)[idx].format() {
+                                    FieldFormat::Text => {
+                                        let value = EscapeOutputBytea(v.deref());
+                                        encoder.encode_field_with_type_and_format(
+                                            &value,
+                                            &value.datatype(),
+                                            FieldFormat::Text,
+                                        )?
+                                    }
+                                    FieldFormat::Binary => encode_value(value, &mut encoder)?,
+                                },
+                                SessionConfigValue::Postgres(PostgresConfigValue::ByteaOutput(
+                                    ByteaOutputValue::HEX,
+                                )) => encoder.encode_field(&HexOutputBytea(v.deref()))?,
+                                _ => unimplemented!(), // impossible
                             }
-                            bytea_output::ESCAPE => match (*pg_schema_ref)[idx].format() {
-                                FieldFormat::Text => {
-                                    let value = EscapeOutputBytea(v.deref());
-                                    encoder.encode_field_with_type_and_format(
-                                        &value,
-                                        &value.datatype(),
-                                        FieldFormat::Text,
-                                    )?
-                                }
-                                FieldFormat::Binary => encode_value(value, &mut encoder)?,
-                            },
-                            bytea_output::DEFAULT => encode_value(value, &mut encoder)?,
-                            _ => unimplemented!(), // impossible
                         }
-                    } else {
-                        encode_value(value, &mut encoder)?
+                        _ => encode_value(value, &mut encoder)?,
                     }
                 }
                 encoder.finish()

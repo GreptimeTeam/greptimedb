@@ -28,6 +28,7 @@ use dashmap::DashMap;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
+use crate::session_config::SessionConfigOption;
 use crate::{SessionConfigValue, SessionRef};
 
 pub type QueryContextRef = Arc<QueryContext>;
@@ -47,7 +48,7 @@ pub struct QueryContext {
     extension: HashMap<String, String>,
     // The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
-    configuration_parameter: DashMap<String, SessionConfigValue>,
+    configuration_parameter: DashMap<SessionConfigOption, SessionConfigValue>,
 }
 
 impl QueryContextBuilder {
@@ -158,13 +159,15 @@ impl QueryContext {
         let _ = self.current_user.swap(Arc::new(user));
     }
 
-    pub fn set_session_config(&self, name: String, value: SessionConfigValue) {
-        self.configuration_parameter
-            .insert(name.to_uppercase(), value);
+    pub fn set_session_config(&self, option: SessionConfigOption, value: SessionConfigValue) {
+        self.configuration_parameter.insert(option, value);
     }
 
-    pub fn get_configuration_parameter(&self, name: &str) -> Option<SessionConfigValue> {
-        self.configuration_parameter.get(name).map(|v| v.clone())
+    pub fn get_configuration_parameter(
+        &self,
+        option: &SessionConfigOption,
+    ) -> Option<SessionConfigValue> {
+        self.configuration_parameter.get(option).map(|v| v.clone())
     }
 
     pub fn set_timezone(&self, timezone: Timezone) {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod context;
+pub mod session_config;
 pub mod table_name;
 
 use std::net::SocketAddr;
@@ -26,39 +27,9 @@ use common_time::timezone::get_timezone;
 use common_time::Timezone;
 use context::QueryContextBuilder;
 use dashmap::DashMap;
-use sql::ast::Value;
+use session_config::{SessionConfigOption, SessionConfigValue};
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
-
-#[derive(Debug, Clone)]
-pub enum SessionConfigValue {
-    // String value must be upper case
-    String(String),
-    Bool(bool),
-    // unused type of sql::ast::Value
-    Unused(Value),
-}
-
-impl SessionConfigValue {
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            SessionConfigValue::String(s) => Some(s),
-            _ => None,
-        }
-    }
-}
-
-impl From<Value> for SessionConfigValue {
-    fn from(v: Value) -> Self {
-        match v {
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                SessionConfigValue::String(s.to_uppercase())
-            }
-            Value::Boolean(b) => SessionConfigValue::Bool(b),
-            _ => SessionConfigValue::Unused(v),
-        }
-    }
-}
 
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
@@ -68,7 +39,7 @@ pub struct Session {
     user_info: ArcSwap<UserInfoRef>,
     conn_info: ConnInfo,
     timezone: ArcSwap<Timezone>,
-    configuration_variables: DashMap<String, SessionConfigValue>,
+    configuration_variables: DashMap<SessionConfigOption, SessionConfigValue>,
 }
 
 pub type SessionRef = Arc<Session>;
@@ -77,7 +48,7 @@ impl Session {
     pub fn new(
         addr: Option<SocketAddr>,
         channel: Channel,
-        configuration_variables: DashMap<String, SessionConfigValue>,
+        configuration_variables: DashMap<SessionConfigOption, SessionConfigValue>,
     ) -> Self {
         Session {
             catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),

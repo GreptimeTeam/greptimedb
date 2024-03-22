@@ -20,9 +20,9 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
-use datatypes::value::Value;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
+use sql::ast::Value;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -532,11 +532,9 @@ pub enum Error {
     #[snafu(display("Invalid partition rule: {}", reason))]
     InvalidPartitionRule { reason: String, location: Location },
 
-    #[snafu(display("Invalid value {} for '{}'", value, name))]
-    InvalidParameterValue {
-        // source: Error
-        name: String,
-        value: Value,
+    #[snafu(display("Invalid configuration value."))]
+    InvalidConfigValue {
+        source: session::session_config::Error,
         location: Location,
     },
 }
@@ -547,7 +545,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::InvalidSql { .. }
-            | Error::InvalidParameterValue { .. }
+            | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }
             | Error::IllegalPrimaryKeysDef { .. }

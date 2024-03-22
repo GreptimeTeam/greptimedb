@@ -9278,6 +9278,8 @@ dependencies = [
  "arc-swap",
  "auth",
  "common-catalog",
+ "common-error",
+ "common-macro",
  "common-telemetry",
  "common-time",
  "dashmap",
