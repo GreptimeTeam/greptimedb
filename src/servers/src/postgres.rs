@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod auth_handler;
+pub mod config_parameters;
 mod handler;
 mod server;
 mod types;
@@ -29,16 +30,21 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ::auth::UserProviderRef;
+use dashmap::DashMap;
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
 use pgwire::api::ClientInfo;
 pub use server::PostgresServer;
 use session::context::Channel;
-use session::Session;
+use session::{Session, SessionConfigValue};
 use sql::ast::Value;
 
 use self::auth_handler::PgLoginVerifier;
+use self::config_parameters::BYTEA_OUTPUT;
 use self::handler::DefaultQueryParser;
+use crate::postgres::config_parameters::{
+    BYTEA_OUTPUT_DEFAULT, BYTEA_OUTPUT_ESCAPE, BYTEA_OUTPUT_HEX,
+};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct GreptimeDBStartupParameters {
@@ -89,7 +95,16 @@ pub(crate) struct MakePostgresServerHandler {
 
 impl MakePostgresServerHandler {
     fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
-        let session = Arc::new(Session::new(addr, Channel::Postgres));
+        let configuration_variables = DashMap::new();
+        configuration_variables.insert(
+            BYTEA_OUTPUT.to_string(),
+            SessionConfigValue::String(BYTEA_OUTPUT_DEFAULT.to_string()),
+        );
+        let session = Arc::new(Session::new(
+            addr,
+            Channel::Postgres,
+            configuration_variables,
+        ));
         PostgresServerHandler {
             query_handler: self.query_handler.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
@@ -102,12 +117,15 @@ impl MakePostgresServerHandler {
     }
 }
 
-/// checks if the parameter value provided by 'set' statement is valid
-pub fn validate_parameter_value(name: &str, value: &Value) -> bool {
+// return true if the parameter value provided by 'set' statement is valid
+pub fn validate_config_value(name: &str, value: &Value) -> bool {
     match name {
-        "BYTEA_OUTPUT" => match value {
+        BYTEA_OUTPUT => match value {
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                matches!(s.to_uppercase().as_str(), "HEX" | "ESCAPE" | "DEFAULT")
+                matches!(
+                    s.to_uppercase().as_str(),
+                    BYTEA_OUTPUT_HEX | BYTEA_OUTPUT_ESCAPE | BYTEA_OUTPUT_DEFAULT
+                )
             }
             _ => false,
         },

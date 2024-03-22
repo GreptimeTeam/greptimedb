@@ -40,10 +40,13 @@ use pgwire::types::ToSqlText;
 use postgres_types::{IsNull, ToSql};
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
-use session::Session;
+use session::{Session, SessionConfigValue};
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
+use super::config_parameters::{
+    BYTEA_OUTPUT, BYTEA_OUTPUT_DEFAULT, BYTEA_OUTPUT_ESCAPE, BYTEA_OUTPUT_HEX,
+};
 use super::types::*;
 use super::PostgresServerHandler;
 use crate::error::Result;
@@ -221,18 +224,14 @@ fn recordbatches_to_query_response<'a, S>(
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
-    let bytea_output = match query_ctx
-        .get_configuration_parameter("BYTEA_OUTPUT")
-        .unwrap()
-    {
-        sql::ast::Value::SingleQuotedString(s) | sql::ast::Value::DoubleQuotedString(s) => s,
-        _ => unimplemented!(),
-    };
     let pg_schema = Arc::new(
         schema_to_pg(schema.as_ref(), field_format)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
     );
     let pg_schema_ref = pg_schema.clone();
+    let bytea_output = query_ctx
+        .get_configuration_parameter(BYTEA_OUTPUT)
+        .unwrap_or(SessionConfigValue::String(BYTEA_OUTPUT_DEFAULT.to_string()));
     let data_row_stream = recordbatches_stream
         .map(|record_batch_result| match record_batch_result {
             Ok(rb) => stream::iter(
@@ -249,9 +248,9 @@ where
                 let mut encoder = DataRowEncoder::new(pg_schema_ref.clone());
                 for (idx, value) in row.iter().enumerate() {
                     if let Value::Binary(v) = value {
-                        match bytea_output.to_uppercase().as_str() {
-                            "HEX" => encoder.encode_field(&HexOutputBytea(v.deref()))?,
-                            "ESCAPE" => match (*pg_schema_ref)[idx].format() {
+                        match bytea_output.as_str().unwrap() {
+                            BYTEA_OUTPUT_HEX => encoder.encode_field(&HexOutputBytea(v.deref()))?,
+                            BYTEA_OUTPUT_ESCAPE => match (*pg_schema_ref)[idx].format() {
                                 FieldFormat::Text => {
                                     let value = EscapeOutputBytea(v.deref());
                                     encoder.encode_field_with_type_and_format(
@@ -262,8 +261,8 @@ where
                                 }
                                 FieldFormat::Binary => encode_value(value, &mut encoder)?,
                             },
-                            "DEFAULT" => encode_value(value, &mut encoder)?,
-                            _ => unimplemented!("impossible"),
+                            BYTEA_OUTPUT_DEFAULT => encode_value(value, &mut encoder)?,
+                            _ => unimplemented!(), // impossible
                         }
                     } else {
                         encode_value(value, &mut encoder)?

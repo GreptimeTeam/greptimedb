@@ -532,7 +532,7 @@ pub enum Error {
     #[snafu(display("Invalid partition rule: {}", reason))]
     InvalidPartitionRule { reason: String, location: Location },
 
-    #[snafu(display("Invalid parameter value {} for '{}'", value, name))]
+    #[snafu(display("Invalid value {} for '{}'", value, name))]
     InvalidParameterValue {
         // source: Error
         name: String,

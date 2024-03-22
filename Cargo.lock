@@ -9200,6 +9200,7 @@ dependencies = [
  "common-time",
  "common-version",
  "criterion",
+ "dashmap",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

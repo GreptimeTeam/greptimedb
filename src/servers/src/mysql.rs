@@ -20,6 +20,6 @@ mod helper;
 pub mod server;
 pub mod writer;
 
-pub fn validate_parameter_value(_name: &str, _value: &Value) -> bool {
+pub fn validate_config_value(_name: &str, _value: &Value) -> bool {
     true
 }

@@ -365,9 +365,9 @@ fn set_configuration_parameter(
     };
     // TODO(j0hn50n133): find a better way to match the sql dialect
     if (ctx.sql_dialect().type_id() == (PostgreSqlDialect {}).type_id()
-        && !postgres::validate_parameter_value(&var_name, value))
+        && !postgres::validate_config_value(&var_name, value))
         || (ctx.sql_dialect().type_id() == (MySqlDialect {}).type_id()
-            && !mysql::validate_parameter_value(&var_name, value))
+            && !mysql::validate_config_value(&var_name, value))
     {
         return (InvalidParameterValueSnafu {
             name: var_name,
@@ -375,7 +375,7 @@ fn set_configuration_parameter(
         })
         .fail();
     }
-    ctx.set_configuration_parameter(var_name, value.clone());
+    ctx.set_session_config(var_name, value.clone());
     Ok(())
 }
 

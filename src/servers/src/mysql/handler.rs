@@ -25,6 +25,7 @@ use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{debug, error, logging, tracing, warn};
+use dashmap::DashMap;
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use opensrv_mysql::{
@@ -85,7 +86,11 @@ impl MysqlInstanceShim {
         MysqlInstanceShim {
             query_handler,
             salt: scramble,
-            session: Arc::new(Session::new(Some(client_addr), Channel::Mysql)),
+            session: Arc::new(Session::new(
+                Some(client_addr),
+                Channel::Mysql,
+                DashMap::new(),
+            )),
             user_provider,
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),

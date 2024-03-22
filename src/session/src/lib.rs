@@ -30,6 +30,35 @@ use sql::ast::Value;
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
 
+#[derive(Debug, Clone)]
+pub enum SessionConfigValue {
+    String(String),
+    Bool(bool),
+    // unused type of sql::ast::Value
+    Unused(Value),
+}
+
+impl SessionConfigValue {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            SessionConfigValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+impl From<Value> for SessionConfigValue {
+    fn from(v: Value) -> Self {
+        match v {
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+                SessionConfigValue::String(s.to_uppercase())
+            }
+            Value::Boolean(b) => SessionConfigValue::Bool(b),
+            _ => SessionConfigValue::Unused(v),
+        }
+    }
+}
+
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
 pub struct Session {
@@ -38,18 +67,17 @@ pub struct Session {
     user_info: ArcSwap<UserInfoRef>,
     conn_info: ConnInfo,
     timezone: ArcSwap<Timezone>,
-    configuration_variables: DashMap<String, Value>,
+    configuration_variables: DashMap<String, SessionConfigValue>,
 }
 
 pub type SessionRef = Arc<Session>;
 
 impl Session {
-    pub fn new(addr: Option<SocketAddr>, channel: Channel) -> Self {
-        let configuration_variables = DashMap::new();
-        configuration_variables.insert(
-            "BYTEA_OUTPUT".to_string(),
-            Value::SingleQuotedString("DEFAULT".to_string()),
-        );
+    pub fn new(
+        addr: Option<SocketAddr>,
+        channel: Channel,
+        configuration_variables: DashMap<String, SessionConfigValue>,
+    ) -> Self {
         Session {
             catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),
             schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),

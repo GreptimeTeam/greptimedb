@@ -29,7 +29,7 @@ use derive_builder::Builder;
 use sql::ast::Value;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
-use crate::SessionRef;
+use crate::{SessionConfigValue, SessionRef};
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
@@ -48,7 +48,7 @@ pub struct QueryContext {
     extension: HashMap<String, String>,
     // The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
-    configuration_parameter: DashMap<String, Value>,
+    configuration_parameter: DashMap<String, SessionConfigValue>,
 }
 
 impl QueryContextBuilder {
@@ -159,11 +159,12 @@ impl QueryContext {
         let _ = self.current_user.swap(Arc::new(user));
     }
 
-    pub fn set_configuration_parameter(&self, name: String, value: Value) {
+    pub fn set_session_config(&self, name: String, value: Value) {
         self.configuration_parameter
-            .insert(name.to_uppercase(), value);
+            .insert(name.to_uppercase(), value.into());
     }
-    pub fn get_configuration_parameter(&self, name: &str) -> Option<Value> {
+
+    pub fn get_configuration_parameter(&self, name: &str) -> Option<SessionConfigValue> {
         self.configuration_parameter.get(name).map(|v| v.clone())
     }
 
@@ -303,7 +304,11 @@ mod test {
 
     #[test]
     fn test_session() {
-        let session = Session::new(Some("127.0.0.1:9000".parse().unwrap()), Channel::Mysql);
+        let session = Session::new(
+            Some("127.0.0.1:9000".parse().unwrap()),
+            Channel::Mysql,
+            DashMap::new(),
+        );
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");
 
