@@ -223,9 +223,7 @@ impl StatementExecutor {
                     // Since the "bytea_output" only determines the output format of binary values,
                     // it won't cause much trouble if we do so.
                     // TODO(#3438): Remove this temporary workaround after the feature is implemented.
-                    "BYTEA_OUTPUT" => {
-                        set_configuration_parameter(var_name, set_var.value, query_ctx)?
-                    }
+                    "BYTEA_OUTPUT" => set_session_config(var_name, set_var.value, query_ctx)?,
 
                     // Same as "bytea_output", we just ignore it here.
                     // Not harmful since it only relates to how date is viewed in client app's output.
@@ -344,11 +342,7 @@ fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     }
 }
 
-fn set_configuration_parameter(
-    var_name: String,
-    var_value: Vec<Expr>,
-    ctx: QueryContextRef,
-) -> Result<()> {
+fn set_session_config(var_name: String, var_value: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let Some((var_value, [])) = var_value.split_first() else {
         return (NotSupportedSnafu {
             feat: format!(
