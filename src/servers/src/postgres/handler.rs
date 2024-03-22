@@ -16,15 +16,12 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::BufMut;
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
 use common_telemetry::tracing;
-use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use datatypes::types::StringType;
 use datatypes::value::Value;
 use futures::{future, stream, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
@@ -36,14 +33,13 @@ use pgwire::api::results::{
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use pgwire::types::ToSqlText;
-use postgres_types::{IsNull, ToSql};
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
 use session::{Session, SessionConfigValue};
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
+use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use super::config_parameters::{
     BYTEA_OUTPUT, BYTEA_OUTPUT_DEFAULT, BYTEA_OUTPUT_ESCAPE, BYTEA_OUTPUT_HEX,
 };
@@ -81,105 +77,6 @@ impl SimpleQueryHandler for PostgresServerHandler {
         }
 
         Ok(results)
-    }
-}
-#[derive(Debug)]
-struct HexOutputBytea<'a>(&'a [u8]);
-impl ToSqlText for HexOutputBytea<'_> {
-    fn to_sql_text(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        out.put_slice(b"\\x");
-        let _ = self.0.to_sql_text(ty, out);
-        Ok(IsNull::No)
-    }
-}
-
-impl ToSql for HexOutputBytea<'_> {
-    fn to_sql(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        self.0.to_sql(ty, out)
-    }
-
-    fn accepts(ty: &Type) -> bool
-    where
-        Self: Sized,
-    {
-        <&[u8] as ToSql>::accepts(ty)
-    }
-
-    fn to_sql_checked(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        self.0.to_sql_checked(ty, out)
-    }
-}
-#[derive(Debug)]
-struct EscapeOutputBytea<'a>(&'a [u8]);
-impl EscapeOutputBytea<'_> {
-    fn datatype(&self) -> Type {
-        // to show as string, use string as type
-        type_gt_to_pg(&ConcreteDataType::String(StringType)).unwrap()
-    }
-}
-impl ToSqlText for EscapeOutputBytea<'_> {
-    fn to_sql_text(
-        &self,
-        _ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        self.0.iter().for_each(|b| match b {
-            0..=31 | 127..=255 => {
-                out.put_slice(b"\\");
-                out.put_slice(format!("{:03o}", b).as_bytes());
-            }
-            92 => out.put_slice(b"\\\\"),
-            32..=126 => out.put_u8(*b),
-        });
-        Ok(IsNull::No)
-    }
-}
-impl ToSql for EscapeOutputBytea<'_> {
-    fn to_sql(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        self.0.to_sql(ty, out)
-    }
-
-    fn accepts(ty: &Type) -> bool
-    where
-        Self: Sized,
-    {
-        <&[u8] as ToSql>::accepts(ty)
-    }
-
-    fn to_sql_checked(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        self.0.to_sql_checked(ty, out)
     }
 }
 
