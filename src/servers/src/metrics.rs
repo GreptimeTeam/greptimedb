@@ -103,9 +103,10 @@ lazy_static! {
     /// Duration to convert prometheus write request to gRPC request.
     pub static ref METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED: Histogram = METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
         .with_label_values(&["convert"]);
-    pub static ref METRIC_HTTP_PROM_STORE_DECODE_NUM_SERIES: Histogram = register_histogram!(
-        "greptime_servers_http_prometheus_decode_num_series",
-        "servers http prometheus decode num series",
+        /// The samples count of Prometheus remote write.
+    pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounter = register_int_counter!(
+        "greptime_servers_prometheus_remote_write_samples",
+        "frontend prometheus remote write samples"
     )
     .unwrap();
     /// Http prometheus read duration per database.
