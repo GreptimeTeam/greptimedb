@@ -40,9 +40,7 @@ use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
 use self::bytea::{EscapeOutputBytea, HexOutputBytea};
-use super::config_parameters::{
-    BYTEA_OUTPUT, BYTEA_OUTPUT_DEFAULT, BYTEA_OUTPUT_ESCAPE, BYTEA_OUTPUT_HEX,
-};
+use super::config_parameters::bytea_output;
 use super::types::*;
 use super::PostgresServerHandler;
 use crate::error::Result;
@@ -127,8 +125,10 @@ where
     );
     let pg_schema_ref = pg_schema.clone();
     let bytea_output = query_ctx
-        .get_configuration_parameter(BYTEA_OUTPUT)
-        .unwrap_or(SessionConfigValue::String(BYTEA_OUTPUT_DEFAULT.to_string()));
+        .get_configuration_parameter(bytea_output::NAME)
+        .unwrap_or(SessionConfigValue::String(
+            bytea_output::DEFAULT.to_string(),
+        ));
     let data_row_stream = recordbatches_stream
         .map(|record_batch_result| match record_batch_result {
             Ok(rb) => stream::iter(
@@ -146,8 +146,10 @@ where
                 for (idx, value) in row.iter().enumerate() {
                     if let Value::Binary(v) = value {
                         match bytea_output.as_str().unwrap() {
-                            BYTEA_OUTPUT_HEX => encoder.encode_field(&HexOutputBytea(v.deref()))?,
-                            BYTEA_OUTPUT_ESCAPE => match (*pg_schema_ref)[idx].format() {
+                            bytea_output::HEX => {
+                                encoder.encode_field(&HexOutputBytea(v.deref()))?
+                            }
+                            bytea_output::ESCAPE => match (*pg_schema_ref)[idx].format() {
                                 FieldFormat::Text => {
                                     let value = EscapeOutputBytea(v.deref());
                                     encoder.encode_field_with_type_and_format(
@@ -158,7 +160,7 @@ where
                                 }
                                 FieldFormat::Binary => encode_value(value, &mut encoder)?,
                             },
-                            BYTEA_OUTPUT_DEFAULT => encode_value(value, &mut encoder)?,
+                            bytea_output::DEFAULT => encode_value(value, &mut encoder)?,
                             _ => unimplemented!(), // impossible
                         }
                     } else {

@@ -21,6 +21,7 @@ use datatypes::schema::Schema;
 use query::plan::LogicalPlan;
 use serde::{Deserialize, Serialize};
 
+mod config_parameters;
 pub mod configurator;
 pub mod error;
 pub mod export_metrics;

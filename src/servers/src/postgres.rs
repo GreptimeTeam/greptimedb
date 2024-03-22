@@ -39,11 +39,8 @@ use session::context::Channel;
 use session::{Session, SessionConfigValue};
 
 use self::auth_handler::PgLoginVerifier;
-use self::config_parameters::BYTEA_OUTPUT;
+use self::config_parameters::bytea_output;
 use self::handler::DefaultQueryParser;
-use crate::postgres::config_parameters::{
-    BYTEA_OUTPUT_DEFAULT, BYTEA_OUTPUT_ESCAPE, BYTEA_OUTPUT_HEX,
-};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct GreptimeDBStartupParameters {
@@ -96,8 +93,8 @@ impl MakePostgresServerHandler {
     fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
         let configuration_variables = DashMap::new();
         configuration_variables.insert(
-            BYTEA_OUTPUT.to_string(),
-            SessionConfigValue::String(BYTEA_OUTPUT_DEFAULT.to_string()),
+            bytea_output::NAME.to_string(),
+            SessionConfigValue::String(bytea_output::DEFAULT.to_string()),
         );
         let session = Arc::new(Session::new(
             addr,
@@ -119,11 +116,11 @@ impl MakePostgresServerHandler {
 // return true if the parameter value provided by 'set' statement is valid
 pub fn validate_config_value(name: &str, value: &SessionConfigValue) -> bool {
     match name {
-        BYTEA_OUTPUT => match value {
+        bytea_output::NAME => match value {
             SessionConfigValue::String(s) => {
                 matches!(
                     s.as_str(),
-                    BYTEA_OUTPUT_HEX | BYTEA_OUTPUT_ESCAPE | BYTEA_OUTPUT_DEFAULT
+                    bytea_output::HEX | bytea_output::ESCAPE | bytea_output::DEFAULT
                 )
             }
             _ => false,

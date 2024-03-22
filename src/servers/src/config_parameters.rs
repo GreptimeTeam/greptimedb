@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::define_config_enum_option;
-
-define_config_enum_option! {bytea_output, BYTEA_OUTPUT, DEFAULT, ESCAPE, HEX}
+// Refer to: https://www.postgresql.org/docs/current/config-setting.html#CONFIG-SETTING-NAMES-VALUES
+#[macro_export]
+macro_rules! define_config_enum_option {
+    ($mod_name:ident, $name:ident, $($item:ident),+) => {
+        pub mod $mod_name{
+            pub const NAME: &str = stringify!($name);
+            $(pub const $item: &str = stringify!($item);)+
+        }
+    };
+}
