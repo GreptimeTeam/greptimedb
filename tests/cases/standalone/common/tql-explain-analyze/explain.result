@@ -28,6 +28,28 @@ TQL EXPLAIN (0, 10, '5s') test;
 |               |                                                                                               |
 +---------------+-----------------------------------------------------------------------------------------------+
 
+-- 'lookback' parameter is not fully supported, the test has to be updated
+-- explain at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+TQL EXPLAIN (0, 10, '1s', '2s') test;
+
++---------------+-----------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                          |
++---------------+-----------------------------------------------------------------------------------------------+
+| logical_plan  | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]     |
+|               |   PromSeriesNormalize: offset=[0], time index=[j], filter NaN: [false]                        |
+|               |     PromSeriesDivide: tags=["k"]                                                              |
+|               |       MergeScan [is_placeholder=false]                                                        |
+| physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j] |
+|               |   RepartitionExec: partitioning=REDACTED
+|               |     PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                  |
+|               |       PromSeriesDivideExec: tags=["k"]                                                        |
+|               |         SortExec: expr=[k@2 ASC NULLS LAST]                                                   |
+|               |           MergeScanExec: REDACTED
+|               |                                                                                               |
++---------------+-----------------------------------------------------------------------------------------------+
+
 -- explain at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED

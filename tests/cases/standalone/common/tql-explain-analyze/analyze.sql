@@ -11,6 +11,15 @@ INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL ANALYZE (0, 10, '5s') test;
 
+-- 'lookback' parameter is not fully supported, the test has to be updated
+-- analyze at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+TQL ANALYZE (0, 10, '1s', '2s') test;
+
 -- analyze at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
