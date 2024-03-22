@@ -64,6 +64,12 @@ pub enum Error {
         username: String,
     },
 
+    #[snafu(display("Failed to initialize a watcher for file"))]
+    FileWatch {
+        #[snafu(source)]
+        error: notify::Error,
+    },
+
     #[snafu(display("User is not authorized to perform this action"))]
     PermissionDenied { location: Location },
 }
@@ -73,6 +79,7 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
             Error::IllegalParam { .. } => StatusCode::InvalidArguments,
+            Error::FileWatch { .. } => StatusCode::InvalidArguments,
             Error::InternalState { .. } => StatusCode::Unexpected,
             Error::Io { .. } => StatusCode::Internal,
             Error::AuthBackend { .. } => StatusCode::Internal,

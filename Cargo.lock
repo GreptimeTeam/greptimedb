@@ -701,6 +701,7 @@ dependencies = [
  "async-trait",
  "common-error",
  "common-macro",
+ "common-telemetry",
  "common-test-util",
  "digest",
  "hex",
