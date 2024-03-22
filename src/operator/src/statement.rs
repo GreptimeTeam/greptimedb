@@ -47,6 +47,7 @@ use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
 use sqlparser::ast::{Expr, Ident, ObjectName, Value};
+use sql::statements::reload::ReloadTarget;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -160,6 +161,13 @@ impl StatementExecutor {
                 Ok(Output::new_with_affected_rows(0))
             }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
+            Statement::AlterReload(target) => {
+                match target {
+                    ReloadTarget::UserProvider => {
+                        Ok(Output::new_with_affected_rows(0))
+                    }
+                }
+            }
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), &query_ctx)

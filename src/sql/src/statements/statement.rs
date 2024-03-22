@@ -29,6 +29,7 @@ use crate::statements::drop::DropTable;
 use crate::statements::explain::Explain;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
+use crate::statements::reload::ReloadTarget;
 use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
 use crate::statements::tql::Tql;
@@ -56,8 +57,10 @@ pub enum Statement {
     DropDatabase(DropDatabase),
     // CREATE DATABASE
     CreateDatabase(CreateDatabase),
-    /// ALTER TABLE
+    // ALTER TABLE
     Alter(AlterTable),
+    // ALTER SYSTEM RELOAD
+    AlterReload(ReloadTarget),
     // Databases.
     ShowDatabases(ShowDatabases),
     // SHOW TABLES

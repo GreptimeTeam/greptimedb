@@ -476,8 +476,10 @@ pub fn check_permission(
         Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::DropDatabase(_) => {
         }
         // show create table and alter are not supported yet
-        Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
-        }
+        Statement::ShowCreateTable(_)
+        | Statement::CreateExternalTable(_)
+        | Statement::Alter(_)
+        | Statement::AlterReload(_) => {}
         // set/show variable now only alter/show variable in session
         Statement::SetVariables(_) | Statement::ShowVariables(_) => {}
 

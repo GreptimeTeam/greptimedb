@@ -17,6 +17,7 @@ use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use auth::{UserProvider, UserProviderRef};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
@@ -229,6 +230,11 @@ impl QueryEngineState {
             .map::<QueryOptions, _, _>(|x| x.disallow_cross_catalog_query)
             .unwrap_or(false)
     }
+
+    // pub(crate) fn reload_user_provider(&self) -> DfResult<()> {
+    //     self.plugins.map_mut::<UserProviderRef, _, _>(|x| ());
+    //     Ok(())
+    // }
 
     pub(crate) fn session_state(&self) -> SessionState {
         self.df_context.state()

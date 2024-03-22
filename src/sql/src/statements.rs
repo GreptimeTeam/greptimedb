@@ -28,6 +28,7 @@ pub mod statement;
 pub mod tql;
 mod transform;
 pub mod truncate;
+pub mod reload;
 
 use std::str::FromStr;
 

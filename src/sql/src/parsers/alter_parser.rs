@@ -21,12 +21,33 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
 use crate::statements::alter::{AlterTable, AlterTableOperation};
+use crate::statements::reload::ReloadTarget;
 use crate::statements::statement::Statement;
 
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
-        let alter_table = self.parse_alter_table().context(error::SyntaxSnafu)?;
-        Ok(Statement::Alter(alter_table))
+        // eat ALTER
+        let _ = self.parser.next_token();
+
+        match self
+            .parser
+            .parse_one_of_keywords(&[Keyword::TABLE, Keyword::SYSTEM])
+        {
+            Some(Keyword::TABLE) => {
+                let alter_table = self.parse_alter_table().context(error::SyntaxSnafu)?;
+                Ok(Statement::Alter(alter_table))
+            }
+            Some(Keyword::SYSTEM) => {
+                if !self.consume_token("RELOAD") {
+                    return self.unsupported(self.peek_token_as_string());
+                }
+                if !self.consume_token("UserProvider") {
+                    return self.unsupported(self.peek_token_as_string());
+                }
+                Ok(Statement::AlterReload(ReloadTarget::UserProvider))
+            }
+            _ => self.unsupported(self.peek_token_as_string()),
+        }
     }
 
     fn parse_alter_table(&mut self) -> std::result::Result<AlterTable, ParserError> {

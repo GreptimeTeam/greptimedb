@@ -7514,6 +7514,7 @@ dependencies = [
  "async-recursion",
  "async-stream",
  "async-trait",
+ "auth",
  "catalog",
  "chrono",
  "client",
