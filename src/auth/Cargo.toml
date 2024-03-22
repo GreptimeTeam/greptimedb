@@ -18,6 +18,7 @@ common-error.workspace = true
 common-macro.workspace = true
 digest = "0.10"
 hex = { version = "0.4" }
+notify.workspace = true
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 sha1 = "0.10"
 snafu.workspace = true

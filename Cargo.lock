@@ -704,6 +704,7 @@ dependencies = [
  "common-test-util",
  "digest",
  "hex",
+ "notify",
  "secrecy",
  "sha1",
  "snafu",
