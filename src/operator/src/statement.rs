@@ -42,6 +42,7 @@ use query::QueryEngineRef;
 use servers::{mysql, postgres};
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
+use session::SessionConfigValue;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::dialect::{MySqlDialect, PostgreSqlDialect};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
@@ -364,10 +365,11 @@ fn set_configuration_parameter(
         .fail();
     };
     // TODO(j0hn50n133): find a better way to match the sql dialect
+    let config_value: SessionConfigValue = value.clone().into();
     if (ctx.sql_dialect().type_id() == (PostgreSqlDialect {}).type_id()
-        && !postgres::validate_config_value(&var_name, value))
+        && !postgres::validate_config_value(&var_name, &config_value))
         || (ctx.sql_dialect().type_id() == (MySqlDialect {}).type_id()
-            && !mysql::validate_config_value(&var_name, value))
+            && !mysql::validate_config_value(&var_name, &config_value))
     {
         return (InvalidParameterValueSnafu {
             name: var_name,
@@ -375,7 +377,7 @@ fn set_configuration_parameter(
         })
         .fail();
     }
-    ctx.set_session_config(var_name, value.clone());
+    ctx.set_session_config(var_name, config_value);
     Ok(())
 }
 

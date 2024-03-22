@@ -32,6 +32,7 @@ use crate::context::{Channel, ConnInfo, QueryContextRef};
 
 #[derive(Debug, Clone)]
 pub enum SessionConfigValue {
+    // String value must be upper case
     String(String),
     Bool(bool),
     // unused type of sql::ast::Value

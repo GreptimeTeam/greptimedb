@@ -118,12 +118,12 @@ impl MakePostgresServerHandler {
 }
 
 // return true if the parameter value provided by 'set' statement is valid
-pub fn validate_config_value(name: &str, value: &Value) -> bool {
+pub fn validate_config_value(name: &str, value: &SessionConfigValue) -> bool {
     match name {
         BYTEA_OUTPUT => match value {
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+            SessionConfigValue::String(s) => {
                 matches!(
-                    s.to_uppercase().as_str(),
+                    s.as_str(),
                     BYTEA_OUTPUT_HEX | BYTEA_OUTPUT_ESCAPE | BYTEA_OUTPUT_DEFAULT
                 )
             }

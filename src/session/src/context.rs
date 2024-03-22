@@ -159,9 +159,9 @@ impl QueryContext {
         let _ = self.current_user.swap(Arc::new(user));
     }
 
-    pub fn set_session_config(&self, name: String, value: Value) {
+    pub fn set_session_config(&self, name: String, value: SessionConfigValue) {
         self.configuration_parameter
-            .insert(name.to_uppercase(), value.into());
+            .insert(name.to_uppercase(), value);
     }
 
     pub fn get_configuration_parameter(&self, name: &str) -> Option<SessionConfigValue> {
