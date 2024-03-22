@@ -83,6 +83,11 @@ impl QueryEngine for MockQueryEngine {
         unimplemented!()
     }
 
+    fn reload_user_provider(&self) -> query::error::Result<()> {
+        Ok(())
+    }
+
+
     fn engine_context(&self, _query_ctx: QueryContextRef) -> QueryEngineContext {
         unimplemented!()
     }

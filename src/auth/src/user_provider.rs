@@ -22,6 +22,10 @@ use crate::UserInfoRef;
 pub trait UserProvider: Send + Sync {
     fn name(&self) -> &str;
 
+    fn reload(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Checks whether a user is valid and allowed to access the database.
     async fn authenticate(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfoRef>;
 

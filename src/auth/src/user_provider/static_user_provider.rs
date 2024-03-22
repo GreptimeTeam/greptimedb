@@ -17,6 +17,8 @@ use std::fs::File;
 use std::io;
 use std::io::BufRead;
 use std::path::Path;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use secrecy::ExposeSecret;
@@ -33,20 +35,28 @@ pub(crate) const STATIC_USER_PROVIDER: &str = "static_user_provider";
 
 pub(crate) struct StaticUserProvider {
     ident: String,
-    users: HashMap<String, Vec<u8>>,
+    users: AtomicPtr<HashMap<String, Vec<u8>>>,
 }
 
 impl StaticUserProvider {
     pub(crate) fn new(ident: String) -> Result<Self> {
-        let mut this = StaticUserProvider {
+        let users = Box::into_raw(Box::new(HashMap::new()));
+        let this = StaticUserProvider {
             ident,
-            users: HashMap::new(),
+            users: AtomicPtr::new(users),
         };
         this.reload()?;
         Ok(this)
     }
+}
 
-    pub fn reload(&mut self) -> Result<()> {
+#[async_trait]
+impl UserProvider for StaticUserProvider {
+    fn name(&self) -> &str {
+        STATIC_USER_PROVIDER
+    }
+
+    fn reload(&self) -> Result<()> {
         let value = self.ident.as_str();
         let (mode, content) = value.split_once(':').context(InvalidConfigSnafu {
             value: value.to_string(),
@@ -65,10 +75,13 @@ impl StaticUserProvider {
             "file" => {
                 // check valid path
                 let path = Path::new(content);
-                ensure!(path.exists() && path.is_file(), InvalidConfigSnafu {
-                    value: content.to_string(),
-                    msg: "StaticUserProviderOption file must be a valid file path",
-                });
+                ensure!(
+                    path.exists() && path.is_file(),
+                    InvalidConfigSnafu {
+                        value: content.to_string(),
+                        msg: "StaticUserProviderOption file must be a valid file path",
+                    }
+                );
 
                 let file = File::open(path).context(IoSnafu)?;
                 let credential = io::BufReader::new(file)
@@ -88,12 +101,14 @@ impl StaticUserProvider {
                     msg: "StaticUserProviderOption file must contains at least one valid credential",
                 });
 
-                self.users = credential;
+                let credential = Box::into_raw(Box::new(credential));
+                let users = self.users.swap(credential, Ordering::SeqCst);
+                unsafe { Box::from_raw(users) };
             }
             "cmd" => {
                 // cmd is immutable - need not reload
-                if self.users.is_empty() {
-                    self.users = content
+                if unsafe { &*self.users.load(Ordering::SeqCst) }.is_empty() {
+                    let credential = content
                         .split(',')
                         .map(|kv| {
                             let (k, v) = kv.split_once('=').context(InvalidConfigSnafu {
@@ -103,19 +118,15 @@ impl StaticUserProvider {
                             Ok((k.to_string(), v.as_bytes().to_vec()))
                         })
                         .collect::<Result<HashMap<String, Vec<u8>>>>()?;
+                    let credential = Box::into_raw(Box::new(credential));
+                    let users = self.users.swap(credential, Ordering::SeqCst);
+                    unsafe { Box::from_raw(users) };
                 }
-            },
+            }
             mode => unreachable!("invalid mode {} must be filtered above", mode),
         };
 
         Ok(())
-    }
-}
-
-#[async_trait]
-impl UserProvider for StaticUserProvider {
-    fn name(&self) -> &str {
-        STATIC_USER_PROVIDER
     }
 
     async fn authenticate(
@@ -131,7 +142,8 @@ impl UserProvider for StaticUserProvider {
                         msg: "blank username"
                     }
                 );
-                let save_pwd = self.users.get(username).context(UserNotFoundSnafu {
+                let users = unsafe { &*self.users.load(Ordering::SeqCst) };
+                let save_pwd = users.get(username).context(UserNotFoundSnafu {
                     username: username.to_string(),
                 })?;
 

@@ -88,6 +88,9 @@ pub trait QueryEngine: Send + Sync {
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
 
+    /// Create a DataFrame from a table.
+    fn reload_user_provider(&self) -> Result<()>;
+
     /// Create a [`QueryEngineContext`].
     fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext;
 }

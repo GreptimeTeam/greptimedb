@@ -231,11 +231,6 @@ impl QueryEngineState {
             .unwrap_or(false)
     }
 
-    // pub(crate) fn reload_user_provider(&self) -> DfResult<()> {
-    //     self.plugins.map_mut::<UserProviderRef, _, _>(|x| ());
-    //     Ok(())
-    // }
-
     pub(crate) fn session_state(&self) -> SessionState {
         self.df_context.state()
     }

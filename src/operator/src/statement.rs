@@ -42,19 +42,19 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use sql::statements::reload::ReloadTarget;
 use sql::statements::set_variables::SetVariables;
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
 use sqlparser::ast::{Expr, Ident, ObjectName, Value};
-use sql::statements::reload::ReloadTarget;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu,
+    InvalidSqlSnafu, NotSupportedSnafu, PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -161,13 +161,15 @@ impl StatementExecutor {
                 Ok(Output::new_with_affected_rows(0))
             }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
-            Statement::AlterReload(target) => {
-                match target {
-                    ReloadTarget::UserProvider => {
-                        Ok(Output::new_with_affected_rows(0))
-                    }
+            Statement::AlterReload(target) => match target {
+                ReloadTarget::UserProvider => {
+                    let _ = self
+                        .query_engine
+                        .reload_user_provider()
+                        .context(ExecuteStatementSnafu)?;
+                    Ok(Output::new_with_affected_rows(0))
                 }
-            }
+            },
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), &query_ctx)

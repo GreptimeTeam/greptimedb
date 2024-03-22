@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use auth::UserProviderRef;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
@@ -38,7 +39,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
 use datatypes::prelude::VectorRef;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{DeleteRequest, InsertRequest};
@@ -48,8 +49,8 @@ use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu, MissingTableMutationHandlerSnafu,
-    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
-    TableNotFoundSnafu, UnsupportedExprSnafu,
+    MissingTimestampColumnSnafu, QueryExecutionSnafu, ReloadUserProviderSnafu, Result,
+    TableMutationSnafu, TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -310,6 +311,16 @@ impl QueryEngine for DatafusionQueryEngine {
 
     fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
         QueryEngineContext::new(self.state.session_state(), query_ctx)
+    }
+
+    fn reload_user_provider(&self) -> Result<()> {
+        self.plugins.map_mut::<UserProviderRef, _, _>(|x| {
+            if let Some(p) = x {
+                p.reload().context(ReloadUserProviderSnafu)
+            } else {
+                Ok(())
+            }
+        })
     }
 }
 

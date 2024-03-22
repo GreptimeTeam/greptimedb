@@ -39,6 +39,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to reload user provider"))]
+    ReloadUserProvider {
+        #[snafu(source)]
+        source: auth::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("General catalog error"))]
     Catalog {
         source: catalog::error::Error,
@@ -296,6 +303,7 @@ impl ErrorExt for Error {
             RegionQuery { source, .. } => source.status_code(),
             TableMutation { source, .. } => source.status_code(),
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
+            ReloadUserProvider { .. } => StatusCode::Internal,
         }
     }
 
