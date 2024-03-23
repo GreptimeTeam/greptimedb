@@ -593,9 +593,11 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::{AlterExpr, CreateTableExpr};
-    use datatypes::schema::SchemaBuilder;
-    use table::metadata::RawTableInfo;
+    use api::v1::{AlterExpr, ColumnDef, CreateTableExpr, SemanticType};
+    use datatypes::schema::{ColumnSchema, RawSchema, SchemaBuilder};
+    use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+    use store_api::storage::ConcreteDataType;
+    use table::metadata::{RawTableInfo, RawTableMeta, TableType};
     use table::test_util::table_info::test_table_info;
 
     use super::{AlterTableTask, CreateTableTask};
@@ -626,5 +628,109 @@ mod tests {
 
         let de = serde_json::from_slice(&output).unwrap();
         assert_eq!(task, de);
+    }
+
+    #[test]
+    fn test_sort_columns() {
+        // construct RawSchema
+        let raw_schema = RawSchema {
+            column_schemas: vec![
+                ColumnSchema::new(
+                    "column3".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                ColumnSchema::new(
+                    "column1".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    "column2".to_string(),
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+            ],
+            timestamp_index: Some(1),
+            version: 0,
+        };
+
+        // construct RawTableMeta
+        let raw_table_meta = RawTableMeta {
+            schema: raw_schema,
+            primary_key_indices: vec![0],
+            value_indices: vec![2],
+            engine: METRIC_ENGINE_NAME.to_string(),
+            next_column_id: 0,
+            region_numbers: vec![0],
+            options: Default::default(),
+            created_on: Default::default(),
+            partition_key_indices: Default::default(),
+        };
+
+        // construct RawTableInfo
+        let raw_table_info = RawTableInfo {
+            ident: Default::default(),
+            meta: raw_table_meta,
+            name: Default::default(),
+            desc: Default::default(),
+            catalog_name: Default::default(),
+            schema_name: Default::default(),
+            table_type: TableType::Base,
+        };
+
+        // construct create table expr
+        let create_table_expr = CreateTableExpr {
+            column_defs: vec![
+                ColumnDef {
+                    name: "column3".to_string(),
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "column1".to_string(),
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "column2".to_string(),
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            primary_keys: vec!["column3".to_string()],
+            ..Default::default()
+        };
+
+        let mut create_table_task =
+            CreateTableTask::new(create_table_expr, Vec::new(), raw_table_info);
+
+        // Call the sort_columns method
+        create_table_task.sort_columns();
+
+        // Assert that the columns are sorted correctly
+        assert_eq!(
+            create_table_task.create_table.column_defs[0].name,
+            "column1".to_string()
+        );
+        assert_eq!(
+            create_table_task.create_table.column_defs[1].name,
+            "column2".to_string()
+        );
+        assert_eq!(
+            create_table_task.create_table.column_defs[2].name,
+            "column3".to_string()
+        );
+
+        // Assert that the table_info is updated correctly
+        assert_eq!(
+            create_table_task.table_info.meta.schema.timestamp_index,
+            Some(0)
+        );
+        assert_eq!(
+            create_table_task.table_info.meta.primary_key_indices,
+            vec![2]
+        );
+        assert_eq!(create_table_task.table_info.meta.value_indices, vec![1]);
     }
 }
