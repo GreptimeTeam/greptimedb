@@ -38,9 +38,9 @@ DESC TABLE t1;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
+| host   | String               | PRI | YES  |         | TAG           |
 | ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val    | Float64              |     | YES  |         | FIELD         |
-| host   | String               | PRI | YES  |         | TAG           |
 +--------+----------------------+-----+------+---------+---------------+
 
 DESC TABLE t2;
@@ -48,8 +48,8 @@ DESC TABLE t2;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | job    | String               | PRI | YES  |         | TAG           |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val    | Float64              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
