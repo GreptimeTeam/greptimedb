@@ -24,7 +24,7 @@ use common_telemetry::{error, info};
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
     RegionRequest,
@@ -60,7 +60,7 @@ impl RegionEngine for FileRegionEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<AffectedRows, BoxedError> {
+    ) -> Result<RegionHandleResult, BoxedError> {
         self.inner
             .handle_request(region_id, request)
             .await
@@ -154,8 +154,8 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> EngineResult<AffectedRows> {
-        match request {
+    ) -> EngineResult<RegionHandleResult> {
+        let result = match request {
             RegionRequest::Create(req) => self.handle_create(region_id, req).await,
             RegionRequest::Drop(req) => self.handle_drop(region_id, req).await,
             RegionRequest::Open(req) => self.handle_open(region_id, req).await,
@@ -164,7 +164,8 @@ impl EngineInner {
                 operation: request.to_string(),
             }
             .fail(),
-        }
+        };
+        result.map(RegionHandleResult::new)
     }
 
     async fn stop(&self) -> EngineResult<()> {
