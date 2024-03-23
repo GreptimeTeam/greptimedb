@@ -20,6 +20,6 @@ DROP TABLE t2;
 
 DESC TABLE phy;
 
-SELECT * FROM phy;
+SELECT ts, val, __tsid, host, job FROM phy;
 
 DROP TABLE phy;
