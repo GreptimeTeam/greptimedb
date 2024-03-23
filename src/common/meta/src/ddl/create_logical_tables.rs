@@ -142,6 +142,11 @@ impl CreateLogicalTablesProcedure {
                     .await?
             };
             task.set_table_id(table_id);
+
+            // sort columns in task
+            task.sort_columns();
+
+            common_telemetry::info!("[DEBUG] sorted task {:?}", task);
         }
 
         self.creator
