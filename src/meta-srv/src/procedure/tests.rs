@@ -252,7 +252,7 @@ async fn test_on_datanode_create_logical_regions() {
     let region_routes = test_data::new_region_routes();
     let datanode_manager = new_datanode_manager(&region_server, &region_routes).await;
     let physical_table_route = TableRouteValue::physical(region_routes);
-    let physical_table_id = 111;
+    let physical_table_id = 1;
 
     let task1 = create_table_task(Some("my_table1"));
     let task2 = create_table_task(Some("my_table2"));
