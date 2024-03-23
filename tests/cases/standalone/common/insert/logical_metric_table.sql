@@ -18,4 +18,8 @@ DROP TABLE t1;
 
 DROP TABLE t2;
 
+DESC TABLE phy;
+
+SELECT * FROM phy;
+
 DROP TABLE phy;

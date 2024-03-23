@@ -65,6 +65,8 @@ impl MetricEngineInner {
         } else if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
             let physical_region_id = self.create_logical_region(region_id, request).await?;
 
+            common_telemetry::info!("[DEBUG] create logical region {region_id} on to physical region {physical_region_id}");
+
             // Add physical table's column to extension map.
             // It's ok to overwrite existing key, as the latter come schema is more up-to-date
             let physical_columns = self
