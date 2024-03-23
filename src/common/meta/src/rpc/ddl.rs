@@ -22,7 +22,7 @@ use api::v1::meta::{
     DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
-use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr};
+use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, SemanticType, TruncateTableExpr};
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
@@ -367,6 +367,44 @@ impl CreateTableTask {
     /// Sets the `table_info`'s table_id.
     pub fn set_table_id(&mut self, table_id: TableId) {
         self.table_info.ident.table_id = table_id;
+    }
+
+    /// Sort the columns in [CreateTableExpr] and [RawTableInfo].
+    ///
+    /// This function won't do any check or verification. Caller should
+    /// ensure this task is valid.
+    pub fn sort_columns(&mut self) {
+        // sort create table expr
+        // sort column_defs by name
+        self.create_table
+            .column_defs
+            .sort_unstable_by(|a, b| a.name.cmp(&b.name));
+
+        // compute new indices of sorted columns
+        // this part won't do any check or verification.
+        let mut primary_key_indices = Vec::with_capacity(self.create_table.primary_keys.len());
+        let mut value_indices =
+            Vec::with_capacity(self.create_table.column_defs.len() - primary_key_indices.len() - 1);
+        let mut timestamp_index = None;
+        for (index, col) in self.create_table.column_defs.iter().enumerate() {
+            if self.create_table.primary_keys.contains(&col.name) {
+                primary_key_indices.push(index);
+            } else if col.semantic_type == SemanticType::Timestamp as i32 {
+                timestamp_index = Some(index);
+            } else {
+                value_indices.push(index);
+            }
+        }
+
+        // overwrite table info
+        self.table_info
+            .meta
+            .schema
+            .column_schemas
+            .sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        self.table_info.meta.schema.timestamp_index = timestamp_index;
+        self.table_info.meta.primary_key_indices = primary_key_indices;
+        self.table_info.meta.value_indices = value_indices;
     }
 }
 
