@@ -8,7 +8,6 @@ CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) en
 
 SELECT * FROM information_schema.tables WHERE engine = "metric" order by table_name;
 
--- We currently don't maintains physical table's schema.
 DESC TABLE phy;
 
 DESC TABLE t1;
