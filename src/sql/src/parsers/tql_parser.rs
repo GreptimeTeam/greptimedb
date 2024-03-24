@@ -31,7 +31,7 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
-use crate::statements::tql::{Tql, TqlAnalyze, TqlEval, TqlExplain};
+use crate::statements::tql::{Tql, TqlAnalyze, TqlEval, TqlExplain, TqlParameters};
 
 pub const TQL: &str = "TQL";
 const EVAL: &str = "EVAL";
@@ -128,43 +128,35 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_tql_eval(&mut self) -> std::result::Result<Statement, ParserError> {
-        let parser = &mut self.parser;
-        parser.expect_token(&Token::LParen)?;
-        let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-        let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-        let delimiter_token = Self::find_next_delimiter_token(parser);
-        let (step, lookback) = if Self::is_comma(&delimiter_token) {
-            let step = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-            let lookback = Self::parse_string_or_number_or_word(parser, Token::RParen).ok();
-            (step, lookback)
-        } else {
-            let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
-            (step, None)
-        };
-        let query = Self::parse_tql_query(parser, self.sql)?;
+        let params = self.parse_tql_params()?;
+        Ok(Statement::Tql(Tql::Eval(TqlEval::from(params))))
+    }
 
-        Ok(Statement::Tql(Tql::Eval(TqlEval {
-            start,
-            end,
-            step,
-            lookback,
-            query,
-        })))
+    fn parse_tql_analyze(
+        &mut self,
+        is_verbose: bool,
+    ) -> std::result::Result<Statement, ParserError> {
+        let mut params = self.parse_tql_params()?;
+        params.is_verbose = is_verbose;
+        Ok(Statement::Tql(Tql::Analyze(TqlAnalyze::from(params))))
     }
 
     fn parse_tql_explain(
         &mut self,
         is_verbose: bool,
     ) -> std::result::Result<Statement, ParserError> {
-        let parser = &mut self.parser;
+        let mut params = self.parse_tql_params()?;
+        params.is_verbose = is_verbose;
+        Ok(Statement::Tql(Tql::Explain(TqlExplain::from(params))))
+    }
 
+    fn parse_tql_params(&mut self) -> std::result::Result<TqlParameters, ParserError> {
+        let parser = &mut self.parser;
         let (start, end, step, lookback) = match parser.peek_token().token {
             Token::LParen => {
                 let _consume_lparen_token = parser.next_token();
-                let start = Self::parse_string_or_number_or_word(parser, Token::Comma)
-                    .unwrap_or("0".to_string());
-                let end = Self::parse_string_or_number_or_word(parser, Token::Comma)
-                    .unwrap_or("0".to_string());
+                let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
+                let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
                 let delimiter_token = Self::find_next_delimiter_token(parser);
                 let (step, lookback) = if Self::is_comma(&delimiter_token) {
                     let step = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
@@ -178,46 +170,8 @@ impl<'a> ParserContext<'a> {
             }
             _ => ("0".to_string(), "0".to_string(), "5m".to_string(), None),
         };
-
         let query = Self::parse_tql_query(parser, self.sql)?;
-
-        Ok(Statement::Tql(Tql::Explain(TqlExplain {
-            query,
-            start,
-            end,
-            step,
-            lookback,
-            is_verbose,
-        })))
-    }
-
-    fn parse_tql_analyze(
-        &mut self,
-        is_verbose: bool,
-    ) -> std::result::Result<Statement, ParserError> {
-        let parser = &mut self.parser;
-        parser.expect_token(&Token::LParen)?;
-        let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-        let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-        let delimiter_token = Self::find_next_delimiter_token(parser);
-        let (step, lookback) = if Self::is_comma(&delimiter_token) {
-            let step = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-            let lookback = Self::parse_string_or_number_or_word(parser, Token::RParen).ok();
-            (step, lookback)
-        } else {
-            let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
-            (step, None)
-        };
-        let query = Self::parse_tql_query(parser, self.sql)?;
-
-        Ok(Statement::Tql(Tql::Analyze(TqlAnalyze {
-            start,
-            end,
-            step,
-            query,
-            lookback,
-            is_verbose,
-        })))
+        Ok(TqlParameters::new(start, end, step, lookback, query))
     }
 
     fn find_next_delimiter_token(parser: &mut Parser) -> Token {

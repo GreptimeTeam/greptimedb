@@ -54,3 +54,70 @@ pub struct TqlAnalyze {
     pub query: String,
     pub is_verbose: bool,
 }
+
+#[derive(Debug)]
+pub struct TqlParameters {
+    start: String,
+    end: String,
+    step: String,
+    lookback: Option<String>,
+    query: String,
+    pub is_verbose: bool,
+}
+
+impl TqlParameters {
+    pub fn new(
+        start: String,
+        end: String,
+        step: String,
+        lookback: Option<String>,
+        query: String,
+    ) -> Self {
+        TqlParameters {
+            start,
+            end,
+            step,
+            lookback,
+            query,
+            is_verbose: false,
+        }
+    }
+}
+
+impl From<TqlParameters> for TqlEval {
+    fn from(params: TqlParameters) -> Self {
+        TqlEval {
+            start: params.start,
+            end: params.end,
+            step: params.step,
+            lookback: params.lookback,
+            query: params.query,
+        }
+    }
+}
+
+impl From<TqlParameters> for TqlExplain {
+    fn from(params: TqlParameters) -> Self {
+        TqlExplain {
+            start: params.start,
+            end: params.end,
+            step: params.step,
+            query: params.query,
+            lookback: params.lookback,
+            is_verbose: params.is_verbose,
+        }
+    }
+}
+
+impl From<TqlParameters> for TqlAnalyze {
+    fn from(params: TqlParameters) -> Self {
+        TqlAnalyze {
+            start: params.start,
+            end: params.end,
+            step: params.step,
+            query: params.query,
+            lookback: params.lookback,
+            is_verbose: params.is_verbose,
+        }
+    }
+}
