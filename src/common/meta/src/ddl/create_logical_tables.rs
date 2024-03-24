@@ -33,6 +33,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 
+use crate::cache_invalidator::Context;
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
 use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error, region_storage_path};
 use crate::ddl::DdlContext;
@@ -40,6 +41,7 @@ use crate::error::{
     DecodeJsonSnafu, MetadataCorruptionSnafu, Result, TableAlreadyExistsSnafu,
     TableInfoNotFoundSnafu,
 };
+use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -239,6 +241,15 @@ impl CreateLogicalTablesProcedure {
             self.context
                 .table_metadata_manager
                 .update_table_info(physical_table_info, new_table_info)
+                .await?;
+
+            // invalid table cache
+            self.context
+                .cache_invalidator
+                .invalidate(
+                    &Context::default(),
+                    vec![CacheIdent::TableId(self.creator.data.physical_table_id)],
+                )
                 .await?;
         } else {
             warn!("No physical columns found, leaving the physical table's schema unchanged");

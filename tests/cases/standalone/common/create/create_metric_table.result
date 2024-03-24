@@ -19,9 +19,15 @@ CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) en
 
 Affected Rows: 0
 
-SELECT * FROM information_schema.tables WHERE engine = "metric" order by table_name;
+SELECT table_catalog, table_schema, table_name, table_type, engine FROM information_schema.tables WHERE engine = 'metric' order by table_name;
 
-Error: 3000(PlanQuery), Failed to plan SQL: No field named metric. Valid fields are information_schema.tables.table_catalog, information_schema.tables.table_schema, information_schema.tables.table_name, information_schema.tables.table_type, information_schema.tables.table_id, information_schema.tables.engine.
++---------------+--------------+------------+------------+--------+
+| table_catalog | table_schema | table_name | table_type | engine |
++---------------+--------------+------------+------------+--------+
+| greptime      | public       | phy        | BASE TABLE | metric |
+| greptime      | public       | t1         | BASE TABLE | metric |
+| greptime      | public       | t2         | BASE TABLE | metric |
++---------------+--------------+------------+------------+--------+
 
 DESC TABLE phy;
 
