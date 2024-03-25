@@ -17,19 +17,26 @@ mod metadata;
 mod region_request;
 mod update_metadata;
 
+use std::ops::Deref;
+
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context, LockKey, Procedure, Status};
+use common_telemetry::warn;
 use futures_util::future;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::TableId;
 
 use crate::ddl::utils::add_peer_context_if_needed;
-use crate::ddl::DdlContext;
-use crate::error::{Error, Result};
+use crate::ddl::{physical_table_metadata, DdlContext};
+use crate::error::{
+    DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result, TableInfoNotFoundSnafu,
+};
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
@@ -61,6 +68,7 @@ impl AlterLogicalTablesProcedure {
                 table_info_values: vec![],
                 physical_table_id,
                 physical_table_route: None,
+                physical_columns: vec![],
                 cache_invalidate_keys: vec![],
             },
         }
@@ -116,17 +124,69 @@ impl AlterLogicalTablesProcedure {
             }
         }
 
-        future::join_all(alter_region_tasks)
+        // Collects responses from all the alter region tasks.
+        let phy_raw_schemas = future::join_all(alter_region_tasks)
             .await
             .into_iter()
+            .map(|res| res.map(|mut res| res.extension.remove(ALTER_PHYSICAL_EXTENSION_KEY)))
             .collect::<Result<Vec<_>>>()?;
 
-        self.data.state = AlterTablesState::UpdateMetadata;
+        if phy_raw_schemas.is_empty() {
+            self.data.state = AlterTablesState::UpdateMetadata;
+            return Ok(Status::executing(true));
+        }
 
+        // Verify all the physical schemas are the same
+        // Safety: previous check ensures this vec is not empty
+        let first = phy_raw_schemas.first().unwrap();
+        ensure!(
+            phy_raw_schemas.iter().all(|x| x == first),
+            MetadataCorruptionSnafu {
+                err_msg: "The physical schemas from datanodes are not the same."
+            }
+        );
+
+        // Decodes the physical raw schemas
+        if let Some(phy_raw_schema) = first {
+            self.data.physical_columns =
+                ColumnMetadata::decode_list(phy_raw_schema).context(DecodeJsonSnafu)?;
+        } else {
+            warn!("altering logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
+        }
+
+        self.data.state = AlterTablesState::UpdateMetadata;
         Ok(Status::executing(true))
     }
 
     pub(crate) async fn on_update_metadata(&mut self) -> Result<Status> {
+        if !self.data.physical_columns.is_empty() {
+            let physical_table_id = self.data.physical_table_id;
+            let physical_columns = std::mem::take(&mut self.data.physical_columns);
+            // Fetch old physical table's info
+            let physical_table_info = self
+                .context
+                .table_metadata_manager
+                .get_full_table_info(physical_table_id)
+                .await?
+                .0
+                .context(TableInfoNotFoundSnafu {
+                    table_name: format!("table id - {}", physical_table_id),
+                })?;
+
+            // Generates new table info
+            let old_raw_table_info = physical_table_info.deref().table_info.clone();
+            let new_raw_table_info = physical_table_metadata::build_new_physical_table_info(
+                old_raw_table_info,
+                physical_columns,
+            );
+
+            // Updates physical table's metadata
+            self.context
+                .table_metadata_manager
+                .update_table_info(physical_table_info, new_raw_table_info)
+                .await?;
+        }
+
         let table_info_values = self.build_update_metadata()?;
         let manager = &self.context.table_metadata_manager;
         let chunk_size = manager.batch_update_table_info_value_chunk_size();
@@ -238,6 +298,7 @@ pub struct AlterTablesData {
     /// Physical table info
     physical_table_id: TableId,
     physical_table_route: Option<PhysicalTableRouteValue>,
+    physical_columns: Vec<ColumnMetadata>,
     cache_invalidate_keys: Vec<TableId>,
 }
 
