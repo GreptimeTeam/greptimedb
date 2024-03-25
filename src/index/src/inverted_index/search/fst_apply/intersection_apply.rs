@@ -46,13 +46,14 @@ impl fst::Automaton for DfaFstAutomaton {
 
     #[inline]
     fn start(&self) -> Self::State {
-        let config = Config::new().anchored(Anchored::Yes);
+        let config = Config::new().anchored(Anchored::No);
         self.0.start_state(&config).unwrap()
     }
 
     #[inline]
     fn is_match(&self, state: &Self::State) -> bool {
-        self.0.is_match_state(*state)
+        let next_state = self.0.next_eoi_state(*state);
+        self.0.is_match_state(next_state)
     }
 
     #[inline]
