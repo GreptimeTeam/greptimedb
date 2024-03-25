@@ -123,7 +123,7 @@ impl CatalogManager {
         self.kv_backend.exists(&raw_key).await
     }
 
-    pub async fn catalog_names(&self) -> BoxStream<'static, Result<String>> {
+    pub fn catalog_names(&self) -> BoxStream<'static, Result<String>> {
         let start_key = CatalogNameKey::range_start_key();
         let req = RangeRequest::new().with_prefix(start_key.as_bytes());
 

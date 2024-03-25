@@ -19,10 +19,13 @@ use api::v1::meta::{
     AlterTableTask as PbAlterTableTask, AlterTableTasks as PbAlterTableTasks,
     CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
     DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
-    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
+    DropDatabaseTask as PbDropDatabaseTask, DropTableTask as PbDropTableTask,
+    DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
-use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, SemanticType, TruncateTableExpr};
+use api::v1::{
+    AlterExpr, CreateTableExpr, DropDatabaseExpr, DropTableExpr, SemanticType, TruncateTableExpr,
+};
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
@@ -43,6 +46,7 @@ pub enum DdlTask {
     CreateLogicalTables(Vec<CreateTableTask>),
     DropLogicalTables(Vec<DropTableTask>),
     AlterLogicalTables(Vec<AlterTableTask>),
+    DropDatabase(DropDatabaseTask),
 }
 
 impl DdlTask {
@@ -75,6 +79,14 @@ impl DdlTask {
             schema,
             table,
             table_id,
+            drop_if_exists,
+        })
+    }
+
+    pub fn new_drop_database(catalog: String, schema: String, drop_if_exists: bool) -> Self {
+        DdlTask::DropDatabase(DropDatabaseTask {
+            catalog,
+            schema,
             drop_if_exists,
         })
     }
@@ -137,6 +149,9 @@ impl TryFrom<Task> for DdlTask {
 
                 Ok(DdlTask::AlterLogicalTables(tasks))
             }
+            Task::DropDatabaseTask(drop_database) => {
+                Ok(DdlTask::DropDatabase(drop_database.try_into()?))
+            }
         }
     }
 }
@@ -179,6 +194,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
                 Task::AlterTableTasks(PbAlterTableTasks { tasks })
             }
+            DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
         };
 
         Ok(Self {
@@ -557,7 +573,7 @@ impl TryFrom<PbTruncateTableTask> for TruncateTableTask {
 
     fn try_from(pb: PbTruncateTableTask) -> Result<Self> {
         let truncate_table = pb.truncate_table.context(error::InvalidProtoMsgSnafu {
-            err_msg: "expected drop table",
+            err_msg: "expected truncate table",
         })?;
 
         Ok(Self {
@@ -584,6 +600,53 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
                 schema_name: task.schema,
                 table_name: task.table,
                 table_id: Some(api::v1::TableId { id: task.table_id }),
+            }),
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct DropDatabaseTask {
+    pub catalog: String,
+    pub schema: String,
+    pub drop_if_exists: bool,
+}
+
+impl TryFrom<PbDropDatabaseTask> for DropDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbDropDatabaseTask) -> Result<Self> {
+        let DropDatabaseExpr {
+            catalog_name,
+            schema_name,
+            drop_if_exists,
+        } = pb.drop_database.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected drop database",
+        })?;
+
+        Ok(DropDatabaseTask {
+            catalog: catalog_name,
+            schema: schema_name,
+            drop_if_exists,
+        })
+    }
+}
+
+impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(
+        DropDatabaseTask {
+            catalog,
+            schema,
+            drop_if_exists,
+        }: DropDatabaseTask,
+    ) -> Result<Self> {
+        Ok(PbDropDatabaseTask {
+            drop_database: Some(DropDatabaseExpr {
+                catalog_name: catalog,
+                schema_name: schema,
+                drop_if_exists,
             }),
         })
     }

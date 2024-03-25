@@ -53,6 +53,7 @@ strum.workspace = true
 table.workspace = true
 tokio.workspace = true
 tonic.workspace = true
+typetag = "0.2"
 
 [dev-dependencies]
 chrono.workspace = true

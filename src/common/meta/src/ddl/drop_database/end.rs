@@ -12,21 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common traits and structures for the procedure framework.
+use common_procedure::Status;
+use serde::{Deserialize, Serialize};
 
-#![feature(assert_matches)]
+use crate::ddl::drop_database::{DropDatabaseContext, State};
+use crate::ddl::DdlContext;
+use crate::error::Result;
 
-pub mod error;
-pub mod local;
-pub mod options;
-mod procedure;
-pub mod store;
-pub mod watcher;
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DropDatabaseEnd;
 
-pub use crate::error::{Error, Result};
-pub use crate::procedure::{
-    BoxedProcedure, BoxedProcedureLoader, Context, ContextProvider, LockKey, Output, ParseIdError,
-    Procedure, ProcedureId, ProcedureManager, ProcedureManagerRef, ProcedureState, ProcedureWithId,
-    Status, StringKey,
-};
-pub use crate::watcher::Watcher;
+#[async_trait::async_trait]
+#[typetag::serde]
+impl State for DropDatabaseEnd {
+    async fn next(
+        &mut self,
+        _: &DdlContext,
+        _: &mut DropDatabaseContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        Ok((Box::new(DropDatabaseEnd), Status::done()))
+    }
+}

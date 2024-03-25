@@ -267,6 +267,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Schema nod found, schema: {}", table_schema))]
+    SchemaNotFound {
+        table_schema: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to rename table, reason: {}", reason))]
     RenameTable { reason: String, location: Location },
 
@@ -472,9 +478,10 @@ impl ErrorExt for Error {
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
 
-            ParseProcedureId { .. } | InvalidNumTopics { .. } | EmptyCreateTableTasks { .. } => {
-                StatusCode::InvalidArguments
-            }
+            ParseProcedureId { .. }
+            | InvalidNumTopics { .. }
+            | EmptyCreateTableTasks { .. }
+            | SchemaNotFound { .. } => StatusCode::InvalidArguments,
         }
     }
 
