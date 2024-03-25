@@ -53,16 +53,20 @@ impl fst::Automaton for DfaFstAutomaton {
 
     #[inline]
     fn is_match(&self, state: &Self::State) -> bool {
-        if self.0.is_match_state(*state) {
-            return true;
-        }
-        let next_state = self.0.next_eoi_state(*state);
-        self.0.is_match_state(next_state)
+        self.0.is_match_state(*state)
     }
 
     #[inline]
     fn can_match(&self, state: &Self::State) -> bool {
         !self.0.is_dead_state(*state)
+    }
+
+    #[inline]
+    fn accept_eof(&self, state: &StateID) -> Option<StateID> {
+        if self.0.is_match_state(*state) {
+            return Some(*state);
+        }
+        Some(self.0.next_eoi_state(*state))
     }
 
     #[inline]
