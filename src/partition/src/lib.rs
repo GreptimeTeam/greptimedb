@@ -18,7 +18,6 @@ pub mod columns;
 pub mod error;
 pub mod expr;
 pub mod manager;
-pub mod metrics;
 pub mod multi_dim;
 pub mod partition;
 pub mod range;
