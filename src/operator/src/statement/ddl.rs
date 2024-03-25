@@ -525,16 +525,47 @@ impl StatementExecutor {
             .await
             .context(TableMetadataManagerSnafu)?;
 
-        let req = if physical_table_id == table_id {
+        let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
-            SubmitDdlTaskRequest {
+            let req = SubmitDdlTaskRequest {
                 task: DdlTask::new_alter_table(expr),
+            };
+
+            let mut invalidate_keys = vec![
+                CacheIdent::TableId(physical_table_id),
+                CacheIdent::TableId(table_id),
+                CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
+            ];
+
+            let physical_table = self
+                .table_metadata_manager
+                .table_info_manager()
+                .get(physical_table_id)
+                .await
+                .context(TableMetadataManagerSnafu)?
+                .map(|x| x.into_inner());
+            if let Some(physical_table) = physical_table {
+                let physical_table_name = TableName::new(
+                    physical_table.table_info.catalog_name,
+                    physical_table.table_info.schema_name,
+                    physical_table.table_info.name,
+                );
+                invalidate_keys.push(CacheIdent::TableName(physical_table_name));
             }
+
+            (req, invalidate_keys)
         } else {
             // This is logical table
-            SubmitDdlTaskRequest {
+            let req = SubmitDdlTaskRequest {
                 task: DdlTask::new_alter_logical_tables(vec![expr]),
-            }
+            };
+
+            let invalidate_keys = vec![
+                CacheIdent::TableId(table_id),
+                CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
+            ];
+
+            (req, invalidate_keys)
         };
 
         self.procedure_executor
@@ -544,13 +575,7 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate(
-                &Context::default(),
-                vec![
-                    CacheIdent::TableId(table_id),
-                    CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
-                ],
-            )
+            .invalidate(&Context::default(), invalidate_keys)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
