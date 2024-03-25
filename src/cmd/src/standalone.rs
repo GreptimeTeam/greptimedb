@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use async_trait::async_trait;
+use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig};
@@ -399,6 +400,9 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
+        let catalog_manager =
+            KvBackendCatalogManager::new(kv_backend.clone(), Arc::new(DummyCacheInvalidator));
+
         let builder =
             DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
         let datanode = builder.build().await.context(StartDatanodeSnafu)?;
@@ -433,11 +437,16 @@ impl StartCommand {
         )
         .await?;
 
-        let mut frontend = FrontendBuilder::new(kv_backend, datanode_manager, ddl_task_executor)
-            .with_plugin(fe_plugins.clone())
-            .try_build()
-            .await
-            .context(StartFrontendSnafu)?;
+        let mut frontend = FrontendBuilder::new(
+            kv_backend,
+            catalog_manager,
+            datanode_manager,
+            ddl_task_executor,
+        )
+        .with_plugin(fe_plugins.clone())
+        .try_build()
+        .await
+        .context(StartFrontendSnafu)?;
 
         let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
             .build()
