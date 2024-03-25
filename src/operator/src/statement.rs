@@ -221,7 +221,6 @@ impl StatementExecutor {
                     // so we just ignore it here instead of returning an error to break the connection.
                     // Since the "bytea_output" only determines the output format of binary values,
                     // it won't cause much trouble if we do so.
-                    // TODO(#3438): Remove this temporary workaround after the feature is implemented.
                     "BYTEA_OUTPUT" => set_session_config(var_name, set_var.value, query_ctx)?,
 
                     // Same as "bytea_output", we just ignore it here.
