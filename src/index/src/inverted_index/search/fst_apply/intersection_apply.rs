@@ -20,6 +20,7 @@ use regex_automata::dfa::dense::DFA;
 use regex_automata::dfa::Automaton;
 use regex_automata::util::primitives::StateID;
 use regex_automata::util::start::Config;
+use regex_automata::Anchored;
 use snafu::{ensure, ResultExt};
 
 use crate::inverted_index::error::{
@@ -45,7 +46,7 @@ impl fst::Automaton for DfaFstAutomaton {
 
     #[inline]
     fn start(&self) -> Self::State {
-        let config = Config::new();
+        let config = Config::new().anchored(Anchored::Yes);
         self.0.start_state(&config).unwrap()
     }
 
