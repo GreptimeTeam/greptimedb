@@ -1,16 +1,14 @@
-CREATE TABLE test_alt_table(i INTEGER, j TIMESTAMP TIME INDEX);
+CREATE TABLE test_alt_table(h INTEGER, i INTEGER, j TIMESTAMP TIME INDEX, PRIMARY KEY (h, i));
 
 DESC TABLE test_alt_table;
 
-INSERT INTO test_alt_table VALUES (1, 0), (2, 1);
+INSERT INTO test_alt_table VALUES (1, 1, 0), (2, 2, 1);
 
-ALTER TABLE test_alt_table ADD COLUMN k INTEGER;
+ALTER TABLE test_alt_table ADD COLUMN k INTEGER PRIMARY KEY;
 
 DESC TABLE test_alt_table;
 
 SELECT * FROM test_alt_table;
-
-SELECT * FROM test_alt_table WHERE k IS NULL;
 
 SELECT * FROM test_alt_table WHERE i = 1;
 

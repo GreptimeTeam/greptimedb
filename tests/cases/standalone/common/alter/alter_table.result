@@ -1,4 +1,4 @@
-CREATE TABLE test_alt_table(i INTEGER, j TIMESTAMP TIME INDEX);
+CREATE TABLE test_alt_table(h INTEGER, i INTEGER, j TIMESTAMP TIME INDEX, PRIMARY KEY (h, i));
 
 Affected Rows: 0
 
@@ -7,15 +7,16 @@ DESC TABLE test_alt_table;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| i      | Int32                |     | YES  |         | FIELD         |
+| h      | Int32                | PRI | YES  |         | TAG           |
+| i      | Int32                | PRI | YES  |         | TAG           |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
 
-INSERT INTO test_alt_table VALUES (1, 0), (2, 1);
+INSERT INTO test_alt_table VALUES (1, 1, 0), (2, 2, 1);
 
 Affected Rows: 2
 
-ALTER TABLE test_alt_table ADD COLUMN k INTEGER;
+ALTER TABLE test_alt_table ADD COLUMN k INTEGER PRIMARY KEY;
 
 Affected Rows: 0
 
@@ -24,36 +25,28 @@ DESC TABLE test_alt_table;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| i      | Int32                |     | YES  |         | FIELD         |
+| h      | Int32                | PRI | YES  |         | TAG           |
+| i      | Int32                | PRI | YES  |         | TAG           |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| k      | Int32                |     | YES  |         | FIELD         |
+| k      | Int32                | PRI | YES  |         | TAG           |
 +--------+----------------------+-----+------+---------+---------------+
 
 SELECT * FROM test_alt_table;
 
-+---+-------------------------+---+
-| i | j                       | k |
-+---+-------------------------+---+
-| 1 | 1970-01-01T00:00:00     |   |
-| 2 | 1970-01-01T00:00:00.001 |   |
-+---+-------------------------+---+
-
-SELECT * FROM test_alt_table WHERE k IS NULL;
-
-+---+-------------------------+---+
-| i | j                       | k |
-+---+-------------------------+---+
-| 1 | 1970-01-01T00:00:00     |   |
-| 2 | 1970-01-01T00:00:00.001 |   |
-+---+-------------------------+---+
++---+---+-------------------------+---+
+| h | i | j                       | k |
++---+---+-------------------------+---+
+| 1 | 1 | 1970-01-01T00:00:00     |   |
+| 2 | 2 | 1970-01-01T00:00:00.001 |   |
++---+---+-------------------------+---+
 
 SELECT * FROM test_alt_table WHERE i = 1;
 
-+---+---------------------+---+
-| i | j                   | k |
-+---+---------------------+---+
-| 1 | 1970-01-01T00:00:00 |   |
-+---+---------------------+---+
++---+---+---------------------+---+
+| h | i | j                   | k |
++---+---+---------------------+---+
+| 1 | 1 | 1970-01-01T00:00:00 |   |
++---+---+---------------------+---+
 
 -- SQLNESS ARG restart=true
 ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
@@ -65,9 +58,10 @@ DESC TABLE test_alt_table;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| i      | Int32                |     | YES  |         | FIELD         |
+| h      | Int32                | PRI | YES  |         | TAG           |
+| i      | Int32                | PRI | YES  |         | TAG           |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| k      | Int32                |     | YES  |         | FIELD         |
+| k      | Int32                | PRI | YES  |         | TAG           |
 | m      | Int32                |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
