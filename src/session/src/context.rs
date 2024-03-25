@@ -28,7 +28,9 @@ use dashmap::DashMap;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
-use crate::session_config::SessionConfigOption;
+use crate::session_config::{
+    ByteaOutputValue, PostgresConfigValue, PostgresOption, SessionConfigOption,
+};
 use crate::{SessionConfigValue, SessionRef};
 
 pub type QueryContextRef = Arc<QueryContext>;
@@ -48,7 +50,7 @@ pub struct QueryContext {
     extension: HashMap<String, String>,
     // The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
-    configuration_parameter: DashMap<SessionConfigOption, SessionConfigValue>,
+    configuration_parameter: Arc<DashMap<SessionConfigOption, SessionConfigValue>>,
 }
 
 impl QueryContextBuilder {
@@ -191,15 +193,6 @@ impl QueryContext {
         }
     }
 
-    pub fn update_configuration_parameter(&self, session: &SessionRef) {
-        self.configuration_parameter
-            .clone()
-            .into_iter()
-            .for_each(|(key, value)| {
-                session.configuration_variables.insert(key, value);
-            });
-    }
-
     /// Default to double quote and fallback to back quote
     pub fn quote_style(&self) -> char {
         if self.sql_dialect().is_delimited_identifier_start('"') {
@@ -209,6 +202,18 @@ impl QueryContext {
         } else {
             '`'
         }
+    }
+
+    /// Get the bytea_output value from the configuration parameter.
+    pub fn bytea_output(&self) -> ByteaOutputValue {
+        self.get_configuration_parameter(&SessionConfigOption::Postgres(
+            PostgresOption::ByteaOutput,
+        ))
+        .map(|v| match v {
+            SessionConfigValue::Postgres(PostgresConfigValue::ByteaOutput(v)) => v,
+            _ => ByteaOutputValue::DEFAULT,
+        })
+        .unwrap_or(ByteaOutputValue::DEFAULT)
     }
 }
 

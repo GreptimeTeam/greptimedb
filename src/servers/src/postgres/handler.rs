@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -22,28 +21,21 @@ use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
 use common_telemetry::tracing;
 use datatypes::schema::SchemaRef;
-use datatypes::value::Value;
 use futures::{future, stream, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
-    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, QueryResponse,
-    Response, Tag,
+    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
-use session::session_config::{
-    postgres_config_value, postgres_option, ByteaOutputValue, PostgresConfigValue, PostgresOption,
-    SessionConfigValue,
-};
 use session::Session;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
-use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use super::types::*;
 use super::PostgresServerHandler;
 use crate::error::Result;
@@ -68,7 +60,6 @@ impl SimpleQueryHandler for PostgresServerHandler {
             .start_timer();
         let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
         query_ctx.update_session(&self.session);
-        query_ctx.update_configuration_parameter(&self.session);
 
         let mut results = Vec::with_capacity(outputs.len());
 
@@ -127,11 +118,6 @@ where
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
     );
     let pg_schema_ref = pg_schema.clone();
-    let bytea_output = query_ctx
-        .get_configuration_parameter(&postgres_option(PostgresOption::ByteaOutput))
-        .unwrap_or(postgres_config_value(PostgresConfigValue::ByteaOutput(
-            ByteaOutputValue::DEFAULT,
-        )));
     let data_row_stream = recordbatches_stream
         .map(|record_batch_result| match record_batch_result {
             Ok(rb) => stream::iter(
@@ -146,34 +132,8 @@ where
         .map(move |row| {
             row.and_then(|row| {
                 let mut encoder = DataRowEncoder::new(pg_schema_ref.clone());
-                for (idx, value) in row.iter().enumerate() {
-                    match value {
-                        Value::Binary(v) => {
-                            match bytea_output {
-                                SessionConfigValue::Postgres(PostgresConfigValue::ByteaOutput(
-                                    ByteaOutputValue::DEFAULT,
-                                )) => encode_value(value, &mut encoder)?,
-                                SessionConfigValue::Postgres(PostgresConfigValue::ByteaOutput(
-                                    ByteaOutputValue::ESCAPE,
-                                )) => match (*pg_schema_ref)[idx].format() {
-                                    FieldFormat::Text => {
-                                        let value = EscapeOutputBytea(v.deref());
-                                        encoder.encode_field_with_type_and_format(
-                                            &value,
-                                            &value.datatype(),
-                                            FieldFormat::Text,
-                                        )?
-                                    }
-                                    FieldFormat::Binary => encode_value(value, &mut encoder)?,
-                                },
-                                SessionConfigValue::Postgres(PostgresConfigValue::ByteaOutput(
-                                    ByteaOutputValue::HEX,
-                                )) => encoder.encode_field(&HexOutputBytea(v.deref()))?,
-                                _ => unimplemented!(), // impossible
-                            }
-                        }
-                        _ => encode_value(value, &mut encoder)?,
-                    }
+                for value in row.iter() {
+                    encode_value(&query_ctx, value, &mut encoder)?;
                 }
                 encoder.finish()
             })

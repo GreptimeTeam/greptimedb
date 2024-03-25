@@ -401,11 +401,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
 }
 pub async fn test_postgres_bytea(store_type: StorageType) {
     let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_bytea_output").await;
-    // let pool = PgPoolOptions::new()
-    //     .max_connections(2)
-    //     .connect(&format!("postgres://{addr}/public"))
-    //     .await
-    //     .unwrap();
+
     let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
         .await
         .unwrap();
@@ -456,6 +452,20 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
         .simple_query("SET bytea_output='invalid'")
         .await
         .unwrap_err();
+
+    // binary format shall not be affected by bytea_output
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("postgres://{addr}/public"))
+        .await
+        .unwrap();
+
+    let row = sqlx::query("select b from test")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let val: Vec<u8> = row.get("b");
+    assert_eq!(val, [97, 98, 99, 107, 108, 109, 42, 169, 84]);
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;

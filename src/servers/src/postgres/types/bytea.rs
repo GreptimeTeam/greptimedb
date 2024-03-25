@@ -13,12 +13,8 @@
 // limitations under the License.
 
 use bytes::BufMut;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::types::StringType;
 use pgwire::types::ToSqlText;
 use postgres_types::{IsNull, ToSql, Type};
-
-use super::type_gt_to_pg;
 
 #[derive(Debug)]
 pub struct HexOutputBytea<'a>(pub &'a [u8]);
@@ -66,12 +62,6 @@ impl ToSql for HexOutputBytea<'_> {
 }
 #[derive(Debug)]
 pub struct EscapeOutputBytea<'a>(pub &'a [u8]);
-impl EscapeOutputBytea<'_> {
-    pub fn datatype(&self) -> Type {
-        // to show as string, use string as type
-        type_gt_to_pg(&ConcreteDataType::String(StringType)).unwrap()
-    }
-}
 impl ToSqlText for EscapeOutputBytea<'_> {
     fn to_sql_text(
         &self,

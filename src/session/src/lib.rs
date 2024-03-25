@@ -39,7 +39,7 @@ pub struct Session {
     user_info: ArcSwap<UserInfoRef>,
     conn_info: ConnInfo,
     timezone: ArcSwap<Timezone>,
-    configuration_variables: DashMap<SessionConfigOption, SessionConfigValue>,
+    configuration_variables: Arc<DashMap<SessionConfigOption, SessionConfigValue>>,
 }
 
 pub type SessionRef = Arc<Session>;
@@ -56,7 +56,7 @@ impl Session {
             user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
             conn_info: ConnInfo::new(addr, channel),
             timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
-            configuration_variables,
+            configuration_variables: Arc::new(configuration_variables),
         }
     }
 

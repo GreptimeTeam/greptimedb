@@ -29,7 +29,7 @@ pub enum SessionConfigOption {
 pub enum Error {
     #[snafu(display("Unkonw Postgres option '{}'", name))]
     UnknownOption { name: String, location: Location },
-    #[snafu(display("Invalid value: {} for '{}'", value, name))]
+    #[snafu(display("Invalid value for parameter \"{}\": \"{}\"", name, value))]
     InvalidConfigValue {
         name: String,
         value: String,
