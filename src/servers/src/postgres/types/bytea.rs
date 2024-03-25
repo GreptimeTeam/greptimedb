@@ -109,3 +109,44 @@ impl ToSql for EscapeOutputBytea<'_> {
         self.0.to_sql_checked(ty, out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_output_bytea() {
+        let input: &[u8] = &[97, 98, 99, 107, 108, 109, 42, 169, 84];
+        let input = EscapeOutputBytea(input);
+
+        let expected = b"abcklm*\\251T";
+        let mut out = bytes::BytesMut::new();
+        let is_null = input.to_sql_text(&Type::BYTEA, &mut out).unwrap();
+        assert!(matches!(is_null, IsNull::No));
+        assert_eq!(&out[..], expected);
+
+        let expected = &[97, 98, 99, 107, 108, 109, 42, 169, 84];
+        let mut out = bytes::BytesMut::new();
+        let is_null = input.to_sql(&Type::BYTEA, &mut out).unwrap();
+        assert!(matches!(is_null, IsNull::No));
+        assert_eq!(&out[..], expected);
+    }
+
+    #[test]
+    fn test_hex_output_bytea() {
+        let input = b"hello, world!";
+        let input = HexOutputBytea(input);
+
+        let expected = b"\\x68656c6c6f2c20776f726c6421";
+        let mut out = bytes::BytesMut::new();
+        let is_null = input.to_sql_text(&Type::BYTEA, &mut out).unwrap();
+        assert!(matches!(is_null, IsNull::No));
+        assert_eq!(&out[..], expected);
+
+        let expected = b"hello, world!";
+        let mut out = bytes::BytesMut::new();
+        let is_null = input.to_sql(&Type::BYTEA, &mut out).unwrap();
+        assert!(matches!(is_null, IsNull::No));
+        assert_eq!(&out[..], expected);
+    }
+}
