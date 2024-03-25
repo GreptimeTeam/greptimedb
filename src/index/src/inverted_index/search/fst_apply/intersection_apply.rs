@@ -39,6 +39,7 @@ pub struct IntersectionFstApplier {
     dfas: Vec<DfaFstAutomaton>,
 }
 
+#[derive(Debug)]
 struct DfaFstAutomaton(DFA<Vec<u32>>);
 
 impl fst::Automaton for DfaFstAutomaton {
@@ -52,6 +53,9 @@ impl fst::Automaton for DfaFstAutomaton {
 
     #[inline]
     fn is_match(&self, state: &Self::State) -> bool {
+        if self.0.is_match_state(*state) {
+            return true;
+        }
         let next_state = self.0.next_eoi_state(*state);
         self.0.is_match_state(next_state)
     }
@@ -63,6 +67,9 @@ impl fst::Automaton for DfaFstAutomaton {
 
     #[inline]
     fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        if self.0.is_match_state(*state) {
+            return *state;
+        }
         self.0.next_state(*state, byte)
     }
 }
