@@ -270,8 +270,10 @@ impl RegionServerHandler for RegionServer {
 
         // merge results by sum up affected rows and merge extensions.
         let mut affected_rows = 0;
+        let mut extension = HashMap::new();
         for result in results {
             affected_rows += result.affected_rows;
+            extension.extend(result.extension);
         }
 
         Ok(RegionResponse {
@@ -282,7 +284,7 @@ impl RegionServerHandler for RegionServer {
                 }),
             }),
             affected_rows: affected_rows as _,
-            extension: Default::default(),
+            extension,
         })
     }
 }

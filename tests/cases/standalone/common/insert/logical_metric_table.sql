@@ -18,4 +18,8 @@ DROP TABLE t1;
 
 DROP TABLE t2;
 
+DESC TABLE phy;
+
+SELECT ts, val, __tsid, host, job FROM phy;
+
 DROP TABLE phy;

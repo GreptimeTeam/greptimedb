@@ -148,7 +148,6 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Catchup(_) => Ok(0),
         };
 
-        // TODO: pass extension
         result
             .map_err(BoxedError::new)
             .map(|rows| RegionHandleResult {
