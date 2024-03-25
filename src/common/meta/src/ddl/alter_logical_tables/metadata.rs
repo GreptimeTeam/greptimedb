@@ -17,9 +17,13 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
-use crate::error::{Result, TableInfoNotFoundSnafu, TableNotFoundSnafu};
+use crate::error::{
+    AlterLogicalTablesInvalidArgumentsSnafu, Result, TableInfoNotFoundSnafu, TableNotFoundSnafu,
+    TableRouteNotFoundSnafu,
+};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
+use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::AlterTableTask;
 
 impl AlterLogicalTablesProcedure {
@@ -46,21 +50,38 @@ impl AlterLogicalTablesProcedure {
                 }
             })
             .collect();
-        self.data.cache_invalidate_keys = self
-            .data
-            .table_info_values
-            .iter()
-            .map(|table| table.table_info.ident.table_id)
-            .collect();
 
         Ok(())
     }
 
-    pub(crate) async fn fill_physical_table_route(&mut self) -> Result<()> {
-        let table_route_manager = self.context.table_metadata_manager.table_route_manager();
-        let (_, physical_table_route) = table_route_manager
-            .get_physical_table_route(self.data.physical_table_id)
+    pub(crate) async fn fill_physical_table_info(&mut self) -> Result<()> {
+        let (physical_table_info, physical_table_route) = self
+            .context
+            .table_metadata_manager
+            .get_full_table_info(self.data.physical_table_id)
             .await?;
+
+        let physical_table_info = physical_table_info
+            .context(TableInfoNotFoundSnafu {
+                table: format!("table id - {}", self.data.physical_table_id),
+            })?
+            .into_inner();
+        let physical_table_route = physical_table_route
+            .context(TableRouteNotFoundSnafu {
+                table_id: self.data.physical_table_id,
+            })?
+            .into_inner();
+
+        self.data.physical_table_info = Some(physical_table_info);
+        let TableRouteValue::Physical(physical_table_route) = physical_table_route else {
+            return AlterLogicalTablesInvalidArgumentsSnafu {
+                err_msg: format!(
+                    "expected a physical table but got a logical table: {:?}",
+                    self.data.physical_table_id
+                ),
+            }
+            .fail();
+        };
         self.data.physical_table_route = Some(physical_table_route);
 
         Ok(())
@@ -87,7 +108,7 @@ impl AlterLogicalTablesProcedure {
                 table_info_map
                     .remove(table_id)
                     .with_context(|| TableInfoNotFoundSnafu {
-                        table_name: extract_table_name(task),
+                        table: extract_table_name(task),
                     })?;
             table_info_values.push(table_info_value);
         }

@@ -1,0 +1,109 @@
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+SHOW TABLES;
+
++---------+
+| Tables  |
++---------+
+| numbers |
+| phy     |
++---------+
+
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+DESC TABLE t1;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| host   | String               | PRI | YES  |         | TAG           |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val    | Float64              |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+DESC TABLE t2;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| job    | String               | PRI | YES  |         | TAG           |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val    | Float64              |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+DESC TABLE phy;
+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| ts         | TimestampMillisecond |     | NO   |         | FIELD         |
+| val        | Float64              |     | YES  |         | FIELD         |
+| __table_id | UInt32               | PRI | NO   |         | TAG           |
+| __tsid     | UInt64               | PRI | NO   |         | TAG           |
+| host       | String               | PRI | YES  |         | TAG           |
+| job        | String               | PRI | YES  |         | TAG           |
++------------+----------------------+-----+------+---------+---------------+
+
+ALTER TABLE t1 ADD COLUMN k STRING PRIMARY KEY;
+
+Affected Rows: 0
+
+ALTER TABLE t2 ADD COLUMN k STRING PRIMARY KEY;
+
+Affected Rows: 0
+
+DESC TABLE t1;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| host   | String               | PRI | YES  |         | TAG           |
+| k      | String               | PRI | YES  |         | TAG           |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val    | Float64              |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+DESC TABLE t2;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| job    | String               | PRI | YES  |         | TAG           |
+| k      | String               | PRI | YES  |         | TAG           |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val    | Float64              |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+DESC TABLE phy;
+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| ts         | TimestampMillisecond |     | NO   |         | FIELD         |
+| val        | Float64              |     | YES  |         | FIELD         |
+| __table_id | UInt32               | PRI | NO   |         | TAG           |
+| __tsid     | UInt64               | PRI | NO   |         | TAG           |
+| host       | String               | PRI | YES  |         | TAG           |
+| job        | String               | PRI | YES  |         | TAG           |
++------------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+DROP TABLE t2;
+
+Affected Rows: 0
+
+DROP TABLE phy;
+
+Affected Rows: 0
+

@@ -15,9 +15,8 @@
 mod check;
 mod metadata;
 mod region_request;
+mod table_cache_keys;
 mod update_metadata;
-
-use std::ops::Deref;
 
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
@@ -26,7 +25,7 @@ use common_telemetry::warn;
 use futures_util::future;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
@@ -34,12 +33,10 @@ use table::metadata::TableId;
 
 use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::{physical_table_metadata, DdlContext};
-use crate::error::{
-    DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result, TableInfoNotFoundSnafu,
-};
-use crate::instruction::CacheIdent;
+use crate::error::{DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
+use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders};
@@ -67,9 +64,9 @@ impl AlterLogicalTablesProcedure {
                 tasks,
                 table_info_values: vec![],
                 physical_table_id,
+                physical_table_info: None,
                 physical_table_route: None,
                 physical_columns: vec![],
-                cache_invalidate_keys: vec![],
             },
         }
     }
@@ -87,7 +84,7 @@ impl AlterLogicalTablesProcedure {
         // Checks the physical table, must after [fill_table_info_values]
         self.check_physical_table().await?;
         // Fills the physical table info
-        self.fill_physical_table_route().await?;
+        self.fill_physical_table_info().await?;
         // Filter the tasks
         let finished_tasks = self.check_finished_tasks()?;
         if finished_tasks.iter().all(|x| *x) {
@@ -160,21 +157,11 @@ impl AlterLogicalTablesProcedure {
 
     pub(crate) async fn on_update_metadata(&mut self) -> Result<Status> {
         if !self.data.physical_columns.is_empty() {
-            let physical_table_id = self.data.physical_table_id;
             let physical_columns = std::mem::take(&mut self.data.physical_columns);
-            // Fetch old physical table's info
-            let physical_table_info = self
-                .context
-                .table_metadata_manager
-                .get_full_table_info(physical_table_id)
-                .await?
-                .0
-                .context(TableInfoNotFoundSnafu {
-                    table_name: format!("table id - {}", physical_table_id),
-                })?;
+            let physical_table_info = self.data.physical_table_info.as_ref().unwrap();
 
             // Generates new table info
-            let old_raw_table_info = physical_table_info.deref().table_info.clone();
+            let old_raw_table_info = physical_table_info.table_info.clone();
             let new_raw_table_info = physical_table_metadata::build_new_physical_table_info(
                 old_raw_table_info,
                 physical_columns,
@@ -183,7 +170,10 @@ impl AlterLogicalTablesProcedure {
             // Updates physical table's metadata
             self.context
                 .table_metadata_manager
-                .update_table_info(physical_table_info, new_raw_table_info)
+                .update_table_info(
+                    DeserializedValueWithBytes::from_inner(physical_table_info.clone()),
+                    new_raw_table_info,
+                )
                 .await?;
         }
 
@@ -211,15 +201,12 @@ impl AlterLogicalTablesProcedure {
     }
 
     pub(crate) async fn on_invalidate_table_cache(&mut self) -> Result<Status> {
-        let to_invalidate = self
-            .data
-            .cache_invalidate_keys
-            .drain(..)
-            .map(CacheIdent::TableId)
-            .collect::<Vec<_>>();
+        let ctx = cache_invalidator::Context::default();
+        let to_invalidate = self.build_table_cache_keys_to_invalidate();
+
         self.context
             .cache_invalidator
-            .invalidate(&cache_invalidator::Context::default(), to_invalidate)
+            .invalidate(&ctx, to_invalidate)
             .await?;
         Ok(Status::done())
     }
@@ -297,9 +284,9 @@ pub struct AlterTablesData {
     table_info_values: Vec<TableInfoValue>,
     /// Physical table info
     physical_table_id: TableId,
+    physical_table_info: Option<TableInfoValue>,
     physical_table_route: Option<PhysicalTableRouteValue>,
     physical_columns: Vec<ColumnMetadata>,
-    cache_invalidate_keys: Vec<TableId>,
 }
 
 #[derive(Debug, Serialize, Deserialize, AsRefStr)]

@@ -25,8 +25,12 @@ use crate::rpc::ddl::AlterTableTask;
 impl AlterLogicalTablesProcedure {
     pub(crate) fn build_update_metadata(&mut self) -> Result<Vec<(TableInfoValue, RawTableInfo)>> {
         let mut table_info_values_to_update = Vec::with_capacity(self.data.tasks.len());
-        let table_info_values = std::mem::take(&mut self.data.table_info_values);
-        for (task, table) in self.data.tasks.iter().zip(table_info_values.into_iter()) {
+        for (task, table) in self
+            .data
+            .tasks
+            .iter()
+            .zip(self.data.table_info_values.iter())
+        {
             table_info_values_to_update.push(self.build_new_table_info(task, table)?);
         }
 
@@ -36,7 +40,7 @@ impl AlterLogicalTablesProcedure {
     fn build_new_table_info(
         &self,
         task: &AlterTableTask,
-        table: TableInfoValue,
+        table: &TableInfoValue,
     ) -> Result<(TableInfoValue, RawTableInfo)> {
         // Builds new_meta
         let table_info = TableInfo::try_from(table.table_info.clone())
@@ -61,6 +65,6 @@ impl AlterLogicalTablesProcedure {
         let mut raw_table_info = RawTableInfo::from(new_table);
         raw_table_info.sort_columns();
 
-        Ok((table, raw_table_info))
+        Ok((table.clone(), raw_table_info))
     }
 }

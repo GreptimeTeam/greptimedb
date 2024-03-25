@@ -50,6 +50,7 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
+use crate::table_name::TableName;
 use crate::{metrics, ClusterId};
 
 pub struct CreateLogicalTablesProcedure {
@@ -226,17 +227,23 @@ impl CreateLogicalTablesProcedure {
             let physical_table_info = self
                 .context
                 .table_metadata_manager
-                .get_full_table_info(self.data.physical_table_id)
+                .table_info_manager()
+                .get(self.data.physical_table_id)
                 .await?
-                .0
                 .context(TableInfoNotFoundSnafu {
-                    table_name: format!("table id - {}", self.data.physical_table_id),
+                    table: format!("table id - {}", self.data.physical_table_id),
                 })?;
 
             // generate new table info
             let new_table_info = self
                 .data
                 .build_new_physical_table_info(&physical_table_info);
+
+            let physical_table_name = TableName::new(
+                &new_table_info.catalog_name,
+                &new_table_info.schema_name,
+                &new_table_info.name,
+            );
 
             // update physical table's metadata
             self.context
@@ -249,7 +256,10 @@ impl CreateLogicalTablesProcedure {
                 .cache_invalidator
                 .invalidate(
                     &Context::default(),
-                    vec![CacheIdent::TableId(self.data.physical_table_id)],
+                    vec![
+                        CacheIdent::TableId(self.data.physical_table_id),
+                        CacheIdent::TableName(physical_table_name),
+                    ],
                 )
                 .await?;
         } else {
