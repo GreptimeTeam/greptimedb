@@ -11,6 +11,10 @@ DESC TABLE test_alt_table;
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
 
+INSERT INTO test_alt_table VALUES (1, 0), (2, 1);
+
+Affected Rows: 2
+
 ALTER TABLE test_alt_table ADD COLUMN k INTEGER;
 
 Affected Rows: 0
@@ -24,6 +28,32 @@ DESC TABLE test_alt_table;
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | k      | Int32                |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM test_alt_table;
+
++---+-------------------------+---+
+| i | j                       | k |
++---+-------------------------+---+
+| 1 | 1970-01-01T00:00:00     |   |
+| 2 | 1970-01-01T00:00:00.001 |   |
++---+-------------------------+---+
+
+SELECT * FROM test_alt_table WHERE k IS NULL;
+
++---+-------------------------+---+
+| i | j                       | k |
++---+-------------------------+---+
+| 1 | 1970-01-01T00:00:00     |   |
+| 2 | 1970-01-01T00:00:00.001 |   |
++---+-------------------------+---+
+
+SELECT * FROM test_alt_table WHERE i = 1;
+
++---+---------------------+---+
+| i | j                   | k |
++---+---------------------+---+
+| 1 | 1970-01-01T00:00:00 |   |
++---+---------------------+---+
 
 -- SQLNESS ARG restart=true
 ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
