@@ -196,12 +196,12 @@ mod tests {
                     value: "metric3".to_string(),
                 },
                 Label {
-                    name: "idc".to_string(),
-                    value: "z002".to_string(),
-                },
-                Label {
                     name: "app".to_string(),
                     value: "biz".to_string(),
+                },
+                Label {
+                    name: "idc".to_string(),
+                    value: "z002".to_string(),
                 },
             ],
             timeseries.labels

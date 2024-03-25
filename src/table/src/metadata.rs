@@ -567,13 +567,19 @@ impl From<TableId> for TableIdent {
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RawTableMeta {
     pub schema: RawSchema,
+    /// The indices of columns in primary key. Note that the index of timestamp column
+    /// is not included. Order matters to this array.
     pub primary_key_indices: Vec<usize>,
+    ///  The indices of columns in value. Order doesn't matter to this array.
     pub value_indices: Vec<usize>,
+    /// Engine type of this table. Usually in small case.
     pub engine: String,
+    /// Deprecated. See https://github.com/GreptimeTeam/greptimedb/issues/2982
     pub next_column_id: ColumnId,
     pub region_numbers: Vec<u32>,
     pub options: TableOptions,
     pub created_on: DateTime<Utc>,
+    /// Order doesn't matter to this array.
     #[serde(default)]
     pub partition_key_indices: Vec<usize>,
 }
