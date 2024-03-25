@@ -439,11 +439,12 @@ impl StartCommand {
 
         let mut frontend = FrontendBuilder::new(
             kv_backend,
-            catalog_manager,
+            catalog_manager.clone(),
             datanode_manager,
             ddl_task_executor,
         )
         .with_plugin(fe_plugins.clone())
+        .with_cache_invalidator(catalog_manager)
         .try_build()
         .await
         .context(StartFrontendSnafu)?;

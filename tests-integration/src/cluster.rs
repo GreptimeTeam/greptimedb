@@ -358,9 +358,7 @@ impl GreptimeDbClusterBuilder {
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                cached_meta_backend.clone(),
-            )),
+            Arc::new(InvalidateTableCacheHandler::new(catalog_manager.clone())),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(

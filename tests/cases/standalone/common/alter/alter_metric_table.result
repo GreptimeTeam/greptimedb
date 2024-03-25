@@ -93,6 +93,7 @@ DESC TABLE phy;
 | __tsid     | UInt64               | PRI | NO   |         | TAG           |
 | host       | String               | PRI | YES  |         | TAG           |
 | job        | String               | PRI | YES  |         | TAG           |
+| k          | String               | PRI | YES  |         | TAG           |
 +------------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE t1;

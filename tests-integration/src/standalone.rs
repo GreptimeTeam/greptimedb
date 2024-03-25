@@ -160,11 +160,12 @@ impl GreptimeDbStandaloneBuilder {
 
         let instance = FrontendBuilder::new(
             kv_backend.clone(),
-            catalog_manager,
+            catalog_manager.clone(),
             datanode_manager,
             ddl_task_executor,
         )
         .with_plugin(plugins)
+        .with_cache_invalidator(catalog_manager)
         .try_build()
         .await
         .unwrap();

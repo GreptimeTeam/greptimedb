@@ -37,7 +37,7 @@ use crate::error::{DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::DeserializedValueWithBytes;
-use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders};
 use crate::{cache_invalidator, metrics, ClusterId};
@@ -259,17 +259,13 @@ impl Procedure for AlterLogicalTablesProcedure {
         lock_key.push(CatalogLock::Read(table_ref.catalog).into());
         lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());
         lock_key.push(TableLock::Write(self.data.physical_table_id).into());
+        lock_key.extend(
+            self.data
+                .table_info_values
+                .iter()
+                .map(|table| TableLock::Write(table.table_info.ident.table_id).into()),
+        );
 
-        for task in &self.data.tasks {
-            lock_key.push(
-                TableNameLock::new(
-                    &task.alter_table.catalog_name,
-                    &task.alter_table.schema_name,
-                    &task.alter_table.table_name,
-                )
-                .into(),
-            );
-        }
         LockKey::new(lock_key)
     }
 }
