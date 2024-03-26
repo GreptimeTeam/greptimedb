@@ -28,3 +28,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
+awaitility = "0.3"

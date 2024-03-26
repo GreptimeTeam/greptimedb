@@ -14,18 +14,19 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::channel;
 
 use async_trait::async_trait;
-use common_telemetry::{info, warn};
 use notify::{EventKind, RecursiveMode, Watcher};
 use snafu::ResultExt;
 
+use common_telemetry::{info, warn};
+
+use crate::{Identity, Password, UserInfoRef, UserProvider};
 use crate::error::{FileWatchSnafu, Result};
 use crate::user_info::DefaultUserInfo;
 use crate::user_provider::{authenticate_with_credential, load_credential_from_file};
-use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const WATCH_FILE_USER_PROVIDER: &str = "watch_file_user_provider";
 
@@ -114,13 +115,14 @@ impl UserProvider for WatchFileUserProvider {
 pub mod test {
     use std::fs::File;
     use std::io::{LineWriter, Write};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use common_test_util::temp_dir::create_temp_dir;
     use tokio::time::sleep;
 
-    use crate::user_provider::watch_file_user_provider::WatchFileUserProvider;
+    use common_test_util::temp_dir::create_temp_dir;
+
     use crate::user_provider::{Identity, Password};
+    use crate::user_provider::watch_file_user_provider::WatchFileUserProvider;
     use crate::UserProvider;
 
     async fn test_authenticate(
@@ -128,20 +130,40 @@ pub mod test {
         username: &str,
         password: &str,
         ok: bool,
+        timeout: Option<Duration>,
     ) {
-        let re = provider
-            .authenticate(
-                Identity::UserId(username, None),
-                Password::PlainText(password.to_string().into()),
-            )
-            .await;
-        assert_eq!(
-            re.is_ok(),
-            ok,
-            "username: {}, password: {}",
-            username,
-            password
-        );
+        if let Some(timeout) = timeout {
+            let deadline = Instant::now().checked_add(timeout).unwrap();
+            loop {
+                let re = provider
+                    .authenticate(
+                        Identity::UserId(username, None),
+                        Password::PlainText(password.to_string().into()),
+                    )
+                    .await;
+                if re.is_ok() == ok {
+                    break;
+                } else if Instant::now() < deadline {
+                    sleep(Duration::from_millis(100)).await;
+                } else {
+                    panic!("timeout (username: {username}, password: {password}, expected: {ok})");
+                }
+            }
+        } else {
+            let re = provider
+                .authenticate(
+                    Identity::UserId(username, None),
+                    Password::PlainText(password.to_string().into()),
+                )
+                .await;
+            assert_eq!(
+                re.is_ok(),
+                ok,
+                "username: {}, password: {}",
+                username,
+                password
+            );
+        }
     }
 
     #[tokio::test]
@@ -158,10 +180,11 @@ pub mod test {
         }
 
         let provider = WatchFileUserProvider::new(file_path.as_str()).unwrap();
-        test_authenticate(&provider, "root", "123456", true).await;
-        test_authenticate(&provider, "admin", "654321", true).await;
-        test_authenticate(&provider, "root", "654321", false).await;
+        test_authenticate(&provider, "root", "123456", true, None).await;
+        test_authenticate(&provider, "admin", "654321", true, None).await;
+        test_authenticate(&provider, "root", "654321", false, None).await;
 
+        let timeout = Duration::from_secs(2);
         {
             // update the tmp file
             let file = File::create(&file_path).unwrap();
@@ -169,19 +192,18 @@ pub mod test {
             assert!(writeln!(lw, "root=654321").is_ok());
             lw.flush().unwrap();
         }
-        sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
-        test_authenticate(&provider, "root", "123456", false).await;
-        test_authenticate(&provider, "root", "654321", true).await;
-        test_authenticate(&provider, "admin", "654321", false).await;
+        test_authenticate(&provider, "root", "123456", false, Some(timeout)).await;
+        test_authenticate(&provider, "root", "654321", true, Some(timeout)).await;
+        test_authenticate(&provider, "admin", "654321", false, Some(timeout)).await;
 
         {
             // remove the tmp file
             std::fs::remove_file(&file_path).unwrap();
         }
         sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
-        test_authenticate(&provider, "root", "123456", true).await;
-        test_authenticate(&provider, "root", "654321", true).await;
-        test_authenticate(&provider, "admin", "654321", true).await;
+        test_authenticate(&provider, "root", "123456", true, Some(timeout)).await;
+        test_authenticate(&provider, "root", "654321", true, Some(timeout)).await;
+        test_authenticate(&provider, "admin", "654321", true, Some(timeout)).await;
 
         {
             // recreate the tmp file
@@ -191,8 +213,8 @@ pub mod test {
             lw.flush().unwrap();
         }
         sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
-        test_authenticate(&provider, "root", "123456", true).await;
-        test_authenticate(&provider, "root", "654321", false).await;
-        test_authenticate(&provider, "admin", "654321", false).await;
+        test_authenticate(&provider, "root", "123456", true, Some(timeout)).await;
+        test_authenticate(&provider, "root", "654321", false, Some(timeout)).await;
+        test_authenticate(&provider, "admin", "654321", false, Some(timeout)).await;
     }
 }

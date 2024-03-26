@@ -699,6 +699,7 @@ version = "0.7.1"
 dependencies = [
  "api",
  "async-trait",
+ "awaitility",
  "common-error",
  "common-macro",
  "common-telemetry",
@@ -745,6 +746,12 @@ checksum = "aef8da1805e028a172334c3b680f93e71126f2327622faef2ec3d893c0a4ad77"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "awaitility"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46ee60785cbb3a23bde2c462098564a6337432b9fa032a62bb7ddb5e734c135d"
 
 [[package]]
 name = "axum"
