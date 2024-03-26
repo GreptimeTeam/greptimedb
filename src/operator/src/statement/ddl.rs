@@ -48,6 +48,7 @@ use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, CreateTableLike, Partitions};
 use sql::statements::sql_value_to_value;
 use sqlparser::ast::{Expr, Ident, Value as ParserValue};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions};
@@ -138,6 +139,22 @@ impl StatementExecutor {
         partitions: Option<Partitions>,
         query_ctx: &QueryContextRef,
     ) -> Result<TableRef> {
+        // Check if is creating logical table
+        if create_table.engine == METRIC_ENGINE_NAME
+            && create_table
+                .table_options
+                .contains_key(LOGICAL_TABLE_METADATA_KEY)
+        {
+            return self
+                .create_logical_tables(&[create_table.clone()])
+                .await?
+                .into_iter()
+                .next()
+                .context(error::UnexpectedSnafu {
+                    violated: "expected to create a logical table",
+                });
+        }
+
         let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
         let schema = self
             .table_metadata_manager
@@ -353,6 +370,34 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn drop_database(
+        &self,
+        catalog: String,
+        schema: String,
+        drop_if_exists: bool,
+    ) -> Result<Output> {
+        if self
+            .catalog_manager
+            .schema_exists(&catalog, &schema)
+            .await
+            .context(CatalogSnafu)?
+        {
+            self.drop_database_procedure(catalog, schema, drop_if_exists)
+                .await?;
+
+            Ok(Output::new_with_affected_rows(0))
+        } else if drop_if_exists {
+            // DROP TABLE IF EXISTS meets table not found - ignored
+            Ok(Output::new_with_affected_rows(0))
+        } else {
+            Err(SchemaNotFoundSnafu {
+                schema_info: schema,
+            }
+            .into_error(snafu::NoneError))
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn truncate_table(&self, table_name: TableName) -> Result<Output> {
         let table = self
             .catalog_manager
@@ -520,6 +565,22 @@ impl StatementExecutor {
                 table_id,
                 drop_if_exists,
             ),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    async fn drop_database_procedure(
+        &self,
+        catalog: String,
+        schema: String,
+        drop_if_exists: bool,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_drop_database(catalog, schema, drop_if_exists),
         };
 
         self.procedure_executor

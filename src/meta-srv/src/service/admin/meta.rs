@@ -52,8 +52,7 @@ impl HttpHandler for CatalogsHandler {
         let stream = self
             .table_metadata_manager
             .catalog_manager()
-            .catalog_names()
-            .await;
+            .catalog_names();
 
         let keys = stream
             .try_collect::<Vec<_>>()
@@ -84,8 +83,7 @@ impl HttpHandler for SchemasHandler {
         let stream = self
             .table_metadata_manager
             .schema_manager()
-            .schema_names(catalog)
-            .await;
+            .schema_names(catalog);
 
         let keys = stream
             .try_collect::<Vec<_>>()
@@ -118,8 +116,7 @@ impl HttpHandler for TablesHandler {
         let stream = self
             .table_metadata_manager
             .table_name_manager()
-            .tables(catalog, schema)
-            .await;
+            .tables(catalog, schema);
         let tables = stream
             .try_collect::<Vec<_>>()
             .await

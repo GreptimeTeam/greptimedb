@@ -7,7 +7,6 @@ show databases;
 | illegal-database      |
 | information_schema    |
 | public                |
-| test_public_schema    |
 | upper_case_table_name |
 +-----------------------+
 

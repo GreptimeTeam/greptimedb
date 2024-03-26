@@ -1996,6 +1996,7 @@ dependencies = [
  "table",
  "tokio",
  "tonic 0.10.2",
+ "typetag",
  "uuid",
 ]
 
@@ -3882,7 +3883,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=96f1f0404f421ee560a4310c73c5071e49168168#96f1f0404f421ee560a4310c73c5071e49168168"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=06f6297ff3cab578a1589741b504342fbad70453#06f6297ff3cab578a1589741b504342fbad70453"
 dependencies = [
  "prost 0.12.3",
  "serde",
@@ -4389,7 +4390,7 @@ dependencies = [
  "prost 0.12.3",
  "rand",
  "regex",
- "regex-automata 0.2.0",
+ "regex-automata 0.4.3",
  "snafu",
  "tempfile",
  "tokio",
@@ -7823,17 +7824,6 @@ version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c230d73fb8d8c1b9c0b3135c5142a8acee3a0558fb8db5cf1cb65f8d7862132"
 dependencies = [
- "regex-syntax 0.6.29",
-]
-
-[[package]]
-name = "regex-automata"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9368763f5a9b804326f3af749e16f9abf378d227bcdee7634b13d8f17793782"
-dependencies = [
- "fst",
- "memchr",
  "regex-syntax 0.6.29",
 ]
 

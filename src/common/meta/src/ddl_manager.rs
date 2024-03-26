@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use common_procedure::{watcher, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{
+    watcher, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId,
+};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -25,6 +27,7 @@ use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
+use crate::ddl::drop_database::DropDatabaseProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::ddl::truncate_table::TruncateTableProcedure;
@@ -39,12 +42,12 @@ use crate::key::table_route::TableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::DdlTask::{
-    AlterLogicalTables, AlterTable, CreateLogicalTables, CreateTable, DropLogicalTables, DropTable,
-    TruncateTable,
+    AlterLogicalTables, AlterTable, CreateLogicalTables, CreateTable, DropDatabase,
+    DropLogicalTables, DropTable, TruncateTable,
 };
 use crate::rpc::ddl::{
-    AlterTableTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    TruncateTableTask,
+    AlterTableTask, CreateTableTask, DropDatabaseTask, DropTableTask, SubmitDdlTaskRequest,
+    SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -53,6 +56,8 @@ use crate::table_name::TableName;
 use crate::ClusterId;
 
 pub type DdlManagerRef = Arc<DdlManager>;
+
+pub type BoxedProcedureLoaderFactory = dyn Fn(DdlContext) -> BoxedProcedureLoader;
 
 /// The [DdlManager] provides the ability to execute Ddl.
 pub struct DdlManager {
@@ -64,8 +69,8 @@ pub struct DdlManager {
     memory_region_keeper: MemoryRegionKeeperRef,
 }
 
+/// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
 impl DdlManager {
-    /// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
     pub fn try_new(
         procedure_manager: ProcedureManagerRef,
         datanode_clients: DatanodeManagerRef,
@@ -103,75 +108,72 @@ impl DdlManager {
     }
 
     fn register_loaders(&self) -> Result<()> {
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
+        let loaders: Vec<(&str, &BoxedProcedureLoaderFactory)> = vec![
+            (
                 CreateTableProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    CreateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: CreateTableProcedure::TYPE_NAME,
-            })?;
-
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        CreateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
                 CreateLogicalTablesProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    CreateLogicalTablesProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: CreateLogicalTablesProcedure::TYPE_NAME,
-            })?;
-
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
-                DropTableProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: DropTableProcedure::TYPE_NAME,
-            })?;
-
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        CreateLogicalTablesProcedure::from_json(json, context)
+                            .map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
                 AlterTableProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: AlterTableProcedure::TYPE_NAME,
-            })?;
-
-        let context = self.create_context();
-
-        self.procedure_manager
-            .register_loader(
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
+                DropTableProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
                 TruncateTableProcedure::TYPE_NAME,
-                Box::new(move |json| {
-                    let context = context.clone();
-                    TruncateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu {
-                type_name: TruncateTableProcedure::TYPE_NAME,
-            })
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        TruncateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
+                DropDatabaseProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        DropDatabaseProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+        ];
+
+        for (type_name, loader_factory) in loaders {
+            let context = self.create_context();
+            self.procedure_manager
+                .register_loader(type_name, loader_factory(context))
+                .context(RegisterProcedureLoaderSnafu { type_name })?;
+        }
+
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -255,6 +257,24 @@ impl DdlManager {
             context,
         );
 
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    /// Submits and executes a drop table task.
+    pub async fn submit_drop_database(
+        &self,
+        _cluster_id: ClusterId,
+        DropDatabaseTask {
+            catalog,
+            schema,
+            drop_if_exists,
+        }: DropDatabaseTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = DropDatabaseProcedure::new(catalog, schema, drop_if_exists, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
@@ -529,6 +549,28 @@ async fn handle_create_logical_table_tasks(
     })
 }
 
+async fn handle_drop_database_task(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    drop_database_task: DropDatabaseTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, _) = ddl_manager
+        .submit_drop_database(cluster_id, drop_database_task.clone())
+        .await?;
+
+    let procedure_id = id.to_string();
+    info!(
+        "Database {}.{} is dropped via procedure_id {id:?}",
+        drop_database_task.catalog, drop_database_task.schema
+    );
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        table_id: None,
+        ..Default::default()
+    })
+}
+
 /// TODO(dennis): let [`DdlManager`] implement [`ProcedureExecutor`] looks weird, find some way to refactor it.
 #[async_trait::async_trait]
 impl ProcedureExecutor for DdlManager {
@@ -564,6 +606,9 @@ impl ProcedureExecutor for DdlManager {
                 }
                 DropLogicalTables(_) => todo!(),
                 AlterLogicalTables(_) => todo!(),
+                DropDatabase(drop_database_task) => {
+                    handle_drop_database_task(self, cluster_id, drop_database_task).await
+                }
             }
         }
         .trace(span)

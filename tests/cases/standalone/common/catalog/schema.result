@@ -120,7 +120,7 @@ SHOW TABLES FROM public WHERE Tables = 'numbers';
 
 DROP SCHEMA test_public_schema;
 
-Error: 1001(Unsupported), Not supported: Drop Database
+Affected Rows: 0
 
 SELECT * FROM test_public_schema.hello;
 

@@ -12,30 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{CreateRequests, RegionRequest, RegionRequestHeader};
-use api::v1::CreateTableExpr;
+use api::v1::{CreateTableExpr, SemanticType};
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
-use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::{info, warn};
 use futures_util::future::join_all;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 
+use crate::cache_invalidator::Context;
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
 use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error, region_storage_path};
 use crate::ddl::DdlContext;
-use crate::error::{Result, TableAlreadyExistsSnafu};
+use crate::error::{
+    DecodeJsonSnafu, MetadataCorruptionSnafu, Result, TableAlreadyExistsSnafu,
+    TableInfoNotFoundSnafu,
+};
+use crate::instruction::CacheIdent;
+use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
@@ -70,6 +80,7 @@ impl CreateLogicalTablesProcedure {
     /// - Checks whether physical table exists.
     /// - Checks whether logical tables exist.
     /// - Allocates the table ids.
+    /// - Modify tasks to sort logical columns on their names.
     ///
     /// Abort(non-retry):
     /// - The physical table does not exist.
@@ -130,7 +141,7 @@ impl CreateLogicalTablesProcedure {
             ));
         }
 
-        // Allocates table ids
+        // Allocates table ids and sort columns on their names.
         for (task, table_id) in tasks.iter_mut().zip(already_exists_tables_ids.iter()) {
             let table_id = if let Some(table_id) = table_id {
                 *table_id
@@ -141,6 +152,11 @@ impl CreateLogicalTablesProcedure {
                     .await?
             };
             task.set_table_id(table_id);
+
+            // sort columns in task
+            task.sort_columns();
+
+            common_telemetry::info!("[DEBUG] sorted task {:?}", task);
         }
 
         self.creator
@@ -163,11 +179,12 @@ impl CreateLogicalTablesProcedure {
         self.create_regions(region_routes).await
     }
 
-    /// Creates table metadata
+    /// Creates table metadata for logical tables and update corresponding physical
+    /// table's metadata.
     ///
     /// Abort(not-retry):
     /// - Failed to create table metadata.
-    pub async fn on_create_metadata(&self) -> Result<Status> {
+    pub async fn on_create_metadata(&mut self) -> Result<Status> {
         let manager = &self.context.table_metadata_manager;
         let physical_table_id = self.creator.data.physical_table_id();
         let remaining_tasks = self.creator.data.remaining_tasks();
@@ -201,6 +218,42 @@ impl CreateLogicalTablesProcedure {
             .iter()
             .map(|task| task.table_info.ident.table_id)
             .collect::<Vec<_>>();
+
+        if !self.creator.data.physical_columns.is_empty() {
+            // fetch old physical table's info
+            let physical_table_info = self
+                .context
+                .table_metadata_manager
+                .get_full_table_info(self.creator.data.physical_table_id)
+                .await?
+                .0
+                .context(TableInfoNotFoundSnafu {
+                    table_name: format!("table id - {}", self.creator.data.physical_table_id),
+                })?;
+
+            // generate new table info
+            let new_table_info = self
+                .creator
+                .data
+                .build_new_physical_table_info(&physical_table_info);
+
+            // update physical table's metadata
+            self.context
+                .table_metadata_manager
+                .update_table_info(physical_table_info, new_table_info)
+                .await?;
+
+            // invalid table cache
+            self.context
+                .cache_invalidator
+                .invalidate(
+                    &Context::default(),
+                    vec![CacheIdent::TableId(self.creator.data.physical_table_id)],
+                )
+                .await?;
+        } else {
+            warn!("No physical columns found, leaving the physical table's schema unchanged");
+        }
 
         info!("Created {num_tables} tables {table_ids:?} metadata for physical table {physical_table_id}");
 
@@ -269,10 +322,38 @@ impl CreateLogicalTablesProcedure {
             });
         }
 
-        join_all(create_region_tasks)
+        // collect response from datanodes
+        let raw_schemas = join_all(create_region_tasks)
             .await
             .into_iter()
+            .map(|response| {
+                response.map(|mut response| response.extension.remove(ALTER_PHYSICAL_EXTENSION_KEY))
+            })
             .collect::<Result<Vec<_>>>()?;
+
+        if raw_schemas.is_empty() {
+            self.creator.data.state = CreateTablesState::CreateMetadata;
+            return Ok(Status::executing(false));
+        }
+
+        // verify all datanodes return the same raw schemas
+        // Safety: previous check ensures this vector is not empty.
+        let first = raw_schemas.first().unwrap();
+        ensure!(
+            raw_schemas.iter().all(|x| x == first),
+            MetadataCorruptionSnafu {
+                err_msg: "Raw schemas from datanodes are not the same"
+            }
+        );
+
+        // decode raw schemas and store it
+        if let Some(raw_schema) = first {
+            let physical_columns =
+                ColumnMetadata::decode_list(raw_schema).context(DecodeJsonSnafu)?;
+            self.creator.data.physical_columns = physical_columns;
+        } else {
+            warn!("creating logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
+        }
 
         self.creator.data.state = CreateTablesState::CreateMetadata;
 
@@ -351,6 +432,7 @@ impl TablesCreator {
                 table_ids_already_exists: vec![None; len],
                 physical_table_id,
                 physical_region_numbers: vec![],
+                physical_columns: vec![],
             },
         }
     }
@@ -364,6 +446,7 @@ pub struct CreateTablesData {
     table_ids_already_exists: Vec<Option<TableId>>,
     physical_table_id: TableId,
     physical_region_numbers: Vec<RegionNumber>,
+    physical_columns: Vec<ColumnMetadata>,
 }
 
 impl CreateTablesData {
@@ -413,6 +496,47 @@ impl CreateTablesData {
                 }
             })
             .collect::<Vec<_>>()
+    }
+
+    /// Generate the new physical table info.
+    ///
+    /// This method will consumes the physical columns.
+    fn build_new_physical_table_info(
+        &mut self,
+        old_table_info: &DeserializedValueWithBytes<TableInfoValue>,
+    ) -> RawTableInfo {
+        let mut raw_table_info = old_table_info.deref().table_info.clone();
+
+        let existing_primary_key = raw_table_info
+            .meta
+            .schema
+            .column_schemas
+            .iter()
+            .map(|col| col.name.clone())
+            .collect::<HashSet<_>>();
+        let primary_key_indices = &mut raw_table_info.meta.primary_key_indices;
+        let value_indices = &mut raw_table_info.meta.value_indices;
+        value_indices.clear();
+        let time_index = &mut raw_table_info.meta.schema.timestamp_index;
+        let columns = &mut raw_table_info.meta.schema.column_schemas;
+        columns.clear();
+
+        for (idx, col) in self.physical_columns.drain(..).enumerate() {
+            match col.semantic_type {
+                SemanticType::Tag => {
+                    // push new primary key to the end.
+                    if !existing_primary_key.contains(&col.column_schema.name) {
+                        primary_key_indices.push(idx);
+                    }
+                }
+                SemanticType::Field => value_indices.push(idx),
+                SemanticType::Timestamp => *time_index = Some(idx),
+            }
+
+            columns.push(col.column_schema);
+        }
+
+        raw_table_info
     }
 }
 

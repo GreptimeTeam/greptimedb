@@ -103,7 +103,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "96f1f0404f421ee560a4310c73c5071e49168168" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "06f6297ff3cab578a1589741b504342fbad70453" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -127,7 +127,7 @@ prost = "0.12"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
 regex = "1.8"
-regex-automata = { version = "0.2", features = ["transducer"] }
+regex-automata = { version = "0.4" }
 reqwest = { version = "0.11", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",

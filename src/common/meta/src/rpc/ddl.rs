@@ -19,10 +19,13 @@ use api::v1::meta::{
     AlterTableTask as PbAlterTableTask, AlterTableTasks as PbAlterTableTasks,
     CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
     DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
-    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
+    DropDatabaseTask as PbDropDatabaseTask, DropTableTask as PbDropTableTask,
+    DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
-use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr};
+use api::v1::{
+    AlterExpr, CreateTableExpr, DropDatabaseExpr, DropTableExpr, SemanticType, TruncateTableExpr,
+};
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
@@ -43,6 +46,7 @@ pub enum DdlTask {
     CreateLogicalTables(Vec<CreateTableTask>),
     DropLogicalTables(Vec<DropTableTask>),
     AlterLogicalTables(Vec<AlterTableTask>),
+    DropDatabase(DropDatabaseTask),
 }
 
 impl DdlTask {
@@ -75,6 +79,14 @@ impl DdlTask {
             schema,
             table,
             table_id,
+            drop_if_exists,
+        })
+    }
+
+    pub fn new_drop_database(catalog: String, schema: String, drop_if_exists: bool) -> Self {
+        DdlTask::DropDatabase(DropDatabaseTask {
+            catalog,
+            schema,
             drop_if_exists,
         })
     }
@@ -137,6 +149,9 @@ impl TryFrom<Task> for DdlTask {
 
                 Ok(DdlTask::AlterLogicalTables(tasks))
             }
+            Task::DropDatabaseTask(drop_database) => {
+                Ok(DdlTask::DropDatabase(drop_database.try_into()?))
+            }
         }
     }
 }
@@ -179,6 +194,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
                 Task::AlterTableTasks(PbAlterTableTasks { tasks })
             }
+            DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
         };
 
         Ok(Self {
@@ -368,6 +384,44 @@ impl CreateTableTask {
     pub fn set_table_id(&mut self, table_id: TableId) {
         self.table_info.ident.table_id = table_id;
     }
+
+    /// Sort the columns in [CreateTableExpr] and [RawTableInfo].
+    ///
+    /// This function won't do any check or verification. Caller should
+    /// ensure this task is valid.
+    pub fn sort_columns(&mut self) {
+        // sort create table expr
+        // sort column_defs by name
+        self.create_table
+            .column_defs
+            .sort_unstable_by(|a, b| a.name.cmp(&b.name));
+
+        // compute new indices of sorted columns
+        // this part won't do any check or verification.
+        let mut primary_key_indices = Vec::with_capacity(self.create_table.primary_keys.len());
+        let mut value_indices =
+            Vec::with_capacity(self.create_table.column_defs.len() - primary_key_indices.len() - 1);
+        let mut timestamp_index = None;
+        for (index, col) in self.create_table.column_defs.iter().enumerate() {
+            if self.create_table.primary_keys.contains(&col.name) {
+                primary_key_indices.push(index);
+            } else if col.semantic_type == SemanticType::Timestamp as i32 {
+                timestamp_index = Some(index);
+            } else {
+                value_indices.push(index);
+            }
+        }
+
+        // overwrite table info
+        self.table_info
+            .meta
+            .schema
+            .column_schemas
+            .sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        self.table_info.meta.schema.timestamp_index = timestamp_index;
+        self.table_info.meta.primary_key_indices = primary_key_indices;
+        self.table_info.meta.value_indices = value_indices;
+    }
 }
 
 impl Serialize for CreateTableTask {
@@ -519,7 +573,7 @@ impl TryFrom<PbTruncateTableTask> for TruncateTableTask {
 
     fn try_from(pb: PbTruncateTableTask) -> Result<Self> {
         let truncate_table = pb.truncate_table.context(error::InvalidProtoMsgSnafu {
-            err_msg: "expected drop table",
+            err_msg: "expected truncate table",
         })?;
 
         Ok(Self {
@@ -551,13 +605,62 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
     }
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct DropDatabaseTask {
+    pub catalog: String,
+    pub schema: String,
+    pub drop_if_exists: bool,
+}
+
+impl TryFrom<PbDropDatabaseTask> for DropDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbDropDatabaseTask) -> Result<Self> {
+        let DropDatabaseExpr {
+            catalog_name,
+            schema_name,
+            drop_if_exists,
+        } = pb.drop_database.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected drop database",
+        })?;
+
+        Ok(DropDatabaseTask {
+            catalog: catalog_name,
+            schema: schema_name,
+            drop_if_exists,
+        })
+    }
+}
+
+impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(
+        DropDatabaseTask {
+            catalog,
+            schema,
+            drop_if_exists,
+        }: DropDatabaseTask,
+    ) -> Result<Self> {
+        Ok(PbDropDatabaseTask {
+            drop_database: Some(DropDatabaseExpr {
+                catalog_name: catalog,
+                schema_name: schema,
+                drop_if_exists,
+            }),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::{AlterExpr, CreateTableExpr};
-    use datatypes::schema::SchemaBuilder;
-    use table::metadata::RawTableInfo;
+    use api::v1::{AlterExpr, ColumnDef, CreateTableExpr, SemanticType};
+    use datatypes::schema::{ColumnSchema, RawSchema, SchemaBuilder};
+    use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+    use store_api::storage::ConcreteDataType;
+    use table::metadata::{RawTableInfo, RawTableMeta, TableType};
     use table::test_util::table_info::test_table_info;
 
     use super::{AlterTableTask, CreateTableTask};
@@ -588,5 +691,109 @@ mod tests {
 
         let de = serde_json::from_slice(&output).unwrap();
         assert_eq!(task, de);
+    }
+
+    #[test]
+    fn test_sort_columns() {
+        // construct RawSchema
+        let raw_schema = RawSchema {
+            column_schemas: vec![
+                ColumnSchema::new(
+                    "column3".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                ColumnSchema::new(
+                    "column1".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    "column2".to_string(),
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+            ],
+            timestamp_index: Some(1),
+            version: 0,
+        };
+
+        // construct RawTableMeta
+        let raw_table_meta = RawTableMeta {
+            schema: raw_schema,
+            primary_key_indices: vec![0],
+            value_indices: vec![2],
+            engine: METRIC_ENGINE_NAME.to_string(),
+            next_column_id: 0,
+            region_numbers: vec![0],
+            options: Default::default(),
+            created_on: Default::default(),
+            partition_key_indices: Default::default(),
+        };
+
+        // construct RawTableInfo
+        let raw_table_info = RawTableInfo {
+            ident: Default::default(),
+            meta: raw_table_meta,
+            name: Default::default(),
+            desc: Default::default(),
+            catalog_name: Default::default(),
+            schema_name: Default::default(),
+            table_type: TableType::Base,
+        };
+
+        // construct create table expr
+        let create_table_expr = CreateTableExpr {
+            column_defs: vec![
+                ColumnDef {
+                    name: "column3".to_string(),
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "column1".to_string(),
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "column2".to_string(),
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            primary_keys: vec!["column3".to_string()],
+            ..Default::default()
+        };
+
+        let mut create_table_task =
+            CreateTableTask::new(create_table_expr, Vec::new(), raw_table_info);
+
+        // Call the sort_columns method
+        create_table_task.sort_columns();
+
+        // Assert that the columns are sorted correctly
+        assert_eq!(
+            create_table_task.create_table.column_defs[0].name,
+            "column1".to_string()
+        );
+        assert_eq!(
+            create_table_task.create_table.column_defs[1].name,
+            "column2".to_string()
+        );
+        assert_eq!(
+            create_table_task.create_table.column_defs[2].name,
+            "column3".to_string()
+        );
+
+        // Assert that the table_info is updated correctly
+        assert_eq!(
+            create_table_task.table_info.meta.schema.timestamp_index,
+            Some(0)
+        );
+        assert_eq!(
+            create_table_task.table_info.meta.primary_key_indices,
+            vec![2]
+        );
+        assert_eq!(create_table_task.table_info.meta.value_indices, vec![1]);
     }
 }

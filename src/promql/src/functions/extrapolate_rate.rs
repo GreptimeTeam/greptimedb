@@ -13,6 +13,7 @@
 // limitations under the License.
 
 // This file also contains some code from prometheus project.
+
 // Copyright 2015 The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -48,7 +49,7 @@ pub type Rate = ExtrapolatedRate<true, true>;
 pub type Increase = ExtrapolatedRate<true, false>;
 
 /// Part of the `extrapolatedRate` in Promql,
-/// from <https://github.com/prometheus/prometheus/blob/6bdecf377cea8e856509914f35234e948c4fcb80/promql/functions.go#L66>
+/// from <https://github.com/prometheus/prometheus/blob/v0.40.1/promql/functions.go#L66>
 #[derive(Debug)]
 pub struct ExtrapolatedRate<const IS_COUNTER: bool, const IS_RATE: bool> {
     /// Range duration in millisecond

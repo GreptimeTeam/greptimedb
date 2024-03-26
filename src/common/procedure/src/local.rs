@@ -799,8 +799,10 @@ mod tests {
         let root_id = ProcedureId::random();
         // Prepare data for the root procedure.
         for step in 0..3 {
+            let type_name = root.type_name().to_string();
+            let data = root.dump().unwrap();
             procedure_store
-                .store_procedure(root_id, step, &root, None)
+                .store_procedure(root_id, step, type_name, data, None)
                 .await
                 .unwrap();
         }
@@ -809,8 +811,10 @@ mod tests {
         let child_id = ProcedureId::random();
         // Prepare data for the child procedure
         for step in 0..2 {
+            let type_name = child.type_name().to_string();
+            let data = child.dump().unwrap();
             procedure_store
-                .store_procedure(child_id, step, &child, Some(root_id))
+                .store_procedure(child_id, step, type_name, data, Some(root_id))
                 .await
                 .unwrap();
         }

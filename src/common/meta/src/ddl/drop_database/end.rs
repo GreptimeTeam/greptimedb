@@ -11,3 +11,25 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+use common_procedure::Status;
+use serde::{Deserialize, Serialize};
+
+use crate::ddl::drop_database::{DropDatabaseContext, State};
+use crate::ddl::DdlContext;
+use crate::error::Result;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DropDatabaseEnd;
+
+#[async_trait::async_trait]
+#[typetag::serde]
+impl State for DropDatabaseEnd {
+    async fn next(
+        &mut self,
+        _: &DdlContext,
+        _: &mut DropDatabaseContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        Ok((Box::new(DropDatabaseEnd), Status::done()))
+    }
+}
