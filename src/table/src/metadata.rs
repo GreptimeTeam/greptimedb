@@ -188,9 +188,12 @@ impl TableMeta {
         &self,
         table_name: &str,
         alter_kind: &AlterKind,
+        add_if_not_exists: bool,
     ) -> Result<TableMetaBuilder> {
         match alter_kind {
-            AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
+            AlterKind::AddColumns { columns } => {
+                self.add_columns(table_name, columns, add_if_not_exists)
+            }
             AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => {
@@ -248,6 +251,7 @@ impl TableMeta {
         &self,
         table_name: &str,
         requests: &[AddColumnRequest],
+        add_if_not_exists: bool,
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
@@ -255,7 +259,31 @@ impl TableMeta {
             self.primary_key_indices.iter().collect();
 
         let mut names = HashSet::with_capacity(requests.len());
-
+        let mut new_requests = Vec::with_capacity(requests.len());
+        let requests = if add_if_not_exists {
+            for col_to_add in requests {
+                if let Some(column_schema) =
+                    table_schema.column_schema_by_name(&col_to_add.column_schema.name)
+                {
+                    // If the column already exists, we should check if the type is the same.
+                    ensure!(
+                        column_schema.data_type == col_to_add.column_schema.data_type,
+                        error::InvalidAlterRequestSnafu {
+                            table: table_name,
+                            err: format!(
+                                "column {} already exists with different type",
+                                col_to_add.column_schema.name
+                            ),
+                        }
+                    );
+                } else {
+                    new_requests.push(col_to_add.clone());
+                }
+            }
+            &new_requests[..]
+        } else {
+            requests
+        };
         for col_to_add in requests {
             ensure!(
                 names.insert(&col_to_add.column_schema.name),
@@ -630,6 +658,44 @@ pub struct RawTableInfo {
     pub table_type: TableType,
 }
 
+impl RawTableInfo {
+    /// Sort the columns in [RawTableInfo], logical tables require it.
+    pub fn sort_columns(&mut self) {
+        let column_schemas = &self.meta.schema.column_schemas;
+        let primary_keys = self
+            .meta
+            .primary_key_indices
+            .iter()
+            .map(|index| column_schemas[*index].name.clone())
+            .collect::<HashSet<_>>();
+
+        self.meta
+            .schema
+            .column_schemas
+            .sort_unstable_by(|a, b| a.name.cmp(&b.name));
+
+        // Compute new indices of sorted columns
+        let mut primary_key_indices = Vec::with_capacity(primary_keys.len());
+        let mut timestamp_index = None;
+        let mut value_indices =
+            Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len() - 1);
+        for (index, column_schema) in self.meta.schema.column_schemas.iter().enumerate() {
+            if primary_keys.contains(&column_schema.name) {
+                primary_key_indices.push(index);
+            } else if column_schema.is_time_index() {
+                timestamp_index = Some(index);
+            } else {
+                value_indices.push(index);
+            }
+        }
+
+        // Overwrite table meta
+        self.meta.schema.timestamp_index = timestamp_index;
+        self.meta.primary_key_indices = primary_key_indices;
+        self.meta.value_indices = value_indices;
+    }
+}
+
 impl From<TableInfo> for RawTableInfo {
     fn from(info: TableInfo) -> RawTableInfo {
         RawTableInfo {
@@ -731,7 +797,7 @@ mod tests {
         };
 
         let builder = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind, false)
             .unwrap();
         builder.build().unwrap()
     }
@@ -761,7 +827,7 @@ mod tests {
         };
 
         let builder = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind, false)
             .unwrap();
         builder.build().unwrap()
     }
@@ -808,7 +874,7 @@ mod tests {
             names: vec![String::from("col2"), String::from("my_field")],
         };
         let new_meta = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind, false)
             .unwrap()
             .build()
             .unwrap();
@@ -863,7 +929,7 @@ mod tests {
             names: vec![String::from("col3"), String::from("col1")],
         };
         let new_meta = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind, false)
             .unwrap()
             .build()
             .unwrap();
@@ -903,7 +969,7 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind, false)
             .err()
             .unwrap();
         assert_eq!(StatusCode::TableColumnExists, err.status_code());
@@ -933,7 +999,7 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind, false)
             .err()
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
@@ -955,7 +1021,7 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind, false)
             .err()
             .unwrap();
         assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
@@ -978,7 +1044,7 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind, false)
             .err()
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
@@ -989,7 +1055,7 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
+            .builder_with_alter_kind("my_table", &alter_kind, false)
             .err()
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());

@@ -28,8 +28,10 @@ use common_telemetry::debug;
 
 use crate::datanode_manager::HandleResponse;
 use crate::ddl::create_table::CreateTableProcedure;
-use crate::ddl::test_util::create_table::build_raw_table_info_from_expr;
-use crate::ddl::test_util::{TestColumnDefBuilder, TestCreateTableExprBuilder};
+use crate::ddl::test_util::columns::TestColumnDefBuilder;
+use crate::ddl::test_util::create_table::{
+    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+};
 use crate::error;
 use crate::error::{Error, Result};
 use crate::key::table_route::TableRouteValue;

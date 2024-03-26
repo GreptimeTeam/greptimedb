@@ -32,7 +32,6 @@ common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
-common-grpc-expr.workspace = true
 common-macro.workspace = true
 common-mem-prof = { workspace = true, optional = true }
 common-meta.workspace = true
@@ -44,14 +43,11 @@ common-telemetry.workspace = true
 common-time.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
-datafusion-expr.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
-digest = "0.10"
 futures = "0.3"
 hashbrown = "0.14"
 headers = "0.3"
-hex = { version = "0.4" }
 hostname = "0.3.1"
 http-body = "0.4"
 humantime-serde.workspace = true
@@ -91,7 +87,6 @@ secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
-sha1 = "0.10"
 snafu.workspace = true
 snap = "1"
 sql.workspace = true

@@ -24,6 +24,7 @@ use store_api::storage::TableId;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
+use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
@@ -33,7 +34,7 @@ use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{utils, DdlContext, ExecutorContext, ProcedureExecutor};
 use crate::error::{
-    self, EmptyCreateTableTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
+    self, EmptyDdlTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
     SubmitProcedureSnafu, TableNotFoundSnafu, UnsupportedSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
@@ -138,6 +139,16 @@ impl DdlManager {
                 },
             ),
             (
+                AlterLogicalTablesProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        AlterLogicalTablesProcedure::from_json(json, context)
+                            .map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
                 DropTableProcedure::TYPE_NAME,
                 &|context: DdlContext| -> BoxedProcedureLoader {
                     Box::new(move |json: &str| {
@@ -217,7 +228,7 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
-    /// Submits and executes a create table task.
+    /// Submits and executes a create multiple logical table tasks.
     pub async fn submit_create_logical_table_tasks(
         &self,
         cluster_id: ClusterId,
@@ -229,6 +240,28 @@ impl DdlManager {
         let procedure = CreateLogicalTablesProcedure::new(
             cluster_id,
             create_table_tasks,
+            physical_table_id,
+            context,
+        );
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    /// Submits and executes alter multiple table tasks.
+    pub async fn submit_alter_logical_table_tasks(
+        &self,
+        cluster_id: ClusterId,
+        alter_table_tasks: Vec<AlterTableTask>,
+        physical_table_id: TableId,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+
+        let procedure = AlterLogicalTablesProcedure::new(
+            cluster_id,
+            alter_table_tasks,
             physical_table_id,
             context,
         );
@@ -510,7 +543,12 @@ async fn handle_create_logical_table_tasks(
     cluster_id: ClusterId,
     mut create_table_tasks: Vec<CreateTableTask>,
 ) -> Result<SubmitDdlTaskResponse> {
-    ensure!(!create_table_tasks.is_empty(), EmptyCreateTableTasksSnafu);
+    ensure!(
+        !create_table_tasks.is_empty(),
+        EmptyDdlTasksSnafu {
+            name: "create logical tables"
+        }
+    );
     let physical_table_id = utils::check_and_get_physical_table_id(
         &ddl_manager.table_metadata_manager,
         &create_table_tasks,
@@ -566,7 +604,42 @@ async fn handle_drop_database_task(
 
     Ok(SubmitDdlTaskResponse {
         key: procedure_id.into(),
-        table_id: None,
+        ..Default::default()
+    })
+}
+
+async fn handle_alter_logical_table_tasks(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    alter_table_tasks: Vec<AlterTableTask>,
+) -> Result<SubmitDdlTaskResponse> {
+    ensure!(
+        !alter_table_tasks.is_empty(),
+        EmptyDdlTasksSnafu {
+            name: "alter logical tables"
+        }
+    );
+
+    // Use the physical table id in the first logical table, then it will be checked in the procedure.
+    let first_table = TableNameKey {
+        catalog: &alter_table_tasks[0].alter_table.catalog_name,
+        schema: &alter_table_tasks[0].alter_table.schema_name,
+        table: &alter_table_tasks[0].alter_table.table_name,
+    };
+    let physical_table_id =
+        utils::get_physical_table_id(&ddl_manager.table_metadata_manager, first_table).await?;
+    let num_logical_tables = alter_table_tasks.len();
+
+    let (id, _) = ddl_manager
+        .submit_alter_logical_table_tasks(cluster_id, alter_table_tasks, physical_table_id)
+        .await?;
+
+    info!("{num_logical_tables} logical tables on physical table: {physical_table_id:?} is altered via procedure_id {id:?}");
+
+    let procedure_id = id.to_string();
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
         ..Default::default()
     })
 }
@@ -604,8 +677,10 @@ impl ProcedureExecutor for DdlManager {
                 CreateLogicalTables(create_table_tasks) => {
                     handle_create_logical_table_tasks(self, cluster_id, create_table_tasks).await
                 }
+                AlterLogicalTables(alter_table_tasks) => {
+                    handle_alter_logical_table_tasks(self, cluster_id, alter_table_tasks).await
+                }
                 DropLogicalTables(_) => todo!(),
-                AlterLogicalTables(_) => todo!(),
                 DropDatabase(drop_database_task) => {
                     handle_drop_database_task(self, cluster_id, drop_database_task).await
                 }
