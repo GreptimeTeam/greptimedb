@@ -112,8 +112,6 @@ impl UserProvider for WatchFileUserProvider {
 
 #[cfg(test)]
 pub mod test {
-    use std::fs::File;
-    use std::io::{LineWriter, Write};
     use std::time::{Duration, Instant};
 
     use common_test_util::temp_dir::create_temp_dir;
@@ -168,47 +166,30 @@ pub mod test {
     async fn test_file_provider() {
         let dir = create_temp_dir("test_file_provider");
         let file_path = format!("{}/test_file_provider", dir.path().to_str().unwrap());
-        {
-            // write a tmp file
-            let file = File::create(&file_path).unwrap();
-            let mut lw = LineWriter::new(file);
-            assert!(writeln!(lw, "root=123456").is_ok());
-            assert!(writeln!(lw, "admin=654321").is_ok());
-            lw.flush().unwrap();
-        }
 
+        // write a tmp file
+        assert!(std::fs::write(&file_path, "root=123456\nadmin=654321\n").is_ok());
         let provider = WatchFileUserProvider::new(file_path.as_str()).unwrap();
+        let timeout = Duration::from_secs(60);
+
         test_authenticate(&provider, "root", "123456", true, None).await;
         test_authenticate(&provider, "admin", "654321", true, None).await;
         test_authenticate(&provider, "root", "654321", false, None).await;
 
-        let timeout = Duration::from_secs(60);
-        {
-            // update the tmp file
-            let file = File::create(&file_path).unwrap();
-            let mut lw = LineWriter::new(file);
-            assert!(writeln!(lw, "root=654321").is_ok());
-            lw.flush().unwrap();
-        }
+        // update the tmp file
+        assert!(std::fs::write(&file_path, "root=654321\n").is_ok());
         test_authenticate(&provider, "root", "123456", false, Some(timeout)).await;
         test_authenticate(&provider, "root", "654321", true, Some(timeout)).await;
         test_authenticate(&provider, "admin", "654321", false, Some(timeout)).await;
 
-        {
-            // remove the tmp file
-            std::fs::remove_file(&file_path).unwrap();
-        }
+        // remove the tmp file
+        assert!(std::fs::remove_file(&file_path).is_ok());
         test_authenticate(&provider, "root", "123456", true, Some(timeout)).await;
         test_authenticate(&provider, "root", "654321", true, Some(timeout)).await;
         test_authenticate(&provider, "admin", "654321", true, Some(timeout)).await;
 
-        {
-            // recreate the tmp file
-            let file = File::create(&file_path).unwrap();
-            let mut lw = LineWriter::new(file);
-            assert!(writeln!(lw, "root=123456").is_ok());
-            lw.flush().unwrap();
-        }
+        // recreate the tmp file
+        assert!(std::fs::write(&file_path, "root=123456\n").is_ok());
         test_authenticate(&provider, "root", "123456", true, Some(timeout)).await;
         test_authenticate(&provider, "root", "654321", false, Some(timeout)).await;
         test_authenticate(&provider, "admin", "654321", false, Some(timeout)).await;
