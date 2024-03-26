@@ -363,7 +363,7 @@ impl AlterTableProcedure {
                 )
                 .into(),
             );
-            // We must acquire the write lock since ti maybe update the physical table schema
+            // We must acquire the write lock since this may update the physical table schema
             lock_key.push(TableLock::Write(*physical_table_id).into())
         }
 
