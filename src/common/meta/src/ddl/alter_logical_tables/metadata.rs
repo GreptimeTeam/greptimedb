@@ -62,7 +62,7 @@ impl AlterLogicalTablesProcedure {
             .await?;
 
         let physical_table_info = physical_table_info
-            .context(TableInfoNotFoundSnafu {
+            .with_context(|| TableInfoNotFoundSnafu {
                 table: format!("table id - {}", self.data.physical_table_id),
             })?
             .into_inner();

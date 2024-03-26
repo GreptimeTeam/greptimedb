@@ -489,9 +489,11 @@ impl CreateTablesData {
         old_table_info: &DeserializedValueWithBytes<TableInfoValue>,
     ) -> RawTableInfo {
         let raw_table_info = old_table_info.deref().table_info.clone();
-        let physical_columns = std::mem::take(&mut self.physical_columns);
 
-        physical_table_metadata::build_new_physical_table_info(raw_table_info, physical_columns)
+        physical_table_metadata::build_new_physical_table_info(
+            raw_table_info,
+            &self.physical_columns,
+        )
     }
 }
 

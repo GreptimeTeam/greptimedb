@@ -23,7 +23,7 @@ use crate::key::table_info::TableInfoValue;
 use crate::rpc::ddl::AlterTableTask;
 
 impl AlterLogicalTablesProcedure {
-    pub(crate) fn build_update_metadata(&mut self) -> Result<Vec<(TableInfoValue, RawTableInfo)>> {
+    pub(crate) fn build_update_metadata(&self) -> Result<Vec<(TableInfoValue, RawTableInfo)>> {
         let mut table_info_values_to_update = Vec::with_capacity(self.data.tasks.len());
         for (task, table) in self
             .data

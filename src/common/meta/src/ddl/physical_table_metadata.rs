@@ -21,9 +21,9 @@ use table::metadata::RawTableInfo;
 /// Generate the new physical table info.
 pub(crate) fn build_new_physical_table_info(
     mut raw_table_info: RawTableInfo,
-    physical_columns: Vec<ColumnMetadata>,
+    physical_columns: &[ColumnMetadata],
 ) -> RawTableInfo {
-    let existing_primary_key = raw_table_info
+    let existing_columns = raw_table_info
         .meta
         .schema
         .column_schemas
@@ -37,11 +37,11 @@ pub(crate) fn build_new_physical_table_info(
     let columns = &mut raw_table_info.meta.schema.column_schemas;
     columns.clear();
 
-    for (idx, col) in physical_columns.into_iter().enumerate() {
+    for (idx, col) in physical_columns.iter().enumerate() {
         match col.semantic_type {
             SemanticType::Tag => {
                 // push new primary key to the end.
-                if !existing_primary_key.contains(&col.column_schema.name) {
+                if !existing_columns.contains(&col.column_schema.name) {
                     primary_key_indices.push(idx);
                 }
             }
@@ -49,7 +49,7 @@ pub(crate) fn build_new_physical_table_info(
             SemanticType::Timestamp => *time_index = Some(idx),
         }
 
-        columns.push(col.column_schema);
+        columns.push(col.column_schema.clone());
     }
 
     raw_table_info

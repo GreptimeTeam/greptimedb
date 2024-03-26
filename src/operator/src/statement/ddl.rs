@@ -531,6 +531,18 @@ impl StatementExecutor {
                 task: DdlTask::new_alter_table(expr),
             };
 
+            let invalidate_keys = vec![
+                CacheIdent::TableId(table_id),
+                CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
+            ];
+
+            (req, invalidate_keys)
+        } else {
+            // This is logical table
+            let req = SubmitDdlTaskRequest {
+                task: DdlTask::new_alter_logical_tables(vec![expr]),
+            };
+
             let mut invalidate_keys = vec![
                 CacheIdent::TableId(physical_table_id),
                 CacheIdent::TableId(table_id),
@@ -552,18 +564,6 @@ impl StatementExecutor {
                 );
                 invalidate_keys.push(CacheIdent::TableName(physical_table_name));
             }
-
-            (req, invalidate_keys)
-        } else {
-            // This is logical table
-            let req = SubmitDdlTaskRequest {
-                task: DdlTask::new_alter_logical_tables(vec![expr]),
-            };
-
-            let invalidate_keys = vec![
-                CacheIdent::TableId(table_id),
-                CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
-            ];
 
             (req, invalidate_keys)
         };

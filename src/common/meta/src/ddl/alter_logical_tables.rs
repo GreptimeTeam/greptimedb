@@ -170,14 +170,13 @@ impl AlterLogicalTablesProcedure {
 
     pub(crate) async fn on_update_metadata(&mut self) -> Result<Status> {
         if !self.data.physical_columns.is_empty() {
-            let physical_columns = std::mem::take(&mut self.data.physical_columns);
             let physical_table_info = self.data.physical_table_info.as_ref().unwrap();
 
             // Generates new table info
             let old_raw_table_info = physical_table_info.table_info.clone();
             let new_raw_table_info = physical_table_metadata::build_new_physical_table_info(
                 old_raw_table_info,
-                physical_columns,
+                &self.data.physical_columns,
             );
 
             // Updates physical table's metadata
