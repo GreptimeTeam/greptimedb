@@ -397,14 +397,6 @@ impl TableRouteManager {
         Ok(physical_table_routes)
     }
 
-    /// Returns [TableRouteValue::Physical]s or [TableRouteValue::Logical]s by the given `table_ids`.
-    pub async fn batch_get_table_routes(
-        &self,
-        table_ids: &[TableId],
-    ) -> Result<Vec<Option<TableRouteValue>>> {
-        self.storage.batch_get(table_ids).await
-    }
-
     /// Returns [`RegionDistribution`] of the table(`table_id`).
     pub async fn get_region_distribution(
         &self,

@@ -39,7 +39,8 @@ impl AlterLogicalTablesProcedure {
             .map(|v| v.table_info.ident.table_id)
             .collect::<Vec<_>>();
         let table_routes = table_route_manager
-            .batch_get_table_routes(&table_ids)
+            .table_route_storage()
+            .batch_get(&table_ids)
             .await?;
         let physical_table_id = self.data.physical_table_id;
         let is_same_physical_table = table_routes.iter().all(|r| {
