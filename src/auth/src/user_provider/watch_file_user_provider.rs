@@ -62,7 +62,7 @@ impl WatchFileUserProvider {
                         event.kind,
                         EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                     ) {
-                        info!("User provider file {} changed", &filepath);
+                        info!(?event.kind, "User provider file {} changed", &filepath);
                         match load_credential_from_file(&filepath) {
                             Ok(credential) => {
                                 let mut users =
@@ -102,7 +102,7 @@ impl UserProvider for WatchFileUserProvider {
         } else {
             match id {
                 Identity::UserId(id, _) => {
-                    warn!(id, "User provider file is empty, allow all users");
+                    warn!(id, "User provider file not exist, allow all users");
                     Ok(DefaultUserInfo::with_name(id))
                 }
             }
