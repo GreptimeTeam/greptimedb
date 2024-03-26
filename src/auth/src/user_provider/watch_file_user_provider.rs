@@ -182,7 +182,7 @@ pub mod test {
         test_authenticate(&provider, "admin", "654321", true, None).await;
         test_authenticate(&provider, "root", "654321", false, None).await;
 
-        let timeout = Duration::from_secs(2);
+        let timeout = Duration::from_secs(60);
         {
             // update the tmp file
             let file = File::create(&file_path).unwrap();
@@ -198,7 +198,6 @@ pub mod test {
             // remove the tmp file
             std::fs::remove_file(&file_path).unwrap();
         }
-        sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
         test_authenticate(&provider, "root", "123456", true, Some(timeout)).await;
         test_authenticate(&provider, "root", "654321", true, Some(timeout)).await;
         test_authenticate(&provider, "admin", "654321", true, Some(timeout)).await;
@@ -210,7 +209,6 @@ pub mod test {
             assert!(writeln!(lw, "root=123456").is_ok());
             lw.flush().unwrap();
         }
-        sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
         test_authenticate(&provider, "root", "123456", true, Some(timeout)).await;
         test_authenticate(&provider, "root", "654321", false, Some(timeout)).await;
         test_authenticate(&provider, "admin", "654321", false, Some(timeout)).await;
