@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::hash::{Hash, Hasher};
+use std::mem::size_of;
 
 use store_api::logstore::entry::{Entry, Id as EntryId};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
@@ -83,4 +84,9 @@ impl Entry for EntryImpl {
             ..Default::default()
         }
     }
+}
+
+/// Computes the estimated size in bytes of the entry.
+pub fn entry_estimated_size(entry: &EntryImpl) -> usize {
+    size_of::<EntryImpl>() + entry.data.capacity() * size_of::<u8>()
 }

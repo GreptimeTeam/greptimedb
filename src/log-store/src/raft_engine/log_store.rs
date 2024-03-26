@@ -35,7 +35,9 @@ use crate::error::{
     IllegalNamespaceSnafu, IllegalStateSnafu, OverrideCompactedEntrySnafu, RaftEngineSnafu, Result,
     StartGcTaskSnafu, StopGcTaskSnafu,
 };
+use crate::metrics;
 use crate::raft_engine::backend::SYSTEM_NAMESPACE;
+use crate::raft_engine::entry_estimated_size;
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace};
 
 const NAMESPACE_PREFIX: &str = "$sys/";
@@ -248,6 +250,11 @@ impl LogStore for RaftEngineLogStore {
     /// Appends a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
     /// batch append.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
+        metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_CALLS_TOTAL.inc();
+        metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_BYTES_TOTAL
+            .inc_by(entries.iter().map(entry_estimated_size).sum::<usize>() as u64);
+        let _timer = metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_ELAPSED.start_timer();
+
         ensure!(self.started(), IllegalStateSnafu);
         if entries.is_empty() {
             return Ok(AppendBatchResponse::default());
@@ -280,6 +287,9 @@ impl LogStore for RaftEngineLogStore {
         ns: &Self::Namespace,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
+        metrics::METRIC_RAFT_ENGINE_READ_CALLS_TOTAL.inc();
+        let _timer = metrics::METRIC_RAFT_ENGINE_READ_ELAPSED.start_timer();
+
         ensure!(self.started(), IllegalStateSnafu);
         let engine = self.engine.clone();
 

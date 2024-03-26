@@ -17,14 +17,17 @@ use std::collections::HashMap;
 use rskafka::record::Record as KafkaRecord;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use tokio::time::Instant;
 
 use crate::error::{
     DecodeJsonSnafu, EmptyEntriesSnafu, EncodeJsonSnafu, GetClientSnafu, IllegalSequenceSnafu,
     MissingKeySnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
 };
 use crate::kafka::client_manager::ClientManagerRef;
+use crate::kafka::log_store::PRODUCED_ELAPSED_TOTAL;
 use crate::kafka::util::offset::Offset;
 use crate::kafka::{EntryId, EntryImpl, NamespaceImpl};
+use crate::metrics;
 
 /// The current version of Record.
 pub(crate) const VERSION: u32 = 0;
@@ -97,6 +100,7 @@ impl TryFrom<Record> for KafkaRecord {
     }
 }
 
+// TODO(niebayes): improve the performance of decoding kafka record.
 impl TryFrom<KafkaRecord> for Record {
     type Error = crate::error::Error;
 
@@ -150,6 +154,7 @@ impl RecordProducer {
 
     /// Produces the buffered entries to Kafka sever. Those entries may span several Kafka records.
     /// Returns the offset of the last successfully produced record.
+    // TODO(niebayes): maybe requires more fine-grained metrics to measure stages of writing to kafka.
     pub(crate) async fn produce(self, client_manager: &ClientManagerRef) -> Result<Offset> {
         ensure!(!self.entries.is_empty(), EmptyEntriesSnafu);
 
@@ -173,6 +178,14 @@ impl RecordProducer {
         for entry in self.entries {
             for record in build_records(entry, max_record_size) {
                 let kafka_record = KafkaRecord::try_from(record)?;
+
+                metrics::METRIC_KAFKA_PRODUCE_RECORD_COUNTS.inc();
+                metrics::METRIC_KAFKA_PRODUCE_RECORD_BYTES_TOTAL
+                    .inc_by(kafka_record.approximate_size() as u64);
+                let _timer = metrics::METRIC_KAFKA_PRODUCE_ELAPSED.start_timer();
+
+                let now = Instant::now();
+
                 // Records of a certain region cannot be produced in parallel since their order must be static.
                 let offset = producer
                     .produce(kafka_record.clone())
@@ -183,6 +196,12 @@ impl RecordProducer {
                         size: kafka_record.approximate_size(),
                         limit: max_record_size,
                     })?;
+
+                PRODUCED_ELAPSED_TOTAL.fetch_add(
+                    now.elapsed().as_millis() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+
                 last_offset = Some(offset);
             }
         }

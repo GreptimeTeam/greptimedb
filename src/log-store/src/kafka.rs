@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::mem::size_of;
 pub(crate) mod client_manager;
 pub mod log_store;
 pub(crate) mod util;
@@ -81,4 +82,9 @@ impl Display for EntryImpl {
             self.data.len()
         )
     }
+}
+
+/// Computes the estimated size in bytes of the entry.
+pub fn entry_estimated_size(entry: &EntryImpl) -> usize {
+    size_of::<EntryImpl>() + entry.data.capacity() * size_of::<u8>() + entry.ns.topic.capacity()
 }
