@@ -24,6 +24,8 @@ use crate::rpc::ddl::AlterTableTask;
 
 impl AlterLogicalTablesProcedure {
     pub(crate) fn filter_task(&mut self, finished_tasks: &[bool]) -> Result<()> {
+        debug_assert_eq!(finished_tasks.len(), self.data.tasks.len());
+        debug_assert_eq!(finished_tasks.len(), self.data.table_info_values.len());
         self.data.tasks = self
             .data
             .tasks
@@ -67,7 +69,7 @@ impl AlterLogicalTablesProcedure {
     pub(crate) async fn fill_table_info_values(&mut self) -> Result<()> {
         let table_ids = self.get_all_table_ids().await?;
         let table_info_values = self.get_all_table_info_values(&table_ids).await?;
-        debug_assert!(table_info_values.len() == self.data.tasks.len());
+        debug_assert_eq!(table_info_values.len(), self.data.tasks.len());
         self.data.table_info_values = table_info_values;
 
         Ok(())
