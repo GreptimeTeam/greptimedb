@@ -239,6 +239,10 @@ impl StatementExecutor {
                 Ok(Output::new_with_affected_rows(0))
             }
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
+            Statement::ShowColumns(show_columns) => {
+                self.show_columns(show_columns, query_ctx).await
+            }
+            Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
         }
     }
 

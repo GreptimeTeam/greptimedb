@@ -21,7 +21,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::ast::Ident;
 use sql::statements::create::Partitions;
-use sql::statements::show::{ShowDatabases, ShowTables, ShowVariables};
+use sql::statements::show::{ShowColumns, ShowDatabases, ShowIndex, ShowTables, ShowVariables};
 use table::TableRef;
 
 use crate::error::{self, ExecuteStatementSnafu, Result};
@@ -46,6 +46,28 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         query::sql::show_tables(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub(super) async fn show_columns(
+        &self,
+        stmt: ShowColumns,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_columns(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub(super) async fn show_index(
+        &self,
+        stmt: ShowIndex,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_index(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }

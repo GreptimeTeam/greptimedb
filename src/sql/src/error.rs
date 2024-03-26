@@ -75,6 +75,18 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
+    #[snafu(display(
+        "Unexpected token while parsing SQL statement: {}, expected: '{}', found: {}",
+        sql,
+        expected,
+        actual,
+    ))]
+    UnexpectedToken {
+        sql: String,
+        expected: String,
+        actual: String,
+    },
+
     #[snafu(display("Invalid column option, column name: {}, error: {}", name, msg))]
     InvalidColumnOption { name: String, msg: String },
 
@@ -175,6 +187,7 @@ impl ErrorExt for Error {
             | InvalidSql { .. }
             | ParseSqlValue { .. }
             | SqlTypeNotSupported { .. }
+            | UnexpectedToken { .. }
             | InvalidDefault { .. } => StatusCode::InvalidSyntax,
 
             InvalidColumnOption { .. }
