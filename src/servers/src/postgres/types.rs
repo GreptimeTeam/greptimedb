@@ -30,7 +30,7 @@ use pgwire::api::Type;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
-use session::session_config::ByteaOutputValue;
+use session::session_config::PGByteaOutputValue;
 
 use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use self::interval::PgInterval;
@@ -74,11 +74,10 @@ pub(super) fn encode_value(
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
         Value::Binary(v) => {
-            let bytea_output = query_ctx.bytea_output();
-            match bytea_output {
-                ByteaOutputValue::DEFAULT => builder.encode_field(&v.deref()),
-                ByteaOutputValue::ESCAPE => builder.encode_field(&EscapeOutputBytea(v.deref())),
-                ByteaOutputValue::HEX => builder.encode_field(&HexOutputBytea(v.deref())),
+            let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
+            match *bytea_output {
+                PGByteaOutputValue::ESCAPE => builder.encode_field(&EscapeOutputBytea(v.deref())),
+                PGByteaOutputValue::HEX => builder.encode_field(&HexOutputBytea(v.deref())),
             }
         }
         Value::Date(v) => {
@@ -574,7 +573,6 @@ pub(super) fn param_types_to_pg_types(
 mod test {
     use std::sync::Arc;
 
-    use dashmap::DashMap;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::ListValue;
     use pgwire::api::results::{FieldFormat, FieldInfo};
@@ -802,7 +800,7 @@ mod test {
             Value::Interval(1000001i128.into()),
         ];
         let query_context = QueryContextBuilder::default()
-            .configuration_parameter(Arc::new(DashMap::new()))
+            .configuration_parameter(Default::default())
             .build();
         let mut builder = DataRowEncoder::new(Arc::new(schema));
         for i in values.iter() {

@@ -425,15 +425,7 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
 
     let r = client.simple_query("SELECT b FROM test").await.unwrap();
     let b = get_row(r);
-    assert_eq!(b, "6162636b6c6d2aa954");
-
-    let _ = client
-        .simple_query("SET bytea_output='default'")
-        .await
-        .unwrap();
-    let r = client.simple_query("SELECT b FROM test").await.unwrap();
-    let b = get_row(r);
-    assert_eq!(b, "6162636b6c6d2aa954");
+    assert_eq!(b, "\\x6162636b6c6d2aa954");
 
     let _ = client.simple_query("SET bytea_output='hex'").await.unwrap();
     let r = client.simple_query("SELECT b FROM test").await.unwrap();

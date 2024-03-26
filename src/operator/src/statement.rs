@@ -21,7 +21,6 @@ mod dml;
 mod show;
 mod tql;
 
-use std::any::Any;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -40,10 +39,9 @@ use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use session::session_config::{try_into_mysql_config, try_into_postgres_config};
+use session::session_config::PGByteaOutputValue;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::dialect::{MySqlDialect, PostgreSqlDialect};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::set_variables::SetVariables;
 use sql::statements::statement::Statement;
@@ -221,7 +219,7 @@ impl StatementExecutor {
                     // so we just ignore it here instead of returning an error to break the connection.
                     // Since the "bytea_output" only determines the output format of binary values,
                     // it won't cause much trouble if we do so.
-                    "BYTEA_OUTPUT" => set_session_config(var_name, set_var.value, query_ctx)?,
+                    "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,
 
                     // Same as "bytea_output", we just ignore it here.
                     // Not harmful since it only relates to how date is viewed in client app's output.
@@ -340,13 +338,10 @@ fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     }
 }
 
-fn set_session_config(var_name: String, var_value: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
-    let Some((var_value, [])) = var_value.split_first() else {
+fn set_bytea_output(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let Some((var_value, [])) = exprs.split_first() else {
         return (NotSupportedSnafu {
-            feat: format!(
-                "Set variable value must have one and only one value for '{}'",
-                var_name
-            ),
+            feat: "Set variable value must have one and only one value for bytea_output",
         })
         .fail();
     };
@@ -356,19 +351,9 @@ fn set_session_config(var_name: String, var_value: Vec<Expr>, ctx: QueryContextR
         })
         .fail();
     };
-    // TODO(j0hn50n133): find a better way to match the sql dialect
-    let (option, value) = if ctx.sql_dialect().type_id() == (PostgreSqlDialect {}).type_id() {
-        try_into_postgres_config(&var_name, value)
-    } else if ctx.sql_dialect().type_id() == (MySqlDialect {}).type_id() {
-        try_into_mysql_config(&var_name, value)
-    } else {
-        return NotSupportedSnafu {
-            feat: "Set session configuration value only support Postgres and Mysql SQL",
-        }
-        .fail();
-    }
-    .context(InvalidConfigValueSnafu)?;
-    ctx.set_session_config(option, value);
+    ctx.configuration_parameter().set_postgres_bytea_output(
+        PGByteaOutputValue::try_from(value.clone()).context(InvalidConfigValueSnafu)?,
+    );
     Ok(())
 }
 

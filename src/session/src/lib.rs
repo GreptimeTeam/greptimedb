@@ -25,9 +25,7 @@ use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::timezone::get_timezone;
 use common_time::Timezone;
-use context::QueryContextBuilder;
-use dashmap::DashMap;
-use session_config::{SessionConfigOption, SessionConfigValue};
+use context::{ConfigurationVariables, QueryContextBuilder};
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
 
@@ -39,7 +37,7 @@ pub struct Session {
     user_info: ArcSwap<UserInfoRef>,
     conn_info: ConnInfo,
     timezone: ArcSwap<Timezone>,
-    configuration_variables: Arc<DashMap<SessionConfigOption, SessionConfigValue>>,
+    configuration_variables: Arc<ConfigurationVariables>,
 }
 
 pub type SessionRef = Arc<Session>;
@@ -48,7 +46,7 @@ impl Session {
     pub fn new(
         addr: Option<SocketAddr>,
         channel: Channel,
-        configuration_variables: DashMap<SessionConfigOption, SessionConfigValue>,
+        configuration_variables: ConfigurationVariables,
     ) -> Self {
         Session {
             catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),

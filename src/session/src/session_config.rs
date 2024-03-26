@@ -12,92 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Display;
-
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 use sql::ast::Value;
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub enum SessionConfigOption {
-    Mysql,
-    Postgres(PostgresOption),
-}
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Unkonw Postgres option '{}'", name))]
-    UnknownOption { name: String, location: Location },
-    #[snafu(display("Invalid value for parameter \"{}\": \"{}\"", name, value))]
+    #[snafu(display(
+        "Invalid value for parameter \"{}\": \"{}\"\nHint: {}",
+        name,
+        value,
+        hint,
+    ))]
     InvalidConfigValue {
         name: String,
         value: String,
+        hint: String,
         location: Location,
     },
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub enum PostgresOption {
-    ByteaOutput,
-}
-
-impl Display for PostgresOption {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PostgresOption::ByteaOutput => write!(f, "BYTEA_OUTPUT"),
-        }
-    }
-}
-
-impl TryFrom<&str> for PostgresOption {
-    type Error = Error;
-    fn try_from(name: &str) -> Result<Self, Self::Error> {
-        match name.to_uppercase().as_str() {
-            "BYTEA_OUTPUT" => Ok(PostgresOption::ByteaOutput),
-            _ => UnknownOptionSnafu { name }.fail(),
-        }
-    }
-}
-
-pub fn postgres_option(option: PostgresOption) -> SessionConfigOption {
-    SessionConfigOption::Postgres(option)
-}
-
-#[derive(Debug, Clone)]
-pub enum SessionConfigValue {
-    MySql,
-    Postgres(PostgresConfigValue),
-}
-
-pub fn postgres_config_value(value: PostgresConfigValue) -> SessionConfigValue {
-    SessionConfigValue::Postgres(value)
-}
-
-#[derive(Debug, Clone)]
-pub enum PostgresConfigValue {
-    ByteaOutput(ByteaOutputValue),
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum ByteaOutputValue {
-    DEFAULT,
+#[derive(Clone, Copy, Debug, Default)]
+pub enum PGByteaOutputValue {
+    #[default]
     HEX,
     ESCAPE,
 }
-impl TryFrom<Value> for ByteaOutputValue {
+
+impl TryFrom<Value> for PGByteaOutputValue {
     type Error = Error;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match &value {
             Value::DoubleQuotedString(s) | Value::SingleQuotedString(s) => {
                 match s.to_uppercase().as_str() {
-                    "DEFAULT" => Ok(ByteaOutputValue::DEFAULT),
-                    "ESCAPE" => Ok(ByteaOutputValue::ESCAPE),
-                    "HEX" => Ok(ByteaOutputValue::HEX),
+                    "ESCAPE" => Ok(PGByteaOutputValue::ESCAPE),
+                    "HEX" => Ok(PGByteaOutputValue::HEX),
                     _ => InvalidConfigValueSnafu {
                         name: "BYTEA_OUTPUT",
                         value: value.to_string(),
+                        hint: "Avaiable values: escape, hex",
                     }
                     .fail(),
                 }
@@ -105,30 +61,9 @@ impl TryFrom<Value> for ByteaOutputValue {
             _ => InvalidConfigValueSnafu {
                 name: "BYTEA_OUTPUT",
                 value: value.to_string(),
+                hint: "Avaiable values: escape, hex",
             }
             .fail(),
         }
     }
-}
-
-pub fn try_into_postgres_config(
-    name: &str,
-    value: &Value,
-) -> Result<(SessionConfigOption, SessionConfigValue), Error> {
-    let option = PostgresOption::try_from(name)?;
-    let value = match option {
-        PostgresOption::ByteaOutput => ByteaOutputValue::try_from(value.clone())?,
-    };
-    Ok((
-        postgres_option(option),
-        postgres_config_value(PostgresConfigValue::ByteaOutput(value)),
-    ))
-}
-
-pub fn try_into_mysql_config(
-    _name: &str,
-    _value: &Value,
-) -> Result<(SessionConfigOption, SessionConfigValue), Error> {
-    // place holder
-    Ok((SessionConfigOption::Mysql, SessionConfigValue::MySql))
 }

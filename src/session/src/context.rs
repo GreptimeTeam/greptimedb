@@ -24,14 +24,11 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
 use common_time::timezone::get_timezone;
 use common_time::Timezone;
-use dashmap::DashMap;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
-use crate::session_config::{
-    ByteaOutputValue, PostgresConfigValue, PostgresOption, SessionConfigOption,
-};
-use crate::{SessionConfigValue, SessionRef};
+use crate::session_config::PGByteaOutputValue;
+use crate::SessionRef;
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
@@ -50,7 +47,7 @@ pub struct QueryContext {
     extension: HashMap<String, String>,
     // The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
-    configuration_parameter: Arc<DashMap<SessionConfigOption, SessionConfigValue>>,
+    configuration_parameter: Arc<ConfigurationVariables>,
 }
 
 impl QueryContextBuilder {
@@ -161,17 +158,6 @@ impl QueryContext {
         let _ = self.current_user.swap(Arc::new(user));
     }
 
-    pub fn set_session_config(&self, option: SessionConfigOption, value: SessionConfigValue) {
-        self.configuration_parameter.insert(option, value);
-    }
-
-    pub fn get_configuration_parameter(
-        &self,
-        option: &SessionConfigOption,
-    ) -> Option<SessionConfigValue> {
-        self.configuration_parameter.get(option).map(|v| v.clone())
-    }
-
     pub fn set_timezone(&self, timezone: Timezone) {
         let _ = self.timezone.swap(Arc::new(timezone));
     }
@@ -204,16 +190,8 @@ impl QueryContext {
         }
     }
 
-    /// Get the bytea_output value from the configuration parameter.
-    pub fn bytea_output(&self) -> ByteaOutputValue {
-        self.get_configuration_parameter(&SessionConfigOption::Postgres(
-            PostgresOption::ByteaOutput,
-        ))
-        .map(|v| match v {
-            SessionConfigValue::Postgres(PostgresConfigValue::ByteaOutput(v)) => v,
-            _ => ByteaOutputValue::DEFAULT,
-        })
-        .unwrap_or(ByteaOutputValue::DEFAULT)
+    pub fn configuration_parameter(&self) -> &ConfigurationVariables {
+        &self.configuration_parameter
     }
 }
 
@@ -301,6 +279,33 @@ impl Display for Channel {
     }
 }
 
+#[derive(Default, Debug)]
+pub struct ConfigurationVariables {
+    postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
+}
+
+impl Clone for ConfigurationVariables {
+    fn clone(&self) -> Self {
+        Self {
+            postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
+        }
+    }
+}
+
+impl ConfigurationVariables {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_postgres_bytea_output(&self, value: PGByteaOutputValue) {
+        let _ = self.postgres_bytea_output.swap(Arc::new(value));
+    }
+
+    pub fn postgres_bytea_output(&self) -> Arc<PGByteaOutputValue> {
+        self.postgres_bytea_output.load().clone()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
@@ -314,7 +319,7 @@ mod test {
         let session = Session::new(
             Some("127.0.0.1:9000".parse().unwrap()),
             Channel::Mysql,
-            DashMap::new(),
+            Default::default(),
         );
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");

@@ -9282,7 +9282,6 @@ dependencies = [
  "common-macro",
  "common-telemetry",
  "common-time",
- "dashmap",
  "derive_builder 0.12.0",
  "snafu",
  "sql",

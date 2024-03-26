@@ -29,15 +29,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ::auth::UserProviderRef;
-use dashmap::DashMap;
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
 use pgwire::api::ClientInfo;
 pub use server::PostgresServer;
 use session::context::Channel;
-use session::session_config::{
-    postgres_config_value, postgres_option, ByteaOutputValue, PostgresConfigValue, PostgresOption,
-};
 use session::Session;
 
 use self::auth_handler::PgLoginVerifier;
@@ -92,16 +88,7 @@ pub(crate) struct MakePostgresServerHandler {
 
 impl MakePostgresServerHandler {
     fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
-        let configuration_variables = DashMap::new();
-        configuration_variables.insert(
-            postgres_option(PostgresOption::ByteaOutput),
-            postgres_config_value(PostgresConfigValue::ByteaOutput(ByteaOutputValue::DEFAULT)),
-        );
-        let session = Arc::new(Session::new(
-            addr,
-            Channel::Postgres,
-            configuration_variables,
-        ));
+        let session = Arc::new(Session::new(addr, Channel::Postgres, Default::default()));
         PostgresServerHandler {
             query_handler: self.query_handler.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
