@@ -18,6 +18,7 @@ pub(crate) mod create_parser;
 pub(crate) mod delete_parser;
 pub(crate) mod describe_parser;
 pub(crate) mod drop_parser;
+mod error;
 pub(crate) mod explain_parser;
 pub(crate) mod insert_parser;
 pub(crate) mod query_parser;

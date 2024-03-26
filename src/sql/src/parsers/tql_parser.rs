@@ -17,9 +17,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext};
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::{
-    DFSchema, DataFusionError, Result as DFResult, ScalarValue, TableReference,
-};
+use datafusion_common::{DFSchema, Result as DFResult, ScalarValue, TableReference};
 use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_sql::planner::{ContextProvider, SqlToRel};
@@ -42,46 +40,7 @@ use datatypes::arrow::datatypes::DataType;
 use sqlparser::parser::Parser;
 
 use crate::dialect::GreptimeDbDialect;
-
-pub enum TQLError {
-    Parser(String),
-    Simplification(String),
-    Evaluation(String),
-}
-
-impl From<ParserError> for TQLError {
-    fn from(err: ParserError) -> Self {
-        TQLError::Parser(err.to_string())
-    }
-}
-
-impl From<DataFusionError> for TQLError {
-    fn from(err: DataFusionError) -> Self {
-        match err {
-            DataFusionError::SQL(parser_err) => TQLError::Parser(parser_err.to_string()),
-            DataFusionError::Plan(plan_err) => TQLError::Evaluation(plan_err),
-            unspecified => {
-                TQLError::Evaluation(format!("Failed to evaluate due to: {unspecified:?}"))
-            }
-        }
-    }
-}
-
-impl From<TQLError> for ParserError {
-    fn from(tql_err: TQLError) -> Self {
-        match tql_err {
-            TQLError::Parser(s) => {
-                ParserError::ParserError(format!("Failed to parse the query: {s}"))
-            }
-            TQLError::Simplification(s) => {
-                ParserError::ParserError(format!("Failed to simplify the query: {s}"))
-            }
-            TQLError::Evaluation(s) => {
-                ParserError::ParserError(format!("Failed to evaluate the query: {s}"))
-            }
-        }
-    }
-}
+use crate::parsers::error::TQLError;
 
 /// TQL extension parser, including:
 /// - `TQL EVAL <query>`
@@ -100,24 +59,34 @@ impl<'a> ParserContext<'a> {
                         if (uppercase == EVAL || uppercase == EVALUATE)
                             && w.quote_style.is_none() =>
                     {
-                        self.parse_tql_eval().context(error::SyntaxSnafu)
+                        self.parse_tql_params()
+                            .map(|params| Statement::Tql(Tql::Eval(TqlEval::from(params))))
+                            .context(error::SyntaxSnafu)
                     }
 
                     Keyword::EXPLAIN => {
-                        let is_verbose = self.peek_token_as_string() == VERBOSE;
+                        let is_verbose = self.has_verbose_keyword();
                         if is_verbose {
                             let _consume_verbose_token = self.parser.next_token();
                         }
-                        self.parse_tql_explain(is_verbose)
+                        self.parse_tql_params()
+                            .map(|mut params| {
+                                params.is_verbose = is_verbose;
+                                Statement::Tql(Tql::Explain(TqlExplain::from(params)))
+                            })
                             .context(error::SyntaxSnafu)
                     }
 
                     Keyword::ANALYZE => {
-                        let is_verbose = self.peek_token_as_string() == VERBOSE;
+                        let is_verbose = self.has_verbose_keyword();
                         if is_verbose {
                             let _consume_verbose_token = self.parser.next_token();
                         }
-                        self.parse_tql_analyze(is_verbose)
+                        self.parse_tql_params()
+                            .map(|mut params| {
+                                params.is_verbose = is_verbose;
+                                Statement::Tql(Tql::Analyze(TqlAnalyze::from(params)))
+                            })
                             .context(error::SyntaxSnafu)
                     }
                     _ => self.unsupported(self.peek_token_as_string()),
@@ -125,29 +94,6 @@ impl<'a> ParserContext<'a> {
             }
             unexpected => self.unsupported(unexpected.to_string()),
         }
-    }
-
-    fn parse_tql_eval(&mut self) -> std::result::Result<Statement, ParserError> {
-        let params = self.parse_tql_params()?;
-        Ok(Statement::Tql(Tql::Eval(TqlEval::from(params))))
-    }
-
-    fn parse_tql_analyze(
-        &mut self,
-        is_verbose: bool,
-    ) -> std::result::Result<Statement, ParserError> {
-        let mut params = self.parse_tql_params()?;
-        params.is_verbose = is_verbose;
-        Ok(Statement::Tql(Tql::Analyze(TqlAnalyze::from(params))))
-    }
-
-    fn parse_tql_explain(
-        &mut self,
-        is_verbose: bool,
-    ) -> std::result::Result<Statement, ParserError> {
-        let mut params = self.parse_tql_params()?;
-        params.is_verbose = is_verbose;
-        Ok(Statement::Tql(Tql::Explain(TqlExplain::from(params))))
     }
 
     fn parse_tql_params(&mut self) -> std::result::Result<TqlParameters, ParserError> {
@@ -200,6 +146,10 @@ impl<'a> ParserContext<'a> {
     #[inline]
     fn is_rparen(token: &Token) -> bool {
         matches!(token, Token::RParen)
+    }
+
+    fn has_verbose_keyword(&mut self) -> bool {
+        self.peek_token_as_string().eq_ignore_ascii_case(VERBOSE)
     }
 
     fn parse_string_or_number_or_word(
@@ -562,6 +512,19 @@ mod tests {
             _ => unreachable!(),
         }
 
+        let sql = "TQL EXPLAIN verbose (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Explain(explain)) => {
+                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(explain.start, "20");
+                assert_eq!(explain.end, "100");
+                assert_eq!(explain.step, "10");
+                assert_eq!(explain.lookback, None);
+                assert!(explain.is_verbose);
+            }
+            _ => unreachable!(),
+        }
+
         let sql = "TQL EXPLAIN VERBOSE ('1970-01-01T00:05:00'::timestamp, '1970-01-01T00:10:00'::timestamp + '10 minutes'::interval, 10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
@@ -605,6 +568,19 @@ mod tests {
         }
 
         let sql = "TQL ANALYZE VERBOSE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Analyze(analyze)) => {
+                assert_eq!(analyze.start, "1676887657.1");
+                assert_eq!(analyze.end, "1676887659.5");
+                assert_eq!(analyze.step, "30.3");
+                assert_eq!(analyze.lookback, None);
+                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert!(analyze.is_verbose);
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "TQL ANALYZE verbose (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Analyze(analyze)) => {
                 assert_eq!(analyze.start, "1676887657.1");
