@@ -21,7 +21,7 @@ mod update_metadata;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context, LockKey, Procedure, Status};
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use futures_util::future;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -85,10 +85,21 @@ impl AlterLogicalTablesProcedure {
         self.check_physical_table().await?;
         // Fills the physical table info
         self.fill_physical_table_info().await?;
-        // Filter the tasks
+        // Filter the finished tasks
         let finished_tasks = self.check_finished_tasks()?;
-        if finished_tasks.iter().all(|x| *x) {
+        let already_finished_count = finished_tasks
+            .iter()
+            .map(|x| if *x { 1 } else { 0 })
+            .sum::<usize>();
+        let apply_tasks_count = self.data.tasks.len();
+        if already_finished_count == apply_tasks_count {
+            info!("All the alter tasks are finished, will skip the procedure.");
             return Ok(Status::done());
+        } else if already_finished_count > 0 {
+            info!(
+                "There are {} alter tasks, {} of them were already finished.",
+                apply_tasks_count, already_finished_count
+            );
         }
         self.filter_task(&finished_tasks)?;
 
