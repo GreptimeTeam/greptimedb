@@ -7355,6 +7355,7 @@ dependencies = [
  "ahash 0.8.6",
  "api",
  "approx_eq",
+ "arc-swap",
  "arrow",
  "arrow-schema",
  "async-recursion",

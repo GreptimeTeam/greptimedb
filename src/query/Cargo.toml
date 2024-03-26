@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 ahash.workspace = true
 api.workspace = true
+arc-swap = "1.0"
 arrow.workspace = true
 arrow-schema.workspace = true
 async-recursion = "1.0"
