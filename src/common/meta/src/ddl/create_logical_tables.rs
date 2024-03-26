@@ -230,7 +230,7 @@ impl CreateLogicalTablesProcedure {
                 .table_info_manager()
                 .get(self.data.physical_table_id)
                 .await?
-                .context(TableInfoNotFoundSnafu {
+                .with_context(|| TableInfoNotFoundSnafu {
                     table: format!("table id - {}", self.data.physical_table_id),
                 })?;
 
