@@ -41,7 +41,7 @@ SHOW COLUMNS FROM system_metrics in public;
 | ts          | TimestampMillisecond | No   | TIME INDEX | current_timestamp() |       |
 +-------------+----------------------+------+------------+---------------------+-------+
 
-SHOW FULL COLUMNS FROM system_metrics;
+SHOW FULL COLUMNS FROM `system_metrics`;
 
 +-------------+----------------------+-----------+------+------------+---------------------+---------+---------------------------------+-------+
 | Field       | Type                 | Collation | Null | Key        | Default             | Comment | Privileges                      | Extra |

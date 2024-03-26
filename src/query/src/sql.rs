@@ -343,6 +343,7 @@ pub async fn show_columns(
             (COLUMN_EXTRA_COLUMN, COLUMN_EXTRA_COLUMN),
         ]
     };
+
     let filters = vec![
         col(columns::TABLE_NAME).eq(lit(&stmt.table)),
         col(columns::TABLE_SCHEMA).eq(lit(schema_name.clone())),

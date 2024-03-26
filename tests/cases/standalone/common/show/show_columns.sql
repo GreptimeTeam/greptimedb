@@ -15,7 +15,7 @@ SHOW COLUMNS FROM system_metrics;
 
 SHOW COLUMNS FROM system_metrics in public;
 
-SHOW FULL COLUMNS FROM system_metrics;
+SHOW FULL COLUMNS FROM `system_metrics`;
 
 SHOW COLUMNS FROM system_metrics like '%util%';
 

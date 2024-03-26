@@ -113,8 +113,10 @@ impl<'a> ParserContext<'a> {
                         name: table_name.to_string(),
                     }
                 );
-
-                table_name.to_string()
+                // Safety: already checked above
+                Self::canonicalize_object_name(table_name).0[0]
+                    .value
+                    .clone()
             }
             _ => {
                 return error::UnexpectedTokenSnafu {
@@ -221,7 +223,10 @@ impl<'a> ParserContext<'a> {
                     }
                 );
 
-                table_name.to_string()
+                // Safety: already checked above
+                Self::canonicalize_object_name(table_name).0[0]
+                    .value
+                    .clone()
             }
             _ => {
                 return error::UnexpectedTokenSnafu {
