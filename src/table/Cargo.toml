@@ -11,7 +11,6 @@ testing = []
 workspace = true
 
 [dependencies]
-anymap = "1.0.0-beta.2"
 async-trait = "0.1"
 chrono.workspace = true
 common-base.workspace = true
@@ -19,7 +18,6 @@ common-catalog.workspace = true
 common-datasource.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
-common-procedure.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
 common-telemetry.workspace = true

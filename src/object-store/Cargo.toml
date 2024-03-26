@@ -10,9 +10,6 @@ workspace = true
 [dependencies]
 async-trait = "0.1"
 bytes.workspace = true
-common-error.workspace = true
-common-macro.workspace = true
-common-runtime.workspace = true
 common-telemetry.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
@@ -22,7 +19,6 @@ opendal = { version = "0.45", features = [
     "layers-tracing",
 ] }
 prometheus.workspace = true
-snafu.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
