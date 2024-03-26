@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Deref;
 
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{CreateRequests, RegionRequest, RegionRequestHeader};
-use api::v1::{CreateTableExpr, SemanticType};
+use api::v1::CreateTableExpr;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
@@ -36,7 +36,7 @@ use table::metadata::{RawTableInfo, TableId};
 use crate::cache_invalidator::Context;
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
 use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error, region_storage_path};
-use crate::ddl::DdlContext;
+use crate::ddl::{physical_table_metadata, DdlContext};
 use crate::error::{
     DecodeJsonSnafu, MetadataCorruptionSnafu, Result, TableAlreadyExistsSnafu,
     TableInfoNotFoundSnafu,
@@ -50,6 +50,7 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
+use crate::table_name::TableName;
 use crate::{metrics, ClusterId};
 
 pub struct CreateLogicalTablesProcedure {
@@ -226,17 +227,23 @@ impl CreateLogicalTablesProcedure {
             let physical_table_info = self
                 .context
                 .table_metadata_manager
-                .get_full_table_info(self.data.physical_table_id)
+                .table_info_manager()
+                .get(self.data.physical_table_id)
                 .await?
-                .0
-                .context(TableInfoNotFoundSnafu {
-                    table_name: format!("table id - {}", self.data.physical_table_id),
+                .with_context(|| TableInfoNotFoundSnafu {
+                    table: format!("table id - {}", self.data.physical_table_id),
                 })?;
 
             // generate new table info
             let new_table_info = self
                 .data
                 .build_new_physical_table_info(&physical_table_info);
+
+            let physical_table_name = TableName::new(
+                &new_table_info.catalog_name,
+                &new_table_info.schema_name,
+                &new_table_info.name,
+            );
 
             // update physical table's metadata
             self.context
@@ -249,7 +256,10 @@ impl CreateLogicalTablesProcedure {
                 .cache_invalidator
                 .invalidate(
                     &Context::default(),
-                    vec![CacheIdent::TableId(self.data.physical_table_id)],
+                    vec![
+                        CacheIdent::TableId(self.data.physical_table_id),
+                        CacheIdent::TableName(physical_table_name),
+                    ],
                 )
                 .await?;
         } else {
@@ -358,8 +368,7 @@ impl CreateLogicalTablesProcedure {
 
         self.data.state = CreateTablesState::CreateMetadata;
 
-        // Ensures the procedures after the crash start from the `DatanodeCreateRegions` stage.
-        Ok(Status::executing(false))
+        Ok(Status::executing(true))
     }
 }
 
@@ -479,38 +488,12 @@ impl CreateTablesData {
         &mut self,
         old_table_info: &DeserializedValueWithBytes<TableInfoValue>,
     ) -> RawTableInfo {
-        let mut raw_table_info = old_table_info.deref().table_info.clone();
+        let raw_table_info = old_table_info.deref().table_info.clone();
 
-        let existing_primary_key = raw_table_info
-            .meta
-            .schema
-            .column_schemas
-            .iter()
-            .map(|col| col.name.clone())
-            .collect::<HashSet<_>>();
-        let primary_key_indices = &mut raw_table_info.meta.primary_key_indices;
-        let value_indices = &mut raw_table_info.meta.value_indices;
-        value_indices.clear();
-        let time_index = &mut raw_table_info.meta.schema.timestamp_index;
-        let columns = &mut raw_table_info.meta.schema.column_schemas;
-        columns.clear();
-
-        for (idx, col) in self.physical_columns.drain(..).enumerate() {
-            match col.semantic_type {
-                SemanticType::Tag => {
-                    // push new primary key to the end.
-                    if !existing_primary_key.contains(&col.column_schema.name) {
-                        primary_key_indices.push(idx);
-                    }
-                }
-                SemanticType::Field => value_indices.push(idx),
-                SemanticType::Timestamp => *time_index = Some(idx),
-            }
-
-            columns.push(col.column_schema);
-        }
-
-        raw_table_info
+        physical_table_metadata::build_new_physical_table_info(
+            raw_table_info,
+            &self.physical_columns,
+        )
     }
 }
 

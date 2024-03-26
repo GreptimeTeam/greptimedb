@@ -369,7 +369,7 @@ async fn handle_truncate_table_task(
         table_metadata_manager.get_full_table_info(table_id).await?;
 
     let table_info_value = table_info_value.with_context(|| error::TableInfoNotFoundSnafu {
-        table_name: table_ref.to_string(),
+        table: table_ref.to_string(),
     })?;
 
     let table_route_value =
@@ -421,7 +421,7 @@ async fn handle_alter_table_task(
         .get(table_id)
         .await?
         .with_context(|| error::TableInfoNotFoundSnafu {
-            table_name: table_ref.to_string(),
+            table: table_ref.to_string(),
         })?;
 
     let physical_table_id = ddl_manager
@@ -439,7 +439,7 @@ async fn handle_alter_table_task(
             .get(physical_table_id)
             .await?
             .with_context(|| error::TableInfoNotFoundSnafu {
-                table_name: table_ref.to_string(),
+                table: table_ref.to_string(),
             })?
             .table_info;
         Some((
@@ -488,7 +488,7 @@ async fn handle_drop_table_task(
         .await?;
 
     let table_info_value = table_info_value.with_context(|| error::TableInfoNotFoundSnafu {
-        table_name: table_ref.to_string(),
+        table: table_ref.to_string(),
     })?;
 
     let table_route_value =

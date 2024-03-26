@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::options::MixOptions;
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
@@ -124,6 +125,9 @@ impl GreptimeDbStandaloneBuilder {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
 
+        let catalog_manager =
+            KvBackendCatalogManager::new(kv_backend.clone(), Arc::new(DummyCacheInvalidator));
+
         let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
         let table_id_sequence = Arc::new(
@@ -154,12 +158,17 @@ impl GreptimeDbStandaloneBuilder {
             .unwrap(),
         );
 
-        let instance =
-            FrontendBuilder::new(kv_backend.clone(), datanode_manager, ddl_task_executor)
-                .with_plugin(plugins)
-                .try_build()
-                .await
-                .unwrap();
+        let instance = FrontendBuilder::new(
+            kv_backend.clone(),
+            catalog_manager.clone(),
+            datanode_manager,
+            ddl_task_executor,
+        )
+        .with_plugin(plugins)
+        .with_cache_invalidator(catalog_manager)
+        .try_build()
+        .await
+        .unwrap();
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

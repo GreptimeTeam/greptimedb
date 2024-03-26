@@ -487,26 +487,26 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn alter_table_inner(&self, expr: AlterExpr) -> Result<Output> {
         let catalog_name = if expr.catalog_name.is_empty() {
-            DEFAULT_CATALOG_NAME
+            DEFAULT_CATALOG_NAME.to_string()
         } else {
-            expr.catalog_name.as_str()
+            expr.catalog_name.clone()
         };
 
         let schema_name = if expr.schema_name.is_empty() {
-            DEFAULT_SCHEMA_NAME
+            DEFAULT_SCHEMA_NAME.to_string()
         } else {
-            expr.schema_name.as_str()
+            expr.schema_name.clone()
         };
 
-        let table_name = expr.table_name.as_str();
+        let table_name = expr.table_name.clone();
 
         let table = self
             .catalog_manager
-            .table(catalog_name, schema_name, table_name)
+            .table(&catalog_name, &schema_name, &table_name)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format_full_table_name(catalog_name, schema_name, table_name),
+                table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
             })?;
 
         let table_id = table.table_info().ident.table_id;
@@ -518,8 +518,54 @@ impl StatementExecutor {
             expr
         );
 
-        let req = SubmitDdlTaskRequest {
-            task: DdlTask::new_alter_table(expr.clone()),
+        let physical_table_id = self
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_id(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        let (req, invalidate_keys) = if physical_table_id == table_id {
+            // This is physical table
+            let req = SubmitDdlTaskRequest {
+                task: DdlTask::new_alter_table(expr),
+            };
+
+            let invalidate_keys = vec![
+                CacheIdent::TableId(table_id),
+                CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
+            ];
+
+            (req, invalidate_keys)
+        } else {
+            // This is logical table
+            let req = SubmitDdlTaskRequest {
+                task: DdlTask::new_alter_logical_tables(vec![expr]),
+            };
+
+            let mut invalidate_keys = vec![
+                CacheIdent::TableId(physical_table_id),
+                CacheIdent::TableId(table_id),
+                CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
+            ];
+
+            let physical_table = self
+                .table_metadata_manager
+                .table_info_manager()
+                .get(physical_table_id)
+                .await
+                .context(TableMetadataManagerSnafu)?
+                .map(|x| x.into_inner());
+            if let Some(physical_table) = physical_table {
+                let physical_table_name = TableName::new(
+                    physical_table.table_info.catalog_name,
+                    physical_table.table_info.schema_name,
+                    physical_table.table_info.name,
+                );
+                invalidate_keys.push(CacheIdent::TableName(physical_table_name));
+            }
+
+            (req, invalidate_keys)
         };
 
         self.procedure_executor
@@ -529,13 +575,7 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate(
-                &Context::default(),
-                vec![
-                    CacheIdent::TableId(table_id),
-                    CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
-                ],
-            )
+            .invalidate(&Context::default(), invalidate_keys)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 

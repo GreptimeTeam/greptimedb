@@ -15,25 +15,29 @@
 mod check;
 mod metadata;
 mod region_request;
+mod table_cache_keys;
 mod update_metadata;
 
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context, LockKey, Procedure, Status};
+use common_telemetry::{info, warn};
 use futures_util::future;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::TableId;
 
 use crate::ddl::utils::add_peer_context_if_needed;
-use crate::ddl::DdlContext;
-use crate::error::{Error, Result};
-use crate::instruction::CacheIdent;
+use crate::ddl::{physical_table_metadata, DdlContext};
+use crate::error::{DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
-use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
+use crate::key::DeserializedValueWithBytes;
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders};
 use crate::{cache_invalidator, metrics, ClusterId};
@@ -60,8 +64,9 @@ impl AlterLogicalTablesProcedure {
                 tasks,
                 table_info_values: vec![],
                 physical_table_id,
+                physical_table_info: None,
                 physical_table_route: None,
-                cache_invalidate_keys: vec![],
+                physical_columns: vec![],
             },
         }
     }
@@ -79,11 +84,24 @@ impl AlterLogicalTablesProcedure {
         // Checks the physical table, must after [fill_table_info_values]
         self.check_physical_table().await?;
         // Fills the physical table info
-        self.fill_physical_table_route().await?;
-        // Filter the tasks
+        self.fill_physical_table_info().await?;
+        // Filter the finished tasks
         let finished_tasks = self.check_finished_tasks()?;
-        if finished_tasks.iter().all(|x| *x) {
-            return Ok(Status::done());
+        let already_finished_count = finished_tasks
+            .iter()
+            .map(|x| if *x { 1 } else { 0 })
+            .sum::<usize>();
+        let apply_tasks_count = self.data.tasks.len();
+        if already_finished_count == apply_tasks_count {
+            info!("All the alter tasks are finished, will skip the procedure.");
+            // Re-invalidate the table cache
+            self.data.state = AlterTablesState::InvalidateTableCache;
+            return Ok(Status::executing(true));
+        } else if already_finished_count > 0 {
+            info!(
+                "There are {} alter tasks, {} of them were already finished.",
+                apply_tasks_count, already_finished_count
+            );
         }
         self.filter_task(&finished_tasks)?;
 
@@ -116,17 +134,61 @@ impl AlterLogicalTablesProcedure {
             }
         }
 
-        future::join_all(alter_region_tasks)
+        // Collects responses from all the alter region tasks.
+        let phy_raw_schemas = future::join_all(alter_region_tasks)
             .await
             .into_iter()
+            .map(|res| res.map(|mut res| res.extension.remove(ALTER_PHYSICAL_EXTENSION_KEY)))
             .collect::<Result<Vec<_>>>()?;
 
-        self.data.state = AlterTablesState::UpdateMetadata;
+        if phy_raw_schemas.is_empty() {
+            self.data.state = AlterTablesState::UpdateMetadata;
+            return Ok(Status::executing(true));
+        }
 
+        // Verify all the physical schemas are the same
+        // Safety: previous check ensures this vec is not empty
+        let first = phy_raw_schemas.first().unwrap();
+        ensure!(
+            phy_raw_schemas.iter().all(|x| x == first),
+            MetadataCorruptionSnafu {
+                err_msg: "The physical schemas from datanodes are not the same."
+            }
+        );
+
+        // Decodes the physical raw schemas
+        if let Some(phy_raw_schema) = first {
+            self.data.physical_columns =
+                ColumnMetadata::decode_list(phy_raw_schema).context(DecodeJsonSnafu)?;
+        } else {
+            warn!("altering logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
+        }
+
+        self.data.state = AlterTablesState::UpdateMetadata;
         Ok(Status::executing(true))
     }
 
     pub(crate) async fn on_update_metadata(&mut self) -> Result<Status> {
+        if !self.data.physical_columns.is_empty() {
+            let physical_table_info = self.data.physical_table_info.as_ref().unwrap();
+
+            // Generates new table info
+            let old_raw_table_info = physical_table_info.table_info.clone();
+            let new_raw_table_info = physical_table_metadata::build_new_physical_table_info(
+                old_raw_table_info,
+                &self.data.physical_columns,
+            );
+
+            // Updates physical table's metadata
+            self.context
+                .table_metadata_manager
+                .update_table_info(
+                    DeserializedValueWithBytes::from_inner(physical_table_info.clone()),
+                    new_raw_table_info,
+                )
+                .await?;
+        }
+
         let table_info_values = self.build_update_metadata()?;
         let manager = &self.context.table_metadata_manager;
         let chunk_size = manager.batch_update_table_info_value_chunk_size();
@@ -151,15 +213,12 @@ impl AlterLogicalTablesProcedure {
     }
 
     pub(crate) async fn on_invalidate_table_cache(&mut self) -> Result<Status> {
-        let to_invalidate = self
-            .data
-            .cache_invalidate_keys
-            .drain(..)
-            .map(CacheIdent::TableId)
-            .collect::<Vec<_>>();
+        let ctx = cache_invalidator::Context::default();
+        let to_invalidate = self.build_table_cache_keys_to_invalidate();
+
         self.context
             .cache_invalidator
-            .invalidate(&cache_invalidator::Context::default(), to_invalidate)
+            .invalidate(&ctx, to_invalidate)
             .await?;
         Ok(Status::done())
     }
@@ -212,17 +271,13 @@ impl Procedure for AlterLogicalTablesProcedure {
         lock_key.push(CatalogLock::Read(table_ref.catalog).into());
         lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());
         lock_key.push(TableLock::Write(self.data.physical_table_id).into());
+        lock_key.extend(
+            self.data
+                .table_info_values
+                .iter()
+                .map(|table| TableLock::Write(table.table_info.ident.table_id).into()),
+        );
 
-        for task in &self.data.tasks {
-            lock_key.push(
-                TableNameLock::new(
-                    &task.alter_table.catalog_name,
-                    &task.alter_table.schema_name,
-                    &task.alter_table.table_name,
-                )
-                .into(),
-            );
-        }
         LockKey::new(lock_key)
     }
 }
@@ -237,8 +292,9 @@ pub struct AlterTablesData {
     table_info_values: Vec<TableInfoValue>,
     /// Physical table info
     physical_table_id: TableId,
+    physical_table_info: Option<TableInfoValue>,
     physical_table_route: Option<PhysicalTableRouteValue>,
-    cache_invalidate_keys: Vec<TableId>,
+    physical_columns: Vec<ColumnMetadata>,
 }
 
 #[derive(Debug, Serialize, Deserialize, AsRefStr)]

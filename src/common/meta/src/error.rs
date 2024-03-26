@@ -89,11 +89,8 @@ pub enum Error {
     #[snafu(display("Unexpected sequence value: {}", err_msg))]
     UnexpectedSequenceValue { err_msg: String, location: Location },
 
-    #[snafu(display("Table info not found: {}", table_name))]
-    TableInfoNotFound {
-        table_name: String,
-        location: Location,
-    },
+    #[snafu(display("Table info not found: {}", table))]
+    TableInfoNotFound { table: String, location: Location },
 
     #[snafu(display("Failed to register procedure loader, type name: {}", type_name))]
     RegisterProcedureLoader {
