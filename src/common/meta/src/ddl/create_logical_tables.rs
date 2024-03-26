@@ -54,7 +54,7 @@ use crate::{metrics, ClusterId};
 
 pub struct CreateLogicalTablesProcedure {
     pub context: DdlContext,
-    pub creator: TablesCreator,
+    pub data: CreateTablesData,
 }
 
 impl CreateLogicalTablesProcedure {
@@ -66,14 +66,22 @@ impl CreateLogicalTablesProcedure {
         physical_table_id: TableId,
         context: DdlContext,
     ) -> Self {
-        let creator = TablesCreator::new(cluster_id, tasks, physical_table_id);
-        Self { context, creator }
+        let len = tasks.len();
+        let data = CreateTablesData {
+            cluster_id,
+            state: CreateTablesState::Prepare,
+            tasks,
+            table_ids_already_exists: vec![None; len],
+            physical_table_id,
+            physical_region_numbers: vec![],
+            physical_columns: vec![],
+        };
+        Self { context, data }
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
-        let creator = TablesCreator { data };
-        Ok(Self { context, creator })
+        Ok(Self { context, data })
     }
 
     /// On the prepares step, it performs:
@@ -90,19 +98,17 @@ impl CreateLogicalTablesProcedure {
         let manager = &self.context.table_metadata_manager;
 
         // Sets physical region numbers
-        let physical_table_id = self.creator.data.physical_table_id();
+        let physical_table_id = self.data.physical_table_id();
         let physical_region_numbers = manager
             .table_route_manager()
             .get_physical_table_route(physical_table_id)
             .await
             .map(|(_, route)| TableRouteValue::Physical(route).region_numbers())?;
-        self.creator
-            .data
+        self.data
             .set_physical_region_numbers(physical_region_numbers);
 
         // Checks if the tables exist
         let table_name_keys = self
-            .creator
             .data
             .all_create_table_exprs()
             .iter()
@@ -117,7 +123,7 @@ impl CreateLogicalTablesProcedure {
             .collect::<Vec<_>>();
 
         // Validates the tasks
-        let tasks = &mut self.creator.data.tasks;
+        let tasks = &mut self.data.tasks;
         for (task, table_id) in tasks.iter().zip(already_exists_tables_ids.iter()) {
             if table_id.is_some() {
                 // If a table already exists, we just ignore it.
@@ -155,19 +161,16 @@ impl CreateLogicalTablesProcedure {
 
             // sort columns in task
             task.sort_columns();
-
-            common_telemetry::info!("[DEBUG] sorted task {:?}", task);
         }
 
-        self.creator
-            .data
+        self.data
             .set_table_ids_already_exists(already_exists_tables_ids);
-        self.creator.data.state = CreateTablesState::DatanodeCreateRegions;
+        self.data.state = CreateTablesState::DatanodeCreateRegions;
         Ok(Status::executing(true))
     }
 
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
-        let physical_table_id = self.creator.data.physical_table_id();
+        let physical_table_id = self.data.physical_table_id();
         let (_, physical_table_route) = self
             .context
             .table_metadata_manager
@@ -186,12 +189,12 @@ impl CreateLogicalTablesProcedure {
     /// - Failed to create table metadata.
     pub async fn on_create_metadata(&mut self) -> Result<Status> {
         let manager = &self.context.table_metadata_manager;
-        let physical_table_id = self.creator.data.physical_table_id();
-        let remaining_tasks = self.creator.data.remaining_tasks();
+        let physical_table_id = self.data.physical_table_id();
+        let remaining_tasks = self.data.remaining_tasks();
         let num_tables = remaining_tasks.len();
 
         if num_tables > 0 {
-            let chunk_size = manager.max_logical_tables_per_batch();
+            let chunk_size = manager.create_logical_tables_metadata_chunk_size();
             if num_tables > chunk_size {
                 let chunks = remaining_tasks
                     .into_iter()
@@ -212,28 +215,26 @@ impl CreateLogicalTablesProcedure {
         // The `table_id` MUST be collected after the [Prepare::Prepare],
         // ensures the all `table_id`s have been allocated.
         let table_ids = self
-            .creator
             .data
             .tasks
             .iter()
             .map(|task| task.table_info.ident.table_id)
             .collect::<Vec<_>>();
 
-        if !self.creator.data.physical_columns.is_empty() {
+        if !self.data.physical_columns.is_empty() {
             // fetch old physical table's info
             let physical_table_info = self
                 .context
                 .table_metadata_manager
-                .get_full_table_info(self.creator.data.physical_table_id)
+                .get_full_table_info(self.data.physical_table_id)
                 .await?
                 .0
                 .context(TableInfoNotFoundSnafu {
-                    table_name: format!("table id - {}", self.creator.data.physical_table_id),
+                    table_name: format!("table id - {}", self.data.physical_table_id),
                 })?;
 
             // generate new table info
             let new_table_info = self
-                .creator
                 .data
                 .build_new_physical_table_info(&physical_table_info);
 
@@ -248,7 +249,7 @@ impl CreateLogicalTablesProcedure {
                 .cache_invalidator
                 .invalidate(
                     &Context::default(),
-                    vec![CacheIdent::TableId(self.creator.data.physical_table_id)],
+                    vec![CacheIdent::TableId(self.data.physical_table_id)],
                 )
                 .await?;
         } else {
@@ -275,7 +276,7 @@ impl CreateLogicalTablesProcedure {
         datanode: &Peer,
         region_routes: &[RegionRoute],
     ) -> Result<CreateRequests> {
-        let create_tables_data = &self.creator.data;
+        let create_tables_data = &self.data;
         let tasks = &create_tables_data.tasks;
         let physical_table_id = create_tables_data.physical_table_id();
         let regions = find_leader_regions(region_routes, datanode);
@@ -332,7 +333,7 @@ impl CreateLogicalTablesProcedure {
             .collect::<Result<Vec<_>>>()?;
 
         if raw_schemas.is_empty() {
-            self.creator.data.state = CreateTablesState::CreateMetadata;
+            self.data.state = CreateTablesState::CreateMetadata;
             return Ok(Status::executing(false));
         }
 
@@ -350,12 +351,12 @@ impl CreateLogicalTablesProcedure {
         if let Some(raw_schema) = first {
             let physical_columns =
                 ColumnMetadata::decode_list(raw_schema).context(DecodeJsonSnafu)?;
-            self.creator.data.physical_columns = physical_columns;
+            self.data.physical_columns = physical_columns;
         } else {
             warn!("creating logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
         }
 
-        self.creator.data.state = CreateTablesState::CreateMetadata;
+        self.data.state = CreateTablesState::CreateMetadata;
 
         // Ensures the procedures after the crash start from the `DatanodeCreateRegions` stage.
         Ok(Status::executing(false))
@@ -369,7 +370,7 @@ impl Procedure for CreateLogicalTablesProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let state = &self.creator.data.state;
+        let state = &self.data.state;
 
         let _timer = metrics::METRIC_META_PROCEDURE_CREATE_TABLES
             .with_label_values(&[state.as_ref()])
@@ -384,20 +385,20 @@ impl Procedure for CreateLogicalTablesProcedure {
     }
 
     fn dump(&self) -> ProcedureResult<String> {
-        serde_json::to_string(&self.creator.data).context(ToJsonSnafu)
+        serde_json::to_string(&self.data).context(ToJsonSnafu)
     }
 
     fn lock_key(&self) -> LockKey {
         // CatalogLock, SchemaLock,
         // TableLock
         // TableNameLock(s)
-        let mut lock_key = Vec::with_capacity(2 + 1 + self.creator.data.tasks.len());
-        let table_ref = self.creator.data.tasks[0].table_ref();
+        let mut lock_key = Vec::with_capacity(2 + 1 + self.data.tasks.len());
+        let table_ref = self.data.tasks[0].table_ref();
         lock_key.push(CatalogLock::Read(table_ref.catalog).into());
         lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());
-        lock_key.push(TableLock::Write(self.creator.data.physical_table_id()).into());
+        lock_key.push(TableLock::Write(self.data.physical_table_id()).into());
 
-        for task in &self.creator.data.tasks {
+        for task in &self.data.tasks {
             lock_key.push(
                 TableNameLock::new(
                     &task.create_table.catalog_name,
@@ -408,33 +409,6 @@ impl Procedure for CreateLogicalTablesProcedure {
             );
         }
         LockKey::new(lock_key)
-    }
-}
-
-pub struct TablesCreator {
-    /// The serializable data.
-    pub data: CreateTablesData,
-}
-
-impl TablesCreator {
-    pub fn new(
-        cluster_id: ClusterId,
-        tasks: Vec<CreateTableTask>,
-        physical_table_id: TableId,
-    ) -> Self {
-        let len = tasks.len();
-
-        Self {
-            data: CreateTablesData {
-                cluster_id,
-                state: CreateTablesState::Prepare,
-                tasks,
-                table_ids_already_exists: vec![None; len],
-                physical_table_id,
-                physical_region_numbers: vec![],
-                physical_columns: vec![],
-            },
-        }
     }
 }
 

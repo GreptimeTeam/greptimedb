@@ -23,9 +23,7 @@ use api::v1::meta::{
     DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
-use api::v1::{
-    AlterExpr, CreateTableExpr, DropDatabaseExpr, DropTableExpr, SemanticType, TruncateTableExpr,
-};
+use api::v1::{AlterExpr, CreateTableExpr, DropDatabaseExpr, DropTableExpr, TruncateTableExpr};
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
@@ -63,6 +61,15 @@ impl DdlTask {
             table_data
                 .into_iter()
                 .map(|(expr, table_info)| CreateTableTask::new(expr, Vec::new(), table_info))
+                .collect(),
+        )
+    }
+
+    pub fn new_alter_logical_tables(table_data: Vec<AlterExpr>) -> Self {
+        DdlTask::AlterLogicalTables(
+            table_data
+                .into_iter()
+                .map(|alter_table| AlterTableTask { alter_table })
                 .collect(),
         )
     }
@@ -396,31 +403,7 @@ impl CreateTableTask {
             .column_defs
             .sort_unstable_by(|a, b| a.name.cmp(&b.name));
 
-        // compute new indices of sorted columns
-        // this part won't do any check or verification.
-        let mut primary_key_indices = Vec::with_capacity(self.create_table.primary_keys.len());
-        let mut value_indices =
-            Vec::with_capacity(self.create_table.column_defs.len() - primary_key_indices.len() - 1);
-        let mut timestamp_index = None;
-        for (index, col) in self.create_table.column_defs.iter().enumerate() {
-            if self.create_table.primary_keys.contains(&col.name) {
-                primary_key_indices.push(index);
-            } else if col.semantic_type == SemanticType::Timestamp as i32 {
-                timestamp_index = Some(index);
-            } else {
-                value_indices.push(index);
-            }
-        }
-
-        // overwrite table info
-        self.table_info
-            .meta
-            .schema
-            .column_schemas
-            .sort_unstable_by(|a, b| a.name.cmp(&b.name));
-        self.table_info.meta.schema.timestamp_index = timestamp_index;
-        self.table_info.meta.primary_key_indices = primary_key_indices;
-        self.table_info.meta.value_indices = value_indices;
+        self.table_info.sort_columns();
     }
 }
 
@@ -707,7 +690,8 @@ mod tests {
                     "column1".to_string(),
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     false,
-                ),
+                )
+                .with_time_index(true),
                 ColumnSchema::new(
                     "column2".to_string(),
                     ConcreteDataType::float64_datatype(),

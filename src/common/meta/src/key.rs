@@ -461,7 +461,7 @@ impl TableMetadataManager {
         Ok(())
     }
 
-    pub fn max_logical_tables_per_batch(&self) -> usize {
+    pub fn create_logical_tables_metadata_chunk_size(&self) -> usize {
         // The batch size is max_txn_size / 3 because the size of the `tables_data`
         // is 3 times the size of the `tables_data`.
         self.kv_backend.max_txn_ops() / 3
@@ -683,6 +683,64 @@ impl TableMetadataManager {
             let op_name = "the updating table info";
             ensure_values!(remote_table_info, new_table_info_value, op_name);
         }
+        Ok(())
+    }
+
+    pub fn batch_update_table_info_value_chunk_size(&self) -> usize {
+        self.kv_backend.max_txn_ops()
+    }
+
+    pub async fn batch_update_table_info_values(
+        &self,
+        table_info_value_pairs: Vec<(TableInfoValue, RawTableInfo)>,
+    ) -> Result<()> {
+        let len = table_info_value_pairs.len();
+        let mut txns = Vec::with_capacity(len);
+        struct OnFailure<F, R>
+        where
+            F: FnOnce(&Vec<TxnOpResponse>) -> R,
+        {
+            table_info_value: TableInfoValue,
+            on_update_table_info_failure: F,
+        }
+        let mut on_failures = Vec::with_capacity(len);
+
+        for (table_info_value, new_table_info) in table_info_value_pairs {
+            let table_id = table_info_value.table_info.ident.table_id;
+
+            let new_table_info_value = table_info_value.update(new_table_info);
+
+            let (update_table_info_txn, on_update_table_info_failure) =
+                self.table_info_manager().build_update_txn(
+                    table_id,
+                    &DeserializedValueWithBytes::from_inner(table_info_value),
+                    &new_table_info_value,
+                )?;
+
+            txns.push(update_table_info_txn);
+
+            on_failures.push(OnFailure {
+                table_info_value: new_table_info_value,
+                on_update_table_info_failure,
+            });
+        }
+
+        let txn = Txn::merge_all(txns);
+        let r = self.kv_backend.txn(txn).await?;
+
+        if !r.succeeded {
+            for on_failure in on_failures {
+                let remote_table_info = (on_failure.on_update_table_info_failure)(&r.responses)?
+                    .context(error::UnexpectedSnafu {
+                        err_msg: "Reads the empty table info during the updating table info",
+                    })?
+                    .into_inner();
+
+                let op_name = "the batch updating table info";
+                ensure_values!(remote_table_info, on_failure.table_info_value, op_name);
+            }
+        }
+
         Ok(())
     }
 

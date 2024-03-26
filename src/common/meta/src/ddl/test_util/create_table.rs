@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use api::v1::column_def::try_as_column_schema;
-use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
+use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO2_ENGINE};
 use datatypes::schema::RawSchema;
@@ -23,40 +23,6 @@ use derive_builder::Builder;
 use store_api::storage::TableId;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
-
-#[derive(Default, Builder)]
-pub struct TestColumnDef {
-    #[builder(setter(into), default)]
-    name: String,
-    data_type: ColumnDataType,
-    #[builder(default)]
-    is_nullable: bool,
-    semantic_type: SemanticType,
-    #[builder(setter(into), default)]
-    comment: String,
-}
-
-impl From<TestColumnDef> for ColumnDef {
-    fn from(
-        TestColumnDef {
-            name,
-            data_type,
-            is_nullable,
-            semantic_type,
-            comment,
-        }: TestColumnDef,
-    ) -> Self {
-        Self {
-            name,
-            data_type: data_type as i32,
-            is_nullable,
-            default_constraint: vec![],
-            semantic_type: semantic_type as i32,
-            comment,
-            datatype_extension: None,
-        }
-    }
-}
 
 #[derive(Default, Builder)]
 #[builder(default)]
