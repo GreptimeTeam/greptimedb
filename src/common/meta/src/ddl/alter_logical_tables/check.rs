@@ -63,16 +63,12 @@ impl AlterLogicalTablesProcedure {
     pub(crate) fn check_finished_tasks(&self) -> Result<Vec<bool>> {
         let task = &self.data.tasks;
         let table_info_values = &self.data.table_info_values;
-        let mut finished_tasks = vec![false; task.len()];
-        for ((task, table), is_finished) in task
+
+        Ok(task
             .iter()
             .zip(table_info_values.iter())
-            .zip(finished_tasks.iter_mut())
-        {
-            *is_finished = Self::check_finished_task(task, table);
-        }
-
-        Ok(finished_tasks)
+            .map(|(task, table)| Self::check_finished_task(task, table))
+            .collect())
     }
 
     // Checks if the schemas of the tasks are the same
