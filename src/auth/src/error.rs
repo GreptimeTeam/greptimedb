@@ -64,8 +64,9 @@ pub enum Error {
         username: String,
     },
 
-    #[snafu(display("Failed to initialize a watcher for file"))]
+    #[snafu(display("Failed to initialize a watcher for file {}", path))]
     FileWatch {
+        path: Option<String>,
         #[snafu(source)]
         error: notify::Error,
     },
