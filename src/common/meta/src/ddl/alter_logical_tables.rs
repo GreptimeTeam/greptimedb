@@ -94,7 +94,9 @@ impl AlterLogicalTablesProcedure {
         let apply_tasks_count = self.data.tasks.len();
         if already_finished_count == apply_tasks_count {
             info!("All the alter tasks are finished, will skip the procedure.");
-            return Ok(Status::done());
+            // Re-invalidate the table cache
+            self.data.state = AlterTablesState::InvalidateTableCache;
+            return Ok(Status::executing(true));
         } else if already_finished_count > 0 {
             info!(
                 "There are {} alter tasks, {} of them were already finished.",
