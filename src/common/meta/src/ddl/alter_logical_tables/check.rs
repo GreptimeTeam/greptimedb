@@ -121,10 +121,10 @@ impl AlterLogicalTablesProcedure {
             .collect::<HashSet<_>>();
 
         let Some(kind) = task.alter_table.kind.as_ref() else {
-            return false;
+            return true; // Never get here since we have checked it in `check_alter_kind`
         };
         let Kind::AddColumns(add_columns) = kind else {
-            return false;
+            return true; // Never get here since we have checked it in `check_alter_kind`
         };
 
         // We only check that all columns have been finished. That is to say,
