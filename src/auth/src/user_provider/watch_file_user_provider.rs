@@ -21,7 +21,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_telemetry::info;
 use notify::{EventKind, RecursiveMode, Watcher};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use snafu::ResultExt;
 
 use crate::error::{FileWatchSnafu, Result};
@@ -43,11 +42,10 @@ impl WatchFileUserProvider {
             users: users.clone(),
         };
 
-        let (tx, rx) = channel::<DebounceEventResult>();
-        let mut debouncer = new_debouncer(Duration::from_secs(1), None, tx)
-            .context(FileWatchSnafu { path: "<none>" })?;
+        let (tx, rx) = channel::<notify::Result<notify::Event>>();
+        let mut debouncer =
+            notify::recommended_watcher(tx).context(FileWatchSnafu { path: "<none>" })?;
         debouncer
-            .watcher()
             .watch(Path::new(filepath), RecursiveMode::NonRecursive)
             .context(FileWatchSnafu { path: filepath })?;
 
@@ -55,11 +53,8 @@ impl WatchFileUserProvider {
         std::thread::spawn(move || {
             let _hold = debouncer;
             while let Ok(res) = rx.recv() {
-                if let Ok(events) = res {
-                    if events
-                        .iter()
-                        .any(|e| matches!(e.kind, EventKind::Modify(_) | EventKind::Create(_)))
-                    {
+                if let Ok(event) = res {
+                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                         info!("User provider file {} changed", &filepath);
                         if let Ok(credential) = load_credential_from_file(&filepath) {
                             *users.lock().expect("users credential must be valid") = credential;
