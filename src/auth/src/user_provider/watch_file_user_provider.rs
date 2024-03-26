@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_telemetry::{info, warn};
 use notify::{EventKind, RecursiveMode, Watcher};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
-use crate::error::{FileWatchSnafu, Result};
+use crate::error::{FileWatchSnafu, InvalidConfigSnafu, Result};
 use crate::user_info::DefaultUserInfo;
 use crate::user_provider::{authenticate_with_credential, load_credential_from_file};
 use crate::{Identity, Password, UserInfoRef, UserProvider};
@@ -49,19 +49,30 @@ impl WatchFileUserProvider {
         let (tx, rx) = channel::<notify::Result<notify::Event>>();
         let mut debouncer =
             notify::recommended_watcher(tx).context(FileWatchSnafu { path: "<none>" })?;
+        let mut dir = Path::new(filepath).to_path_buf();
+        ensure!(
+            dir.pop(),
+            InvalidConfigSnafu {
+                value: filepath,
+                msg: "UserProvider path must be a file path",
+            }
+        );
         debouncer
-            .watch(Path::new(filepath), RecursiveMode::NonRecursive)
+            .watch(&dir, RecursiveMode::NonRecursive)
             .context(FileWatchSnafu { path: filepath })?;
 
         let filepath = filepath.to_string();
         std::thread::spawn(move || {
+            let filename = Path::new(&filepath).file_name();
             let _hold = debouncer;
             while let Ok(res) = rx.recv() {
                 if let Ok(event) = res {
-                    if matches!(
+                    let is_this_file = event.paths.iter().any(|p| p.file_name() == filename);
+                    let is_relevant_event = matches!(
                         event.kind,
                         EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                    ) {
+                    );
+                    if is_this_file && is_relevant_event {
                         info!(?event.kind, "User provider file {} changed", &filepath);
                         match load_credential_from_file(&filepath) {
                             Ok(credential) => {
