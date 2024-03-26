@@ -36,21 +36,14 @@ type WatchedCredentialRef = Arc<Mutex<Option<HashMap<String, Vec<u8>>>>>;
 /// Empty file is invalid; but file not exist means every user can be authenticated.
 pub(crate) struct WatchFileUserProvider {
     users: WatchedCredentialRef,
-    #[cfg(test)]
-    notify: crossbeam_channel::Receiver<()>,
 }
 
 impl WatchFileUserProvider {
     pub fn new(filepath: &str) -> Result<Self> {
-        #[cfg(test)]
-        let (tx_notify, rx_notify) = crossbeam_channel::unbounded();
-
         let credential = load_credential_from_file(filepath)?;
         let users = Arc::new(Mutex::new(credential));
         let this = WatchFileUserProvider {
             users: users.clone(),
-            #[cfg(test)]
-            notify: rx_notify,
         };
 
         let (tx, rx) = channel::<notify::Result<notify::Event>>();
@@ -73,15 +66,13 @@ impl WatchFileUserProvider {
                         match load_credential_from_file(&filepath) {
                             Ok(credential) => {
                                 *users.lock().expect("users credential must be valid") = credential;
-                                info!("User provider file {filepath} reloaded");
-                                #[cfg(test)]
-                                let _ = tx_notify.send(());
+                                info!("User provider file {filepath} reloaded")
                             }
                             Err(err) => {
                                 warn!(
                                     ?err,
                                     "Fail to load credential from file {filepath}; keep the old one",
-                                );
+                                )
                             }
                         }
                     }
@@ -126,6 +117,7 @@ pub mod test {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_temp_dir;
+    use tokio::time::sleep;
 
     use crate::user_provider::watch_file_user_provider::WatchFileUserProvider;
     use crate::user_provider::{Identity, Password};
@@ -148,14 +140,12 @@ pub mod test {
             ok,
             "username: {}, password: {}",
             username,
-            password,
+            password
         );
     }
 
     #[tokio::test]
     async fn test_file_provider() {
-        common_telemetry::init_default_ut_logging();
-
         let dir = create_temp_dir("test_file_provider");
         let file_path = format!("{}/test_file_provider", dir.path().to_str().unwrap());
         {
@@ -174,45 +164,33 @@ pub mod test {
 
         {
             // update the tmp file
-            let _ = provider.notify.try_iter().into_iter();
             let file = File::create(&file_path).unwrap();
             let mut lw = LineWriter::new(file);
             assert!(writeln!(lw, "root=654321").is_ok());
             lw.flush().unwrap();
         }
-        provider
-            .notify
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
+        sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
         test_authenticate(&provider, "root", "123456", false).await;
         test_authenticate(&provider, "root", "654321", true).await;
         test_authenticate(&provider, "admin", "654321", false).await;
 
         {
             // remove the tmp file
-            let _ = provider.notify.try_iter().into_iter();
             std::fs::remove_file(&file_path).unwrap();
         }
-        provider
-            .notify
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
+        sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
         test_authenticate(&provider, "root", "123456", true).await;
         test_authenticate(&provider, "root", "654321", true).await;
         test_authenticate(&provider, "admin", "654321", true).await;
 
         {
             // recreate the tmp file
-            let _ = provider.notify.try_iter().into_iter();
             let file = File::create(&file_path).unwrap();
             let mut lw = LineWriter::new(file);
             assert!(writeln!(lw, "root=123456").is_ok());
             lw.flush().unwrap();
         }
-        provider
-            .notify
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
+        sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
         test_authenticate(&provider, "root", "123456", true).await;
         test_authenticate(&provider, "root", "654321", false).await;
         test_authenticate(&provider, "admin", "654321", false).await;
