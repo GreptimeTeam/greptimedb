@@ -169,7 +169,7 @@ pub mod test {
             assert!(writeln!(lw, "root=654321").is_ok());
             lw.flush().unwrap();
         }
-        sleep(Duration::from_secs(1)).await; // wait the watcher to apply the change
+        sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
         test_authenticate(&provider, "root", "123456", false).await;
         test_authenticate(&provider, "root", "654321", true).await;
         test_authenticate(&provider, "admin", "654321", false).await;
@@ -178,7 +178,7 @@ pub mod test {
             // remove the tmp file
             std::fs::remove_file(&file_path).unwrap();
         }
-        sleep(Duration::from_secs(1)).await; // wait the watcher to apply the change
+        sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
         test_authenticate(&provider, "root", "123456", true).await;
         test_authenticate(&provider, "root", "654321", true).await;
         test_authenticate(&provider, "admin", "654321", true).await;
@@ -190,7 +190,7 @@ pub mod test {
             assert!(writeln!(lw, "root=123456").is_ok());
             lw.flush().unwrap();
         }
-        sleep(Duration::from_secs(1)).await; // wait the watcher to apply the change
+        sleep(Duration::from_secs(2)).await; // wait the watcher to apply the change
         test_authenticate(&provider, "root", "123456", true).await;
         test_authenticate(&provider, "root", "654321", false).await;
         test_authenticate(&provider, "admin", "654321", false).await;
