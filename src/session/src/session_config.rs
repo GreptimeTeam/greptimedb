@@ -20,12 +20,7 @@ use sql::ast::Value;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display(
-        "Invalid value for parameter \"{}\": \"{}\"\nHint: {}",
-        name,
-        value,
-        hint,
-    ))]
+    #[snafu(display("Invalid value for parameter \"{}\": {}\nHint: {}", name, value, hint,))]
     InvalidConfigValue {
         name: String,
         value: String,
@@ -53,7 +48,7 @@ impl TryFrom<Value> for PGByteaOutputValue {
                     _ => InvalidConfigValueSnafu {
                         name: "BYTEA_OUTPUT",
                         value: value.to_string(),
-                        hint: "Avaiable values: escape, hex",
+                        hint: "Available values: escape, hex",
                     }
                     .fail(),
                 }
@@ -61,7 +56,7 @@ impl TryFrom<Value> for PGByteaOutputValue {
             _ => InvalidConfigValueSnafu {
                 name: "BYTEA_OUTPUT",
                 value: value.to_string(),
-                hint: "Avaiable values: escape, hex",
+                hint: "Available values: escape, hex",
             }
             .fail(),
         }
