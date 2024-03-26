@@ -14,6 +14,5 @@ clap.workspace = true
 client.workspace = true
 futures-util.workspace = true
 indicatif = "0.17.1"
-itertools.workspace = true
 parquet.workspace = true
 tokio.workspace = true
