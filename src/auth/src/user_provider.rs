@@ -65,7 +65,7 @@ fn load_credential_from_file(filepath: &str) -> Result<HashMap<String, Vec<u8>>>
     ensure!(
         path.exists() && path.is_file(),
         InvalidConfigSnafu {
-            value: filepath.to_string(),
+            value: filepath,
             msg: "UserProvider file must be a valid file path",
         }
     );
@@ -86,7 +86,7 @@ fn load_credential_from_file(filepath: &str) -> Result<HashMap<String, Vec<u8>>>
     ensure!(
         !credential.is_empty(),
         InvalidConfigSnafu {
-            value: filepath.to_string(),
+            value: filepath,
             msg: "UserProvider's file must contains at least one valid credential",
         }
     );

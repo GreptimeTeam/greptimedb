@@ -30,6 +30,7 @@ use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const WATCH_FILE_USER_PROVIDER: &str = "watch_file_user_provider";
 
+/// A user provider that reads user credential from a file and watches the file for changes.
 pub(crate) struct WatchFileUserProvider {
     users: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 }
