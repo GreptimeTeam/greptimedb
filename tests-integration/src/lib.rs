@@ -13,10 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-<<<<<<< HEAD
-=======
 
->>>>>>> 9a816ba2 (fix: rebase)
 pub mod cluster;
 mod grpc;
 mod influxdb;

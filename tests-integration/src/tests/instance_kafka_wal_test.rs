@@ -16,8 +16,8 @@ use std::assert_matches::assert_matches;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use client::{OutputData, DEFAULT_CATALOG_NAME};
-use common_query::Output;
+use client::DEFAULT_CATALOG_NAME;
+use common_query::{Output, OutputData};
 use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
 use frontend::instance::Instance;
 use itertools::Itertools;
@@ -46,7 +46,7 @@ async fn test_create_database_and_insert_query(
         QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
     )
     .await;
-    assert_matches!(output, OutputData::AffectedRows(1));
+    assert_matches!(output.data, OutputData::AffectedRows(1));
 
     let output = execute_sql_with(
         &instance,
@@ -79,7 +79,7 @@ async fn test_create_database_and_insert_query(
         QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
     )
     .await;
-    match query_output {
+    match query_output.data {
         OutputData::Stream(s) => {
             let batches = common_recordbatch::util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
@@ -94,12 +94,14 @@ async fn test_create_database_and_insert_query(
     }
 }
 
+/// Maintains metadata of a table.
 struct Table {
     name: String,
     logical_timer: AtomicU64,
     inserted: Mutex<Vec<u64>>,
 }
 
+/// Inserts some data to a collection of tables and checks if these data exist after restart.
 #[apply(both_instances_cases_with_kafka_wal)]
 async fn test_replay(rebuildable_instance: Option<Box<dyn RebuildableMockInstance>>) {
     let Some(mut rebuildable_instance) = rebuildable_instance else {
@@ -113,17 +115,19 @@ async fn test_replay(rebuildable_instance: Option<Box<dyn RebuildableMockInstanc
         QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
     )
     .await;
-    assert_matches!(output, Output::AffectedRows(1));
+    assert_matches!(output.data, OutputData::AffectedRows(1));
 
     let tables = create_tables("test_replay", &instance, 10).await;
     insert_data(&tables, &instance, 15).await;
     ensure_data_exists(&tables, &instance).await;
 
     // Rebuilds to emulate restart which then triggers a replay.
-    let instance = rebuildable_instance.rebuild().await;
-    ensure_data_exists(&tables, &instance).await;
+    rebuildable_instance.rebuild().await;
+    ensure_data_exists(&tables, &rebuildable_instance.frontend()).await;
 }
 
+/// Inserts some data to a collection of tables and sends alter table requests to force flushing each table.
+/// Then checks if these data exist after restart.
 #[apply(both_instances_cases_with_kafka_wal)]
 async fn test_flush_then_replay(rebuildable_instance: Option<Box<dyn RebuildableMockInstance>>) {
     let Some(mut rebuildable_instance) = rebuildable_instance else {
@@ -137,7 +141,7 @@ async fn test_flush_then_replay(rebuildable_instance: Option<Box<dyn Rebuildable
         QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
     )
     .await;
-    assert_matches!(output, Output::AffectedRows(1));
+    assert_matches!(output.data, OutputData::AffectedRows(1));
 
     let tables = create_tables("test_flush_then_replay", &instance, 10).await;
     insert_data(&tables, &instance, 15).await;
@@ -150,8 +154,8 @@ async fn test_flush_then_replay(rebuildable_instance: Option<Box<dyn Rebuildable
             // Repeats the last char to construct a new table name.
             let new_table_name = format!("{}{}", table.name, table.name.chars().last().unwrap());
             assert_matches!(
-                do_alter(&instance, &table.name, &new_table_name).await,
-                Output::AffectedRows(0)
+                do_alter(&instance, &table.name, &new_table_name).await.data,
+                OutputData::AffectedRows(0)
             );
             Table {
                 name: new_table_name,
@@ -164,18 +168,19 @@ async fn test_flush_then_replay(rebuildable_instance: Option<Box<dyn Rebuildable
     ensure_data_exists(&tables, &instance).await;
 
     // Rebuilds to emulate restart which then triggers a replay.
-    let instance = rebuildable_instance.rebuild().await;
-    ensure_data_exists(&tables, &instance).await;
+    rebuildable_instance.rebuild().await;
+    ensure_data_exists(&tables, &rebuildable_instance.frontend()).await;
 }
 
+/// Creates a given number of tables.
 async fn create_tables(test_name: &str, instance: &Arc<Instance>, num_tables: usize) -> Vec<Table> {
     futures::future::join_all((0..num_tables).map(|i| {
         let instance = instance.clone();
         async move {
             let table_name = format!("{}_{}", test_name, i);
             assert_matches!(
-                do_create(&instance, &table_name).await,
-                Output::AffectedRows(0)
+                do_create(&instance, &table_name).await.data,
+                OutputData::AffectedRows(0)
             );
             Table {
                 name: table_name,
@@ -187,6 +192,8 @@ async fn create_tables(test_name: &str, instance: &Arc<Instance>, num_tables: us
     .await
 }
 
+/// Inserts data to the tables in parallel.
+/// The reason why the insertion is parallel is that we want to ensure the kafka wal works as expected under parallel write workloads.
 async fn insert_data(tables: &[Table], instance: &Arc<Instance>, num_writers: usize) {
     // Each writer randomly chooses a table and inserts a sequence of rows into the table.
     futures::future::join_all((0..num_writers).map(|_| async {
@@ -196,8 +203,8 @@ async fn insert_data(tables: &[Table], instance: &Arc<Instance>, num_writers: us
             let ts = table.logical_timer.fetch_add(1000, Ordering::Relaxed);
             let row = make_row(ts, &mut rng);
             assert_matches!(
-                do_insert(instance, &table.name, row).await,
-                Output::AffectedRows(1)
+                do_insert(instance, &table.name, row).await.data,
+                OutputData::AffectedRows(1)
             );
             {
                 // Inserting into the `inserted` vector and inserting into the database are not atomic
@@ -210,10 +217,11 @@ async fn insert_data(tables: &[Table], instance: &Arc<Instance>, num_writers: us
     .await;
 }
 
+/// Sends queries to ensure the data exists for each table.
 async fn ensure_data_exists(tables: &[Table], instance: &Arc<Instance>) {
     futures::future::join_all(tables.iter().map(|table| async {
         let output = do_query(instance, &table.name).await;
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let record_batches = common_recordbatch::util::collect(stream).await.unwrap();
@@ -238,6 +246,7 @@ async fn ensure_data_exists(tables: &[Table], instance: &Arc<Instance>) {
     .await;
 }
 
+/// Sends a create table SQL.
 async fn do_create(instance: &Arc<Instance>, table_name: &str) -> Output {
     execute_sql_with(
         instance,
@@ -256,6 +265,7 @@ async fn do_create(instance: &Arc<Instance>, table_name: &str) -> Output {
     .await
 }
 
+/// Sends an alter table SQL.
 async fn do_alter(instance: &Arc<Instance>, table_name: &str, new_table_name: &str) -> Output {
     execute_sql_with(
         instance,
@@ -265,6 +275,7 @@ async fn do_alter(instance: &Arc<Instance>, table_name: &str, new_table_name: &s
     .await
 }
 
+/// Sends a insert SQL.
 async fn do_insert(instance: &Arc<Instance>, table_name: &str, row: String) -> Output {
     execute_sql_with(
         instance,
@@ -274,6 +285,7 @@ async fn do_insert(instance: &Arc<Instance>, table_name: &str, row: String) -> O
     .await
 }
 
+/// Sends a query SQL.
 async fn do_query(instance: &Arc<Instance>, table_name: &str) -> Output {
     execute_sql_with(
         instance,
@@ -283,6 +295,8 @@ async fn do_query(instance: &Arc<Instance>, table_name: &str) -> Output {
     .await
 }
 
+/// Sends a SQL with the given context which specifies the catalog name and schema name, aka. database name.
+/// The query context is required since the tables are created in the `test` schema rather than the default `public` schema.
 async fn execute_sql_with(
     instance: &Arc<Instance>,
     sql: &str,
