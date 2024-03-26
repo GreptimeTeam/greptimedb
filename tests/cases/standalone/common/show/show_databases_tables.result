@@ -48,3 +48,7 @@ show tables;
 | triggers                              |
 +---------------------------------------+
 
+use public;
+
+Affected Rows: 0
+
