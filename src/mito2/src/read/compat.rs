@@ -119,6 +119,14 @@ impl CompatPrimaryKey {
         )?;
 
         batch.set_primary_key(buffer);
+
+        // update cache
+        if let Some(pk_values) = &mut batch.pk_values {
+            for value in &self.values {
+                pk_values.push(value.clone());
+            }
+        }
+
         Ok(batch)
     }
 }

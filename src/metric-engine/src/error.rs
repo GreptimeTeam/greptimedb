@@ -19,6 +19,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
+use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
 
 #[derive(Snafu)]
@@ -66,6 +67,13 @@ pub enum Error {
     #[snafu(display("Failed to deserialize column metadata from {}", raw))]
     DeserializeColumnMetadata {
         raw: String,
+        #[snafu(source)]
+        error: serde_json::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to serialize column metadata"))]
+    SerializeColumnMetadata {
         #[snafu(source)]
         error: serde_json::Error,
         location: Location,
@@ -155,6 +163,12 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display("Unsupported region request: {}", request))]
+    UnsupportedRegionRequest {
+        request: RegionRequest,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -170,11 +184,14 @@ impl ErrorExt for Error {
             | ColumnTypeMismatch { .. }
             | PhysicalRegionBusy { .. } => StatusCode::InvalidArguments,
 
-            ForbiddenPhysicalAlter { .. } => StatusCode::Unsupported,
+            ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
+                StatusCode::Unsupported
+            }
 
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
             | DeserializeColumnMetadata { .. }
+            | SerializeColumnMetadata { .. }
             | DecodeColumnValue { .. }
             | ParseRegionId { .. }
             | InvalidMetadata { .. } => StatusCode::Unexpected,

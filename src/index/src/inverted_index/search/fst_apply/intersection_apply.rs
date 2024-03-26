@@ -17,6 +17,10 @@ use std::mem::size_of;
 use fst::map::OpBuilder;
 use fst::{IntoStreamer, Streamer};
 use regex_automata::dfa::dense::DFA;
+use regex_automata::dfa::Automaton;
+use regex_automata::util::primitives::StateID;
+use regex_automata::util::start::Config;
+use regex_automata::Anchored;
 use snafu::{ensure, ResultExt};
 
 use crate::inverted_index::error::{
@@ -32,7 +36,53 @@ pub struct IntersectionFstApplier {
     ranges: Vec<Range>,
 
     /// A list of `Dfa` compiled from regular expression patterns.
-    dfas: Vec<DFA<Vec<u32>>>,
+    dfas: Vec<DfaFstAutomaton>,
+}
+
+#[derive(Debug)]
+struct DfaFstAutomaton(DFA<Vec<u32>>);
+
+impl fst::Automaton for DfaFstAutomaton {
+    type State = StateID;
+
+    #[inline]
+    fn start(&self) -> Self::State {
+        let config = Config::new().anchored(Anchored::No);
+        self.0.start_state(&config).unwrap()
+    }
+
+    #[inline]
+    fn is_match(&self, state: &Self::State) -> bool {
+        self.0.is_match_state(*state)
+    }
+
+    #[inline]
+    fn can_match(&self, state: &Self::State) -> bool {
+        !self.0.is_dead_state(*state)
+    }
+
+    #[inline]
+    fn accept_eof(&self, state: &StateID) -> Option<StateID> {
+        if self.0.is_match_state(*state) {
+            return Some(*state);
+        }
+        Some(self.0.next_eoi_state(*state))
+    }
+
+    #[inline]
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        if self.0.is_match_state(*state) {
+            return *state;
+        }
+        self.0.next_state(*state, byte)
+    }
+}
+
+impl IntersectionFstApplier {
+    fn new(ranges: Vec<Range>, dfas: Vec<DFA<Vec<u32>>>) -> Self {
+        let dfas = dfas.into_iter().map(DfaFstAutomaton).collect();
+        Self { ranges, dfas }
+    }
 }
 
 impl FstApplier for IntersectionFstApplier {
@@ -86,7 +136,7 @@ impl FstApplier for IntersectionFstApplier {
 
         size += self.dfas.capacity() * size_of::<DFA<Vec<u32>>>();
         for dfa in &self.dfas {
-            size += dfa.memory_usage();
+            size += dfa.0.memory_usage();
         }
         size
     }
@@ -119,7 +169,7 @@ impl IntersectionFstApplier {
             }
         }
 
-        Ok(Self { dfas, ranges })
+        Ok(Self::new(ranges, dfas))
     }
 }
 
@@ -365,18 +415,15 @@ mod tests {
 
     #[test]
     fn test_intersection_fst_applier_memory_usage() {
-        let applier = IntersectionFstApplier {
-            ranges: vec![],
-            dfas: vec![],
-        };
+        let applier = IntersectionFstApplier::new(vec![], vec![]);
 
         assert_eq!(applier.memory_usage(), 0);
 
         let dfa = DFA::new("^abc$").unwrap();
         assert_eq!(dfa.memory_usage(), 320);
 
-        let applier = IntersectionFstApplier {
-            ranges: vec![Range {
+        let applier = IntersectionFstApplier::new(
+            vec![Range {
                 lower: Some(Bound {
                     value: b"aa".to_vec(),
                     inclusive: true,
@@ -386,9 +433,8 @@ mod tests {
                     inclusive: true,
                 }),
             }],
-            dfas: vec![dfa],
-        };
-
+            vec![dfa],
+        );
         assert_eq!(
             applier.memory_usage(),
             size_of::<Range>() + 4 + size_of::<DFA<Vec<u32>>>() + 320

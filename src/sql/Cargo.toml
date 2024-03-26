@@ -26,7 +26,6 @@ datatypes.workspace = true
 hex = "0.4"
 itertools.workspace = true
 lazy_static.workspace = true
-once_cell.workspace = true
 regex.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true

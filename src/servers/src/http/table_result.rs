@@ -135,7 +135,7 @@ impl IntoResponse for TableResponse {
         let mut resp = (
             [(
                 header::CONTENT_TYPE,
-                HeaderValue::from_static(mime::PLAIN.as_ref()),
+                HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref()),
             )],
             self.to_string(),
         )

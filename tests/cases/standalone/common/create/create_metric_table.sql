@@ -2,13 +2,14 @@ CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("phys
 
 SHOW TABLES;
 
+DESC TABLE phy;
+
 CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
 
 CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
 
-SELECT * FROM information_schema.tables WHERE engine = "metric" order by table_name;
+SELECT table_catalog, table_schema, table_name, table_type, engine FROM information_schema.tables WHERE engine = 'metric' order by table_name;
 
--- We currently don't maintains physical table's schema.
 DESC TABLE phy;
 
 DESC TABLE t1;

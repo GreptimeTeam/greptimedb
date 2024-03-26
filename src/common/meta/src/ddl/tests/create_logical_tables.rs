@@ -28,19 +28,22 @@ use common_telemetry::debug;
 use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 
+use crate::datanode_manager::HandleResponse;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
-use crate::ddl::test_util::create_table::build_raw_table_info_from_expr;
-use crate::ddl::test_util::{TestColumnDefBuilder, TestCreateTableExprBuilder};
+use crate::ddl::test_util::columns::TestColumnDefBuilder;
+use crate::ddl::test_util::create_table::{
+    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+};
 use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
 use crate::error::{Error, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
-use crate::test_util::{new_ddl_context, AffectedRows, MockDatanodeHandler, MockDatanodeManager};
+use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
 
 // Note: this code may be duplicated with others.
 // However, it's by design, ensures the tests are easy to be modified or added.
-fn test_create_logical_table_task(name: &str) -> CreateTableTask {
+pub(crate) fn test_create_logical_table_task(name: &str) -> CreateTableTask {
     let create_table = TestCreateTableExprBuilder::default()
         .column_defs([
             TestColumnDefBuilder::default()
@@ -85,7 +88,7 @@ fn test_create_logical_table_task(name: &str) -> CreateTableTask {
 
 // Note: this code may be duplicated with others.
 // However, it's by design, ensures the tests are easy to be modified or added.
-fn test_create_physical_table_task(name: &str) -> CreateTableTask {
+pub(crate) fn test_create_physical_table_task(name: &str) -> CreateTableTask {
     let create_table = TestCreateTableExprBuilder::default()
         .column_defs([
             TestColumnDefBuilder::default()
@@ -134,7 +137,7 @@ async fn test_on_prepare_physical_table_not_found() {
     assert_matches!(err, Error::TableRouteNotFound { .. });
 }
 
-async fn create_physical_table_metadata(
+pub(crate) async fn create_physical_table_metadata(
     ddl_context: &DdlContext,
     table_info: RawTableInfo,
     table_route: TableRouteValue,
@@ -332,9 +335,9 @@ pub struct NaiveDatanodeHandler;
 
 #[async_trait::async_trait]
 impl MockDatanodeHandler for NaiveDatanodeHandler {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<AffectedRows> {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<HandleResponse> {
         debug!("Returning Ok(0) for request: {request:?}, peer: {peer:?}");
-        Ok(0)
+        Ok(HandleResponse::new(0))
     }
 
     async fn handle_query(

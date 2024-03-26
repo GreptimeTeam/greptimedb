@@ -19,6 +19,12 @@ includes = [
     "*.py",
 ]
 
+excludes = [
+    # copied sources
+    "src/common/base/src/readable_size.rs",
+    "src/servers/src/repeated_field.rs",
+]
+
 [properties]
 inceptionYear = 2023
 copyrightOwner = "Greptime Team"

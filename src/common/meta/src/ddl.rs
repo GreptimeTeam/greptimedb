@@ -28,11 +28,14 @@ use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 
+pub mod alter_logical_tables;
 pub mod alter_table;
 pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;
+pub mod drop_database;
 pub mod drop_table;
+mod physical_table_metadata;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;

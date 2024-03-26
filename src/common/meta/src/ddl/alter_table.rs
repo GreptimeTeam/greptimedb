@@ -281,7 +281,7 @@ impl AlterTableProcedure {
 
         let new_meta = table_info
             .meta
-            .builder_with_alter_kind(table_ref.table, &request.alter_kind)
+            .builder_with_alter_kind(table_ref.table, &request.alter_kind, false)
             .context(error::TableSnafu)?
             .build()
             .with_context(|_| error::BuildTableMetaSnafu {
@@ -363,7 +363,8 @@ impl AlterTableProcedure {
                 )
                 .into(),
             );
-            lock_key.push(TableLock::Read(*physical_table_id).into())
+            // We must acquire the write lock since this may update the physical table schema
+            lock_key.push(TableLock::Write(*physical_table_id).into())
         }
 
         let table_ref = self.data.table_ref();
