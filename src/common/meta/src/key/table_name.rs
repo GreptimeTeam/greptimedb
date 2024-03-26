@@ -241,7 +241,7 @@ impl TableNameManager {
         self.kv_backend.exists(&raw_key).await
     }
 
-    pub async fn tables(
+    pub fn tables(
         &self,
         catalog: &str,
         schema: &str,

@@ -22,7 +22,7 @@ use snafu::ResultExt;
 
 use crate::error::{Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::StateStoreRef;
-use crate::{BoxedProcedure, ProcedureId};
+use crate::ProcedureId;
 
 pub mod state_store;
 
@@ -75,14 +75,12 @@ impl ProcedureStore {
         &self,
         procedure_id: ProcedureId,
         step: u32,
-        procedure: &BoxedProcedure,
+        type_name: String,
+        data: String,
         parent_id: Option<ProcedureId>,
     ) -> Result<()> {
-        let type_name = procedure.type_name();
-        let data = procedure.dump()?;
-
         let message = ProcedureMessage {
-            type_name: type_name.to_string(),
+            type_name,
             data,
             parent_id,
             step,
@@ -312,6 +310,7 @@ mod tests {
     use object_store::ObjectStore;
 
     use crate::store::state_store::ObjectStateStore;
+    use crate::BoxedProcedure;
 
     impl ProcedureStore {
         pub(crate) fn from_object_store(store: ObjectStore) -> ProcedureStore {
@@ -481,9 +480,10 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
-
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(procedure_id, 0, type_name, data, None)
             .await
             .unwrap();
 
@@ -507,9 +507,10 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
-
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(procedure_id, 0, type_name, data, None)
             .await
             .unwrap();
         store.commit_procedure(procedure_id, 1).await.unwrap();
@@ -526,9 +527,10 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
-
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(procedure_id, 0, type_name, data, None)
             .await
             .unwrap();
         store.rollback_procedure(procedure_id, 1).await.unwrap();
@@ -545,13 +547,16 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
-
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(procedure_id, 0, type_name, data, None)
             .await
             .unwrap();
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 1, &procedure, None)
+            .store_procedure(procedure_id, 1, type_name, data, None)
             .await
             .unwrap();
 
@@ -570,12 +575,17 @@ mod tests {
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
 
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(procedure_id, 0, type_name, data, None)
             .await
             .unwrap();
+
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 1, &procedure, None)
+            .store_procedure(procedure_id, 1, type_name, data, None)
             .await
             .unwrap();
         store.commit_procedure(procedure_id, 2).await.unwrap();
@@ -595,31 +605,41 @@ mod tests {
         // store 3 steps
         let id0 = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id0-0"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id0, 0, &procedure, None)
+            .store_procedure(id0, 0, type_name, data, None)
             .await
             .unwrap();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id0-1"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id0, 1, &procedure, None)
+            .store_procedure(id0, 1, type_name, data, None)
             .await
             .unwrap();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id0-2"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id0, 2, &procedure, None)
+            .store_procedure(id0, 2, type_name, data, None)
             .await
             .unwrap();
 
         // store 2 steps and then commit
         let id1 = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id1-0"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id1, 0, &procedure, None)
+            .store_procedure(id1, 0, type_name, data, None)
             .await
             .unwrap();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id1-1"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id1, 1, &procedure, None)
+            .store_procedure(id1, 1, type_name, data, None)
             .await
             .unwrap();
         store.commit_procedure(id1, 2).await.unwrap();
@@ -627,8 +647,10 @@ mod tests {
         // store 1 step
         let id2 = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id2-0"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id2, 0, &procedure, None)
+            .store_procedure(id2, 0, type_name, data, None)
             .await
             .unwrap();
 

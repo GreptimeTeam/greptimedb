@@ -199,6 +199,8 @@ impl Env {
         };
         let log_file_name = self.data_home.join(log_file_name).display().to_string();
 
+        println!("{subcommand} log file at {log_file_name}");
+
         let log_file = OpenOptions::new()
             .create(true)
             .write(true)

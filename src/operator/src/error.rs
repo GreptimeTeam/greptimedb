@@ -508,23 +508,20 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Do not support creating tables in multiple catalogs: {}",
-        catalog_names
-    ))]
-    CreateTableWithMultiCatalogs {
-        catalog_names: String,
+    #[snafu(display("Do not support {} in multiple catalogs", ddl_name))]
+    DdlWithMultiCatalogs {
+        ddl_name: String,
         location: Location,
     },
 
-    #[snafu(display("Do not support creating tables in multiple schemas: {}", schema_names))]
-    CreateTableWithMultiSchemas {
-        schema_names: String,
+    #[snafu(display("Do not support {} in multiple schemas", ddl_name))]
+    DdlWithMultiSchemas {
+        ddl_name: String,
         location: Location,
     },
 
-    #[snafu(display("Empty creating table expr"))]
-    EmptyCreateTableExpr { location: Location },
+    #[snafu(display("Empty {} expr", name))]
+    EmptyDdlExpr { name: String, location: Location },
 
     #[snafu(display("Failed to create logical tables: {}", reason))]
     CreateLogicalTables { reason: String, location: Location },
@@ -657,9 +654,9 @@ impl ErrorExt for Error {
 
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
 
-            Error::CreateTableWithMultiCatalogs { .. }
-            | Error::CreateTableWithMultiSchemas { .. }
-            | Error::EmptyCreateTableExpr { .. }
+            Error::DdlWithMultiCatalogs { .. }
+            | Error::DdlWithMultiSchemas { .. }
+            | Error::EmptyDdlExpr { .. }
             | Error::InvalidPartitionRule { .. }
             | Error::ParseSqlValue { .. } => StatusCode::InvalidArguments,
 

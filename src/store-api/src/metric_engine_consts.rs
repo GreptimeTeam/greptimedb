@@ -66,3 +66,7 @@ pub const PHYSICAL_TABLE_METADATA_KEY: &str = "physical_metric_table";
 /// ```
 /// And this key will be translated to corresponding physical **REGION** id in metasrv.
 pub const LOGICAL_TABLE_METADATA_KEY: &str = "on_physical_table";
+
+/// HashMap key to be used in the region server's extension response.
+/// Represent a list of column metadata that are added to physical table.
+pub const ALTER_PHYSICAL_EXTENSION_KEY: &str = "ALTER_PHYSICAL";

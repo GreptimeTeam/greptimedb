@@ -215,12 +215,12 @@ mod tests {
 
         // write data
         let logical_region_id = env.default_logical_region_id();
-        let count = env
+        let result = env
             .metric()
             .handle_request(logical_region_id, request)
             .await
             .unwrap();
-        assert_eq!(count, 5);
+        assert_eq!(result.affected_rows, 5);
 
         // read data from physical region
         let physical_region_id = env.default_physical_region_id();
@@ -287,11 +287,11 @@ mod tests {
         });
 
         // write data
-        let count = engine
+        let result = engine
             .handle_request(logical_region_id, request)
             .await
             .unwrap();
-        assert_eq!(100, count);
+        assert_eq!(100, result.affected_rows);
     }
 
     #[tokio::test]

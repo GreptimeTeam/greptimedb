@@ -32,8 +32,10 @@ use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, Crea
 use common_meta::ddl::create_table::*;
 use common_meta::ddl::drop_table::executor::DropTableExecutor;
 use common_meta::ddl::drop_table::DropTableProcedure;
-use common_meta::ddl::test_util::create_table::build_raw_table_info_from_expr;
-use common_meta::ddl::test_util::{TestColumnDefBuilder, TestCreateTableExprBuilder};
+use common_meta::ddl::test_util::columns::TestColumnDefBuilder;
+use common_meta::ddl::test_util::create_table::{
+    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::DeserializedValueWithBytes;
@@ -252,7 +254,7 @@ async fn test_on_datanode_create_logical_regions() {
     let region_routes = test_data::new_region_routes();
     let datanode_manager = new_datanode_manager(&region_server, &region_routes).await;
     let physical_table_route = TableRouteValue::physical(region_routes);
-    let physical_table_id = 111;
+    let physical_table_id = 1;
 
     let task1 = create_table_task(Some("my_table1"));
     let task2 = create_table_task(Some("my_table2"));
@@ -301,9 +303,9 @@ async fn test_on_datanode_create_logical_regions() {
     });
 
     let status = procedure.on_datanode_create_regions().await.unwrap();
-    assert!(matches!(status, Status::Executing { persist: false }));
+    assert!(matches!(status, Status::Executing { persist: true }));
     assert!(matches!(
-        procedure.creator.data.state(),
+        procedure.data.state(),
         &CreateTablesState::CreateMetadata
     ));
 

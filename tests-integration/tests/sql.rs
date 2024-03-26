@@ -198,6 +198,23 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         assert_eq!(ret, 6);
     }
 
+    // parameter type mismatch
+    let query_re = sqlx::query("select i from demo where i = ?")
+        .bind("test")
+        .fetch_all(&pool)
+        .await;
+    assert!(query_re.is_err());
+    assert_eq!(
+        query_re
+            .err()
+            .unwrap()
+            .into_database_error()
+            .unwrap()
+            .downcast::<MySqlDatabaseError>()
+            .code(),
+        Some("22007")
+    );
+
     let _ = sqlx::query("delete from demo")
         .execute(&pool)
         .await

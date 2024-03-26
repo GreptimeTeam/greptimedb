@@ -39,7 +39,8 @@ impl MetricEngineInner {
             .collect::<Vec<_>>();
 
         // sort columns on column id to ensure the order
-        logical_column_metadata.sort_unstable_by_key(|col| col.column_id);
+        logical_column_metadata
+            .sort_unstable_by(|c1, c2| c1.column_schema.name.cmp(&c2.column_schema.name));
 
         Ok(logical_column_metadata)
     }
