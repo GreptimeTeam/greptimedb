@@ -20,7 +20,7 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig};
-use common_meta::cache_invalidator::DummyCacheInvalidator;
+use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::ProcedureExecutorRef;
@@ -433,6 +433,7 @@ impl StartCommand {
             table_metadata_manager,
             procedure_manager.clone(),
             datanode_manager.clone(),
+            catalog_manager.clone(),
             table_meta_allocator,
         )
         .await?;
@@ -469,13 +470,14 @@ impl StartCommand {
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
         datanode_manager: DatanodeManagerRef,
+        cache_invalidator: CacheInvalidatorRef,
         table_meta_allocator: TableMetadataAllocatorRef,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
                 procedure_manager,
                 datanode_manager,
-                Arc::new(DummyCacheInvalidator),
+                cache_invalidator,
                 table_metadata_manager,
                 table_meta_allocator,
                 Arc::new(MemoryRegionKeeper::default()),
