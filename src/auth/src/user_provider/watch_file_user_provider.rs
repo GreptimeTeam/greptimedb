@@ -65,8 +65,13 @@ impl WatchFileUserProvider {
                         info!("User provider file {} changed", &filepath);
                         match load_credential_from_file(&filepath) {
                             Ok(credential) => {
-                                *users.lock().expect("users credential must be valid") = credential;
-                                info!("User provider file {filepath} reloaded")
+                                let mut users =
+                                    users.lock().expect("users credential must be valid");
+                                #[cfg(not(test))]
+                                info!("User provider file {filepath} reloaded");
+                                #[cfg(test)]
+                                info!("User provider file {filepath} reloaded: {credential:?}");
+                                *users = credential;
                             }
                             Err(err) => {
                                 warn!(
@@ -164,6 +169,8 @@ pub mod test {
 
     #[tokio::test]
     async fn test_file_provider() {
+        common_telemetry::init_default_ut_logging();
+
         let dir = create_temp_dir("test_file_provider");
         let file_path = format!("{}/test_file_provider", dir.path().to_str().unwrap());
 
