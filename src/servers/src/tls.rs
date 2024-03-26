@@ -200,20 +200,20 @@ pub fn maybe_watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>)
     let tls_server_config_for_watcher = tls_server_config.clone();
 
     let (tx, rx) = channel::<notify::Result<notify::Event>>();
-    let mut watcher = notify::recommended_watcher(tx).context(FileWatchSnafu { path: None })?;
+    let mut watcher = notify::recommended_watcher(tx).context(FileWatchSnafu { path: "<none>" })?;
 
     let cert_path = tls_server_config.get_tls_option().cert_path();
     watcher
         .watch(cert_path, RecursiveMode::NonRecursive)
-        .context(FileWatchSnafu {
-            path: Some(cert_path),
+        .with_context(|_| FileWatchSnafu {
+            path: cert_path.display().to_string(),
         })?;
 
     let key_path = tls_server_config.get_tls_option().key_path();
     watcher
         .watch(key_path, RecursiveMode::NonRecursive)
-        .context(FileWatchSnafu {
-            path: Some(key_path),
+        .with_context(|_| FileWatchSnafu {
+            path: key_path.display().to_string(),
         })?;
 
     std::thread::spawn(move || {

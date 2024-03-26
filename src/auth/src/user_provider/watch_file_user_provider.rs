@@ -45,13 +45,11 @@ impl WatchFileUserProvider {
 
         let (tx, rx) = channel::<DebounceEventResult>();
         let mut debouncer = new_debouncer(Duration::from_secs(1), None, tx)
-            .context(FileWatchSnafu { path: None })?;
+            .context(FileWatchSnafu { path: "<none>" })?;
         debouncer
             .watcher()
             .watch(Path::new(filepath), RecursiveMode::NonRecursive)
-            .context(FileWatchSnafu {
-                path: Some(filepath),
-            })?;
+            .context(FileWatchSnafu { path: filepath })?;
 
         let filepath = filepath.to_string();
         std::thread::spawn(move || {

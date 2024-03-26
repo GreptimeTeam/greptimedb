@@ -451,7 +451,7 @@ pub enum Error {
 
     #[snafu(display("Failed to initialize a watcher for file {}", path))]
     FileWatch {
-        path: Option<String>,
+        path: String,
         #[snafu(source)]
         error: notify::Error,
     },
