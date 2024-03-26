@@ -14,19 +14,18 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use common_telemetry::{info, warn};
 use notify::{EventKind, RecursiveMode, Watcher};
 use snafu::ResultExt;
 
-use common_telemetry::{info, warn};
-
-use crate::{Identity, Password, UserInfoRef, UserProvider};
 use crate::error::{FileWatchSnafu, Result};
 use crate::user_info::DefaultUserInfo;
 use crate::user_provider::{authenticate_with_credential, load_credential_from_file};
+use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const WATCH_FILE_USER_PROVIDER: &str = "watch_file_user_provider";
 
@@ -117,12 +116,11 @@ pub mod test {
     use std::io::{LineWriter, Write};
     use std::time::{Duration, Instant};
 
+    use common_test_util::temp_dir::create_temp_dir;
     use tokio::time::sleep;
 
-    use common_test_util::temp_dir::create_temp_dir;
-
-    use crate::user_provider::{Identity, Password};
     use crate::user_provider::watch_file_user_provider::WatchFileUserProvider;
+    use crate::user_provider::{Identity, Password};
     use crate::UserProvider;
 
     async fn test_authenticate(
