@@ -59,17 +59,20 @@ pub trait UserProvider: Send + Sync {
     }
 }
 
-fn load_credential_from_file(filepath: &str) -> Result<HashMap<String, Vec<u8>>> {
+fn load_credential_from_file(filepath: &str) -> Result<Option<HashMap<String, Vec<u8>>>> {
     // check valid path
     let path = Path::new(filepath);
+    if !path.exists() {
+        return Ok(None);
+    }
+
     ensure!(
-        path.exists() && path.is_file(),
+        path.is_file(),
         InvalidConfigSnafu {
             value: filepath,
-            msg: "UserProvider file must be a valid file path",
+            msg: "UserProvider file must be a file",
         }
     );
-
     let file = File::open(path).context(IoSnafu)?;
     let credential = io::BufReader::new(file)
         .lines()
@@ -91,7 +94,7 @@ fn load_credential_from_file(filepath: &str) -> Result<HashMap<String, Vec<u8>>>
         }
     );
 
-    Ok(credential)
+    Ok(Some(credential))
 }
 
 fn authenticate_with_credential(

@@ -35,7 +35,11 @@ impl StaticUserProvider {
         })?;
         return match mode {
             "file" => {
-                let users = load_credential_from_file(content)?;
+                let users = load_credential_from_file(content)?
+                    .context(InvalidConfigSnafu {
+                        value: content.to_string(),
+                        msg: "StaticFileUserProvider must be a valid file path",
+                    })?;
                 Ok(StaticUserProvider { users })
             }
             "cmd" => content
@@ -64,12 +68,8 @@ impl UserProvider for StaticUserProvider {
         STATIC_USER_PROVIDER
     }
 
-    async fn authenticate(
-        &self,
-        input_id: Identity<'_>,
-        input_pwd: Password<'_>,
-    ) -> Result<UserInfoRef> {
-        authenticate_with_credential(&self.users, input_id, input_pwd)
+    async fn authenticate(&self, id: Identity<'_>, pwd: Password<'_>) -> Result<UserInfoRef> {
+        authenticate_with_credential(&self.users, id, pwd)
     }
 
     async fn authorize(
