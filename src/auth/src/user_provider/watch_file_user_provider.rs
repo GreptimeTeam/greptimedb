@@ -18,7 +18,7 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{info, warn};
 use notify::{EventKind, RecursiveMode, Watcher};
 use snafu::ResultExt;
 
@@ -66,11 +66,12 @@ impl WatchFileUserProvider {
                         match load_credential_from_file(&filepath) {
                             Ok(credential) => {
                                 *users.lock().expect("users credential must be valid") = credential;
+                                info!("User provider file {filepath} reloaded")
                             }
                             Err(err) => {
-                                error!(
+                                warn!(
                                     ?err,
-                                    "fail to load credential from changed file; keep the old one"
+                                    "Fail to load credential from file {filepath}; keep the old one",
                                 )
                             }
                         }
@@ -151,12 +152,8 @@ pub mod test {
             // write a tmp file
             let file = File::create(&file_path).unwrap();
             let mut lw = LineWriter::new(file);
-            assert!(lw
-                .write_all(
-                    b"root=123456
-admin=654321",
-                )
-                .is_ok());
+            assert!(writeln!(lw, "root=123456").is_ok());
+            assert!(writeln!(lw, "admin=654321").is_ok());
             lw.flush().unwrap();
         }
 
@@ -169,7 +166,7 @@ admin=654321",
             // update the tmp file
             let file = File::create(&file_path).unwrap();
             let mut lw = LineWriter::new(file);
-            assert!(lw.write_all(b"root=654321",).is_ok());
+            assert!(writeln!(lw, "root=654321").is_ok());
             lw.flush().unwrap();
         }
         sleep(Duration::from_secs(1)).await; // wait the watcher to apply the change
@@ -185,5 +182,17 @@ admin=654321",
         test_authenticate(&provider, "root", "123456", true).await;
         test_authenticate(&provider, "root", "654321", true).await;
         test_authenticate(&provider, "admin", "654321", true).await;
+
+        {
+            // recreate the tmp file
+            let file = File::create(&file_path).unwrap();
+            let mut lw = LineWriter::new(file);
+            assert!(writeln!(lw, "root=123456").is_ok());
+            lw.flush().unwrap();
+        }
+        sleep(Duration::from_secs(1)).await; // wait the watcher to apply the change
+        test_authenticate(&provider, "root", "123456", true).await;
+        test_authenticate(&provider, "root", "654321", false).await;
+        test_authenticate(&provider, "admin", "654321", false).await;
     }
 }
