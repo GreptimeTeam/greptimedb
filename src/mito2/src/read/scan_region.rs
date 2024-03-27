@@ -34,6 +34,7 @@ use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::CompatReader;
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
+use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{compat, Batch, Source};
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
@@ -44,7 +45,8 @@ use crate::sst::index::applier::SstIndexApplierRef;
 pub(crate) enum Scanner {
     /// Sequential scan.
     Seq(SeqScan),
-    // TODO(yingwen): Support windowed scan and chained scan.
+    /// Unordered scan.
+    Unordered(UnorderedScan),
 }
 
 impl Scanner {
@@ -52,6 +54,7 @@ impl Scanner {
     pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream> {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.build_stream().await,
+            Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
         }
     }
 }
@@ -61,21 +64,24 @@ impl Scanner {
     /// Returns number of files to scan.
     pub(crate) fn num_files(&self) -> usize {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.num_files(),
+            Scanner::Seq(seq_scan) => seq_scan.input().num_files(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().num_files(),
         }
     }
 
     /// Returns number of memtables to scan.
     pub(crate) fn num_memtables(&self) -> usize {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.num_memtables(),
+            Scanner::Seq(seq_scan) => seq_scan.input().num_memtables(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().num_memtables(),
         }
     }
 
     /// Returns SST file ids to scan.
     pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.file_ids(),
+            Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
         }
     }
 }
@@ -176,19 +182,38 @@ impl ScanRegion {
 
     /// Returns a [Scanner] to scan the region.
     pub(crate) fn scanner(self) -> Result<Scanner> {
-        self.seq_scan().map(Scanner::Seq)
+        if self.version.options.append_mode {
+            // If table uses append mode, we use unordered scan in query.
+            // We still use seq scan in compaction.
+            self.unordered_scan().map(Scanner::Unordered)
+        } else {
+            self.seq_scan().map(Scanner::Seq)
+        }
     }
 
     /// Scan sequentially.
     pub(crate) fn seq_scan(self) -> Result<SeqScan> {
+        let input = self.scan_input()?;
+        let seq_scan = SeqScan::new(input);
+
+        Ok(seq_scan)
+    }
+
+    /// Unordered scan.
+    pub(crate) fn unordered_scan(self) -> Result<UnorderedScan> {
+        let input = self.scan_input()?;
+        let scan = UnorderedScan::new(input);
+
+        Ok(scan)
+    }
+
+    /// Creates a scan input.
+    fn scan_input(self) -> Result<ScanInput> {
         let time_range = self.build_time_range_predicate();
 
         let ssts = &self.version.ssts;
-        let mut total_ssts = 0;
         let mut files = Vec::new();
         for level in ssts.levels() {
-            total_ssts += level.files.len();
-
             for file in level.files.values() {
                 // Finds SST files in range.
                 if file_in_range(file, &time_range) {
@@ -217,12 +242,11 @@ impl ScanRegion {
             .collect();
 
         debug!(
-            "Seq scan region {}, request: {:?}, memtables: {}, ssts_to_read: {}, total_ssts: {}, append_mode: {}",
+            "Scan region {}, request: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
             self.version.metadata.region_id,
             self.request,
             memtables.len(),
             files.len(),
-            total_ssts,
             self.version.options.append_mode,
         );
 
@@ -234,7 +258,7 @@ impl ScanRegion {
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
 
-        let input = ScanInput::new(self.access_layer.clone(), mapper)
+        let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
             .with_predicate(Some(predicate))
             .with_memtables(memtables)
@@ -244,9 +268,7 @@ impl ScanRegion {
             .with_parallelism(self.parallelism)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode);
-        let seq_scan = SeqScan::new(input);
-
-        Ok(seq_scan)
+        Ok(input)
     }
 
     /// Build time range predicate from filters.
@@ -535,5 +557,23 @@ impl ScanInput {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+impl ScanInput {
+    /// Returns number of memtables to scan.
+    pub(crate) fn num_memtables(&self) -> usize {
+        self.memtables.len()
+    }
+
+    /// Returns number of SST files to scan.
+    pub(crate) fn num_files(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Returns SST file ids to scan.
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
+        self.files.iter().map(|file| file.file_id()).collect()
     }
 }
