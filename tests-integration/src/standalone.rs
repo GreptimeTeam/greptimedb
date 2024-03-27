@@ -50,8 +50,8 @@ pub struct GreptimeDbStandalone {
 
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
-    wal_config: DatanodeWalConfig,
-    meta_wal_config: MetaSrvWalConfig,
+    datanode_wal_config: DatanodeWalConfig,
+    metasrv_wal_config: MetaSrvWalConfig,
     store_providers: Option<Vec<StorageType>>,
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
@@ -64,8 +64,8 @@ impl GreptimeDbStandaloneBuilder {
             store_providers: None,
             plugin: None,
             default_store: None,
-            wal_config: DatanodeWalConfig::default(),
-            meta_wal_config: MetaSrvWalConfig::default(),
+            datanode_wal_config: DatanodeWalConfig::default(),
+            metasrv_wal_config: MetaSrvWalConfig::default(),
         }
     }
 
@@ -96,14 +96,14 @@ impl GreptimeDbStandaloneBuilder {
     }
 
     #[must_use]
-    pub fn with_wal_config(mut self, wal_config: DatanodeWalConfig) -> Self {
-        self.wal_config = wal_config;
+    pub fn with_datanode_wal_config(mut self, datanode_wal_config: DatanodeWalConfig) -> Self {
+        self.datanode_wal_config = datanode_wal_config;
         self
     }
 
     #[must_use]
-    pub fn with_meta_wal_config(mut self, wal_meta: MetaSrvWalConfig) -> Self {
-        self.meta_wal_config = wal_meta;
+    pub fn with_metasrv_wal_config(mut self, metasrv_wal_config: MetaSrvWalConfig) -> Self {
+        self.metasrv_wal_config = metasrv_wal_config;
         self
     }
 
@@ -194,7 +194,7 @@ impl GreptimeDbStandaloneBuilder {
             default_store_type,
             store_types,
             &self.instance_name,
-            self.wal_config.clone(),
+            self.datanode_wal_config.clone(),
         );
 
         let kv_backend_config = KvBackendConfig::default();
@@ -207,7 +207,7 @@ impl GreptimeDbStandaloneBuilder {
         .await
         .unwrap();
 
-        let wal_meta = self.meta_wal_config.clone();
+        let wal_meta = self.metasrv_wal_config.clone();
         let mix_options = MixOptions {
             data_home: opts.storage.data_home.to_string(),
             procedure: procedure_config,
