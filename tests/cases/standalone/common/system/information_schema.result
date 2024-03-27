@@ -516,7 +516,7 @@ select * from engines;
 | engine | support | comment                                                                                                                                                            | transactions | xa | savepoints |
 +--------+---------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------+----+------------+
 | mito   | DEFAULT | Storage engine for time-series data                                                                                                                                | NO           | NO | NO         |
-| metric | DEFAULT | Storage engine for observability scenarios, which is adept at handling a large number of small tables, making it particularly suitable for cloud-native monitoring | NO           | NO | NO         |
+| metric | YES     | Storage engine for observability scenarios, which is adept at handling a large number of small tables, making it particularly suitable for cloud-native monitoring | NO           | NO | NO         |
 +--------+---------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------+----+------------+
 
 desc table build_info;

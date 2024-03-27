@@ -62,7 +62,7 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             ]),
             vec![
                 Arc::new(StringVector::from(vec![MITO_ENGINE, METRIC_ENGINE])),
-                Arc::new(StringVector::from(vec!["DEFAULT", "DEFAULT"])),
+                Arc::new(StringVector::from(vec!["DEFAULT", "YES"])),
                 Arc::new(StringVector::from(vec![
                     "Storage engine for time-series data",
                     "Storage engine for observability scenarios, which is adept at handling a large number of small tables, making it particularly suitable for cloud-native monitoring",
