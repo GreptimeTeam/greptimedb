@@ -15,7 +15,6 @@
 use common_procedure::Status;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
 use table::metadata::TableId;
 
 use super::executor::DropDatabaseExecutor;
@@ -23,7 +22,7 @@ use super::metadata::DropDatabaseRemoveMetadata;
 use super::DropTableTarget;
 use crate::ddl::drop_database::{DropDatabaseContext, State};
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
 use crate::table_name::TableName;
 
@@ -71,15 +70,11 @@ impl DropDatabaseCursor {
             (DropTableTarget::Logical, TableRouteValue::Logical(route)) => {
                 let table_id = route.physical_table_id();
 
-                // Safety: it must be the physical table route.
-                let table_route = ddl_ctx
+                let (_, table_route) = ddl_ctx
                     .table_metadata_manager
                     .table_route_manager()
-                    .table_route_storage()
-                    .get(table_id)
-                    .await?
-                    .context(error::TableRouteNotFoundSnafu { table_id })?
-                    .into_physical_table_route();
+                    .get_physical_table_route(table_id)
+                    .await?;
                 Ok((
                     Box::new(DropDatabaseExecutor::new(
                         table_id,
