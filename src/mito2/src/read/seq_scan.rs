@@ -176,18 +176,8 @@ struct Metrics {
 
 #[cfg(test)]
 impl SeqScan {
-    /// Returns number of memtables to scan.
-    pub(crate) fn num_memtables(&self) -> usize {
-        self.input.memtables.len()
-    }
-
-    /// Returns number of SST files to scan.
-    pub(crate) fn num_files(&self) -> usize {
-        self.input.files.len()
-    }
-
-    /// Returns SST file ids to scan.
-    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
-        self.input.files.iter().map(|file| file.file_id()).collect()
+    /// Returns the input.
+    pub(crate) fn input(&self) -> &ScanInput {
+        &self.input
     }
 }
