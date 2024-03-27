@@ -118,7 +118,7 @@ impl<'a> ParserContext<'a> {
             }
             _ => ("0".to_string(), "0".to_string(), "5m".to_string(), None),
         };
-        let query = Self::parse_tql_query(parser, self.sql).context(ParserSnafu {})?;
+        let query = Self::parse_tql_query(parser, self.sql).context(ParserSnafu)?;
         Ok(TqlParameters::new(start, end, step, lookback, query))
     }
 
@@ -168,7 +168,7 @@ impl<'a> ParserContext<'a> {
             0 => Err(ParserError::ParserError(
                 "Expected at least one token".to_string(),
             ))
-            .context(ParserSnafu {}),
+            .context(ParserSnafu),
             1 => {
                 let value = match tokens[0].clone() {
                     Token::Number(n, _) => n,
@@ -178,16 +178,14 @@ impl<'a> ParserContext<'a> {
                         return Err(ParserError::ParserError(format!(
                             "Expected number, string or word, but have {unexpected:?}"
                         )))
-                        .context(ParserSnafu {});
+                        .context(ParserSnafu);
                     }
                 };
                 Ok(value)
             }
             _ => Self::parse_tokens(tokens),
         };
-        parser
-            .expect_token(&delimiter_token)
-            .context(ParserSnafu {})?;
+        parser.expect_token(&delimiter_token).context(ParserSnafu)?;
         result
     }
 
@@ -202,14 +200,14 @@ impl<'a> ParserContext<'a> {
         Parser::new(&GreptimeDbDialect {})
             .with_tokens(tokens)
             .parse_expr()
-            .context(ParserSnafu {})
+            .context(ParserSnafu)
     }
 
     fn parse_to_logical_expr(expr: sqlparser::ast::Expr) -> std::result::Result<Expr, TQLError> {
         let empty_df_schema = DFSchema::empty();
         SqlToRel::new(&StubContextProvider {})
             .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
-            .context(ConvertToLogicalExpressionSnafu {})
+            .context(ConvertToLogicalExpressionSnafu)
     }
 
     fn simplify_expr(logical_expr: Expr) -> std::result::Result<Expr, TQLError> {
@@ -218,7 +216,7 @@ impl<'a> ParserContext<'a> {
         let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema));
         ExprSimplifier::new(info)
             .simplify(logical_expr)
-            .context(SimplificationSnafu {})
+            .context(SimplificationSnafu)
     }
 
     fn evaluate_expr(simplified_expr: Expr) -> std::result::Result<String, TQLError> {
