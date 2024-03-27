@@ -673,6 +673,27 @@ DESC TABLE GREPTIME_REGION_PEERS;
 | down_seconds | Int64  |     | YES  |         | FIELD         |
 +--------------+--------+-----+------+---------+---------------+
 
+USE INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+DESC COLUMNS;
+
++----------------+--------+-----+------+---------+---------------+
+| Column         | Type   | Key | Null | Default | Semantic Type |
++----------------+--------+-----+------+---------+---------------+
+| table_catalog  | String |     | NO   |         | FIELD         |
+| table_schema   | String |     | NO   |         | FIELD         |
+| table_name     | String |     | NO   |         | FIELD         |
+| column_name    | String |     | NO   |         | FIELD         |
+| data_type      | String |     | NO   |         | FIELD         |
+| semantic_type  | String |     | NO   |         | FIELD         |
+| column_default | String |     | YES  |         | FIELD         |
+| is_nullable    | String |     | NO   |         | FIELD         |
+| column_type    | String |     | NO   |         | FIELD         |
+| column_comment | String |     | YES  |         | FIELD         |
++----------------+--------+-----+------+---------+---------------+
+
 drop table my_db.foo;
 
 Error: 4001(TableNotFound), Table not found: greptime.my_db.foo

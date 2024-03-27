@@ -371,13 +371,17 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
         let (catalog_from_db, schema) = parse_optional_catalog_and_schema_from_db_string(database);
-        let catalog = if let Some(catalog) = catalog_from_db {
-            catalog.to_owned()
+        let catalog = if let Some(catalog) = &catalog_from_db {
+            catalog.to_string()
         } else {
             self.session.get_catalog()
         };
 
-        if !self.query_handler.is_valid_schema(&catalog, schema).await? {
+        if !self
+            .query_handler
+            .is_valid_schema(&catalog, &schema)
+            .await?
+        {
             return w
                 .error(
                     ErrorKind::ER_WRONG_DB_NAME,
@@ -391,7 +395,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         if let Some(schema_validator) = &self.user_provider {
             if let Err(e) = schema_validator
-                .authorize(&catalog, schema, user_info)
+                .authorize(&catalog, &schema, user_info)
                 .await
             {
                 METRIC_AUTH_FAILURE
@@ -410,7 +414,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         if catalog_from_db.is_some() {
             self.session.set_catalog(catalog)
         }
-        self.session.set_schema(schema.into());
+        self.session.set_schema(schema);
 
         w.ok().await.map_err(|e| e.into())
     }
