@@ -770,7 +770,6 @@ mod tests {
             Arc::new(TableMetadataAllocator::new(
                 Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
                 Arc::new(WalOptionsAllocator::default()),
-                table_metadata_manager.table_name_manager().clone(),
             )),
             Arc::new(MemoryRegionKeeper::default()),
         );

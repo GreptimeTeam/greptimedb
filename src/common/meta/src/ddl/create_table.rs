@@ -35,9 +35,9 @@ use table::table_reference::TableReference;
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
 use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error, region_storage_path};
 use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
-use crate::error::{self, Result, TableRouteNotFoundSnafu};
+use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
-use crate::key::table_route::TableRouteValue;
+use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::CreateTableTask;
@@ -69,7 +69,7 @@ impl CreateTableProcedure {
         };
 
         // Only registers regions if the table route is allocated.
-        if let Some(TableRouteValue::Physical(x)) = &creator.data.table_route {
+        if let Some(x) = &creator.data.table_route {
             creator.opening_regions = creator
                 .register_opening_regions(&context, &x.region_routes)
                 .map_err(BoxedError::new)
@@ -97,7 +97,7 @@ impl CreateTableProcedure {
             })
     }
 
-    fn table_route(&self) -> Result<&TableRouteValue> {
+    fn table_route(&self) -> Result<&PhysicalTableRouteValue> {
         self.creator
             .data
             .table_route
@@ -111,7 +111,7 @@ impl CreateTableProcedure {
     pub fn set_allocated_metadata(
         &mut self,
         table_id: TableId,
-        table_route: TableRouteValue,
+        table_route: PhysicalTableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,
     ) {
         self.creator
@@ -192,31 +192,10 @@ impl CreateTableProcedure {
     ///   - [Code::DeadlineExceeded](tonic::status::Code::DeadlineExceeded)
     ///   - [Code::Unavailable](tonic::status::Code::Unavailable)
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
-        // Safety: the table route must be allocated.
-        match self.table_route()?.clone() {
-            TableRouteValue::Physical(x) => {
-                let request_builder = self.new_region_request_builder(None)?;
-                self.create_regions(&x.region_routes, request_builder).await
-            }
-            TableRouteValue::Logical(x) => {
-                let physical_table_id = x.physical_table_id();
-
-                let physical_table_route = self
-                    .context
-                    .table_metadata_manager
-                    .table_route_manager()
-                    .try_get_physical_table_route(physical_table_id)
-                    .await?
-                    .context(TableRouteNotFoundSnafu {
-                        table_id: physical_table_id,
-                    })?;
-                let region_routes = &physical_table_route.region_routes;
-
-                let request_builder = self.new_region_request_builder(Some(physical_table_id))?;
-
-                self.create_regions(region_routes, request_builder).await
-            }
-        }
+        let table_route = self.table_route()?.clone();
+        let request_builder = self.new_region_request_builder(None)?;
+        self.create_regions(&table_route.region_routes, request_builder)
+            .await
     }
 
     async fn create_regions(
@@ -224,15 +203,12 @@ impl CreateTableProcedure {
         region_routes: &[RegionRoute],
         request_builder: CreateRequestBuilder,
     ) -> Result<Status> {
-        // Safety: the table_route must be allocated.
-        if self.table_route()?.is_physical() {
-            // Registers opening regions
-            let guards = self
-                .creator
-                .register_opening_regions(&self.context, region_routes)?;
-            if !guards.is_empty() {
-                self.creator.opening_regions = guards;
-            }
+        // Registers opening regions
+        let guards = self
+            .creator
+            .register_opening_regions(&self.context, region_routes)?;
+        if !guards.is_empty() {
+            self.creator.opening_regions = guards;
         }
 
         let create_table_data = &self.creator.data;
@@ -303,7 +279,7 @@ impl CreateTableProcedure {
         // Safety: the region_wal_options must be allocated.
         let region_wal_options = self.region_wal_options()?.clone();
         // Safety: the table_route must be allocated.
-        let table_route = self.table_route()?.clone();
+        let table_route = TableRouteValue::Physical(self.table_route()?.clone());
         manager
             .create_table_metadata(raw_table_info, table_route, region_wal_options)
             .await?;
@@ -400,7 +376,7 @@ impl TableCreator {
     fn set_allocated_metadata(
         &mut self,
         table_id: TableId,
-        table_route: TableRouteValue,
+        table_route: PhysicalTableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,
     ) {
         self.data.task.table_info.ident.table_id = table_id;
@@ -424,7 +400,7 @@ pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
     /// None stands for not allocated yet.
-    table_route: Option<TableRouteValue>,
+    table_route: Option<PhysicalTableRouteValue>,
     /// None stands for not allocated yet.
     pub region_wal_options: Option<HashMap<RegionNumber, String>>,
     pub cluster_id: ClusterId,
