@@ -86,7 +86,6 @@ impl Scanner {
     }
 }
 
-// TODO(yingwen): Update mermaid
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Helper to scans a region by [ScanRequest].
 ///
@@ -104,15 +103,23 @@ impl Scanner {
 /// class Scanner {
 ///     <<enumeration>>
 ///     SeqScan
+///     UnorderedScan
 ///     +scan() SendableRecordBatchStream
 /// }
 /// class SeqScan {
+///     -ScanInput input
+///     +build() SendableRecordBatchStream
+/// }
+/// class UnorderedScan {
+///     -ScanInput input
+///     +build() SendableRecordBatchStream
+/// }
+/// class ScanInput {
 ///     -ProjectionMapper mapper
 ///     -Option~TimeRange~ time_range
 ///     -Option~Predicate~ predicate
 ///     -Vec~MemtableRef~ memtables
 ///     -Vec~FileHandle~ files
-///     +build() SendableRecordBatchStream
 /// }
 /// class ProjectionMapper {
 ///     ~output_schema() SchemaRef
@@ -121,9 +128,13 @@ impl Scanner {
 /// ScanRegion -- Scanner
 /// ScanRegion o-- ScanRequest
 /// Scanner o-- SeqScan
+/// Scanner o-- UnorderedScan
+/// SeqScan o-- ScanInput
+/// UnorderedScan o-- ScanInput
 /// Scanner -- SendableRecordBatchStream
-/// SeqScan o-- ProjectionMapper
+/// ScanInput o-- ProjectionMapper
 /// SeqScan -- SendableRecordBatchStream
+/// UnorderedScan -- SendableRecordBatchStream
 /// ```
 pub(crate) struct ScanRegion {
     /// Version of the region at scan.
