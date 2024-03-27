@@ -237,7 +237,7 @@ async fn test_on_datanode_create_regions() {
     });
 
     let status = procedure.on_datanode_create_regions().await.unwrap();
-    assert!(matches!(status, Status::Executing { persist: false }));
+    assert!(matches!(status, Status::Executing { persist: true }));
     assert!(matches!(
         procedure.creator.data.state,
         CreateTableState::CreateMetadata

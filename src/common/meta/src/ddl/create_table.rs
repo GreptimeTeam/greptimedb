@@ -195,9 +195,8 @@ impl CreateTableProcedure {
         // Safety: the table route must be allocated.
         match self.table_route()?.clone() {
             TableRouteValue::Physical(x) => {
-                let region_routes = x.region_routes.clone();
                 let request_builder = self.new_region_request_builder(None)?;
-                self.create_regions(&region_routes, request_builder).await
+                self.create_regions(&x.region_routes, request_builder).await
             }
             TableRouteValue::Logical(x) => {
                 let physical_table_id = x.physical_table_id();
@@ -288,9 +287,8 @@ impl CreateTableProcedure {
 
         self.creator.data.state = CreateTableState::CreateMetadata;
 
-        // Ensures the procedures after the crash start from the `DatanodeCreateRegions` stage.
         // TODO(weny): Add more tests.
-        Ok(Status::executing(false))
+        Ok(Status::executing(true))
     }
 
     /// Creates table metadata
