@@ -121,7 +121,7 @@ async fn test_replay(rebuildable_instance: Option<Box<dyn RebuildableMockInstanc
     insert_data(&tables, &instance, 15).await;
     ensure_data_exists(&tables, &instance).await;
 
-    // Rebuilds to emulate restart which then triggers a replay.
+    // Rebuilds to emulate restart which triggers a replay.
     rebuildable_instance.rebuild().await;
     ensure_data_exists(&tables, &rebuildable_instance.frontend()).await;
 }
@@ -147,27 +147,23 @@ async fn test_flush_then_replay(rebuildable_instance: Option<Box<dyn Rebuildable
     insert_data(&tables, &instance, 15).await;
     ensure_data_exists(&tables, &instance).await;
 
-    // Renames tables to force flushing each table.
-    let tables = futures::future::join_all(tables.into_iter().map(|table| {
+    // Alters tables to force flushing.
+    futures::future::join_all(tables.iter().map(|table| {
         let instance = instance.clone();
         async move {
-            // Repeats the last char to construct a new table name.
-            let new_table_name = format!("{}{}", table.name, table.name.chars().last().unwrap());
             assert_matches!(
-                do_alter(&instance, &table.name, &new_table_name).await.data,
+                do_alter(&instance, &table.name).await.data,
                 OutputData::AffectedRows(0)
             );
-            Table {
-                name: new_table_name,
-                logical_timer: AtomicU64::new(table.logical_timer.load(Ordering::Relaxed)),
-                inserted: Mutex::new(table.inserted.lock().await.clone()),
-            }
         }
     }))
     .await;
+
+    // Inserts more data and check all data exists after flushing.
+    insert_data(&tables, &instance, 15).await;
     ensure_data_exists(&tables, &instance).await;
 
-    // Rebuilds to emulate restart which then triggers a replay.
+    // Rebuilds to emulate restart which triggers a replay.
     rebuildable_instance.rebuild().await;
     ensure_data_exists(&tables, &rebuildable_instance.frontend()).await;
 }
@@ -266,10 +262,10 @@ async fn do_create(instance: &Arc<Instance>, table_name: &str) -> Output {
 }
 
 /// Sends an alter table SQL.
-async fn do_alter(instance: &Arc<Instance>, table_name: &str, new_table_name: &str) -> Output {
+async fn do_alter(instance: &Arc<Instance>, table_name: &str) -> Output {
     execute_sql_with(
         instance,
-        &format!("alter table {} rename {}", table_name, new_table_name),
+        &format!("alter table {} add column new_col STRING", table_name),
         QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
     )
     .await
