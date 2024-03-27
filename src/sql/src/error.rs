@@ -24,6 +24,7 @@ use snafu::{Location, Snafu};
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value as SqlValue};
+use crate::parsers::error::TQLError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -63,6 +64,14 @@ pub enum Error {
     Syntax {
         #[snafu(source)]
         error: ParserError,
+        location: Location,
+    },
+
+    // Syntax error from tql parser.
+    #[snafu(display(""))]
+    TQLSyntax {
+        #[snafu(source)]
+        error: TQLError,
         location: Location,
     },
 
@@ -170,6 +179,7 @@ impl ErrorExt for Error {
             UnsupportedDefaultValue { .. } | Unsupported { .. } => StatusCode::Unsupported,
             Unexpected { .. }
             | Syntax { .. }
+            | TQLSyntax { .. }
             | MissingTimeIndex { .. }
             | InvalidTimeIndex { .. }
             | InvalidSql { .. }

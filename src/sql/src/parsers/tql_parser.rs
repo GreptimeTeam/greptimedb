@@ -21,7 +21,7 @@ use datafusion_common::{DFSchema, Result as DFResult, ScalarValue, TableReferenc
 use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_sql::planner::{ContextProvider, SqlToRel};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::Token;
@@ -40,7 +40,9 @@ use datatypes::arrow::datatypes::DataType;
 use sqlparser::parser::Parser;
 
 use crate::dialect::GreptimeDbDialect;
-use crate::parsers::error::TQLError;
+use crate::parsers::error::{
+    ConvertToLogicalExpressionSnafu, EvaluationSnafu, ParserSnafu, SimplificationSnafu, TQLError,
+};
 
 /// TQL extension parser, including:
 /// - `TQL EVAL <query>`
@@ -61,7 +63,7 @@ impl<'a> ParserContext<'a> {
                     {
                         self.parse_tql_params()
                             .map(|params| Statement::Tql(Tql::Eval(TqlEval::from(params))))
-                            .context(error::SyntaxSnafu)
+                            .context(error::TQLSyntaxSnafu)
                     }
 
                     Keyword::EXPLAIN => {
@@ -74,7 +76,7 @@ impl<'a> ParserContext<'a> {
                                 params.is_verbose = is_verbose;
                                 Statement::Tql(Tql::Explain(TqlExplain::from(params)))
                             })
-                            .context(error::SyntaxSnafu)
+                            .context(error::TQLSyntaxSnafu)
                     }
 
                     Keyword::ANALYZE => {
@@ -87,7 +89,7 @@ impl<'a> ParserContext<'a> {
                                 params.is_verbose = is_verbose;
                                 Statement::Tql(Tql::Analyze(TqlAnalyze::from(params)))
                             })
-                            .context(error::SyntaxSnafu)
+                            .context(error::TQLSyntaxSnafu)
                     }
                     _ => self.unsupported(self.peek_token_as_string()),
                 }
@@ -96,7 +98,7 @@ impl<'a> ParserContext<'a> {
         }
     }
 
-    fn parse_tql_params(&mut self) -> std::result::Result<TqlParameters, ParserError> {
+    fn parse_tql_params(&mut self) -> std::result::Result<TqlParameters, TQLError> {
         let parser = &mut self.parser;
         let (start, end, step, lookback) = match parser.peek_token().token {
             Token::LParen => {
@@ -116,7 +118,7 @@ impl<'a> ParserContext<'a> {
             }
             _ => ("0".to_string(), "0".to_string(), "5m".to_string(), None),
         };
-        let query = Self::parse_tql_query(parser, self.sql)?;
+        let query = Self::parse_tql_query(parser, self.sql).context(ParserSnafu {})?;
         Ok(TqlParameters::new(start, end, step, lookback, query))
     }
 
@@ -163,23 +165,29 @@ impl<'a> ParserContext<'a> {
             tokens.push(token.token);
         }
         let result = match tokens.len() {
-            0 => Err(TQLError::Parser("Expected tokens".to_string())),
+            0 => Err(ParserError::ParserError(
+                "Expected at least one token".to_string(),
+            ))
+            .context(ParserSnafu {}),
             1 => {
                 let value = match tokens[0].clone() {
                     Token::Number(n, _) => n,
                     Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
                     Token::Word(_) => Self::parse_tokens(tokens)?,
                     unexpected => {
-                        return Err(TQLError::Parser(format!(
-                            "Expect number, string or word, but is {unexpected:?}"
-                        )));
+                        return Err(ParserError::ParserError(format!(
+                            "Expected number, string or word, but have {unexpected:?}"
+                        )))
+                        .context(ParserSnafu {});
                     }
                 };
                 Ok(value)
             }
             _ => Self::parse_tokens(tokens),
         };
-        parser.expect_token(&delimiter_token)?;
+        parser
+            .expect_token(&delimiter_token)
+            .context(ParserSnafu {})?;
         result
     }
 
@@ -194,16 +202,14 @@ impl<'a> ParserContext<'a> {
         Parser::new(&GreptimeDbDialect {})
             .with_tokens(tokens)
             .parse_expr()
-            .map_err(|err| TQLError::Parser(format!("Failed to convert to expression: {err:?}")))
+            .context(ParserSnafu {})
     }
 
     fn parse_to_logical_expr(expr: sqlparser::ast::Expr) -> std::result::Result<Expr, TQLError> {
         let empty_df_schema = DFSchema::empty();
         SqlToRel::new(&StubContextProvider {})
             .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
-            .map_err(|err| {
-                TQLError::Parser(format!("Failed to convert to logical expression {err:?}"))
-            })
+            .context(ConvertToLogicalExpressionSnafu {})
     }
 
     fn simplify_expr(logical_expr: Expr) -> std::result::Result<Expr, TQLError> {
@@ -212,21 +218,31 @@ impl<'a> ParserContext<'a> {
         let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema));
         ExprSimplifier::new(info)
             .simplify(logical_expr)
-            .map_err(|err| {
-                TQLError::Simplification(format!("Failed to simplify expression {err:?}"))
-            })
+            .context(SimplificationSnafu {})
     }
 
     fn evaluate_expr(simplified_expr: Expr) -> std::result::Result<String, TQLError> {
         match simplified_expr {
-            Expr::Literal(ScalarValue::TimestampNanosecond(v, _))
-            | Expr::Literal(ScalarValue::DurationNanosecond(v)) => v,
+            Expr::Literal(ScalarValue::TimestampNanosecond(ts_nanos, _))
+            | Expr::Literal(ScalarValue::DurationNanosecond(ts_nanos)) => {
+                ts_nanos.map(|v| v / 1_000_000_000)
+            }
+            Expr::Literal(ScalarValue::TimestampMicrosecond(ts_micros, _))
+            | Expr::Literal(ScalarValue::DurationMicrosecond(ts_micros)) => {
+                ts_micros.map(|v| v / 1_000_000)
+            }
+            Expr::Literal(ScalarValue::TimestampMillisecond(ts_millis, _))
+            | Expr::Literal(ScalarValue::DurationMillisecond(ts_millis)) => {
+                ts_millis.map(|v| v / 1_000)
+            }
+            Expr::Literal(ScalarValue::TimestampSecond(ts_secs, _))
+            | Expr::Literal(ScalarValue::DurationSecond(ts_secs)) => ts_secs,
             _ => None,
         }
-        .map(|timestamp_nanos| (timestamp_nanos / 1_000_000_000).to_string())
-        .ok_or(TQLError::Evaluation(format!(
-            "Failed to extract a timestamp value {simplified_expr:?}"
-        )))
+        .map(|ts| ts.to_string())
+        .context(EvaluationSnafu {
+            msg: format!("Failed to extract a timestamp value {simplified_expr:?}"),
+        })
     }
 
     fn parse_tql_query(parser: &mut Parser, sql: &str) -> std::result::Result<String, ParserError> {

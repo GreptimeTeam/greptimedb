@@ -55,6 +55,9 @@ pub struct TqlAnalyze {
     pub is_verbose: bool,
 }
 
+/// Intermediate structure used to unify parameter mappings for various TQL operations.
+/// This struct serves as a common parameter container for parsing TQL queries
+/// and constructing corresponding TQL operations: `TqlEval`, `TqlAnalyze` or `TqlExplain`.
 #[derive(Debug)]
 pub struct TqlParameters {
     start: String,

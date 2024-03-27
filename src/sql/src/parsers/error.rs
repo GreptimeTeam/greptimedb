@@ -12,45 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_macro::stack_trace_debug;
 use datafusion_common::DataFusionError;
+use snafu::{Location, Snafu};
 use sqlparser::parser::ParserError;
 
+/// TQL parser & evaluation errors.
+#[derive(Snafu)]
+#[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum TQLError {
-    Parser(String),
-    Simplification(String),
-    Evaluation(String),
-}
+    #[snafu(display("Failed to parse TQL expression"))]
+    Parser {
+        #[snafu(source)]
+        error: ParserError,
+        location: Location,
+    },
 
-impl From<ParserError> for TQLError {
-    fn from(err: ParserError) -> Self {
-        TQLError::Parser(err.to_string())
-    }
-}
+    #[snafu(display("Failed to convert to logical TQL expression"))]
+    ConvertToLogicalExpression {
+        #[snafu(source)]
+        error: DataFusionError,
+        location: Location,
+    },
 
-impl From<DataFusionError> for TQLError {
-    fn from(err: DataFusionError) -> Self {
-        match err {
-            DataFusionError::SQL(parser_err) => TQLError::Parser(parser_err.to_string()),
-            DataFusionError::Plan(plan_err) => TQLError::Evaluation(plan_err),
-            unspecified => {
-                TQLError::Evaluation(format!("Failed to evaluate due to: {unspecified:?}"))
-            }
-        }
-    }
-}
+    #[snafu(display("Failed to simplify TQL expression"))]
+    Simplification {
+        #[snafu(source)]
+        error: DataFusionError,
+        location: Location,
+    },
 
-impl From<TQLError> for ParserError {
-    fn from(tql_err: TQLError) -> Self {
-        match tql_err {
-            TQLError::Parser(s) => {
-                ParserError::ParserError(format!("Failed to parse the query: {s}"))
-            }
-            TQLError::Simplification(s) => {
-                ParserError::ParserError(format!("Failed to simplify the query: {s}"))
-            }
-            TQLError::Evaluation(s) => {
-                ParserError::ParserError(format!("Failed to evaluate the query: {s}"))
-            }
-        }
-    }
+    #[snafu(display("Failed to evaluate TQL expression: {}", msg))]
+    Evaluation { msg: String },
 }
