@@ -123,7 +123,7 @@ async fn test_append_mode_compaction() {
         .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
         .await
         .unwrap();
-    assert_eq!(output, 0);
+    assert_eq!(output.affected_rows, 0);
 
     // a, field 2, 3
     let rows = Rows {
