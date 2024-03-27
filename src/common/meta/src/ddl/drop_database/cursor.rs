@@ -15,7 +15,6 @@
 use common_procedure::Status;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
 use table::metadata::TableId;
 
 use super::executor::DropDatabaseExecutor;
@@ -23,9 +22,8 @@ use super::metadata::DropDatabaseRemoveMetadata;
 use super::DropTableTarget;
 use crate::ddl::drop_database::{DropDatabaseContext, State};
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
-use crate::key::DeserializedValueWithBytes;
 use crate::table_name::TableName;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,31 +64,36 @@ impl DropDatabaseCursor {
         ctx: &mut DropDatabaseContext,
         table_name: String,
         table_id: TableId,
-        table_route_value: DeserializedValueWithBytes<TableRouteValue>,
+        table_route_value: TableRouteValue,
     ) -> Result<(Box<dyn State>, Status)> {
-        match (self.target, table_route_value.get_inner_ref()) {
-            (DropTableTarget::Logical, TableRouteValue::Logical(_))
-            | (DropTableTarget::Physical, TableRouteValue::Physical(_)) => {
-                // TODO(weny): Maybe we can drop the table without fetching the `TableInfoValue`
-                let table_info_value = ddl_ctx
+        match (self.target, table_route_value) {
+            (DropTableTarget::Logical, TableRouteValue::Logical(route)) => {
+                let table_id = route.physical_table_id();
+
+                let (_, table_route) = ddl_ctx
                     .table_metadata_manager
-                    .table_info_manager()
-                    .get(table_id)
-                    .await?
-                    .context(error::TableNotFoundSnafu {
-                        table_name: &table_name,
-                    })?;
+                    .table_route_manager()
+                    .get_physical_table_route(table_id)
+                    .await?;
                 Ok((
                     Box::new(DropDatabaseExecutor::new(
-                        TableName::new(&ctx.catalog, &ctx.schema, &table_name),
                         table_id,
-                        table_info_value,
-                        table_route_value,
+                        TableName::new(&ctx.catalog, &ctx.schema, &table_name),
+                        table_route.region_routes,
                         self.target,
                     )),
                     Status::executing(true),
                 ))
             }
+            (DropTableTarget::Physical, TableRouteValue::Physical(table_route)) => Ok((
+                Box::new(DropDatabaseExecutor::new(
+                    table_id,
+                    TableName::new(&ctx.catalog, &ctx.schema, &table_name),
+                    table_route.region_routes,
+                    self.target,
+                )),
+                Status::executing(true),
+            )),
             _ => Ok((
                 Box::new(DropDatabaseCursor::new(self.target)),
                 Status::executing(false),
@@ -122,7 +125,7 @@ impl State for DropDatabaseCursor {
                     .table_metadata_manager
                     .table_route_manager()
                     .table_route_storage()
-                    .get_raw(table_id)
+                    .get(table_id)
                     .await?
                 {
                     Some(table_route_value) => {

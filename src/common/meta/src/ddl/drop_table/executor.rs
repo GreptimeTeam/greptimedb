@@ -29,11 +29,8 @@ use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
-use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::table_route::TableRouteValue;
-use crate::key::DeserializedValueWithBytes;
-use crate::rpc::router::{find_leader_regions, find_leaders};
+use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 use crate::table_name::TableName;
 
 /// [Control] indicated to the caller whether to go to the next step.
@@ -106,11 +103,10 @@ impl DropTableExecutor {
     pub async fn on_remove_metadata(
         &self,
         ctx: &DdlContext,
-        table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
-        table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
+        region_routes: &[RegionRoute],
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata(table_info_value, table_route_value)
+            .delete_table_metadata(self.table_id, &self.table, region_routes)
             .await
     }
 
@@ -138,10 +134,8 @@ impl DropTableExecutor {
     pub async fn on_drop_regions(
         &self,
         ctx: &DdlContext,
-        table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
+        region_routes: &[RegionRoute],
     ) -> Result<()> {
-        // The `table_route_value` always be the physical table route.
-        let region_routes = table_route_value.region_routes()?;
         let leaders = find_leaders(region_routes);
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
         let table_id = self.table_id;
@@ -202,6 +196,7 @@ mod tests {
     use crate::ddl::test_util::create_table::{
         build_raw_table_info_from_expr, TestCreateTableExprBuilder,
     };
+    use crate::key::table_route::TableRouteValue;
     use crate::table_name::TableName;
     use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
