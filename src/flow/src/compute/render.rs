@@ -73,16 +73,9 @@ impl<'referred, 'df> Context<'referred, 'df> {
             Plan::Get { id } => self.get_by_id(id),
             Plan::Let { id, value, body } => self.eval_let(id, value, body),
             Plan::Mfp { input, mfp } => self.render_mfp(input, mfp),
-            Plan::Reduce {
-                input,
-                key_val_plan,
-                reduce_plan,
-            } => todo!(),
-            Plan::Join { inputs, plan } => todo!(),
-            Plan::Union {
-                inputs,
-                consolidate_output,
-            } => todo!(),
+            Plan::Reduce { .. } => todo!(),
+            Plan::Join { .. } => todo!(),
+            Plan::Union { .. } => todo!(),
         }
     }
 
@@ -410,7 +403,9 @@ mod test {
                 )
             },
         );
-        ctx.df.run_available();
+        drop(ctx);
+
+        df.run_available();
     }
 
     /// test if constant operator works properly
