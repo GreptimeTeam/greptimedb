@@ -68,7 +68,7 @@ pub async fn create_physical_table(
     create_physical_table_metadata(
         &ddl_context,
         create_physical_table_task.table_info.clone(),
-        table_route,
+        TableRouteValue::Physical(table_route),
     )
     .await;
 

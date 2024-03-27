@@ -541,7 +541,7 @@ async fn handle_create_table_task(
 async fn handle_create_logical_table_tasks(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
-    mut create_table_tasks: Vec<CreateTableTask>,
+    create_table_tasks: Vec<CreateTableTask>,
 ) -> Result<SubmitDdlTaskResponse> {
     ensure!(
         !create_table_tasks.is_empty(),
@@ -554,11 +554,6 @@ async fn handle_create_logical_table_tasks(
         &create_table_tasks,
     )
     .await?;
-    // Sets table_ids on create_table_tasks
-    ddl_manager
-        .table_metadata_allocator
-        .set_table_ids_on_logic_create(&mut create_table_tasks)
-        .await?;
     let num_logical_tables = create_table_tasks.len();
 
     let (id, output) = ddl_manager
@@ -770,7 +765,6 @@ mod tests {
             Arc::new(TableMetadataAllocator::new(
                 Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
                 Arc::new(WalOptionsAllocator::default()),
-                table_metadata_manager.table_name_manager().clone(),
             )),
             Arc::new(MemoryRegionKeeper::default()),
         );

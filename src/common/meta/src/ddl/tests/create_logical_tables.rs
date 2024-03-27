@@ -71,7 +71,7 @@ async fn test_on_prepare() {
     create_physical_table_metadata(
         &ddl_context,
         create_physical_table_task.table_info.clone(),
-        table_route,
+        TableRouteValue::Physical(table_route),
     )
     .await;
     // The create logical table procedure.
@@ -106,7 +106,7 @@ async fn test_on_prepare_logical_table_exists_err() {
     create_physical_table_metadata(
         &ddl_context,
         create_physical_table_task.table_info.clone(),
-        table_route,
+        TableRouteValue::Physical(table_route),
     )
     .await;
     // Creates the logical table metadata.
@@ -152,7 +152,7 @@ async fn test_on_prepare_with_create_if_table_exists() {
     create_physical_table_metadata(
         &ddl_context,
         create_physical_table_task.table_info.clone(),
-        table_route,
+        TableRouteValue::Physical(table_route),
     )
     .await;
     // Creates the logical table metadata.
@@ -200,7 +200,7 @@ async fn test_on_prepare_part_logical_tables_exist() {
     create_physical_table_metadata(
         &ddl_context,
         create_physical_table_task.table_info.clone(),
-        table_route,
+        TableRouteValue::Physical(table_route),
     )
     .await;
     // Creates the logical table metadata.
@@ -271,7 +271,7 @@ async fn test_on_create_metadata() {
     create_physical_table_metadata(
         &ddl_context,
         create_physical_table_task.table_info.clone(),
-        table_route,
+        TableRouteValue::Physical(table_route),
     )
     .await;
     // The create logical table procedure.
@@ -321,7 +321,7 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
     create_physical_table_metadata(
         &ddl_context,
         create_physical_table_task.table_info.clone(),
-        table_route,
+        TableRouteValue::Physical(table_route),
     )
     .await;
     // Creates the logical table metadata.
@@ -382,7 +382,7 @@ async fn test_on_create_metadata_err() {
     create_physical_table_metadata(
         &ddl_context,
         create_physical_table_task.table_info.clone(),
-        table_route,
+        TableRouteValue::Physical(table_route),
     )
     .await;
     // The create logical table procedure.
