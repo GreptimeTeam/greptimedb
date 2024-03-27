@@ -85,7 +85,11 @@ impl MysqlInstanceShim {
         MysqlInstanceShim {
             query_handler,
             salt: scramble,
-            session: Arc::new(Session::new(Some(client_addr), Channel::Mysql)),
+            session: Arc::new(Session::new(
+                Some(client_addr),
+                Channel::Mysql,
+                Default::default(),
+            )),
             user_provider,
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),

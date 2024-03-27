@@ -9030,6 +9030,7 @@ dependencies = [
  "common-time",
  "common-version",
  "criterion",
+ "dashmap",
  "datafusion",
  "datafusion-common",
  "datatypes",
@@ -9103,8 +9104,12 @@ dependencies = [
  "arc-swap",
  "auth",
  "common-catalog",
+ "common-error",
+ "common-macro",
+ "common-telemetry",
  "common-time",
  "derive_builder 0.12.0",
+ "snafu",
  "sql",
 ]
 

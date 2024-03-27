@@ -41,6 +41,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datatypes.workspace = true
