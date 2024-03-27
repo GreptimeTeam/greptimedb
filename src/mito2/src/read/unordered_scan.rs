@@ -50,9 +50,9 @@ impl UnorderedScan {
     pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
         let enable_parallel = self.enable_parallel_scan();
         if enable_parallel {
-            self.scan_sources().await
-        } else {
             self.scan_in_parallel().await
+        } else {
+            self.scan_sources().await
         }
     }
 
