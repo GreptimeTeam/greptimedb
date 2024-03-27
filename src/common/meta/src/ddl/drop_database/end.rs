@@ -20,7 +20,7 @@ use crate::ddl::DdlContext;
 use crate::error::Result;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DropDatabaseEnd;
+pub(crate) struct DropDatabaseEnd;
 
 #[async_trait::async_trait]
 #[typetag::serde]

@@ -29,7 +29,7 @@ use crate::rpc::router::{operating_leader_regions, RegionRoute};
 use crate::table_name::TableName;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DropDatabaseExecutor {
+pub(crate) struct DropDatabaseExecutor {
     table_id: TableId,
     table_name: TableName,
     region_routes: Vec<RegionRoute>,

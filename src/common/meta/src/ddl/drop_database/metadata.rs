@@ -22,7 +22,7 @@ use crate::error::Result;
 use crate::key::schema_name::SchemaNameKey;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DropDatabaseRemoveMetadata;
+pub(crate) struct DropDatabaseRemoveMetadata;
 
 #[async_trait::async_trait]
 #[typetag::serde]

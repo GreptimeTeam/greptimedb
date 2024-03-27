@@ -24,7 +24,7 @@ use crate::error::{self, Result};
 use crate::key::schema_name::SchemaNameKey;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DropDatabaseStart;
+pub(crate) struct DropDatabaseStart;
 
 #[async_trait::async_trait]
 #[typetag::serde]

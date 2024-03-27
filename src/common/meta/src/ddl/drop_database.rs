@@ -44,13 +44,13 @@ pub struct DropDatabaseProcedure {
 
 /// Target of dropping tables.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum DropTableTarget {
+pub(crate) enum DropTableTarget {
     Logical,
     Physical,
 }
 
 /// Context of [DropDatabaseProcedure] execution.
-pub struct DropDatabaseContext {
+pub(crate) struct DropDatabaseContext {
     catalog: String,
     schema: String,
     drop_if_exists: bool,

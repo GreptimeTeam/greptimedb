@@ -27,7 +27,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::table_name::TableName;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DropDatabaseCursor {
+pub(crate) struct DropDatabaseCursor {
     target: DropTableTarget,
 }
 
