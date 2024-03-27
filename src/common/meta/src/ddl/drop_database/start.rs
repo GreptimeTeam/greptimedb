@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+
 use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
@@ -61,5 +63,9 @@ impl State for DropDatabaseStart {
             Box::new(DropDatabaseCursor::new(DropTableTarget::Logical)),
             Status::executing(true),
         ))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

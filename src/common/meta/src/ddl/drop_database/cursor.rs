@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+
 use common_procedure::Status;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
@@ -140,5 +142,9 @@ impl State for DropDatabaseCursor {
             }
             None => self.handle_reach_end(ctx),
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

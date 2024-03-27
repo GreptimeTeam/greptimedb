@@ -17,6 +17,7 @@ pub mod end;
 pub mod executor;
 pub mod metadata;
 pub mod start;
+use std::any::Any;
 use std::fmt::Debug;
 
 use common_procedure::error::{Error as ProcedureError, FromJsonSnafu, ToJsonSnafu};
@@ -66,6 +67,9 @@ pub(crate) trait State: Send + Debug {
         ddl_ctx: &DdlContext,
         ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)>;
+
+    /// Returns as [Any](std::any::Any).
+    fn as_any(&self) -> &dyn Any;
 }
 
 impl DropDatabaseProcedure {
