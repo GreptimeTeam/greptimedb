@@ -19,22 +19,16 @@ use api::v1::{ColumnDataType, SemanticType};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::{Procedure, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
-use table::metadata::TableId;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
-use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
-use crate::ddl::tests::create_logical_tables;
-use crate::ddl::tests::create_logical_tables::{
-    test_create_physical_table_task, NaiveDatanodeHandler,
-};
-use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
+use crate::ddl::test_util::{create_logical_table, create_physical_table};
+use crate::ddl::tests::create_logical_tables::NaiveDatanodeHandler;
 use crate::error::Error::{AlterLogicalTablesInvalidArguments, TableNotFound};
 use crate::key::table_name::TableNameKey;
 use crate::rpc::ddl::AlterTableTask;
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
-use crate::ClusterId;
 
 fn make_alter_logical_table_add_column_task(
     schema: Option<&str>,
@@ -126,53 +120,6 @@ async fn test_on_prepare_check_alter_kind() {
         AlterLogicalTablesProcedure::new(cluster_id, tasks, physical_table_id, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, AlterLogicalTablesInvalidArguments { .. });
-}
-
-async fn create_physical_table(
-    ddl_context: DdlContext,
-    cluster_id: ClusterId,
-    name: &str,
-) -> TableId {
-    // Prepares physical table metadata.
-    let mut create_physical_table_task = test_create_physical_table_task(name);
-    let TableMetadata {
-        table_id,
-        table_route,
-        ..
-    } = ddl_context
-        .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
-        .await
-        .unwrap();
-    create_physical_table_task.set_table_id(table_id);
-    create_logical_tables::create_physical_table_metadata(
-        &ddl_context,
-        create_physical_table_task.table_info.clone(),
-        table_route,
-    )
-    .await;
-
-    table_id
-}
-
-async fn create_logical_table(
-    ddl_context: DdlContext,
-    cluster_id: ClusterId,
-    physical_table_id: TableId,
-    table_name: &str,
-) {
-    let tasks = vec![create_logical_tables::test_create_logical_table_task(
-        table_name,
-    )];
-    let mut procedure =
-        CreateLogicalTablesProcedure::new(cluster_id, tasks, physical_table_id, ddl_context);
-    let status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
-    let status = procedure.on_create_metadata().await.unwrap();
-    assert_matches!(status, Status::Done { .. });
 }
 
 #[tokio::test]

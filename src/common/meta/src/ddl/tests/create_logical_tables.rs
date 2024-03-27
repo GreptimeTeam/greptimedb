@@ -13,12 +13,9 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::meta::Partition;
 use api::v1::region::{QueryRequest, RegionRequest};
-use api::v1::{ColumnDataType, SemanticType};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
@@ -26,103 +23,17 @@ use common_procedure_test::MockContextProvider;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use store_api::storage::RegionId;
-use table::metadata::RawTableInfo;
 
 use crate::datanode_manager::HandleResponse;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
-use crate::ddl::test_util::columns::TestColumnDefBuilder;
-use crate::ddl::test_util::create_table::{
-    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+use crate::ddl::test_util::{
+    create_physical_table_metadata, test_create_logical_table_task, test_create_physical_table_task,
 };
-use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
+use crate::ddl::{TableMetadata, TableMetadataAllocatorContext};
 use crate::error::{Error, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::peer::Peer;
-use crate::rpc::ddl::CreateTableTask;
 use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
-
-// Note: this code may be duplicated with others.
-// However, it's by design, ensures the tests are easy to be modified or added.
-pub(crate) fn test_create_logical_table_task(name: &str) -> CreateTableTask {
-    let create_table = TestCreateTableExprBuilder::default()
-        .column_defs([
-            TestColumnDefBuilder::default()
-                .name("ts")
-                .data_type(ColumnDataType::TimestampMillisecond)
-                .semantic_type(SemanticType::Timestamp)
-                .build()
-                .unwrap()
-                .into(),
-            TestColumnDefBuilder::default()
-                .name("host")
-                .data_type(ColumnDataType::String)
-                .semantic_type(SemanticType::Tag)
-                .build()
-                .unwrap()
-                .into(),
-            TestColumnDefBuilder::default()
-                .name("cpu")
-                .data_type(ColumnDataType::Float64)
-                .semantic_type(SemanticType::Field)
-                .build()
-                .unwrap()
-                .into(),
-        ])
-        .time_index("ts")
-        .primary_keys(["host".into()])
-        .table_name(name)
-        .build()
-        .unwrap()
-        .into();
-    let table_info = build_raw_table_info_from_expr(&create_table);
-    CreateTableTask {
-        create_table,
-        // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
-        table_info,
-    }
-}
-
-// Note: this code may be duplicated with others.
-// However, it's by design, ensures the tests are easy to be modified or added.
-pub(crate) fn test_create_physical_table_task(name: &str) -> CreateTableTask {
-    let create_table = TestCreateTableExprBuilder::default()
-        .column_defs([
-            TestColumnDefBuilder::default()
-                .name("ts")
-                .data_type(ColumnDataType::TimestampMillisecond)
-                .semantic_type(SemanticType::Timestamp)
-                .build()
-                .unwrap()
-                .into(),
-            TestColumnDefBuilder::default()
-                .name("value")
-                .data_type(ColumnDataType::Float64)
-                .semantic_type(SemanticType::Field)
-                .build()
-                .unwrap()
-                .into(),
-        ])
-        .time_index("ts")
-        .primary_keys(["value".into()])
-        .table_name(name)
-        .build()
-        .unwrap()
-        .into();
-    let table_info = build_raw_table_info_from_expr(&create_table);
-    CreateTableTask {
-        create_table,
-        // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
-        table_info,
-    }
-}
 
 #[tokio::test]
 async fn test_on_prepare_physical_table_not_found() {
@@ -135,18 +46,6 @@ async fn test_on_prepare_physical_table_not_found() {
         CreateLogicalTablesProcedure::new(cluster_id, tasks, physical_table_id, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::TableRouteNotFound { .. });
-}
-
-pub(crate) async fn create_physical_table_metadata(
-    ddl_context: &DdlContext,
-    table_info: RawTableInfo,
-    table_route: TableRouteValue,
-) {
-    ddl_context
-        .table_metadata_manager
-        .create_table_metadata(table_info, table_route, HashMap::default())
-        .await
-        .unwrap();
 }
 
 #[tokio::test]

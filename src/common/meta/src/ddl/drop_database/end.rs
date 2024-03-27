@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+
 use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +22,7 @@ use crate::ddl::DdlContext;
 use crate::error::Result;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DropDatabaseEnd;
+pub(crate) struct DropDatabaseEnd;
 
 #[async_trait::async_trait]
 #[typetag::serde]
@@ -31,5 +33,9 @@ impl State for DropDatabaseEnd {
         _: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
         Ok((Box::new(DropDatabaseEnd), Status::done()))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
