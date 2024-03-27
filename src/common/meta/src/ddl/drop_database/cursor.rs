@@ -67,12 +67,12 @@ impl DropDatabaseCursor {
     ) -> Result<(Box<dyn State>, Status)> {
         match (self.target, table_route_value) {
             (DropTableTarget::Logical, TableRouteValue::Logical(route)) => {
-                let table_id = route.physical_table_id();
+                let physical_table_id = route.physical_table_id();
 
                 let (_, table_route) = ddl_ctx
                     .table_metadata_manager
                     .table_route_manager()
-                    .get_physical_table_route(table_id)
+                    .get_physical_table_route(physical_table_id)
                     .await?;
                 Ok((
                     Box::new(DropDatabaseExecutor::new(
