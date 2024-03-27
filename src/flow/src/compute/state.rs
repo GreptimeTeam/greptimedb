@@ -25,7 +25,7 @@ use crate::repr::{self, Timestamp};
 /// input/output of a dataflow
 /// One `ComputeState` manage the input/output/schedule of one `Hydroflow`
 #[derive(Default)]
-pub struct ComputeState {
+pub struct DataflowState {
     /// it is important to use a deque to maintain the order of subgraph here
     /// TODO(discord9): consider dedup? Also not necessary for hydroflow itself also do dedup when schedule
     schedule_subgraph: Rc<RefCell<BTreeMap<Timestamp, VecDeque<SubgraphId>>>>,
@@ -40,7 +40,7 @@ pub struct ComputeState {
     pub err_collector: ErrCollector,
 }
 
-impl ComputeState {
+impl DataflowState {
     /// schedule all subgraph that need to run with time <= `as_of` and run_available()
     ///
     /// return true if any subgraph actually executed

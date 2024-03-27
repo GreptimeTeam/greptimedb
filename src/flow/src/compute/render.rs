@@ -23,7 +23,7 @@ use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 
 use crate::adapter::error::{Error, EvalSnafu, InvalidQuerySnafu};
-use crate::compute::state::ComputeState;
+use crate::compute::state::DataflowState;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::expr::{self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, ScalarExpr};
 use crate::plan::Plan;
@@ -34,7 +34,7 @@ use crate::utils::{ArrangeHandler, Arrangement};
 pub struct Context<'referred, 'df> {
     pub id: GlobalId,
     pub df: &'referred mut Hydroflow<'df>,
-    pub compute_state: &'referred mut ComputeState,
+    pub compute_state: &'referred mut DataflowState,
     /// a list of all collections being used in the operator
     pub input_collection: BTreeMap<GlobalId, CollectionBundle>,
     /// used by `Get`/`Let` Plan for getting/setting local variables
@@ -253,7 +253,7 @@ mod test {
 
     fn harness_test_ctx<'r, 'h>(
         df: &'r mut Hydroflow<'h>,
-        state: &'r mut ComputeState,
+        state: &'r mut DataflowState,
     ) -> Context<'r, 'h> {
         let err_collector = state.err_collector.clone();
         Context {
@@ -271,7 +271,7 @@ mod test {
     #[test]
     fn test_render_mfp_with_temporal() {
         let mut df = Hydroflow::new();
-        let mut state = ComputeState::default();
+        let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
         let rows = vec![
@@ -365,7 +365,7 @@ mod test {
     #[test]
     fn test_render_mfp() {
         let mut df = Hydroflow::new();
-        let mut state = ComputeState::default();
+        let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
         let rows = vec![
@@ -413,7 +413,7 @@ mod test {
     #[test]
     fn test_render_constant() {
         let mut df = Hydroflow::new();
-        let mut state = ComputeState::default();
+        let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
         let rows = vec![
