@@ -93,30 +93,59 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
     }
 
+    fn parse_show_table_name(&mut self) -> Result<String> {
+        let _ = self.parser.next_token();
+        let table_name =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.peek_token_as_string(),
+                })?;
+
+        ensure!(
+            table_name.0.len() == 1,
+            InvalidDatabaseNameSnafu {
+                name: table_name.to_string(),
+            }
+        );
+
+        // Safety: already checked above
+        Ok(Self::canonicalize_object_name(table_name).0[0]
+            .value
+            .clone())
+    }
+
+    fn parse_db_name(&mut self) -> Result<Option<String>> {
+        let _ = self.parser.next_token();
+        let db_name = self
+            .parser
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a database name",
+                actual: self.peek_token_as_string(),
+            })?;
+
+        ensure!(
+            db_name.0.len() == 1,
+            InvalidDatabaseNameSnafu {
+                name: db_name.to_string(),
+            }
+        );
+
+        // Safety: already checked above
+        Ok(Some(
+            Self::canonicalize_object_name(db_name).0[0].value.clone(),
+        ))
+    }
+
     fn parse_show_columns(&mut self, full: bool) -> Result<Statement> {
         let table = match self.parser.peek_token().token {
             // SHOW columns {in | FROM} TABLE
             Token::Word(w) if matches!(w.keyword, Keyword::IN | Keyword::FROM) => {
-                let _ = self.parser.next_token();
-                let table_name =
-                    self.parser
-                        .parse_object_name()
-                        .with_context(|_| error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "a table name",
-                            actual: self.peek_token_as_string(),
-                        })?;
-
-                ensure!(
-                    table_name.0.len() == 1,
-                    InvalidDatabaseNameSnafu {
-                        name: table_name.to_string(),
-                    }
-                );
-                // Safety: already checked above
-                Self::canonicalize_object_name(table_name).0[0]
-                    .value
-                    .clone()
+                self.parse_show_table_name()?
             }
             _ => {
                 return error::UnexpectedTokenSnafu {
@@ -140,25 +169,7 @@ impl<'a> ParserContext<'a> {
 
             // SHOW columns {In | FROM} TABLE {In | FROM} DATABASE
             Token::Word(w) => match w.keyword {
-                Keyword::IN | Keyword::FROM => {
-                    let _ = self.parser.next_token();
-                    let db_name = self.parser.parse_object_name().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "a database name",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?;
-
-                    ensure!(
-                        db_name.0.len() == 1,
-                        InvalidDatabaseNameSnafu {
-                            name: db_name.to_string(),
-                        }
-                    );
-
-                    Some(db_name.to_string())
-                }
+                Keyword::IN | Keyword::FROM => self.parse_db_name()?,
 
                 _ => None,
             },
@@ -206,27 +217,7 @@ impl<'a> ParserContext<'a> {
         let table = match self.parser.peek_token().token {
             // SHOW INDEX {in | FROM} TABLE
             Token::Word(w) if matches!(w.keyword, Keyword::IN | Keyword::FROM) => {
-                let _ = self.parser.next_token();
-                let table_name =
-                    self.parser
-                        .parse_object_name()
-                        .with_context(|_| error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "a table name",
-                            actual: self.peek_token_as_string(),
-                        })?;
-
-                ensure!(
-                    table_name.0.len() == 1,
-                    InvalidDatabaseNameSnafu {
-                        name: table_name.to_string(),
-                    }
-                );
-
-                // Safety: already checked above
-                Self::canonicalize_object_name(table_name).0[0]
-                    .value
-                    .clone()
+                self.parse_show_table_name()?
             }
             _ => {
                 return error::UnexpectedTokenSnafu {
@@ -249,25 +240,7 @@ impl<'a> ParserContext<'a> {
 
             // SHOW INDEX {In | FROM} TABLE {In | FROM} DATABASE
             Token::Word(w) => match w.keyword {
-                Keyword::IN | Keyword::FROM => {
-                    let _ = self.parser.next_token();
-                    let db_name = self.parser.parse_object_name().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "a database name",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?;
-
-                    ensure!(
-                        db_name.0.len() == 1,
-                        InvalidDatabaseNameSnafu {
-                            name: db_name.to_string(),
-                        }
-                    );
-
-                    Some(db_name.to_string())
-                }
+                Keyword::IN | Keyword::FROM => self.parse_db_name()?,
 
                 _ => None,
             },
@@ -312,25 +285,7 @@ impl<'a> ParserContext<'a> {
 
             // SHOW TABLES [in | FROM] [DATABASE]
             Token::Word(w) => match w.keyword {
-                Keyword::IN | Keyword::FROM => {
-                    let _ = self.parser.next_token();
-                    let db_name = self.parser.parse_object_name().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "a database name",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?;
-
-                    ensure!(
-                        db_name.0.len() == 1,
-                        InvalidDatabaseNameSnafu {
-                            name: db_name.to_string(),
-                        }
-                    );
-
-                    Some(db_name.to_string())
-                }
+                Keyword::IN | Keyword::FROM => self.parse_db_name()?,
 
                 _ => None,
             },
@@ -666,13 +621,13 @@ mod tests {
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
         assert!(matches!(&stmts[0],
-                     Statement::ShowColumns(ShowColumns {
-                         table,
-                         database,
-                         full,
-                         ..
+                         Statement::ShowColumns(ShowColumns {
+                             table,
+                             database,
+                             full,
+                             ..
 
-                     }) if table == "test" && database.is_none() && !full));
+                         }) if table == "test" && database.is_none() && !full));
 
         let sql = "SHOW FULL COLUMNS from test from public";
         let result =
@@ -680,12 +635,12 @@ mod tests {
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
         assert!(matches!(&stmts[0],
-                     Statement::ShowColumns(ShowColumns {
-                         table,
-                         database: Some(database),
-                         full,
-                         ..
-                     }) if table == "test" && database == "public" && *full));
+                         Statement::ShowColumns(ShowColumns {
+                             table,
+                             database: Some(database),
+                             full,
+                             ..
+                         }) if table == "test" && database == "public" && *full));
 
         let sql = "SHOW COLUMNS from test like 'disk%'";
         let result =
@@ -693,11 +648,11 @@ mod tests {
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
         assert!(matches!(&stmts[0],
-                     Statement::ShowColumns(ShowColumns {
-                         table,
-                         kind: ShowKind::Like(ident),
-                         ..
-                     }) if table == "test" && ident.to_string() == "'disk%'"));
+                         Statement::ShowColumns(ShowColumns {
+                             table,
+                             kind: ShowKind::Like(ident),
+                             ..
+                         }) if table == "test" && ident.to_string() == "'disk%'"));
 
         let sql = "SHOW COLUMNS from test where Field = 'disk'";
         let result =
@@ -705,11 +660,11 @@ mod tests {
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
         assert!(matches!(&stmts[0],
-                     Statement::ShowColumns(ShowColumns {
-                         table,
-                         kind: ShowKind::Where(expr),
-                         ..
-                     }) if table == "test" && expr.to_string() == "Field = 'disk'"));
+                         Statement::ShowColumns(ShowColumns {
+                             table,
+                             kind: ShowKind::Where(expr),
+                             ..
+                         }) if table == "test" && expr.to_string() == "Field = 'disk'"));
     }
 
     #[test]
@@ -726,12 +681,12 @@ mod tests {
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
         assert!(matches!(&stmts[0],
-                     Statement::ShowIndex(ShowIndex {
-                         table,
-                         database,
-                         ..
+                         Statement::ShowIndex(ShowIndex {
+                             table,
+                             database,
+                             ..
 
-                     }) if table == "test" && database.is_none()));
+                         }) if table == "test" && database.is_none()));
 
         let sql = "SHOW INDEX from test from public";
         let result =
@@ -739,11 +694,11 @@ mod tests {
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
         assert!(matches!(&stmts[0],
-                     Statement::ShowIndex(ShowIndex {
-                         table,
-                         database: Some(database),
-                         ..
-                     }) if table == "test" && database == "public"));
+                         Statement::ShowIndex(ShowIndex {
+                             table,
+                             database: Some(database),
+                             ..
+                         }) if table == "test" && database == "public"));
 
         // SHOW INDEX deosn't support like
         let sql = "SHOW INDEX from test like 'disk%'";
@@ -761,10 +716,10 @@ mod tests {
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
         assert!(matches!(&stmts[0],
-                     Statement::ShowIndex(ShowIndex {
-                         table,
-                         kind: ShowKind::Where(expr),
-                         ..
-                     }) if table == "test" && expr.to_string() == "Field = 'disk'"));
+                         Statement::ShowIndex(ShowIndex {
+                             table,
+                             kind: ShowKind::Where(expr),
+                             ..
+                         }) if table == "test" && expr.to_string() == "Field = 'disk'"));
     }
 }
