@@ -288,9 +288,8 @@ impl CreateTableProcedure {
 
         self.creator.data.state = CreateTableState::CreateMetadata;
 
-        // Ensures the procedures after the crash start from the `DatanodeCreateRegions` stage.
         // TODO(weny): Add more tests.
-        Ok(Status::executing(false))
+        Ok(Status::executing(true))
     }
 
     /// Creates table metadata
