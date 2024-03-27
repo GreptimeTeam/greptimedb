@@ -44,7 +44,7 @@ pub struct DropDatabaseProcedure {
 }
 
 /// Target of dropping tables.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum DropTableTarget {
     Logical,
     Physical,
