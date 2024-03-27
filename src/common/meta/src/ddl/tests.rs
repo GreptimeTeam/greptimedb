@@ -15,3 +15,4 @@
 mod alter_logical_tables;
 mod create_logical_tables;
 mod create_table;
+mod drop_database;

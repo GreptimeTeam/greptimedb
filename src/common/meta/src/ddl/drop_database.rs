@@ -17,6 +17,7 @@ pub mod end;
 pub mod executor;
 pub mod metadata;
 pub mod start;
+use std::any::Any;
 use std::fmt::Debug;
 
 use common_procedure::error::{Error as ProcedureError, FromJsonSnafu, ToJsonSnafu};
@@ -43,14 +44,14 @@ pub struct DropDatabaseProcedure {
 }
 
 /// Target of dropping tables.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum DropTableTarget {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum DropTableTarget {
     Logical,
     Physical,
 }
 
 /// Context of [DropDatabaseProcedure] execution.
-pub struct DropDatabaseContext {
+pub(crate) struct DropDatabaseContext {
     catalog: String,
     schema: String,
     drop_if_exists: bool,
@@ -66,6 +67,9 @@ pub(crate) trait State: Send + Debug {
         ddl_ctx: &DdlContext,
         ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)>;
+
+    /// Returns as [Any](std::any::Any).
+    fn as_any(&self) -> &dyn Any;
 }
 
 impl DropDatabaseProcedure {

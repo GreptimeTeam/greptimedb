@@ -99,7 +99,6 @@ pub fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
                     .build(),
             ),
             Arc::new(WalOptionsAllocator::default()),
-            table_metadata_manager.table_name_manager().clone(),
         )),
         table_metadata_manager,
     }

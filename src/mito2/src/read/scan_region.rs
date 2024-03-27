@@ -210,12 +210,13 @@ impl ScanRegion {
             .collect();
 
         debug!(
-            "Seq scan region {}, request: {:?}, memtables: {}, ssts_to_read: {}, total_ssts: {}",
+            "Seq scan region {}, request: {:?}, memtables: {}, ssts_to_read: {}, total_ssts: {}, append_mode: {}",
             self.version.metadata.region_id,
             self.request,
             memtables.len(),
             files.len(),
-            total_ssts
+            total_ssts,
+            self.version.options.append_mode,
         );
 
         let index_applier = self.build_index_applier();
@@ -234,7 +235,8 @@ impl ScanRegion {
             .with_cache(self.cache_manager)
             .with_index_applier(index_applier)
             .with_parallelism(self.parallelism)
-            .with_start_time(self.start_time);
+            .with_start_time(self.start_time)
+            .with_append_mode(self.version.options.append_mode);
 
         Ok(seq_scan)
     }

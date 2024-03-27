@@ -27,6 +27,7 @@ use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
+use crate::session_config::PGByteaOutputValue;
 use crate::SessionRef;
 
 pub type QueryContextRef = Arc<QueryContext>;
@@ -44,6 +45,9 @@ pub struct QueryContext {
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extension: HashMap<String, String>,
+    // The configuration parameter are used to store the parameters that are set by the user
+    #[builder(default)]
+    configuration_parameter: Arc<ConfigurationVariables>,
 }
 
 impl QueryContextBuilder {
@@ -73,6 +77,7 @@ impl Clone for QueryContext {
             timezone: self.timezone.load().clone().into(),
             sql_dialect: self.sql_dialect.clone(),
             extension: self.extension.clone(),
+            configuration_parameter: self.configuration_parameter.clone(),
         }
     }
 }
@@ -88,6 +93,7 @@ impl From<&RegionRequestHeader> for QueryContext {
             timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
             sql_dialect: Arc::new(GreptimeDbDialect {}),
             extension: Default::default(),
+            configuration_parameter: Default::default(),
         }
     }
 }
@@ -183,6 +189,10 @@ impl QueryContext {
             '`'
         }
     }
+
+    pub fn configuration_parameter(&self) -> &ConfigurationVariables {
+        &self.configuration_parameter
+    }
 }
 
 impl QueryContextBuilder {
@@ -204,6 +214,7 @@ impl QueryContextBuilder {
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extension: self.extension.unwrap_or_default(),
+            configuration_parameter: self.configuration_parameter.unwrap_or_default(),
         })
     }
 
@@ -268,6 +279,33 @@ impl Display for Channel {
     }
 }
 
+#[derive(Default, Debug)]
+pub struct ConfigurationVariables {
+    postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
+}
+
+impl Clone for ConfigurationVariables {
+    fn clone(&self) -> Self {
+        Self {
+            postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
+        }
+    }
+}
+
+impl ConfigurationVariables {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_postgres_bytea_output(&self, value: PGByteaOutputValue) {
+        let _ = self.postgres_bytea_output.swap(Arc::new(value));
+    }
+
+    pub fn postgres_bytea_output(&self) -> Arc<PGByteaOutputValue> {
+        self.postgres_bytea_output.load().clone()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
@@ -278,7 +316,11 @@ mod test {
 
     #[test]
     fn test_session() {
-        let session = Session::new(Some("127.0.0.1:9000".parse().unwrap()), Channel::Mysql);
+        let session = Session::new(
+            Some("127.0.0.1:9000".parse().unwrap()),
+            Channel::Mysql,
+            Default::default(),
+        );
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");
 

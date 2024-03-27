@@ -88,6 +88,7 @@ use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::kv_backend::txn::{Txn, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
+use crate::table_name::TableName;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.]*";
@@ -552,17 +553,15 @@ impl TableMetadataManager {
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn delete_table_metadata(
         &self,
-        table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
-        table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
+        table_id: TableId,
+        table_name: &TableName,
+        region_routes: &[RegionRoute],
     ) -> Result<()> {
-        let table_info = &table_info_value.table_info;
-        let table_id = table_info.ident.table_id;
-
         // Deletes table name.
         let table_name = TableNameKey::new(
-            &table_info.catalog_name,
-            &table_info.schema_name,
-            &table_info.name,
+            &table_name.catalog_name,
+            &table_name.schema_name,
+            &table_name.table_name,
         );
 
         let delete_table_name_txn = self.table_name_manager().build_delete_txn(&table_name)?;
@@ -571,7 +570,7 @@ impl TableMetadataManager {
         let delete_table_info_txn = self.table_info_manager().build_delete_txn(table_id)?;
 
         // Deletes datanode table key value pairs.
-        let distribution = region_distribution(table_route_value.region_routes()?);
+        let distribution = region_distribution(region_routes);
         let delete_datanode_txn = self
             .datanode_table_manager()
             .build_delete_txn(table_id, distribution)?;
@@ -929,6 +928,7 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{region_distribution, Region, RegionRoute, RegionStatus};
+    use crate::table_name::TableName;
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1144,9 +1144,6 @@ mod tests {
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let table_id = table_info.ident.table_id;
         let datanode_id = 2;
-        let table_route_value = DeserializedValueWithBytes::from_inner(TableRouteValue::physical(
-            region_routes.clone(),
-        ));
 
         // creates metadata.
         create_physical_table_metadata(
@@ -1157,18 +1154,20 @@ mod tests {
         .await
         .unwrap();
 
-        let table_info_value =
-            DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
-
+        let table_name = TableName::new(
+            table_info.catalog_name,
+            table_info.schema_name,
+            table_info.name,
+        );
         // deletes metadata.
         table_metadata_manager
-            .delete_table_metadata(&table_info_value, &table_route_value)
+            .delete_table_metadata(table_id, &table_name, region_routes)
             .await
             .unwrap();
 
         // if metadata was already deleted, it should be ok.
         table_metadata_manager
-            .delete_table_metadata(&table_info_value, &table_route_value)
+            .delete_table_metadata(table_id, &table_name, region_routes)
             .await
             .unwrap();
 

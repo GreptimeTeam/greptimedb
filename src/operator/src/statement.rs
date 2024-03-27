@@ -39,6 +39,7 @@ use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
+use session::session_config::PGByteaOutputValue;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
@@ -52,8 +53,8 @@ use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidConfigValueSnafu,
+    InvalidSqlSnafu, NotSupportedSnafu, PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -219,8 +220,7 @@ impl StatementExecutor {
                     // so we just ignore it here instead of returning an error to break the connection.
                     // Since the "bytea_output" only determines the output format of binary values,
                     // it won't cause much trouble if we do so.
-                    // TODO(#3438): Remove this temporary workaround after the feature is implemented.
-                    "BYTEA_OUTPUT" => (),
+                    "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,
 
                     // Same as "bytea_output", we just ignore it here.
                     // Not harmful since it only relates to how date is viewed in client app's output.
@@ -337,6 +337,25 @@ fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
         }
         .fail(),
     }
+}
+
+fn set_bytea_output(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let Some((var_value, [])) = exprs.split_first() else {
+        return (NotSupportedSnafu {
+            feat: "Set variable value must have one and only one value for bytea_output",
+        })
+        .fail();
+    };
+    let Expr::Value(value) = var_value else {
+        return (NotSupportedSnafu {
+            feat: "Set variable value must be a value",
+        })
+        .fail();
+    };
+    ctx.configuration_parameter().set_postgres_bytea_output(
+        PGByteaOutputValue::try_from(value.clone()).context(InvalidConfigValueSnafu)?,
+    );
+    Ok(())
 }
 
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
