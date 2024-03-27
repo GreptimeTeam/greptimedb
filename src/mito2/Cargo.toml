@@ -70,6 +70,7 @@ common-procedure-test.workspace = true
 common-test-util.workspace = true
 criterion = "0.4"
 log-store.workspace = true
+object-store = { workspace = true, features = ["services-memory"] }
 toml.workspace = true
 
 [[bench]]

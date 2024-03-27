@@ -114,6 +114,11 @@ impl MitoEngine {
 
     /// Returns a scanner to scan for `request`.
     fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+        self.scan_region(region_id, request)?.scanner()
+    }
+
+    /// Scans a region.
+    fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         self.inner.handle_query(region_id, request)
     }
 
@@ -220,8 +225,8 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
-    /// Handles the scan `request` and returns a [Scanner] for the `request`.
-    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+    /// Handles the scan `request` and returns a [ScanRegion].
+    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self
@@ -246,7 +251,7 @@ impl EngineInner {
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_start_time(query_start);
 
-        scan_region.scanner()
+        Ok(scan_region)
     }
 
     /// Set writable mode for a region.
