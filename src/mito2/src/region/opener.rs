@@ -173,7 +173,7 @@ impl RegionOpener {
 
         let memtable_builder = self
             .memtable_builder_provider
-            .builder_for_options(options.memtable.as_ref());
+            .builder_for_options(options.memtable.as_ref(), !options.append_mode);
         // Initial memtable id is 0.
         let part_duration = options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
@@ -281,9 +281,10 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
         ));
-        let memtable_builder = self
-            .memtable_builder_provider
-            .builder_for_options(region_options.memtable.as_ref());
+        let memtable_builder = self.memtable_builder_provider.builder_for_options(
+            region_options.memtable.as_ref(),
+            !region_options.append_mode,
+        );
         // Initial memtable id is 0.
         let part_duration = region_options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(

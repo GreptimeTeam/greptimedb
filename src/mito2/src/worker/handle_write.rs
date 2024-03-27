@@ -17,11 +17,13 @@
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
+use api::v1::OpType;
+use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
-use crate::error::{RejectWriteSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RejectWriteSnafu, Result};
 use crate::metrics::{
     WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
 };
@@ -162,6 +164,16 @@ impl<S> RegionWorkerLoop<S> {
             // Safety: Now we ensure the region exists.
             let region_ctx = region_ctxs.get_mut(&region_id).unwrap();
 
+            if let Err(e) = check_op_type(
+                region_ctx.version().options.append_mode,
+                &sender_req.request,
+            ) {
+                // Do not allow non-put op under append mode.
+                sender_req.sender.send(Err(e));
+
+                continue;
+            }
+
             // Checks whether request schema is compatible with region schema.
             if let Err(e) =
                 maybe_fill_missing_columns(&mut sender_req.request, &region_ctx.version().metadata)
@@ -215,6 +227,21 @@ fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetad
         } else {
             return Err(e);
         }
+    }
+
+    Ok(())
+}
+
+/// Rejects delete request under append mode.
+fn check_op_type(append_mode: bool, request: &WriteRequest) -> Result<()> {
+    if append_mode {
+        ensure!(
+            request.op_type == OpType::Put,
+            InvalidRequestSnafu {
+                region_id: request.region_id,
+                reason: "Only put is allowed under append mode",
+            }
+        );
     }
 
     Ok(())

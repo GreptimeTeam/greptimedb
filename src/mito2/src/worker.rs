@@ -48,9 +48,7 @@ use crate::config::MitoConfig;
 use crate::error::{InvalidRequestSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::manifest::action::RegionEdit;
-use crate::memtable::partition_tree::PartitionTreeMemtableBuilder;
-use crate::memtable::time_series::TimeSeriesMemtableBuilder;
-use crate::memtable::{MemtableBuilderProvider, MemtableConfig};
+use crate::memtable::MemtableBuilderProvider;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
@@ -338,20 +336,10 @@ impl<S: LogStore> WorkerStarter<S> {
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
-
-        let default_memtable_builder = match &self.config.memtable {
-            MemtableConfig::PartitionTree(config) => Arc::new(PartitionTreeMemtableBuilder::new(
-                config.clone(),
-                Some(self.write_buffer_manager.clone()),
-            )) as _,
-            MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(Some(
-                self.write_buffer_manager.clone(),
-            ))) as _,
-        };
         let now = self.time_provider.current_time_millis();
         let mut worker_thread = RegionWorkerLoop {
             id: self.id,
-            config: self.config,
+            config: self.config.clone(),
             regions: regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
             sender: sender.clone(),
@@ -361,7 +349,7 @@ impl<S: LogStore> WorkerStarter<S> {
             running: running.clone(),
             memtable_builder_provider: MemtableBuilderProvider::new(
                 Some(self.write_buffer_manager.clone()),
-                default_memtable_builder,
+                self.config,
             ),
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,

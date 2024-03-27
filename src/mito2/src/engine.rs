@@ -17,6 +17,8 @@
 #[cfg(test)]
 mod alter_test;
 #[cfg(test)]
+mod append_mode_test;
+#[cfg(test)]
 mod basic_test;
 #[cfg(test)]
 mod catchup_test;
