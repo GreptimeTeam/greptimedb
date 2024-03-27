@@ -19,6 +19,7 @@ pub mod merge;
 pub mod projection;
 pub(crate) mod scan_region;
 pub(crate) mod seq_scan;
+pub(crate) mod unordered_scan;
 
 use std::collections::HashSet;
 use std::sync::Arc;

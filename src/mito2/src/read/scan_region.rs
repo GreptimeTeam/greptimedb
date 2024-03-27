@@ -34,7 +34,7 @@ use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::CompatReader;
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
-use crate::read::{compat, BoxedBatchStream, Source};
+use crate::read::{compat, Batch, Source};
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
@@ -80,6 +80,7 @@ impl Scanner {
     }
 }
 
+// TODO(yingwen): Update mermaid
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Helper to scans a region by [ScanRequest].
 ///
@@ -485,7 +486,7 @@ impl ScanInput {
         Ok(sources)
     }
 
-    /// Scan sources in parallel.
+    /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
     pub(crate) async fn build_parallel_sources(&self) -> Result<Vec<Source>> {
@@ -497,16 +498,22 @@ impl ScanInput {
         let sources = sources
             .into_iter()
             .map(|source| {
-                let stream = self.spawn_scan_task(source, semaphore.clone());
+                let (sender, receiver) = mpsc::channel(self.parallelism.channel_size);
+                self.spawn_scan_task(source, semaphore.clone(), sender);
+                let stream = Box::pin(ReceiverStream::new(receiver));
                 Source::Stream(stream)
             })
             .collect();
         Ok(sources)
     }
 
-    /// Scan the input source in another task.
-    fn spawn_scan_task(&self, mut input: Source, semaphore: Arc<Semaphore>) -> BoxedBatchStream {
-        let (sender, receiver) = mpsc::channel(self.parallelism.channel_size);
+    /// Scans the input source in another task and sends batches to the sender.
+    pub(crate) fn spawn_scan_task(
+        &self,
+        mut input: Source,
+        semaphore: Arc<Semaphore>,
+        sender: mpsc::Sender<Result<Batch>>,
+    ) {
         tokio::spawn(async move {
             loop {
                 // We release the permit before sending result to avoid the task waiting on
@@ -528,7 +535,5 @@ impl ScanInput {
                 }
             }
         });
-
-        Box::pin(ReceiverStream::new(receiver))
     }
 }
