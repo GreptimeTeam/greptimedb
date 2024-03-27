@@ -22,6 +22,8 @@ use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
 use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
+use tokio::sync::{mpsc, Semaphore};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::FileCacheRef;
@@ -32,7 +34,7 @@ use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::CompatReader;
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
-use crate::read::{compat, Source};
+use crate::read::{compat, BoxedBatchStream, Source};
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
@@ -231,7 +233,7 @@ impl ScanRegion {
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
 
-        let seq_scan = SeqScan::new(self.access_layer.clone(), mapper)
+        let input = ScanInput::new(self.access_layer.clone(), mapper)
             .with_time_range(Some(time_range))
             .with_predicate(Some(predicate))
             .with_memtables(memtables)
@@ -241,6 +243,7 @@ impl ScanRegion {
             .with_parallelism(self.parallelism)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode);
+        let seq_scan = SeqScan::new(input);
 
         Ok(seq_scan)
     }
@@ -325,25 +328,27 @@ pub(crate) struct ScanInput {
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
-    mapper: Arc<ProjectionMapper>,
+    pub(crate) mapper: Arc<ProjectionMapper>,
     /// Time range filter for time index.
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
     predicate: Option<Predicate>,
     /// Memtables to scan.
-    memtables: Vec<MemtableRef>,
+    pub(crate) memtables: Vec<MemtableRef>,
     /// Handles to SST files to scan.
-    files: Vec<FileHandle>,
+    pub(crate) files: Vec<FileHandle>,
     /// Cache.
-    cache_manager: Option<CacheManagerRef>,
+    pub(crate) cache_manager: Option<CacheManagerRef>,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
     /// Parallelism to scan data.
-    parallelism: ScanParallism,
+    pub(crate) parallelism: ScanParallism,
     /// Index applier.
     index_applier: Option<SstIndexApplierRef>,
     /// Start time of the query.
-    query_start: Option<Instant>,
+    pub(crate) query_start: Option<Instant>,
+    /// The region is using append mode.
+    pub(crate) append_mode: bool,
 }
 
 impl ScanInput {
@@ -362,6 +367,7 @@ impl ScanInput {
             parallelism: ScanParallism::default(),
             index_applier: None,
             query_start: None,
+            append_mode: false,
         }
     }
 
@@ -428,6 +434,12 @@ impl ScanInput {
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_append_mode(mut self, is_append_mode: bool) -> Self {
+        self.append_mode = is_append_mode;
+        self
+    }
+
     /// Builds and returns sources to read.
     pub(crate) async fn build_sources(&self) -> Result<Vec<Source>> {
         let mut sources = Vec::with_capacity(self.memtables.len() + self.files.len());
@@ -471,5 +483,52 @@ impl ScanInput {
         READ_SST_COUNT.observe(self.files.len() as f64);
 
         Ok(sources)
+    }
+
+    /// Scan sources in parallel.
+    ///
+    /// # Panics if the input doesn't allow parallel scan.
+    pub(crate) async fn build_parallel_sources(&self) -> Result<Vec<Source>> {
+        assert!(self.parallelism.allow_parallel_scan());
+        // Scall all memtables and SSTs.
+        let sources = self.build_sources().await?;
+        let semaphore = Arc::new(Semaphore::new(self.parallelism.parallelism));
+        // Spawn a task for each source.
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let stream = self.spawn_scan_task(source, semaphore.clone());
+                Source::Stream(stream)
+            })
+            .collect();
+        Ok(sources)
+    }
+
+    /// Scan the input source in another task.
+    fn spawn_scan_task(&self, mut input: Source, semaphore: Arc<Semaphore>) -> BoxedBatchStream {
+        let (sender, receiver) = mpsc::channel(self.parallelism.channel_size);
+        tokio::spawn(async move {
+            loop {
+                // We release the permit before sending result to avoid the task waiting on
+                // the channel with the permit holded
+                let maybe_batch = {
+                    // Safety: We never close the semaphore.
+                    let _permit = semaphore.acquire().await.unwrap();
+                    input.next_batch().await
+                };
+                match maybe_batch {
+                    Ok(Some(batch)) => {
+                        let _ = sender.send(Ok(batch)).await;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = sender.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Box::pin(ReceiverStream::new(receiver))
     }
 }
