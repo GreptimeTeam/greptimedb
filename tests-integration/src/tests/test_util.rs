@@ -114,7 +114,7 @@ impl MockInstanceBuilder {
                 } = instance;
                 MockInstanceImpl::Standalone(
                     builder
-                        .build_with(kv_backend, procedure_manager, guard, mix_options)
+                        .build_with(kv_backend, guard, mix_options, procedure_manager, false)
                         .await,
                 )
             }

@@ -110,9 +110,10 @@ impl GreptimeDbStandaloneBuilder {
     pub async fn build_with(
         &self,
         kv_backend: KvBackendRef,
-        procedure_manager: ProcedureManagerRef,
         guard: TestGuard,
         mix_options: MixOptions,
+        procedure_manager: ProcedureManagerRef,
+        register_procedure_loaders: bool,
     ) -> GreptimeDbStandalone {
         let plugins = self.plugin.clone().unwrap_or_default();
 
@@ -153,6 +154,7 @@ impl GreptimeDbStandaloneBuilder {
                 table_metadata_manager,
                 table_meta_allocator,
                 Arc::new(MemoryRegionKeeper::default()),
+                register_procedure_loaders,
             )
             .unwrap(),
         );
@@ -218,7 +220,7 @@ impl GreptimeDbStandaloneBuilder {
             wal_meta,
         };
 
-        self.build_with(kv_backend, procedure_manager, guard, mix_options)
+        self.build_with(kv_backend, guard, mix_options, procedure_manager, true)
             .await
     }
 }
