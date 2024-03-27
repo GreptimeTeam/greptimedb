@@ -6157,6 +6157,7 @@ dependencies = [
  "futures-util",
  "lazy_static",
  "meta-client",
+ "meter-core",
  "meter-macros",
  "object-store",
  "partition",
