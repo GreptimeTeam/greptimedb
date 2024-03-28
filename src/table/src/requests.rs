@@ -23,11 +23,10 @@ use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
 use datatypes::prelude::VectorRef;
-use datatypes::schema::{ColumnSchema, RawSchema};
+use datatypes::schema::ColumnSchema;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
-use store_api::storage::RegionNumber;
 
 use crate::error;
 use crate::error::ParseTableOptionSnafu;
@@ -64,38 +63,6 @@ pub fn validate_table_option(key: &str) -> bool {
         LOGICAL_TABLE_METADATA_KEY,
     ]
     .contains(&key)
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateDatabaseRequest {
-    pub db_name: String,
-    pub create_if_not_exists: bool,
-}
-
-/// Create table request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateTableRequest {
-    pub id: TableId,
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub desc: Option<String>,
-    pub schema: RawSchema,
-    pub region_numbers: Vec<u32>,
-    pub primary_key_indices: Vec<usize>,
-    pub create_if_not_exists: bool,
-    pub table_options: TableOptions,
-    pub engine: String,
-}
-
-impl CreateTableRequest {
-    pub fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,16 +144,6 @@ impl From<&TableOptions> for HashMap<String, String> {
     }
 }
 
-/// Open table request
-#[derive(Debug, Clone)]
-pub struct OpenTableRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: TableId,
-    pub region_numbers: Vec<RegionNumber>,
-}
-
 /// Alter table request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlterTableRequest {
@@ -197,20 +154,6 @@ pub struct AlterTableRequest {
     pub alter_kind: AlterKind,
     // None in standalone.
     pub table_version: Option<TableVersion>,
-}
-
-impl AlterTableRequest {
-    pub fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
-        }
-    }
-
-    pub fn is_rename_table(&self) -> bool {
-        matches!(self.alter_kind, AlterKind::RenameTable { .. })
-    }
 }
 
 /// Add column request
@@ -226,48 +169,6 @@ pub enum AlterKind {
     AddColumns { columns: Vec<AddColumnRequest> },
     DropColumns { names: Vec<String> },
     RenameTable { new_table_name: String },
-}
-
-/// Drop table request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DropTableRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: TableId,
-}
-
-impl DropTableRequest {
-    pub fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
-        }
-    }
-}
-
-/// Close table request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloseTableRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: TableId,
-    /// Do nothing if region_numbers is empty
-    pub region_numbers: Vec<RegionNumber>,
-    /// flush regions
-    pub flush: bool,
-}
-
-impl CloseTableRequest {
-    pub fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
-        }
-    }
 }
 
 #[derive(Debug)]
