@@ -26,7 +26,7 @@ use crate::expr::error::{
     TypeMismatchSnafu,
 };
 use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
-use crate::repr::Row;
+use crate::repr::{value_to_internal_ts, Row};
 
 /// UnmaterializableFunc is a function that can't be eval independently,
 /// and require special handling
@@ -80,13 +80,17 @@ impl UnaryFunc {
                 }
             }
             Self::StepTimestamp => {
+                let ty = arg.data_type();
                 if let Value::DateTime(datetime) = arg {
                     let datetime = DateTime::from(datetime.val() + 1);
+                    Ok(Value::from(datetime))
+                } else if let Ok(v) = value_to_internal_ts(arg) {
+                    let datetime = DateTime::from(v + 1);
                     Ok(Value::from(datetime))
                 } else {
                     TypeMismatchSnafu {
                         expected: ConcreteDataType::datetime_datatype(),
-                        actual: arg.data_type(),
+                        actual: ty,
                     }
                     .fail()?
                 }
