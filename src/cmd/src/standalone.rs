@@ -480,6 +480,7 @@ impl StartCommand {
                 table_metadata_manager,
                 table_meta_allocator,
                 Arc::new(MemoryRegionKeeper::default()),
+                true,
             )
             .context(InitDdlManagerSnafu)?,
         );

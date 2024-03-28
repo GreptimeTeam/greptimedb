@@ -415,6 +415,7 @@ fn build_ddl_manager(
             table_metadata_manager.clone(),
             table_metadata_allocator.clone(),
             memory_region_keeper.clone(),
+            true,
         )
         .context(error::InitDdlManagerSnafu)?,
     ))

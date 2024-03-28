@@ -10114,6 +10114,7 @@ dependencies = [
  "paste",
  "prost 0.12.3",
  "query",
+ "rand",
  "rstest",
  "rstest_reuse",
  "script",

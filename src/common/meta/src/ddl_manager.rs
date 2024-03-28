@@ -79,6 +79,7 @@ impl DdlManager {
         table_metadata_manager: TableMetadataManagerRef,
         table_metadata_allocator: TableMetadataAllocatorRef,
         memory_region_keeper: MemoryRegionKeeperRef,
+        register_loaders: bool,
     ) -> Result<Self> {
         let manager = Self {
             procedure_manager,
@@ -88,7 +89,9 @@ impl DdlManager {
             table_metadata_allocator,
             memory_region_keeper,
         };
-        manager.register_loaders()?;
+        if register_loaders {
+            manager.register_loaders()?;
+        }
         Ok(manager)
     }
 
@@ -767,6 +770,7 @@ mod tests {
                 Arc::new(WalOptionsAllocator::default()),
             )),
             Arc::new(MemoryRegionKeeper::default()),
+            true,
         );
 
         let expected_loaders = vec![
