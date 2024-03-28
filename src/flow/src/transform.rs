@@ -11,7 +11,9 @@ use datafusion_substrait::variation_const::{
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::value::Value;
 use snafu::OptionExt;
+use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
 use substrait_proto::proto::expression::literal::LiteralType;
+use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
 use substrait_proto::proto::expression::{Literal, RexType};
 use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::proto::r#type::Kind;
@@ -112,12 +114,43 @@ pub fn from_substrait_rel(
     todo!()
 }
 
+/// Convert Substrait Rex into Flow's ScalarExpr
 pub fn from_substrait_rex(
     e: &Expression,
     extensions: &HashMap<u32, &String>,
 ) -> Result<ScalarExpr, Error> {
     match &e.rex_type {
         Some(RexType::Literal(lit)) => {
+            let lit = from_substrait_literal(lit)?;
+            Ok(ScalarExpr::Literal(lit.0, lit.1))
+        }
+        Some(RexType::Selection(field_ref)) => match &field_ref.reference_type {
+            Some(DirectReference(direct)) => match &direct.reference_type.as_ref() {
+                Some(StructField(x)) => match &x.child.as_ref() {
+                    Some(_) => {
+                        not_impl_err!("Direct reference StructField with child is not supported")
+                    }
+                    None => {
+                        let column = x.field as usize;
+                        Ok(ScalarExpr::Column(column))
+                    }
+                },
+                _ => not_impl_err!(
+                    "Direct reference with types other than StructField is not supported"
+                ),
+            },
+            _ => not_impl_err!("unsupported field ref type"),
+        },
+        Some(RexType::ScalarFunction(f)) => {
+            let fn_name = extensions.get(&f.function_reference).ok_or_else(|| {
+                NotImplementedSnafu {
+                    reason: format!(
+                        "Aggregated function not found: function reference = {:?}",
+                        f.function_reference
+                    ),
+                }
+                .build()
+            })?;
             todo!()
         }
         _ => not_impl_err!("unsupported rex_type"),
