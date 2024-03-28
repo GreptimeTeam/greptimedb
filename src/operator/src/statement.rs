@@ -18,6 +18,7 @@ mod copy_table_to;
 mod ddl;
 mod describe;
 mod dml;
+mod set;
 mod show;
 mod tql;
 
@@ -33,28 +34,27 @@ use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
 use common_time::range::TimestampRange;
-use common_time::{Timestamp, Timezone};
+use common_time::Timestamp;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use session::session_config::PGByteaOutputValue;
 use session::table_name::table_idents_to_full_name;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
-use sql::statements::set_variables::SetVariables;
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
-use sqlparser::ast::{Expr, Ident, ObjectName, Value};
+use sqlparser::ast::ObjectName;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::table_reference::TableReference;
 use table::TableRef;
 
+use self::set::{set_bytea_output, set_datestyle, set_timezone, validate_client_encoding};
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidConfigValueSnafu,
-    InvalidSqlSnafu, NotSupportedSnafu, PlanStatementSnafu, Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
+    PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -215,18 +215,12 @@ impl StatementExecutor {
                 match var_name.as_str() {
                     "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
 
-                    // Some postgresql client app may submit a "SET bytea_output" stmt upon connection.
-                    // However, currently we lack the support for it (tracked in https://github.com/GreptimeTeam/greptimedb/issues/3438),
-                    // so we just ignore it here instead of returning an error to break the connection.
-                    // Since the "bytea_output" only determines the output format of binary values,
-                    // it won't cause much trouble if we do so.
                     "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,
 
                     // Same as "bytea_output", we just ignore it here.
                     // Not harmful since it only relates to how date is viewed in client app's output.
                     // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
-                    // TODO(#3442): Remove this temporary workaround after the feature is implemented.
-                    "DATESTYLE" => (),
+                    "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
 
                     "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
                     _ => {
@@ -277,85 +271,6 @@ impl StatementExecutor {
                 table_name: table_ref.to_string(),
             })
     }
-}
-
-fn validate_client_encoding(set: SetVariables) -> Result<()> {
-    let Some((encoding, [])) = set.value.split_first() else {
-        return InvalidSqlSnafu {
-            err_msg: "must provide one and only one client encoding value",
-        }
-        .fail();
-    };
-    let encoding = match encoding {
-        Expr::Value(Value::SingleQuotedString(x))
-        | Expr::Identifier(Ident {
-            value: x,
-            quote_style: _,
-        }) => x.to_uppercase(),
-        _ => {
-            return InvalidSqlSnafu {
-                err_msg: format!("client encoding must be a string, actual: {:?}", encoding),
-            }
-            .fail();
-        }
-    };
-    // For the sake of simplicity, we only support "UTF8" ("UNICODE" is the alias for it,
-    // see https://www.postgresql.org/docs/current/multibyte.html#MULTIBYTE-CHARSET-SUPPORTED).
-    // "UTF8" is universal and sufficient for almost all cases.
-    // GreptimeDB itself is always using "UTF8" as the internal encoding.
-    ensure!(
-        encoding == "UTF8" || encoding == "UNICODE",
-        NotSupportedSnafu {
-            feat: format!("client encoding of '{}'", encoding)
-        }
-    );
-    Ok(())
-}
-
-fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
-    let tz_expr = exprs.first().context(NotSupportedSnafu {
-        feat: "No timezone find in set variable statement",
-    })?;
-    match tz_expr {
-        Expr::Value(Value::SingleQuotedString(tz)) | Expr::Value(Value::DoubleQuotedString(tz)) => {
-            match Timezone::from_tz_string(tz.as_str()) {
-                Ok(timezone) => ctx.set_timezone(timezone),
-                Err(_) => {
-                    return NotSupportedSnafu {
-                        feat: format!("Invalid timezone expr {} in set variable statement", tz),
-                    }
-                    .fail()
-                }
-            }
-            Ok(())
-        }
-        expr => NotSupportedSnafu {
-            feat: format!(
-                "Unsupported timezone expr {} in set variable statement",
-                expr
-            ),
-        }
-        .fail(),
-    }
-}
-
-fn set_bytea_output(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
-    let Some((var_value, [])) = exprs.split_first() else {
-        return (NotSupportedSnafu {
-            feat: "Set variable value must have one and only one value for bytea_output",
-        })
-        .fail();
-    };
-    let Expr::Value(value) = var_value else {
-        return (NotSupportedSnafu {
-            feat: "Set variable value must be a value",
-        })
-        .fail();
-    };
-    ctx.configuration_parameter().set_postgres_bytea_output(
-        PGByteaOutputValue::try_from(value.clone()).context(InvalidConfigValueSnafu)?,
-    );
-    Ok(())
 }
 
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
