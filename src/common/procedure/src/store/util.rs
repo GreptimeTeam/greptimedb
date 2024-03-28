@@ -108,6 +108,7 @@ impl CollectingState {
     }
 }
 
+#[derive(Debug)]
 enum MultipleValuesStreamState {
     Idle,
     Collecting,
@@ -155,11 +156,11 @@ impl Stream for MultipleValuesStream {
                     }
                 }
                 MultipleValuesStreamState::Collecting => {
-                    let mut collecting =
-                        self.collecting.take().expect("The `collecting` must exist");
+                    match ready!(self.upstream.poll_next_unpin(cx)).transpose() {
+                        Ok(Some((key, value))) => {
+                            let mut collecting =
+                                self.collecting.take().expect("The `collecting` must exist");
 
-                    match ready!(self.upstream.poll_next_unpin(cx)).transpose()? {
-                        Some((key, value)) => {
                             if key.starts_with(collecting.key()) {
                                 // Pushes the key value pair into `collecting`.
                                 collecting.push(key, value);
@@ -173,9 +174,16 @@ impl Stream for MultipleValuesStream {
                                 return Poll::Ready(Some((self.collector)(collecting)));
                             }
                         }
-                        None => {
+                        Ok(None) => {
+                            let collecting =
+                                self.collecting.take().expect("The `collecting` must exist");
+
                             self.state = MultipleValuesStreamState::Idle;
                             return Poll::Ready(Some((self.collector)(collecting)));
+                        }
+                        Err(err) => {
+                            self.state = MultipleValuesStreamState::Idle;
+                            return Poll::Ready(Some(Err(err)));
                         }
                     }
                 }
