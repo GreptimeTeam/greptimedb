@@ -84,15 +84,13 @@ fn split_value(value: &[u8], max_size_per_value: Option<usize>) -> Vec<&'_ [u8]>
 
 #[async_trait]
 impl StateStore for KvStateStore {
-    /// # Panic
-    /// If number of splitted values larger than 256.
     async fn put(&self, key: &str, value: Vec<u8>) -> ProcedureResult<()> {
-        let splitted = split_value(&value, self.max_size_per_value);
+        let split = split_value(&value, self.max_size_per_value);
         let key = with_prefix(key);
         // The first segment key: "0b00001111"
         // The 2nd segment key: "0b00001111/0000000001"
         // The 3rd segment key: "0b00001111/0000000002"
-        let operations = splitted
+        let operations = split
             .into_iter()
             .enumerate()
             .map(|(idx, value)| {
