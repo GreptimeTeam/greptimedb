@@ -25,6 +25,41 @@ use snafu::ResultExt;
 
 use crate::error::{DeleteStateSnafu, ListStateSnafu, PutStateSnafu, Result};
 
+/// The set of keys.
+#[derive(Debug, Clone)]
+pub struct KeySet {
+    key: String,
+    segments: usize,
+}
+
+impl KeySet {
+    pub fn new(key: String, segments: usize) -> Self {
+        Self { key, segments }
+    }
+
+    pub fn with_segment_suffix(key: &str, version: usize) -> String {
+        format!("{key}/{version:010}")
+    }
+
+    pub fn with_prefix(key: &str) -> String {
+        format!("{key}/")
+    }
+
+    pub fn keys(&self) -> Vec<String> {
+        let mut keys = Vec::with_capacity(self.segments + 1);
+        keys.push(self.key.to_string());
+        for i in 1..=self.segments {
+            keys.push(Self::with_segment_suffix(&self.key, i))
+        }
+
+        keys
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
 /// Key value from state store.
 pub type KeyValue = (String, Vec<u8>);
 

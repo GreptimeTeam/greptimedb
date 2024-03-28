@@ -15,37 +15,12 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use common_procedure::store::state_store::KeySet;
 use futures::{ready, Stream, StreamExt};
 use snafu::{ensure, ResultExt};
 
 use crate::error;
 use crate::error::Result;
-
-#[derive(Debug, Clone)]
-pub struct KeySet {
-    key: String,
-    segments: usize,
-}
-
-impl KeySet {
-    pub fn with_segment_suffix(key: &str, version: usize) -> String {
-        format!("{key}/{version:010}")
-    }
-
-    fn with_prefix(key: &str) -> String {
-        format!("{key}/")
-    }
-
-    pub fn keys(&self) -> Vec<String> {
-        let mut keys = Vec::with_capacity(self.segments + 1);
-        keys.push(self.key.to_string());
-        for i in 1..=self.segments {
-            keys.push(Self::with_segment_suffix(&self.key, i))
-        }
-
-        keys
-    }
-}
 
 pub struct CollectingState {
     pairs: Vec<(String, Vec<u8>)>,
@@ -57,7 +32,7 @@ pub fn single_value_collector(
     CollectingState { pairs }: CollectingState,
 ) -> Result<(KeySet, Vec<u8>)> {
     let (key, value) = pairs.into_iter().next().unwrap();
-    Ok((KeySet { key, segments: 0 }, value))
+    Ok((KeySet::new(key, 0), value))
 }
 
 fn parse_segments(segments: Vec<(String, Vec<u8>)>, prefix: &str) -> Result<Vec<(usize, Vec<u8>)>> {
@@ -84,7 +59,7 @@ pub fn multiple_values_collector(
     if pairs.len() == 1 {
         // Safety: must exist.
         let (key, value) = pairs.into_iter().next().unwrap();
-        Ok((KeySet { key, segments: 0 }, value))
+        Ok((KeySet::new(key, 0), value))
     } else {
         let segments = pairs.split_off(1);
         // Safety: must exist.
@@ -113,13 +88,7 @@ pub fn multiple_values_collector(
         let mut values = vec![value];
         values.extend(segment_values);
 
-        Ok((
-            KeySet {
-                key,
-                segments: segment_num,
-            },
-            values.concat(),
-        ))
+        Ok((KeySet::new(key, segment_num), values.concat()))
     }
 }
 
@@ -229,10 +198,7 @@ mod tests {
 
     #[test]
     fn test_key_set_keys() {
-        let key = KeySet {
-            key: "baz".to_string(),
-            segments: 3,
-        };
+        let key = KeySet::new("baz".to_string(), 3);
         let keys = key.keys();
         assert_eq!(keys.len(), 4);
         assert_eq!(&keys[0], "baz");
@@ -249,16 +215,19 @@ mod tests {
         let mut stream =
             MultipleValuesStream::new(Box::pin(upstream), Box::new(single_value_collector));
         let (key, value) = stream.try_next().await.unwrap().unwrap();
-        assert_eq!(key.key, "foo");
-        assert_eq!(key.segments, 0);
+        let keys = key.keys();
+        assert_eq!(keys[0], "foo");
+        assert_eq!(keys.len(), 1);
         assert_eq!(value, vec![0, 1, 2, 3]);
         let (key, value) = stream.try_next().await.unwrap().unwrap();
-        assert_eq!(key.key, "bar");
-        assert_eq!(key.segments, 0);
+        let keys = key.keys();
+        assert_eq!(keys[0], "bar");
+        assert_eq!(keys.len(), 1);
         assert_eq!(value, vec![0, 1, 2]);
         let (key, value) = stream.try_next().await.unwrap().unwrap();
-        assert_eq!(key.key, "baz");
-        assert_eq!(key.segments, 0);
+        let keys = key.keys();
+        assert_eq!(keys[0], "baz");
+        assert_eq!(keys.len(), 1);
         assert_eq!(value, vec![0, 1]);
         assert!(stream.try_next().await.unwrap().is_none());
         // Call again
@@ -281,16 +250,19 @@ mod tests {
         let mut stream =
             MultipleValuesStream::new(Box::pin(upstream), Box::new(multiple_values_collector));
         let (key, value) = stream.try_next().await.unwrap().unwrap();
-        assert_eq!(key.key, "foo");
-        assert_eq!(key.segments, 3);
+        let keys = key.keys();
+        assert_eq!(keys[0], "foo");
+        assert_eq!(keys.len(), 4);
         assert_eq!(value, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
         let (key, value) = stream.try_next().await.unwrap().unwrap();
-        assert_eq!(key.key, "bar");
-        assert_eq!(key.segments, 0);
+        let keys = key.keys();
+        assert_eq!(keys[0], "bar");
+        assert_eq!(keys.len(), 1);
         assert_eq!(value, vec![0, 1, 2, 3]);
         let (key, value) = stream.try_next().await.unwrap().unwrap();
-        assert_eq!(key.key, "baz");
-        assert_eq!(key.segments, 3);
+        let keys = key.keys();
+        assert_eq!(keys[0], "baz");
+        assert_eq!(keys.len(), 4);
         assert_eq!(value, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(stream.try_next().await.unwrap().is_none());
         // Call again
