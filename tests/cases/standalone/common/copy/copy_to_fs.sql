@@ -1,11 +1,11 @@
-CREATE TABLE demo(host string, cpu double, memory double, ts TIMESTAMP time index);
+CREATE TABLE demo(host string, cpu DOUBLE, memory DOUBLE, ts TIMESTAMP TIME INDEX);
 
 insert into demo(host, cpu, memory, ts) values ('host1', 66.6, 1024, 1655276557000), ('host2', 88.8,  333.3, 1655276558000);
 
-Copy demo TO '/tmp/export/demo.parquet';
+COPY demo TO '/tmp/export/demo.parquet' WITH (start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
 
-Copy demo TO '/tmp/export/demo.csv' with (format='csv');
+COPY demo TO '/tmp/export/demo.csv' WITH (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
 
-Copy demo TO '/tmp/export/demo.json' with (format='json');
+COPY demo TO '/tmp/export/demo.json' WITH (format='json', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
 
 drop table demo;

@@ -513,11 +513,12 @@ select * from schemata where catalog_name = 'greptime' and schema_name != 'publi
 -- test engines
 select * from engines;
 
-+--------+---------+-------------------------------------+--------------+----+------------+
-| engine | support | comment                             | transactions | xa | savepoints |
-+--------+---------+-------------------------------------+--------------+----+------------+
-| mito   | DEFAULT | Storage engine for time-series data | NO           | NO | NO         |
-+--------+---------+-------------------------------------+--------------+----+------------+
++--------+---------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------+----+------------+
+| engine | support | comment                                                                                                                                                            | transactions | xa | savepoints |
++--------+---------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------+----+------------+
+| mito   | DEFAULT | Storage engine for time-series data                                                                                                                                | NO           | NO | NO         |
+| metric | YES     | Storage engine for observability scenarios, which is adept at handling a large number of small tables, making it particularly suitable for cloud-native monitoring | NO           | NO | NO         |
++--------+---------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------+----+------------+
 
 desc table build_info;
 
@@ -674,6 +675,27 @@ DESC TABLE GREPTIME_REGION_PEERS;
 | status       | String |     | YES  |         | FIELD         |
 | down_seconds | Int64  |     | YES  |         | FIELD         |
 +--------------+--------+-----+------+---------+---------------+
+
+USE INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+DESC COLUMNS;
+
++----------------+--------+-----+------+---------+---------------+
+| Column         | Type   | Key | Null | Default | Semantic Type |
++----------------+--------+-----+------+---------+---------------+
+| table_catalog  | String |     | NO   |         | FIELD         |
+| table_schema   | String |     | NO   |         | FIELD         |
+| table_name     | String |     | NO   |         | FIELD         |
+| column_name    | String |     | NO   |         | FIELD         |
+| data_type      | String |     | NO   |         | FIELD         |
+| semantic_type  | String |     | NO   |         | FIELD         |
+| column_default | String |     | YES  |         | FIELD         |
+| is_nullable    | String |     | NO   |         | FIELD         |
+| column_type    | String |     | NO   |         | FIELD         |
+| column_comment | String |     | YES  |         | FIELD         |
++----------------+--------+-----+------+---------+---------------+
 
 drop table my_db.foo;
 

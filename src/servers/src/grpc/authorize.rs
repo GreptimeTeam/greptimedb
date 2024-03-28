@@ -104,7 +104,7 @@ async fn do_auth<T>(
 ) -> Result<(), tonic::Status> {
     let (catalog, schema) = extract_catalog_and_schema(req);
 
-    let query_ctx = QueryContext::with(catalog, schema);
+    let query_ctx = QueryContext::with(&catalog, &schema);
 
     let Some(user_provider) = user_provider else {
         query_ctx.set_current_user(Some(auth::userinfo_by_name(None)));
@@ -119,7 +119,7 @@ async fn do_auth<T>(
     let pwd = auth::Password::PlainText(password);
 
     let user_info = user_provider
-        .auth(id, pwd, catalog, schema)
+        .auth(id, pwd, &catalog, &schema)
         .await
         .map_err(|e| tonic::Status::unauthenticated(e.to_string()))?;
 

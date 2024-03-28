@@ -22,18 +22,20 @@ use self::table_meta::TableMetadataAllocatorRef;
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
 use crate::error::Result;
-use crate::key::table_route::TableRouteValue;
+use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 
+pub mod alter_logical_tables;
 pub mod alter_table;
 pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;
 pub mod drop_database;
 pub mod drop_table;
+mod physical_table_metadata;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
@@ -84,7 +86,7 @@ pub struct TableMetadata {
     /// Table id.
     pub table_id: TableId,
     /// Route information for each region of the table.
-    pub table_route: TableRouteValue,
+    pub table_route: PhysicalTableRouteValue,
     /// The encoded wal options for regions of the table.
     // If a region does not have an associated wal options, no key for the region would be found in the map.
     pub region_wal_options: HashMap<RegionNumber, String>,

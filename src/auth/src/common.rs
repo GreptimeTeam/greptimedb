@@ -22,6 +22,9 @@ use snafu::{ensure, OptionExt};
 use crate::error::{IllegalParamSnafu, InvalidConfigSnafu, Result, UserPasswordMismatchSnafu};
 use crate::user_info::DefaultUserInfo;
 use crate::user_provider::static_user_provider::{StaticUserProvider, STATIC_USER_PROVIDER};
+use crate::user_provider::watch_file_user_provider::{
+    WatchFileUserProvider, WATCH_FILE_USER_PROVIDER,
+};
 use crate::{UserInfoRef, UserProviderRef};
 
 pub(crate) const DEFAULT_USERNAME: &str = "greptime";
@@ -42,6 +45,9 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
             let provider =
                 StaticUserProvider::new(content).map(|p| Arc::new(p) as UserProviderRef)?;
             Ok(provider)
+        }
+        WATCH_FILE_USER_PROVIDER => {
+            WatchFileUserProvider::new(content).map(|p| Arc::new(p) as UserProviderRef)
         }
         _ => InvalidConfigSnafu {
             value: name.to_string(),

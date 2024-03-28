@@ -55,10 +55,10 @@ pub fn build_db_string(catalog: &str, schema: &str) -> String {
 /// schema name
 /// - if `[<catalog>-]` is provided, we split database name with `-` and use
 /// `<catalog>` and `<schema>`.
-pub fn parse_catalog_and_schema_from_db_string(db: &str) -> (&str, &str) {
+pub fn parse_catalog_and_schema_from_db_string(db: &str) -> (String, String) {
     match parse_optional_catalog_and_schema_from_db_string(db) {
         (Some(catalog), schema) => (catalog, schema),
-        (None, schema) => (DEFAULT_CATALOG_NAME, schema),
+        (None, schema) => (DEFAULT_CATALOG_NAME.to_string(), schema),
     }
 }
 
@@ -66,12 +66,12 @@ pub fn parse_catalog_and_schema_from_db_string(db: &str) -> (&str, &str) {
 ///
 /// Similar to [`parse_catalog_and_schema_from_db_string`] but returns an optional
 /// catalog if it's not provided in the database name.
-pub fn parse_optional_catalog_and_schema_from_db_string(db: &str) -> (Option<&str>, &str) {
+pub fn parse_optional_catalog_and_schema_from_db_string(db: &str) -> (Option<String>, String) {
     let parts = db.splitn(2, '-').collect::<Vec<&str>>();
     if parts.len() == 2 {
-        (Some(parts[0]), parts[1])
+        (Some(parts[0].to_lowercase()), parts[1].to_lowercase())
     } else {
-        (None, db)
+        (None, db.to_lowercase())
     }
 }
 
@@ -88,32 +88,37 @@ mod tests {
     #[test]
     fn test_parse_catalog_and_schema() {
         assert_eq!(
-            (DEFAULT_CATALOG_NAME, "fullschema"),
+            (DEFAULT_CATALOG_NAME.to_string(), "fullschema".to_string()),
             parse_catalog_and_schema_from_db_string("fullschema")
         );
 
         assert_eq!(
-            ("catalog", "schema"),
+            ("catalog".to_string(), "schema".to_string()),
             parse_catalog_and_schema_from_db_string("catalog-schema")
         );
 
         assert_eq!(
-            ("catalog", "schema1-schema2"),
+            ("catalog".to_string(), "schema1-schema2".to_string()),
             parse_catalog_and_schema_from_db_string("catalog-schema1-schema2")
         );
 
         assert_eq!(
-            (None, "fullschema"),
+            (None, "fullschema".to_string()),
             parse_optional_catalog_and_schema_from_db_string("fullschema")
         );
 
         assert_eq!(
-            (Some("catalog"), "schema"),
+            (Some("catalog".to_string()), "schema".to_string()),
             parse_optional_catalog_and_schema_from_db_string("catalog-schema")
         );
 
         assert_eq!(
-            (Some("catalog"), "schema1-schema2"),
+            (Some("catalog".to_string()), "schema".to_string()),
+            parse_optional_catalog_and_schema_from_db_string("CATALOG-SCHEMA")
+        );
+
+        assert_eq!(
+            (Some("catalog".to_string()), "schema1-schema2".to_string()),
             parse_optional_catalog_and_schema_from_db_string("catalog-schema1-schema2")
         );
     }

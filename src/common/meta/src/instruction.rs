@@ -203,7 +203,6 @@ pub enum InstructionReply {
     OpenRegion(SimpleReply),
     CloseRegion(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
-    InvalidateTableCache(SimpleReply),
     DowngradeRegion(DowngradeRegionReply),
 }
 
@@ -213,9 +212,6 @@ impl Display for InstructionReply {
             Self::OpenRegion(reply) => write!(f, "InstructionReply::OpenRegion({})", reply),
             Self::CloseRegion(reply) => write!(f, "InstructionReply::CloseRegion({})", reply),
             Self::UpgradeRegion(reply) => write!(f, "InstructionReply::UpgradeRegion({})", reply),
-            Self::InvalidateTableCache(reply) => {
-                write!(f, "InstructionReply::Invalidate({})", reply)
-            }
             Self::DowngradeRegion(reply) => {
                 write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }

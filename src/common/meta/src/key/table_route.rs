@@ -147,7 +147,7 @@ impl TableRouteValue {
     ///
     /// # Panic
     /// If it is not the [`PhysicalTableRouteValue`].
-    fn into_physical_table_route(self) -> PhysicalTableRouteValue {
+    pub fn into_physical_table_route(self) -> PhysicalTableRouteValue {
         match self {
             TableRouteValue::Physical(x) => x,
             _ => unreachable!("Mistakenly been treated as a Physical TableRoute: {self:?}"),

@@ -45,18 +45,14 @@ mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 object-store.workspace = true
-once_cell.workspace = true
 operator.workspace = true
 query.workspace = true
-rand.workspace = true
 rstest = "0.17"
 rstest_reuse = "0.5"
 secrecy = "0.8"
-serde.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
-snafu.workspace = true
 sql.workspace = true
 sqlx = { version = "0.6", features = [
     "runtime-tokio-rustls",

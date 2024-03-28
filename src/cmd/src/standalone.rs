@@ -16,10 +16,11 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use async_trait::async_trait;
+use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig};
-use common_meta::cache_invalidator::DummyCacheInvalidator;
+use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::ProcedureExecutorRef;
@@ -399,6 +400,9 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
+        let catalog_manager =
+            KvBackendCatalogManager::new(kv_backend.clone(), Arc::new(DummyCacheInvalidator));
+
         let builder =
             DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
         let datanode = builder.build().await.context(StartDatanodeSnafu)?;
@@ -422,22 +426,28 @@ impl StartCommand {
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
-            table_metadata_manager.table_name_manager().clone(),
         ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
             table_metadata_manager,
             procedure_manager.clone(),
             datanode_manager.clone(),
+            catalog_manager.clone(),
             table_meta_allocator,
         )
         .await?;
 
-        let mut frontend = FrontendBuilder::new(kv_backend, datanode_manager, ddl_task_executor)
-            .with_plugin(fe_plugins.clone())
-            .try_build()
-            .await
-            .context(StartFrontendSnafu)?;
+        let mut frontend = FrontendBuilder::new(
+            kv_backend,
+            catalog_manager.clone(),
+            datanode_manager,
+            ddl_task_executor,
+        )
+        .with_plugin(fe_plugins.clone())
+        .with_cache_invalidator(catalog_manager)
+        .try_build()
+        .await
+        .context(StartFrontendSnafu)?;
 
         let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
             .build()
@@ -459,13 +469,14 @@ impl StartCommand {
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
         datanode_manager: DatanodeManagerRef,
+        cache_invalidator: CacheInvalidatorRef,
         table_meta_allocator: TableMetadataAllocatorRef,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
                 procedure_manager,
                 datanode_manager,
-                Arc::new(DummyCacheInvalidator),
+                cache_invalidator,
                 table_metadata_manager,
                 table_meta_allocator,
                 Arc::new(MemoryRegionKeeper::default()),

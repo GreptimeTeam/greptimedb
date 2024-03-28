@@ -27,7 +27,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use self::executor::DropTableExecutor;
-use super::utils::handle_retry_error;
+use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_info::TableInfoValue;
@@ -121,11 +121,7 @@ impl DropTableProcedure {
         // TODO(weny): Considers introducing a RegionStatus to indicate the region is dropping.
         let table_id = self.data.table_id();
         executor
-            .on_remove_metadata(
-                &self.context,
-                &self.data.table_info_value,
-                &self.data.table_route_value,
-            )
+            .on_remove_metadata(&self.context, self.data.region_routes()?)
             .await?;
         info!("Deleted table metadata for table {table_id}");
         self.data.state = DropTableState::InvalidateTableCache;
@@ -142,7 +138,7 @@ impl DropTableProcedure {
 
     pub async fn on_datanode_drop_regions(&self, executor: &DropTableExecutor) -> Result<Status> {
         executor
-            .on_drop_regions(&self.context, &self.data.table_route_value)
+            .on_drop_regions(&self.context, self.data.region_routes()?)
             .await?;
         Ok(Status::done())
     }
@@ -192,6 +188,7 @@ impl Procedure for DropTableProcedure {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// TODO(weny): simplify the table data.
 pub struct DropTableData {
     pub state: DropTableState,
     pub cluster_id: u64,

@@ -18,7 +18,6 @@ greptime-proto.workspace = true
 paste = "1.0"
 prost.workspace = true
 snafu.workspace = true
-tonic.workspace = true
 
 [build-dependencies]
 tonic-build = "0.9"

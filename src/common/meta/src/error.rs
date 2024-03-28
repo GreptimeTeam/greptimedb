@@ -89,11 +89,8 @@ pub enum Error {
     #[snafu(display("Unexpected sequence value: {}", err_msg))]
     UnexpectedSequenceValue { err_msg: String, location: Location },
 
-    #[snafu(display("Table info not found: {}", table_name))]
-    TableInfoNotFound {
-        table_name: String,
-        location: Location,
-    },
+    #[snafu(display("Table info not found: {}", table))]
+    TableInfoNotFound { table: String, location: Location },
 
     #[snafu(display("Failed to register procedure loader, type name: {}", type_name))]
     RegisterProcedureLoader {
@@ -398,11 +395,14 @@ pub enum Error {
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable { location: Location, err_msg: String },
 
-    #[snafu(display("The tasks of create tables cannot be empty"))]
-    EmptyCreateTableTasks { location: Location },
+    #[snafu(display("The tasks of {} cannot be empty", name))]
+    EmptyDdlTasks { name: String, location: Location },
 
     #[snafu(display("Metadata corruption: {}", err_msg))]
     MetadataCorruption { err_msg: String, location: Location },
+
+    #[snafu(display("Alter logical tables invalid arguments: {}", err_msg))]
+    AlterLogicalTablesInvalidArguments { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -462,7 +462,8 @@ impl ErrorExt for Error {
             ProcedureNotFound { .. }
             | PrimaryKeyNotFound { .. }
             | EmptyKey { .. }
-            | InvalidEngineType { .. } => StatusCode::InvalidArguments,
+            | InvalidEngineType { .. }
+            | AlterLogicalTablesInvalidArguments { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
@@ -480,8 +481,8 @@ impl ErrorExt for Error {
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
-            | EmptyCreateTableTasks { .. }
-            | SchemaNotFound { .. } => StatusCode::InvalidArguments,
+            | SchemaNotFound { .. }
+            | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
         }
     }
 
