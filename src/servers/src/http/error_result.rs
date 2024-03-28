@@ -84,6 +84,7 @@ impl IntoResponse for ErrorResponse {
         let status = StatusCode::from_u32(code).unwrap_or(StatusCode::Unknown);
         let status_code = match status {
             StatusCode::Success | StatusCode::Cancelled => HttpStatusCode::OK,
+
             StatusCode::Unsupported
             | StatusCode::InvalidArguments
             | StatusCode::InvalidSyntax
@@ -94,7 +95,9 @@ impl IntoResponse for ErrorResponse {
             | StatusCode::RegionNotFound
             | StatusCode::DatabaseNotFound
             | StatusCode::TableNotFound
-            | StatusCode::TableColumnNotFound => HttpStatusCode::BAD_REQUEST,
+            | StatusCode::TableColumnNotFound
+            | StatusCode::PlanQuery => HttpStatusCode::BAD_REQUEST,
+
             StatusCode::PermissionDenied
             | StatusCode::AuthHeaderNotFound
             | StatusCode::InvalidAuthHeader
@@ -102,16 +105,19 @@ impl IntoResponse for ErrorResponse {
             | StatusCode::UnsupportedPasswordType
             | StatusCode::UserPasswordMismatch
             | StatusCode::RegionReadonly => HttpStatusCode::UNAUTHORIZED,
+
             StatusCode::AccessDenied => HttpStatusCode::FORBIDDEN,
+
+            StatusCode::RateLimited => HttpStatusCode::TOO_MANY_REQUESTS,
+
+            StatusCode::RegionNotReady
+            | StatusCode::RegionBusy
+            | StatusCode::StorageUnavailable => HttpStatusCode::SERVICE_UNAVAILABLE,
+
             StatusCode::Internal
             | StatusCode::Unexpected
             | StatusCode::Unknown
-            | StatusCode::RegionNotReady
-            | StatusCode::RegionBusy
-            | StatusCode::RateLimited
-            | StatusCode::StorageUnavailable
             | StatusCode::RuntimeResourcesExhausted
-            | StatusCode::PlanQuery
             | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,
         };
         (status_code, resp).into_response()
