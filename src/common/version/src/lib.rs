@@ -18,6 +18,11 @@ use std::sync::OnceLock;
 
 const UNKNOWN: &str = "unknown";
 
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "codec",
+    derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)
+)]
 pub struct BuildInfo {
     pub branch: Cow<'static, str>,
     pub commit: Cow<'static, str>,
