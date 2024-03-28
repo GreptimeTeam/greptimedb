@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod bytea;
+mod bytea;
+mod datetime;
 mod interval;
 
 use std::collections::HashMap;
@@ -33,6 +34,7 @@ use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
 
 use self::bytea::{EscapeOutputBytea, HexOutputBytea};
+use self::datetime::{StylingDate, StylingDateTime};
 use self::interval::PgInterval;
 use crate::error::{self, Error, Result};
 use crate::SqlPlan;
@@ -82,7 +84,8 @@ pub(super) fn encode_value(
         }
         Value::Date(v) => {
             if let Some(date) = v.to_chrono_date() {
-                builder.encode_field(&date)
+                let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
+                builder.encode_field(&StylingDate(&date, style, order))
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to convert date to postgres type {v:?}",),
@@ -91,7 +94,8 @@ pub(super) fn encode_value(
         }
         Value::DateTime(v) => {
             if let Some(datetime) = v.to_chrono_datetime() {
-                builder.encode_field(&datetime)
+                let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
+                builder.encode_field(&StylingDateTime(&datetime, style, order))
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to convert date to postgres type {v:?}",),
@@ -100,7 +104,8 @@ pub(super) fn encode_value(
         }
         Value::Timestamp(v) => {
             if let Some(datetime) = v.to_chrono_datetime() {
-                builder.encode_field(&datetime)
+                let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
+                builder.encode_field(&StylingDateTime(&datetime, style, order))
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to convert date to postgres type {v:?}",),

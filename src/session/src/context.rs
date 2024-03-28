@@ -27,7 +27,7 @@ use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
-use crate::session_config::PGByteaOutputValue;
+use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
 use crate::SessionRef;
 
 pub type QueryContextRef = Arc<QueryContext>;
@@ -282,12 +282,14 @@ impl Display for Channel {
 #[derive(Default, Debug)]
 pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
+    pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
 }
 
 impl Clone for ConfigurationVariables {
     fn clone(&self) -> Self {
         Self {
             postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
+            pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
         }
     }
 }
@@ -303,6 +305,14 @@ impl ConfigurationVariables {
 
     pub fn postgres_bytea_output(&self) -> Arc<PGByteaOutputValue> {
         self.postgres_bytea_output.load().clone()
+    }
+
+    pub fn pg_datetime_style(&self) -> Arc<(PGDateTimeStyle, PGDateOrder)> {
+        self.pg_datestyle_format.load().clone()
+    }
+
+    pub fn set_pg_datetime_style(&self, style: PGDateTimeStyle, order: PGDateOrder) {
+        self.pg_datestyle_format.swap(Arc::new((style, order)));
     }
 }
 
