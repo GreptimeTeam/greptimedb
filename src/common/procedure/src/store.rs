@@ -144,16 +144,17 @@ impl ProcedureStore {
         // 8 should be enough for most procedures.
         let mut step_keys = Vec::with_capacity(8);
         let mut finish_keys = Vec::new();
-        while let Some((key, _)) = key_values.try_next().await? {
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, &key) else {
+        while let Some((keyset, _)) = key_values.try_next().await? {
+            let key = keyset.key();
+            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
                 logging::warn!("Unknown key while deleting procedures, key: {}", key);
                 continue;
             };
             if curr_key.key_type == KeyType::Step {
-                step_keys.push(key);
+                step_keys.push(keyset);
             } else {
                 // .commit or .rollback
-                finish_keys.push(key);
+                finish_keys.push(keyset);
             }
         }
 
@@ -164,9 +165,25 @@ impl ProcedureStore {
             finish_keys
         );
         // We delete all step keys first.
-        self.store.batch_delete(step_keys.as_slice()).await?;
+        self.store
+            .batch_delete(
+                step_keys
+                    .into_iter()
+                    .flat_map(|set| set.keys())
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            )
+            .await?;
         // Then we delete the finish keys, to ensure
-        self.store.batch_delete(finish_keys.as_slice()).await?;
+        self.store
+            .batch_delete(
+                finish_keys
+                    .into_iter()
+                    .flat_map(|set| set.keys())
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            )
+            .await?;
         // Finally we remove the directory itself.
         self.store.delete(&path).await?;
         // Maybe we could use procedure_id.commit/rollback as the file name so we could
@@ -185,8 +202,9 @@ impl ProcedureStore {
 
         // Scan all procedures.
         let mut key_values = self.store.walk_top_down(&self.proc_path).await?;
-        while let Some((key, value)) = key_values.try_next().await? {
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, &key) else {
+        while let Some((keyset, value)) = key_values.try_next().await? {
+            let key = keyset.key();
+            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
                 logging::warn!("Unknown key while loading procedures, key: {}", key);
                 continue;
             };

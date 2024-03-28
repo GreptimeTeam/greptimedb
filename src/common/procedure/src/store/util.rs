@@ -114,8 +114,8 @@ enum MultipleValuesStreamState {
     End,
 }
 
-pub type Collector = dyn Fn(CollectingState) -> Result<(KeySet, Vec<u8>)>;
-pub type Upstream = dyn Stream<Item = Result<(String, Vec<u8>)>>;
+pub type Collector = dyn Fn(CollectingState) -> Result<(KeySet, Vec<u8>)> + Send;
+pub type Upstream = dyn Stream<Item = Result<(String, Vec<u8>)>> + Send;
 
 /// A stream collects multiple values into a single key-value pair.
 pub struct MultipleValuesStream {

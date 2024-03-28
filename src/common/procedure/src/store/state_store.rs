@@ -23,13 +23,35 @@ use futures::{Stream, StreamExt};
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
 
+use super::util::{single_value_collector, MultipleValuesStream};
 use crate::error::{DeleteStateSnafu, ListStateSnafu, PutStateSnafu, Result};
 
 /// The set of keys.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeySet {
     key: String,
     segments: usize,
+}
+
+impl PartialOrd for KeySet {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KeySet {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+impl From<&str> for KeySet {
+    fn from(value: &str) -> Self {
+        KeySet {
+            key: value.to_string(),
+            segments: 0,
+        }
+    }
 }
 
 impl KeySet {
@@ -61,7 +83,7 @@ impl KeySet {
 }
 
 /// Key value from state store.
-pub type KeyValue = (String, Vec<u8>);
+pub type KeyValue = (KeySet, Vec<u8>);
 
 /// Stream that yields [KeyValue].
 pub type KeyValueStream = Pin<Box<dyn Stream<Item = Result<KeyValue>> + Send>>;
@@ -163,6 +185,7 @@ impl StateStore for ObjectStateStore {
             }
         });
 
+        let stream = MultipleValuesStream::new(Box::pin(stream), Box::new(single_value_collector));
         Ok(Box::pin(stream))
     }
 
@@ -228,9 +251,9 @@ mod tests {
         data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             vec![
-                ("a/1".to_string(), b"v1".to_vec()),
-                ("a/2".to_string(), b"v2".to_vec()),
-                ("b/1".to_string(), b"v3".to_vec())
+                ("a/1".into(), b"v1".to_vec()),
+                ("a/2".into(), b"v2".to_vec()),
+                ("b/1".into(), b"v3".to_vec())
             ],
             data
         );
@@ -245,8 +268,8 @@ mod tests {
         data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             vec![
-                ("a/1".to_string(), b"v1".to_vec()),
-                ("a/2".to_string(), b"v2".to_vec()),
+                ("a/1".into(), b"v1".to_vec()),
+                ("a/2".into(), b"v2".to_vec()),
             ],
             data
         );
@@ -263,7 +286,7 @@ mod tests {
             .await
             .unwrap();
         data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(vec![("a/1".to_string(), b"v1".to_vec()),], data);
+        assert_eq!(vec![("a/1".into(), b"v1".to_vec()),], data);
     }
 
     #[tokio::test]
@@ -292,8 +315,8 @@ mod tests {
         data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             vec![
-                ("a/1".to_string(), b"v1".to_vec()),
-                ("a/2".to_string(), b"v2".to_vec()),
+                ("a/1".into(), b"v1".to_vec()),
+                ("a/2".into(), b"v2".to_vec()),
             ],
             data
         );
