@@ -42,6 +42,23 @@ pub struct ShowDatabases {
     pub kind: ShowKind,
 }
 
+/// The SQL `SHOW COLUMNS` statement
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowColumns {
+    pub kind: ShowKind,
+    pub table: String,
+    pub database: Option<String>,
+    pub full: bool,
+}
+
+/// The SQL `SHOW INDEX` statement
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowIndex {
+    pub kind: ShowKind,
+    pub table: String,
+    pub database: Option<String>,
+}
+
 impl ShowDatabases {
     /// Creates a statement for `SHOW DATABASES`
     pub fn new(kind: ShowKind) -> Self {

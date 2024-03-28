@@ -1,0 +1,78 @@
+CREATE TABLE IF NOT EXISTS system_metrics (
+    host STRING,
+    idc STRING,
+    cpu_util DOUBLE,
+    memory_util DOUBLE,
+    disk_util DOUBLE,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host, idc),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+SHOW COLUMNS;
+
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement: SHOW COLUMNS;, expected: '{FROM | IN} table', found: ;
+
+SHOW COLUMNS FROM system_metrics;
+
++-------------+----------------------+------+------------+---------------------+-------+
+| Field       | Type                 | Null | Key        | Default             | Extra |
++-------------+----------------------+------+------------+---------------------+-------+
+| cpu_util    | Float64              | Yes  |            |                     |       |
+| disk_util   | Float64              | Yes  |            |                     |       |
+| host        | String               | Yes  | PRI        |                     |       |
+| idc         | String               | Yes  | PRI        |                     |       |
+| memory_util | Float64              | Yes  |            |                     |       |
+| ts          | TimestampMillisecond | No   | TIME INDEX | current_timestamp() |       |
++-------------+----------------------+------+------------+---------------------+-------+
+
+SHOW COLUMNS FROM system_metrics in public;
+
++-------------+----------------------+------+------------+---------------------+-------+
+| Field       | Type                 | Null | Key        | Default             | Extra |
++-------------+----------------------+------+------------+---------------------+-------+
+| cpu_util    | Float64              | Yes  |            |                     |       |
+| disk_util   | Float64              | Yes  |            |                     |       |
+| host        | String               | Yes  | PRI        |                     |       |
+| idc         | String               | Yes  | PRI        |                     |       |
+| memory_util | Float64              | Yes  |            |                     |       |
+| ts          | TimestampMillisecond | No   | TIME INDEX | current_timestamp() |       |
++-------------+----------------------+------+------------+---------------------+-------+
+
+SHOW FULL COLUMNS FROM `system_metrics`;
+
++-------------+----------------------+-----------+------+------------+---------------------+---------+---------------------------------+-------+
+| Field       | Type                 | Collation | Null | Key        | Default             | Comment | Privileges                      | Extra |
++-------------+----------------------+-----------+------+------------+---------------------+---------+---------------------------------+-------+
+| cpu_util    | Float64              |           | Yes  |            |                     |         | select,insert,update,references |       |
+| disk_util   | Float64              |           | Yes  |            |                     |         | select,insert,update,references |       |
+| host        | String               | utf8_bin  | Yes  | PRI        |                     |         | select,insert,update,references |       |
+| idc         | String               | utf8_bin  | Yes  | PRI        |                     |         | select,insert,update,references |       |
+| memory_util | Float64              |           | Yes  |            |                     |         | select,insert,update,references |       |
+| ts          | TimestampMillisecond |           | No   | TIME INDEX | current_timestamp() |         | select,insert,update,references |       |
++-------------+----------------------+-----------+------+------------+---------------------+---------+---------------------------------+-------+
+
+SHOW COLUMNS FROM system_metrics like '%util%';
+
++-------------+---------+------+-----+---------+-------+
+| Field       | Type    | Null | Key | Default | Extra |
++-------------+---------+------+-----+---------+-------+
+| cpu_util    | Float64 | Yes  |     |         |       |
+| disk_util   | Float64 | Yes  |     |         |       |
+| memory_util | Float64 | Yes  |     |         |       |
++-------------+---------+------+-----+---------+-------+
+
+SHOW COLUMNS FROM system_metrics WHERE Field = 'cpu_util';
+
++----------+---------+------+-----+---------+-------+
+| Field    | Type    | Null | Key | Default | Extra |
++----------+---------+------+-----+---------+-------+
+| cpu_util | Float64 | Yes  |     |         |       |
++----------+---------+------+-----+---------+-------+
+
+DROP TABLE system_metrics;
+
+Affected Rows: 0
+

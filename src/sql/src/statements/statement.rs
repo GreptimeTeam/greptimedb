@@ -30,7 +30,7 @@ use crate::statements::explain::Explain;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
 use crate::statements::set_variables::SetVariables;
-use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
+use crate::statements::show::{ShowColumns, ShowCreateTable, ShowDatabases, ShowIndex, ShowTables};
 use crate::statements::tql::Tql;
 use crate::statements::truncate::TruncateTable;
 
@@ -62,6 +62,10 @@ pub enum Statement {
     ShowDatabases(ShowDatabases),
     // SHOW TABLES
     ShowTables(ShowTables),
+    // SHOW COLUMNS
+    ShowColumns(ShowColumns),
+    // SHOW INDEX
+    ShowIndex(ShowIndex),
     // SHOW CREATE TABLE
     ShowCreateTable(ShowCreateTable),
     // DESCRIBE TABLE
