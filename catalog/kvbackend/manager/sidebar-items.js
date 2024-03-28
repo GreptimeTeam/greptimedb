@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CATALOG_CACHE_MAX_CAPACITY","TABLE_CACHE_MAX_CAPACITY","TABLE_CACHE_TTI","TABLE_CACHE_TTL"],"fn":["make_table"],"struct":["KvBackendCatalogManager","SystemCatalog"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["lease_keeper"]};

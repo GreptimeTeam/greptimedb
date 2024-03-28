@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["METASRV_HOME","TABLE_ID_SEQ"],"mod":["builder"],"struct":["Context","DatanodeClientOptions","DatanodeOptions","LeaderValue","MetaSrv","MetaSrvOptions","MetaStateHandler","MetasrvInfo","SelectorContext"],"type":["ElectionRef","SelectorRef"]};

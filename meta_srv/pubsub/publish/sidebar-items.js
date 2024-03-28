@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["DefaultPublish"],"trait":["Publish"],"type":["PublishRef"]};

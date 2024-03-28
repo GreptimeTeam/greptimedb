@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["full_version","greptimedb_cli","log_env_flags","log_versions","print_version","short_version","start_app"],"mod":["cli","datanode","error","frontend","metasrv","options","standalone"],"struct":["APP_VERSION"],"trait":["App"]};

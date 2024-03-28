@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["transform_statements"],"mod":["type_alias"],"struct":["RULES"],"trait":["TransformRule"]};

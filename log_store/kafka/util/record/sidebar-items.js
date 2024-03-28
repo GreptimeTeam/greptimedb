@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ESTIMATED_META_SIZE","VERSION"],"enum":["RecordType"],"fn":["build_records","maybe_emit_entry","record_type"],"struct":["Record","RecordMeta","RecordProducer"]};

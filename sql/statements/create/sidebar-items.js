@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COMMA_SEP","INDENT","LINE_SEP","TIME_INDEX"],"fn":["is_time_index"],"macro":["format_indent","format_list_comma","format_list_indent"],"struct":["CreateDatabase","CreateExternalTable","CreateTable","CreateTableLike","PartitionEntry","Partitions"]};

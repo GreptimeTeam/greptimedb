@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RegionRole","SetReadonlyResponse"],"struct":["GrantedRegion","RegionHandleResult"],"trait":["RegionEngine"],"type":["RegionEngineRef"]};

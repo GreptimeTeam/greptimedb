@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_ddl_context"],"struct":["MockDatanode","MockDatanodeManager"],"trait":["MockDatanodeHandler"],"type":["AffectedRows"]};

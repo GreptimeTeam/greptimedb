@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["dummy_params","format_duration","prepared_params","replace_params","replace_params_with_values","validate_query"],"struct":["MysqlInstanceShim"]};

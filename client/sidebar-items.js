@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_CATALOG_NAME","DEFAULT_SCHEMA_NAME"],"enum":["OutputData"],"fn":["from_grpc_response"],"mod":["client","client_manager","database","error","load_balance","metrics","region","stream_insert"],"struct":["Client","Database","Output","OutputMeta","RecordBatches","StreamInserter"],"type":["SendableRecordBatchStream"]};

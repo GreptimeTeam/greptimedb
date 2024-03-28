@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COLUMN_COMMENT","COLUMN_DEFAULT","COLUMN_NAME","COLUMN_TYPE","DATA_TYPE","INIT_CAPACITY","IS_NULLABLE","SEMANTIC_TYPE","TABLE_CATALOG","TABLE_NAME","TABLE_SCHEMA"],"struct":["InformationSchemaColumns","InformationSchemaColumnsBuilder"]};

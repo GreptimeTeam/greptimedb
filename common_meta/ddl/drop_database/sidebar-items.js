@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["_State_registry"],"enum":["DropTableTarget"],"mod":["cursor","end","executor","metadata","start"],"struct":["DropDatabaseContext","DropDatabaseData","DropDatabaseOwnedData","DropDatabaseProcedure"],"trait":["State"]};

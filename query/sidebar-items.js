@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["dataframe","datafusion","dist_plan","error","executor","logical_optimizer","metrics","optimizer","parser","physical_optimizer","physical_planner","physical_wrapper","plan","planner","query_engine","range_select","region_query","sql"]};

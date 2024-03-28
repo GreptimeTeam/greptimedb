@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Accum"],"fn":["err_try_from_val","ty_eq_without_precision"],"struct":["Bool","Float","OrdValue","SimpleNumber"],"trait":["Accumulator"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["handle_alter_logical_table_tasks","handle_alter_table_task","handle_create_logical_table_tasks","handle_create_table_task","handle_drop_database_task","handle_drop_table_task","handle_truncate_table_task"],"struct":["DdlManager"],"type":["BoxedProcedureLoaderFactory","DdlManagerRef"]};

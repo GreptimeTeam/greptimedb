@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["to_df_accumulator_func","to_df_state_type"],"struct":["AggregateFunction"]};

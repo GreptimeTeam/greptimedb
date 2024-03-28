@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CATALOG_KEY_PREFIX","NAME_PATTERN","SCHEMA_KEY_PREFIX"],"macro":["define_catalog_value"],"mod":["err"],"struct":["CATALOG_KEY_PATTERN","CatalogKey","CatalogValue","SCHEMA_KEY_PATTERN","SchemaKey","SchemaValue","TableGlobalValue"]};

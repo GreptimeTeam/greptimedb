@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Scanner"],"fn":["file_in_range"],"struct":["ScanParallism","ScanRegion"]};

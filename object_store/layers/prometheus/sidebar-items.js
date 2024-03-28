@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["increment_errors_total"],"struct":["BYTES_TOTAL","PrometheusAccessor","PrometheusMetricWrapper","PrometheusMetricsLayer","REQUESTS_DURATION_SECONDS","REQUESTS_TOTAL"],"type":["Result"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["convert_key_value"],"struct":["BatchDelete","BatchGet","BatchPut","CompareAndPut","Delete","EtcdStore","Get","Put"]};

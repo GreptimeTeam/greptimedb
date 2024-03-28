@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DELIMITER","PROCEDURE_PREFIX"],"fn":["decode_kv","strip_prefix","with_prefix"],"struct":["KvStateStore"]};

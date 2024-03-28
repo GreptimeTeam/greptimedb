@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_arg_map","extract_input_types","get_ident"]};

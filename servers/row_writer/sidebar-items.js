@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check_schema","write_by_semantic_type","write_f64","write_fields","write_tag","write_tags","write_ts_millis","write_ts_precision"],"struct":["MultiTableData","TableData"]};

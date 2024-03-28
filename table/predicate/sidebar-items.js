@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["return_none_if_utf8"],"struct":["Predicate","TimeRangePredicateBuilder"]};

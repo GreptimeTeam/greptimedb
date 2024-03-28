@@ -1,0 +1,3 @@
+(function() {var implementors = {
+"substrait":[["impl SerializerRegistry for <a class=\"struct\" href=\"substrait/extension_serializer/struct.ExtensionSerializer.html\" title=\"struct substrait::extension_serializer::ExtensionSerializer\">ExtensionSerializer</a>"]]
+};if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_LEVEL"],"enum":["IndexType"],"struct":["FileHandle","FileHandleInner","FileId","FileMeta","ParseIdError","ParseIdSnafu"],"type":["FileTimeRange","Level"]};

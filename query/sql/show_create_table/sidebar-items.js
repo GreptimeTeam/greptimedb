@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["column_option_def","create_column_def","create_sql_options","create_table_constraints","create_table_stmt","number_value","sql_option","string_value"]};

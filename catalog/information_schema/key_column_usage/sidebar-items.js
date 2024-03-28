@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COLUMN_NAME","CONSTRAINT_NAME","CONSTRAINT_SCHEMA","INIT_CAPACITY","ORDINAL_POSITION","TABLE_CATALOG","TABLE_NAME","TABLE_SCHEMA"],"struct":["InformationSchemaKeyColumnUsage","InformationSchemaKeyColumnUsageBuilder"]};

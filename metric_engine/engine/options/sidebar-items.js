@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["IGNORE_COLUMN_IDS_FOR_DATA_REGION","SEG_ROW_COUNT_FOR_DATA_REGION"],"fn":["set_index_options_for_data_region","set_memtable_options_for_data_region"]};

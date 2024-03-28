@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DropTableState"],"mod":["executor"],"struct":["DropTableData","DropTableProcedure"]};

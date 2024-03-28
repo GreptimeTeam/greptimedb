@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ColumnOption","CreateTableExprBuilderError"],"struct":["CreateTableExpr","CreateTableExprBuilder"]};

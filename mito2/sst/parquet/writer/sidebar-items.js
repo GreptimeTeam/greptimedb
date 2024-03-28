@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["write_next_batch"],"struct":["ParquetWriter","SourceStats"]};

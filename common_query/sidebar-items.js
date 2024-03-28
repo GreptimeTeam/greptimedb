@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AddColumnLocation","OutputData"],"mod":["columnar_value","error","function","logical_plan","physical_plan","prelude","signature"],"struct":["Output","OutputMeta"],"trait":["DfPhysicalPlan"],"type":["OutputCost","OutputRows"]};

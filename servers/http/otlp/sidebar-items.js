@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["metrics","parse_metrics_body","parse_traces_body","traces"],"struct":["OtlpMetricsResponse","OtlpTracesResponse"]};

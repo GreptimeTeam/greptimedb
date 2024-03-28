@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["bootstrap_meta_srv_with_router","create_etcd_client","metasrv_builder","router"],"struct":["MetaSrvInstance"]};

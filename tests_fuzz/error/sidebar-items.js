@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["AssertSnafu","BuildCreateTableExprSnafu","DroppableColumnsSnafu","ExecuteQuerySnafu","UnexpectedSnafu"],"type":["Result"]};

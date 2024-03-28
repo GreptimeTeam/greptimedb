@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["output_to_query_response","recordbatches_to_query_response"],"struct":["DefaultQueryParser"]};

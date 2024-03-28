@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["alter_region_schema","metadata_after_alteration"]};

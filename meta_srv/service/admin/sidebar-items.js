@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["boxed","check_path","make_admin_service"],"mod":["health","heartbeat","leader","maintenance","meta","node_lease","region_migration","route","util"],"struct":["Admin","Router"],"trait":["HttpHandler"]};

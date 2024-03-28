@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NO_VALUE"],"fn":["bigint_column","datetime_column","get_schema_columns","string_column","string_columns"]};
