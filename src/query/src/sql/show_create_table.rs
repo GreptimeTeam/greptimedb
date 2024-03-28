@@ -46,7 +46,7 @@ fn string_value(s: impl Into<String>) -> SqlValue {
 fn sql_option(name: &str, value: SqlValue) -> SqlOption {
     SqlOption {
         name: name.into(),
-        value,
+        value: Expr::Value(value),
     }
 }
 
@@ -141,6 +141,7 @@ fn create_table_constraints(
             name: Some(TIME_INDEX.into()),
             columns: vec![Ident::with_quote(quote_style, column_name)],
             is_primary: false,
+            characteristics: None,
         });
     }
     if !table_meta.primary_key_indices.is_empty() {
@@ -152,6 +153,7 @@ fn create_table_constraints(
             name: None,
             columns,
             is_primary: true,
+            characteristics: None,
         });
     }
 

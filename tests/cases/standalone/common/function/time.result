@@ -30,11 +30,11 @@ select to_timezone('2022-09-20T14:16:43.012345+08:00', 'Europe/Berlin');
 
 select to_timezone('2022-09-20T14:16:43.012345+08:00'::Timestamp, 'Europe/Berlin');
 
-+-----------------------------------------------------------------------------+
-| to_timezone(Utf8("2022-09-20T14:16:43.012345+08:00"),Utf8("Europe/Berlin")) |
-+-----------------------------------------------------------------------------+
-| 2022-09-20 08:16:43.012                                                     |
-+-----------------------------------------------------------------------------+
++------------------------------------------------------------------------------------------------------------------------------+
+| to_timezone(arrow_cast(Utf8("2022-09-20T14:16:43.012345+08:00"),Utf8("Timestamp(Millisecond, None)")),Utf8("Europe/Berlin")) |
++------------------------------------------------------------------------------------------------------------------------------+
+| 2022-09-20 08:16:43.012                                                                                                      |
++------------------------------------------------------------------------------------------------------------------------------+
 
 select to_timezone('2024-03-29T14:16:43.012345Z', 'Asia/Shanghai');
 
@@ -46,13 +46,18 @@ select to_timezone('2024-03-29T14:16:43.012345Z', 'Asia/Shanghai');
 
 select to_timezone('2024-03-29T14:16:43.012345Z'::Timestamp, 'Asia/Shanghai');
 
-+------------------------------------------------------------------------+
-| to_timezone(Utf8("2024-03-29T14:16:43.012345Z"),Utf8("Asia/Shanghai")) |
-+------------------------------------------------------------------------+
-| 2024-03-29 22:16:43.012                                                |
-+------------------------------------------------------------------------+
++-------------------------------------------------------------------------------------------------------------------------+
+| to_timezone(arrow_cast(Utf8("2024-03-29T14:16:43.012345Z"),Utf8("Timestamp(Millisecond, None)")),Utf8("Asia/Shanghai")) |
++-------------------------------------------------------------------------------------------------------------------------+
+| 2024-03-29 22:16:43.012                                                                                                 |
++-------------------------------------------------------------------------------------------------------------------------+
 
 select to_timezone(1709992225, 'Asia/Shanghai');
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Error during planning: Coercion from [Int64, Utf8] to the signature OneOf([Exact([Timestamp(Second, None), Utf8]), Exact([Timestamp(Millisecond, None), Utf8]), Exact([Timestamp(Microsecond, None), Utf8]), Exact([Timestamp(Nanosecond, None), Utf8])]) failed.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: No function matches the given name and argument types 'to_timezone(Int64, Utf8)'. You might need to add explicit type casts.
+	Candidate functions:
+	to_timezone(Timestamp(Second, None), Utf8)
+	to_timezone(Timestamp(Millisecond, None), Utf8)
+	to_timezone(Timestamp(Microsecond, None), Utf8)
+	to_timezone(Timestamp(Nanosecond, None), Utf8)
 

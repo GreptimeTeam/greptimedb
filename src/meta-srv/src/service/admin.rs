@@ -29,7 +29,7 @@ use std::task::{Context, Poll};
 
 use tonic::body::BoxBody;
 use tonic::codegen::{empty_body, http, BoxFuture, Service};
-use tonic::transport::NamedService;
+use tonic::server::NamedService;
 
 use crate::metasrv::MetaSrv;
 

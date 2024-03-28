@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 
 use common_query::prelude::ScalarValue;
+use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::Schema;
@@ -82,7 +83,7 @@ impl LogicalPlan {
         let LogicalPlan::DfPlan(plan) = self;
 
         plan.clone()
-            .replace_params_with_values(values)
+            .replace_params_with_values(&ParamValues::List(values.to_vec()))
             .context(DataFusionSnafu)
             .map(LogicalPlan::DfPlan)
     }

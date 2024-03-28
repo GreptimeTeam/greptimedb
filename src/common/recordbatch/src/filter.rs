@@ -22,7 +22,7 @@ use datafusion_common::ScalarValue;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
-use crate::error::{ArrowComputeSnafu, Result, UnsupportedOperationSnafu};
+use crate::error::{ArrowComputeSnafu, Result, ToArrowScalarSnafu, UnsupportedOperationSnafu};
 
 /// An inplace expr evaluator for simple filter. Only support
 /// - `col` `op` `literal`
@@ -43,7 +43,7 @@ pub struct SimpleFilterEvaluator {
 }
 
 impl SimpleFilterEvaluator {
-    pub fn try_new(predicate: &Expr) -> Option<Self> {
+    pub fn try_new(predicate: &Expr) -> Result<Option<Self>> {
         match predicate {
             Expr::BinaryExpr(binary) => {
                 // check if the expr is in the supported form
@@ -54,7 +54,7 @@ impl SimpleFilterEvaluator {
                     | Operator::LtEq
                     | Operator::Gt
                     | Operator::GtEq => {}
-                    _ => return None,
+                    _ => return Ok(None),
                 }
 
                 // swap the expr if it is in the form of `literal` `op` `col`
@@ -66,16 +66,19 @@ impl SimpleFilterEvaluator {
                         op = op.swap().unwrap();
                         (col, lit)
                     }
-                    _ => return None,
+                    _ => return Ok(None),
                 };
 
-                Some(Self {
+                let literal = rhs
+                    .to_scalar()
+                    .with_context(|_| ToArrowScalarSnafu { v: rhs.clone() })?;
+                Ok(Some(Self {
                     column_name: lhs.name.clone(),
-                    literal: rhs.clone().to_scalar(),
+                    literal,
                     op,
-                })
+                }))
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 
@@ -85,7 +88,10 @@ impl SimpleFilterEvaluator {
     }
 
     pub fn evaluate_scalar(&self, input: &ScalarValue) -> Result<bool> {
-        let result = self.evaluate_datum(&input.to_scalar())?;
+        let input = input
+            .to_scalar()
+            .with_context(|_| ToArrowScalarSnafu { v: input.clone() })?;
+        let result = self.evaluate_datum(&input)?;
         Ok(result.value(0))
     }
 
@@ -139,7 +145,7 @@ mod test {
             op: Operator::Plus,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
+        assert!(SimpleFilterEvaluator::try_new(&expr).unwrap().is_none());
 
         // two literal is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
@@ -147,7 +153,7 @@ mod test {
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
+        assert!(SimpleFilterEvaluator::try_new(&expr).unwrap().is_none());
 
         // two column is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
@@ -161,7 +167,7 @@ mod test {
                 name: "bar".to_string(),
             })),
         });
-        assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
+        assert!(SimpleFilterEvaluator::try_new(&expr).unwrap().is_none());
 
         // compound expr is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
@@ -176,7 +182,7 @@ mod test {
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
+        assert!(SimpleFilterEvaluator::try_new(&expr).unwrap().is_none());
     }
 
     #[test]
@@ -201,7 +207,7 @@ mod test {
                 name: "foo".to_string(),
             })),
         });
-        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
+        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap().unwrap();
         assert_eq!(evaluator.op, Operator::Gt);
         assert_eq!(evaluator.column_name, "foo".to_string());
     }
@@ -216,7 +222,7 @@ mod test {
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
+        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap().unwrap();
 
         let input_1 = Arc::new(datatypes::arrow::array::Int64Array::from(vec![1, 2, 3])) as _;
         let result = evaluator.evaluate_array(&input_1).unwrap();
@@ -241,7 +247,7 @@ mod test {
             op: Operator::Lt,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
+        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap().unwrap();
 
         let input_1 = ScalarValue::Int64(Some(1));
         let result = evaluator.evaluate_scalar(&input_1).unwrap();

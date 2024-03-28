@@ -94,10 +94,10 @@ mod tests {
 
     #[test]
     fn test_from_df_expr() {
-        let df_expr = DfExpr::Wildcard;
+        let df_expr = DfExpr::Wildcard { qualifier: None };
 
         let expr: Expr = df_expr.into();
 
-        assert_eq!(DfExpr::Wildcard, *expr.df_expr());
+        assert_eq!(DfExpr::Wildcard { qualifier: None }, *expr.df_expr());
     }
 }

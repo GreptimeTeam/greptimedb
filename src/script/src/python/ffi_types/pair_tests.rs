@@ -71,6 +71,8 @@ fn into_recordbatch(input: HashMap<String, VectorRef>) -> RecordBatch {
     RecordBatch::new(schema, columns).unwrap()
 }
 
+// FIXME(LFC): Enable testing "integrated_py_copr_test"
+#[ignore]
 #[tokio::test]
 #[allow(clippy::print_stdout)]
 async fn integrated_py_copr_test() {

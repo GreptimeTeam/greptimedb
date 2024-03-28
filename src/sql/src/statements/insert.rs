@@ -55,10 +55,10 @@ impl Insert {
         match &self.inner {
             Statement::Insert {
                 source:
-                    box Query {
+                    Some(box Query {
                         body: box SetExpr::Values(Values { rows, .. }),
                         ..
-                    },
+                    }),
                 ..
             } => sql_exprs_to_values(rows),
             _ => unreachable!(),
@@ -71,10 +71,10 @@ impl Insert {
         match &self.inner {
             Statement::Insert {
                 source:
-                    box Query {
+                    Some(box Query {
                         body: box SetExpr::Values(Values { rows, .. }),
                         ..
-                    },
+                    }),
                 ..
             } => rows.iter().all(|es| {
                 es.iter().all(|expr| match expr {
@@ -100,7 +100,8 @@ impl Insert {
     pub fn query_body(&self) -> Result<Option<GtQuery>> {
         Ok(match &self.inner {
             Statement::Insert {
-                source: box query, ..
+                source: Some(box query),
+                ..
             } => Some(query.clone().try_into()?),
             _ => None,
         })

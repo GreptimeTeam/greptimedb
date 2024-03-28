@@ -357,7 +357,7 @@ impl Timestamp {
 
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
         let (sec, nsec) = self.split();
-        NaiveDateTime::from_timestamp_opt(sec, nsec)
+        chrono::DateTime::from_timestamp(sec, nsec).map(|x| x.naive_utc())
     }
 
     pub fn to_chrono_datetime_with_timezone(&self, tz: Option<&Timezone>) -> Option<NaiveDateTime> {
@@ -380,7 +380,7 @@ impl Timestamp {
     }
 
     pub fn from_chrono_datetime(ndt: NaiveDateTime) -> Option<Self> {
-        let sec = ndt.timestamp();
+        let sec = ndt.and_utc().timestamp();
         let nsec = ndt.timestamp_subsec_nanos();
         Timestamp::from_splits(sec, nsec)
     }
@@ -1063,8 +1063,8 @@ mod tests {
         let _ = Timestamp::new(i64::MAX, TimeUnit::Nanosecond).split();
         let _ = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
         let (sec, nsec) = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
-        let time = NaiveDateTime::from_timestamp_opt(sec, nsec).unwrap();
-        assert_eq!(sec, time.timestamp());
+        let time = DateTime::from_timestamp(sec, nsec).unwrap().naive_utc();
+        assert_eq!(sec, time.and_utc().timestamp());
         assert_eq!(nsec, time.timestamp_subsec_nanos());
     }
 
@@ -1159,12 +1159,12 @@ mod tests {
     #[test]
     fn test_subtract_timestamp() {
         assert_eq!(
-            Some(chrono::Duration::milliseconds(42)),
+            chrono::Duration::try_milliseconds(42),
             Timestamp::new_millisecond(100).sub(&Timestamp::new_millisecond(58))
         );
 
         assert_eq!(
-            Some(chrono::Duration::milliseconds(-42)),
+            chrono::Duration::try_milliseconds(-42),
             Timestamp::new_millisecond(58).sub(&Timestamp::new_millisecond(100))
         );
     }
@@ -1286,8 +1286,8 @@ mod tests {
 
     #[test]
     fn test_from_naive_date_time() {
-        let naive_date_time_min = NaiveDateTime::MIN;
-        let naive_date_time_max = NaiveDateTime::MAX;
+        let naive_date_time_min = NaiveDateTime::MIN.and_utc();
+        let naive_date_time_max = NaiveDateTime::MAX.and_utc();
 
         let min_sec = Timestamp::new_second(naive_date_time_min.timestamp());
         let max_sec = Timestamp::new_second(naive_date_time_max.timestamp());

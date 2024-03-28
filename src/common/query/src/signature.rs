@@ -31,6 +31,8 @@ pub enum TypeSignature {
     // A function such as `array` is `VariadicEqual`
     // The first argument decides the type used for coercion
     VariadicEqual,
+    /// One or more arguments with arbitrary types
+    VariadicAny,
     /// fixed number of arguments of an arbitrary but equal type out of a list of valid types
     // A function of one argument of f64 is `Uniform(1, vec![ConcreteDataType::Float64])`
     // A function of one argument of f64 or f32 is `Uniform(1, vec![ConcreteDataType::Float32, ConcreteDataType::Float64])`
@@ -79,6 +81,15 @@ impl Signature {
             volatility,
         }
     }
+
+    /// variadic_any - Creates a variadic signature that represents an arbitrary number of arguments of any type.
+    pub fn variadic_any(volatility: Volatility) -> Self {
+        Self {
+            type_signature: TypeSignature::VariadicAny,
+            volatility,
+        }
+    }
+
     /// uniform - Creates a function with a fixed number of arguments of the same type, which must be from valid_types.
     pub fn uniform(
         arg_count: usize,
@@ -131,6 +142,7 @@ impl From<TypeSignature> for DfTypeSignature {
             TypeSignature::OneOf(ts) => {
                 DfTypeSignature::OneOf(ts.into_iter().map(Into::into).collect())
             }
+            TypeSignature::VariadicAny => DfTypeSignature::VariadicAny,
         }
     }
 }

@@ -179,6 +179,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
                     }
                     .build()
                 })?
+                .and_utc()
                 .timestamp_millis();
 
             match t {

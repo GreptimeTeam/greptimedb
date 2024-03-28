@@ -14,12 +14,13 @@
 
 use std::sync::Arc;
 
+use arrow::array::ArrayRef;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue as DFColValue;
 use datatypes::prelude::ScalarVector;
 use datatypes::value::Value;
 use datatypes::vectors::{
-    BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,
+    BooleanVector, Float64Vector, Helper, Int64Vector, StringVector, VectorRef,
 };
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
 use rustpython_vm::object::PyObjectPayload;
@@ -134,15 +135,9 @@ pub fn py_obj_to_vec(
             try_into_columnar_value(obj.clone(), vm).map_err(|e| format_py_error(e, vm))?;
 
         match columnar_value {
-            DFColValue::Scalar(ScalarValue::List(scalars, _datatype)) => match scalars {
-                Some(scalars) => {
-                    let array =
-                        ScalarValue::iter_to_array(scalars).context(error::DataFusionSnafu)?;
-
-                    Helper::try_into_vector(array).context(error::TypeCastSnafu)
-                }
-                None => Ok(Arc::new(NullVector::new(0))),
-            },
+            DFColValue::Scalar(ScalarValue::List(array)) => {
+                Helper::try_into_vector(array as ArrayRef).context(error::TypeCastSnafu)
+            }
             _ => unreachable!(),
         }
     } else {

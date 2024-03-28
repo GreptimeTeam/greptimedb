@@ -26,9 +26,9 @@ use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, Result};
+use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
 use crate::scalars::{Scalar, ScalarVectorBuilder};
-use crate::value::{ListValue, ListValueRef};
+use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Decimal128Vector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
@@ -160,19 +160,20 @@ impl Helper {
             | ScalarValue::FixedSizeBinary(_, v) => {
                 ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
             }
-            ScalarValue::List(v, field) | ScalarValue::Fixedsizelist(v, field, _) => {
-                let item_type = ConcreteDataType::try_from(field.data_type())?;
+            ScalarValue::List(array) => {
+                let item_type = ConcreteDataType::try_from(&array.value_type())?;
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
-                if let Some(values) = v {
-                    let values = values
-                        .into_iter()
-                        .map(ScalarValue::try_into)
-                        .collect::<Result<_>>()?;
-                    let list_value = ListValue::new(Some(Box::new(values)), item_type);
-                    builder.push(Some(ListValueRef::Ref { val: &list_value }));
-                } else {
-                    builder.push(None);
-                }
+                let values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
+                    .with_context(|_| ConvertArrowArrayToScalarsSnafu {
+                        array: array as ArrayRef,
+                    })?
+                    .into_iter()
+                    .flatten()
+                    .map(ScalarValue::try_into)
+                    .collect::<Result<Vec<Value>>>()?;
+                builder.push(Some(ListValueRef::Ref {
+                    val: &ListValue::new(values, item_type),
+                }));
                 let list_vector = builder.to_vector();
                 ConstantVector::new(list_vector, length)
             }
@@ -236,8 +237,11 @@ impl Helper {
                 ConstantVector::new(Arc::new(vector), length)
             }
             ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::Struct(_, _)
-            | ScalarValue::Dictionary(_, _) => {
+            | ScalarValue::Struct(_)
+            | ScalarValue::FixedSizeList(_)
+            | ScalarValue::LargeList(_)
+            | ScalarValue::Dictionary(_, _)
+            | ScalarValue::Union(_, _, _) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
@@ -351,7 +355,11 @@ impl Helper {
             | ArrowDataType::Dictionary(_, _)
             | ArrowDataType::Decimal256(_, _)
             | ArrowDataType::Map(_, _)
-            | ArrowDataType::RunEndEncoded(_, _) => {
+            | ArrowDataType::RunEndEncoded(_, _)
+            | ArrowDataType::BinaryView
+            | ArrowDataType::Utf8View
+            | ArrowDataType::ListView(_)
+            | ArrowDataType::LargeListView(_) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: array.as_ref().data_type().clone(),
                 }
@@ -396,7 +404,7 @@ mod tests {
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
-    use arrow::datatypes::{Field, Int32Type};
+    use arrow::datatypes::Int32Type;
     use arrow_array::DictionaryArray;
     use common_decimal::Decimal128;
     use common_time::time::Time;
@@ -486,13 +494,10 @@ mod tests {
 
     #[test]
     fn test_try_from_list_value() {
-        let value = ScalarValue::List(
-            Some(vec![
-                ScalarValue::Int32(Some(1)),
-                ScalarValue::Int32(Some(2)),
-            ]),
-            Arc::new(Field::new("item", ArrowDataType::Int32, true)),
-        );
+        let value = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int32(Some(1)), ScalarValue::Int32(Some(2))],
+            &ArrowDataType::Int32,
+        ));
         let vector = Helper::try_from_scalar_value(value, 3).unwrap();
         assert_eq!(
             ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
@@ -501,8 +506,8 @@ mod tests {
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
             let v = vector.get(i);
-            let items = v.as_list().unwrap().unwrap().items().as_ref().unwrap();
-            assert_eq!(vec![Value::Int32(1), Value::Int32(2)], **items);
+            let items = v.as_list().unwrap().unwrap().items();
+            assert_eq!(vec![Value::Int32(1), Value::Int32(2)], items);
         }
     }
 

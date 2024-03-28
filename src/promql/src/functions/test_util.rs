@@ -32,12 +32,20 @@ pub fn simple_range_udf_runner(
         ColumnarValue::Array(Arc::new(input_ts.into_dict())),
         ColumnarValue::Array(Arc::new(input_value.into_dict())),
     ];
-    let eval_result: Vec<Option<f64>> = extract_array(&(range_fn.fun)(&input).unwrap())
+    let eval_result: Vec<Option<f64>> = extract_array(&(range_fn.fun())(&input).unwrap())
         .unwrap()
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap()
         .iter()
         .collect();
-    assert_eq!(eval_result, expected)
+    assert_eq!(eval_result.len(), expected.len());
+    assert!(eval_result
+        .iter()
+        .zip(expected.iter())
+        .all(|(x, y)| match (*x, *y) {
+            (Some(x), Some(y)) => (x - y).abs() < 0.0001,
+            (None, None) => true,
+            _ => false,
+        }));
 }

@@ -32,10 +32,11 @@ impl AnalyzerRule for StringNormalizationRule {
             let expr = plan
                 .expressions()
                 .into_iter()
-                .map(|e| e.rewrite(&mut converter))
+                .map(|e| e.rewrite(&mut converter).map(|x| x.data))
                 .collect::<Result<Vec<_>>>()?;
-            plan.with_new_exprs(expr, &inputs).map(Transformed::Yes)
+            plan.with_new_exprs(expr, inputs).map(Transformed::yes)
         })
+        .map(|x| x.data)
     }
 
     fn name(&self) -> &str {
@@ -46,12 +47,12 @@ impl AnalyzerRule for StringNormalizationRule {
 struct StringNormalizationConverter;
 
 impl TreeNodeRewriter for StringNormalizationConverter {
-    type N = Expr;
+    type Node = Expr;
 
     /// remove extra whitespaces from the String value when
     /// there is a CAST from a String to Timestamp.
     /// Otherwise - no modifications applied
-    fn mutate(&mut self, expr: Expr) -> Result<Expr> {
+    fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>> {
         let new_expr = match expr {
             Expr::Cast(Cast { expr, data_type }) => {
                 let expr = match data_type {
@@ -71,7 +72,7 @@ impl TreeNodeRewriter for StringNormalizationConverter {
             }
             expr => expr,
         };
-        Ok(new_expr)
+        Ok(Transformed::yes(new_expr))
     }
 }
 

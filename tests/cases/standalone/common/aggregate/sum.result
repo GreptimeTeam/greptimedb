@@ -24,11 +24,7 @@ SELECT SUM(-1) FROM numbers;
 
 SELECT SUM(-1) FROM numbers WHERE number=-1;
 
-+----------------+
-| SUM(Int64(-1)) |
-+----------------+
-|                |
-+----------------+
+Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Can't cast value -1 to type UInt32
 
 SELECT SUM(-1) FROM numbers WHERE number>10000 limit 1000;
 
@@ -64,11 +60,11 @@ Affected Rows: 4
 
 SELECT sum(n) from doubles;
 
-+----------------------+
-| SUM(doubles.n)       |
-+----------------------+
-| 9.007199254740992e15 |
-+----------------------+
++--------------------+
+| SUM(doubles.n)     |
++--------------------+
+| 9007199254740992.0 |
++--------------------+
 
 DROP TABLE bigints;
 
