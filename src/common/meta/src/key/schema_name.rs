@@ -173,8 +173,16 @@ impl SchemaManager {
             .transpose()
     }
 
+    /// Deletes a [SchemaNameKey].
+    pub async fn delete(&self, schema: SchemaNameKey<'_>) -> Result<()> {
+        let raw_key = schema.as_raw_key();
+        self.kv_backend.delete(&raw_key, false).await?;
+
+        Ok(())
+    }
+
     /// Returns a schema stream, it lists all schemas belong to the target `catalog`.
-    pub async fn schema_names(&self, catalog: &str) -> BoxStream<'static, Result<String>> {
+    pub fn schema_names(&self, catalog: &str) -> BoxStream<'static, Result<String>> {
         let start_key = SchemaNameKey::range_start_key(catalog);
         let req = RangeRequest::new().with_prefix(start_key.as_bytes());
 

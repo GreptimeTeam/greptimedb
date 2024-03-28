@@ -36,14 +36,13 @@ pub struct TableResponse {
 
 impl TableResponse {
     pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
-        match handler::from_output(ResponseFormat::Csv, outputs).await {
+        match handler::from_output(outputs).await {
             Err(err) => HttpResponse::Error(err),
             Ok((output, _)) => {
                 if output.len() > 1 {
                     HttpResponse::Error(ErrorResponse::from_error_message(
-                        ResponseFormat::Table,
                         StatusCode::InvalidArguments,
-                        "Multi-statements are not allowed".to_string(),
+                        "cannot output multi-statements result in table format".to_string(),
                     ))
                 } else {
                     HttpResponse::Table(TableResponse {
@@ -136,14 +135,14 @@ impl IntoResponse for TableResponse {
         let mut resp = (
             [(
                 header::CONTENT_TYPE,
-                HeaderValue::from_static(mime::PLAIN.as_ref()),
+                HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref()),
             )],
             self.to_string(),
         )
             .into_response();
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_FORMAT,
-            HeaderValue::from_static("TABLE"),
+            HeaderValue::from_static(ResponseFormat::Table.as_str()),
         );
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_EXECUTION_TIME,

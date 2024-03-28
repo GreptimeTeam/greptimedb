@@ -225,7 +225,6 @@ impl MetaSrvBuilder {
             Arc::new(TableMetadataAllocator::with_peer_allocator(
                 sequence,
                 wal_options_allocator.clone(),
-                table_metadata_manager.table_name_manager().clone(),
                 peer_allocator,
             ))
         });
@@ -416,6 +415,7 @@ fn build_ddl_manager(
             table_metadata_manager.clone(),
             table_metadata_allocator.clone(),
             memory_region_keeper.clone(),
+            true,
         )
         .context(error::InitDdlManagerSnafu)?,
     ))

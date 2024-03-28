@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+
 pub mod cluster;
 mod grpc;
 mod influxdb;

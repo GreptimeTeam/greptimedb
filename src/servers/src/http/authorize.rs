@@ -33,7 +33,7 @@ use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
-use super::{ResponseFormat, PUBLIC_APIS};
+use super::PUBLIC_APIS;
 use crate::error::{
     self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
@@ -64,8 +64,8 @@ pub async fn inner_auth<B>(
     // TODO(ruihang): move this out of auth module
     let timezone = Arc::new(extract_timezone(&req));
     let query_ctx_builder = QueryContextBuilder::default()
-        .current_catalog(catalog.to_string())
-        .current_schema(schema.to_string())
+        .current_catalog(catalog.clone())
+        .current_schema(schema.clone())
         .timezone(timezone);
 
     let query_ctx = query_ctx_builder.build();
@@ -88,7 +88,7 @@ pub async fn inner_auth<B>(
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
-            return Err(err_response(is_influxdb_request(&req), e).into_response());
+            return Err(err_response(e));
         }
     };
 
@@ -97,8 +97,8 @@ pub async fn inner_auth<B>(
         .auth(
             auth::Identity::UserId(&username, None),
             auth::Password::PlainText(password),
-            catalog,
-            schema,
+            &catalog,
+            &schema,
         )
         .await
     {
@@ -112,7 +112,7 @@ pub async fn inner_auth<B>(
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
-            Err(err_response(is_influxdb_request(&req), e).into_response())
+            Err(err_response(e))
         }
     }
 }
@@ -128,16 +128,11 @@ pub async fn check_http_auth<B>(
     }
 }
 
-fn err_response(is_influxdb: bool, err: impl ErrorExt) -> impl IntoResponse {
-    let ty = if is_influxdb {
-        ResponseFormat::InfluxdbV1
-    } else {
-        ResponseFormat::GreptimedbV1
-    };
-    (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(ty, err))
+fn err_response(err: impl ErrorExt) -> Response {
+    (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(err)).into_response()
 }
 
-pub fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {
+pub fn extract_catalog_and_schema<B>(request: &Request<B>) -> (String, String) {
     // parse database from header
     let dbname = request
         .headers()
@@ -419,7 +414,7 @@ mod tests {
             .unwrap();
 
         let db = extract_catalog_and_schema(&req);
-        assert_eq!(db, ("greptime", "tomcat"));
+        assert_eq!(db, ("greptime".to_string(), "tomcat".to_string()));
     }
 
     #[test]

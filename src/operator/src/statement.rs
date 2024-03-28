@@ -39,6 +39,7 @@ use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
+use session::session_config::PGByteaOutputValue;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
@@ -52,8 +53,8 @@ use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidConfigValueSnafu,
+    InvalidSqlSnafu, NotSupportedSnafu, PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -168,12 +169,13 @@ impl StatementExecutor {
                 let table_name = TableName::new(catalog, schema, table);
                 self.drop_table(table_name, stmt.drop_if_exists()).await
             }
-            Statement::DropDatabase(_stmt) => {
-                // TODO(weny): implement the drop database procedure
-                error::NotSupportedSnafu {
-                    feat: "Drop Database",
-                }
-                .fail()
+            Statement::DropDatabase(stmt) => {
+                self.drop_database(
+                    query_ctx.current_catalog().to_string(),
+                    format_raw_object_name(stmt.name()),
+                    stmt.drop_if_exists(),
+                )
+                .await
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
@@ -218,8 +220,7 @@ impl StatementExecutor {
                     // so we just ignore it here instead of returning an error to break the connection.
                     // Since the "bytea_output" only determines the output format of binary values,
                     // it won't cause much trouble if we do so.
-                    // TODO(#3438): Remove this temporary workaround after the feature is implemented.
-                    "BYTEA_OUTPUT" => (),
+                    "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,
 
                     // Same as "bytea_output", we just ignore it here.
                     // Not harmful since it only relates to how date is viewed in client app's output.
@@ -338,6 +339,25 @@ fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     }
 }
 
+fn set_bytea_output(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let Some((var_value, [])) = exprs.split_first() else {
+        return (NotSupportedSnafu {
+            feat: "Set variable value must have one and only one value for bytea_output",
+        })
+        .fail();
+    };
+    let Expr::Value(value) = var_value else {
+        return (NotSupportedSnafu {
+            feat: "Set variable value must be a value",
+        })
+        .fail();
+    };
+    ctx.configuration_parameter().set_postgres_bytea_output(
+        PGByteaOutputValue::try_from(value.clone()).context(InvalidConfigValueSnafu)?,
+    );
+    Ok(())
+}
+
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
     let direction = match stmt {
         CopyTable::To(_) => CopyDirection::Export,
@@ -359,6 +379,8 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
+    let timestamp_range = timestamp_range_from_option_map(&with, &query_ctx)?;
+
     let pattern = with
         .get(common_datasource::file_format::FILE_PATTERN)
         .cloned();
@@ -372,8 +394,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         connection: connection.map,
         pattern,
         direction,
-        // we copy the whole table by default.
-        timestamp_range: None,
+        timestamp_range,
     })
 }
 
@@ -386,16 +407,7 @@ fn to_copy_database_request(
     let (catalog_name, database_name) = idents_to_full_database_name(&arg.database_name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-
-    let start_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_START_KEY, query_ctx)?;
-    let end_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_END_KEY, query_ctx)?;
-
-    let time_range = match (start_timestamp, end_timestamp) {
-        (Some(start), Some(end)) => TimestampRange::new(start, end),
-        (Some(start), None) => Some(TimestampRange::from_start(start)),
-        (None, Some(end)) => Some(TimestampRange::until_end(end, false)), // exclusive end
-        (None, None) => None,
-    };
+    let time_range = timestamp_range_from_option_map(&arg.with, query_ctx)?;
 
     Ok(CopyDatabaseRequest {
         catalog_name,
@@ -405,6 +417,24 @@ fn to_copy_database_request(
         connection: arg.connection.map,
         time_range,
     })
+}
+
+/// Extracts timestamp range from OptionMap with keys `start_time` and `end_time`.
+/// The timestamp ranges should be a valid timestamp string as defined in [Timestamp::from_str].
+/// The timezone used for conversion will respect that inside `query_ctx`.
+fn timestamp_range_from_option_map(
+    options: &OptionMap,
+    query_ctx: &QueryContextRef,
+) -> Result<Option<TimestampRange>> {
+    let start_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_START_KEY, query_ctx)?;
+    let end_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_END_KEY, query_ctx)?;
+    let time_range = match (start_timestamp, end_timestamp) {
+        (Some(start), Some(end)) => TimestampRange::new(start, end),
+        (Some(start), None) => Some(TimestampRange::from_start(start)),
+        (None, Some(end)) => Some(TimestampRange::until_end(end, false)), // exclusive end
+        (None, None) => None,
+    };
+    Ok(time_range)
 }
 
 /// Extracts timestamp from a [HashMap<String, String>] with given key.
@@ -437,5 +467,46 @@ fn idents_to_full_database_name(
             ),
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use common_time::{Timestamp, Timezone};
+    use session::context::QueryContextBuilder;
+    use sql::statements::OptionMap;
+
+    use crate::statement::copy_database::{
+        COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY,
+    };
+    use crate::statement::timestamp_range_from_option_map;
+
+    #[test]
+    fn test_timestamp_range_from_option_map() {
+        let query_ctx = QueryContextBuilder::default()
+            .timezone(Arc::new(Timezone::from_tz_string("Asia/Shanghai").unwrap()))
+            .build();
+        let map = OptionMap::from(
+            [
+                (
+                    COPY_DATABASE_TIME_START_KEY.to_string(),
+                    "2022-04-11 08:00:00".to_string(),
+                ),
+                (
+                    COPY_DATABASE_TIME_END_KEY.to_string(),
+                    "2022-04-11 16:00:00".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+        let range = timestamp_range_from_option_map(&map, &query_ctx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(Timestamp::new_second(1649635200), range.start().unwrap());
+        assert_eq!(Timestamp::new_second(1649664000), range.end().unwrap());
     }
 }

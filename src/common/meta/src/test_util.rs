@@ -19,7 +19,9 @@ pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::cache_invalidator::DummyCacheInvalidator;
-use crate::datanode_manager::{Datanode, DatanodeManager, DatanodeManagerRef, DatanodeRef};
+use crate::datanode_manager::{
+    Datanode, DatanodeManager, DatanodeManagerRef, DatanodeRef, HandleResponse,
+};
 use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::DdlContext;
 use crate::error::Result;
@@ -32,7 +34,7 @@ use crate::wal_options_allocator::WalOptionsAllocator;
 
 #[async_trait::async_trait]
 pub trait MockDatanodeHandler: Sync + Send + Clone {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<AffectedRows>;
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<HandleResponse>;
 
     async fn handle_query(
         &self,
@@ -62,7 +64,7 @@ struct MockDatanode<T> {
 
 #[async_trait::async_trait]
 impl<T: MockDatanodeHandler> Datanode for MockDatanode<T> {
-    async fn handle(&self, request: RegionRequest) -> Result<AffectedRows> {
+    async fn handle(&self, request: RegionRequest) -> Result<HandleResponse> {
         self.handler.handle(&self.peer, request).await
     }
 
@@ -97,7 +99,6 @@ pub fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
                     .build(),
             ),
             Arc::new(WalOptionsAllocator::default()),
-            table_metadata_manager.table_name_manager().clone(),
         )),
         table_metadata_manager,
     }

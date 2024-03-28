@@ -17,5 +17,5 @@ jobs:
       - name: Auto Unassign
         uses: tisonspieces/auto-unassign@main
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           repository: ${{ github.repository }}

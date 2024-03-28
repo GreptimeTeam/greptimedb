@@ -54,13 +54,15 @@ const INITIAL_BUILDER_CAPACITY: usize = 0;
 #[derive(Debug, Default)]
 pub struct TimeSeriesMemtableBuilder {
     write_buffer_manager: Option<WriteBufferManagerRef>,
+    dedup: bool,
 }
 
 impl TimeSeriesMemtableBuilder {
     /// Creates a new builder with specific `write_buffer_manager`.
-    pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>) -> Self {
+    pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>, dedup: bool) -> Self {
         Self {
             write_buffer_manager,
+            dedup,
         }
     }
 }
@@ -71,7 +73,7 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
             metadata.clone(),
             id,
             self.write_buffer_manager.clone(),
-            true, // todo(hl): set according to region option
+            self.dedup,
         ))
     }
 }

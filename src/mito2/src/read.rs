@@ -191,6 +191,9 @@ impl Batch {
     }
 
     /// Replaces the primary key of the batch.
+    ///
+    /// Notice that this [Batch] also contains a maybe-exist `pk_values`.
+    /// Be sure to update that field as well.
     pub fn set_primary_key(&mut self, primary_key: Vec<u8>) {
         self.primary_key = primary_key;
     }

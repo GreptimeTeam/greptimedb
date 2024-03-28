@@ -11,19 +11,6 @@ SHOW TABLES;
 | phy     |
 +---------+
 
-CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
-
-Affected Rows: 0
-
-CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
-
-Affected Rows: 0
-
-SELECT * FROM information_schema.tables WHERE engine = "metric" order by table_name;
-
-Error: 3000(PlanQuery), Failed to plan SQL: No field named metric. Valid fields are information_schema.tables.table_catalog, information_schema.tables.table_schema, information_schema.tables.table_name, information_schema.tables.table_type, information_schema.tables.table_id, information_schema.tables.engine.
-
--- We currently don't maintains physical table's schema.
 DESC TABLE phy;
 
 +--------+----------------------+-----+------+---------+---------------+
@@ -33,14 +20,45 @@ DESC TABLE phy;
 | val    | Float64              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+SELECT table_catalog, table_schema, table_name, table_type, engine FROM information_schema.tables WHERE engine = 'metric' order by table_name;
+
++---------------+--------------+------------+------------+--------+
+| table_catalog | table_schema | table_name | table_type | engine |
++---------------+--------------+------------+------------+--------+
+| greptime      | public       | phy        | BASE TABLE | metric |
+| greptime      | public       | t1         | BASE TABLE | metric |
+| greptime      | public       | t2         | BASE TABLE | metric |
++---------------+--------------+------------+------------+--------+
+
+DESC TABLE phy;
+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| ts         | TimestampMillisecond |     | NO   |         | FIELD         |
+| val        | Float64              |     | YES  |         | FIELD         |
+| __table_id | UInt32               | PRI | NO   |         | TAG           |
+| __tsid     | UInt64               | PRI | NO   |         | TAG           |
+| host       | String               | PRI | YES  |         | TAG           |
+| job        | String               | PRI | YES  |         | TAG           |
++------------+----------------------+-----+------+---------+---------------+
+
 DESC TABLE t1;
 
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
+| host   | String               | PRI | YES  |         | TAG           |
 | ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val    | Float64              |     | YES  |         | FIELD         |
-| host   | String               | PRI | YES  |         | TAG           |
 +--------+----------------------+-----+------+---------+---------------+
 
 DESC TABLE t2;
@@ -48,8 +66,8 @@ DESC TABLE t2;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | job    | String               | PRI | YES  |         | TAG           |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val    | Float64              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 

@@ -25,8 +25,8 @@ pub mod watcher;
 
 pub use crate::error::{Error, Result};
 pub use crate::procedure::{
-    BoxedProcedure, Context, ContextProvider, LockKey, Output, ParseIdError, Procedure,
-    ProcedureId, ProcedureManager, ProcedureManagerRef, ProcedureState, ProcedureWithId, Status,
-    StringKey,
+    BoxedProcedure, BoxedProcedureLoader, Context, ContextProvider, LockKey, Output, ParseIdError,
+    Procedure, ProcedureId, ProcedureManager, ProcedureManagerRef, ProcedureState, ProcedureWithId,
+    Status, StringKey,
 };
 pub use crate::watcher::Watcher;

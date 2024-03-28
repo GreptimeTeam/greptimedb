@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::BoxedError;
 use common_error::status_code::StatusCode;
+use common_meta::datanode_manager::HandleResponse;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, OutputData};
@@ -128,7 +129,7 @@ impl RegionServer {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<AffectedRows> {
+    ) -> Result<HandleResponse> {
         self.inner.handle_request(region_id, request).await
     }
 
@@ -267,11 +268,12 @@ impl RegionServerHandler for RegionServer {
             results
         };
 
-        // merge results by simply sum up affected rows.
-        // only insert/delete will have multiple results.
+        // merge results by sum up affected rows and merge extensions.
         let mut affected_rows = 0;
+        let mut extension = HashMap::new();
         for result in results {
-            affected_rows += result;
+            affected_rows += result.affected_rows;
+            extension.extend(result.extension);
         }
 
         Ok(RegionResponse {
@@ -282,6 +284,7 @@ impl RegionServerHandler for RegionServer {
                 }),
             }),
             affected_rows: affected_rows as _,
+            extension,
         })
     }
 }
@@ -462,7 +465,7 @@ impl RegionServerInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<AffectedRows> {
+    ) -> Result<HandleResponse> {
         let request_type = request.request_type();
         let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
             .with_label_values(&[request_type])
@@ -487,7 +490,7 @@ impl RegionServerInner {
 
         let engine = match self.get_engine(region_id, &region_change)? {
             CurrentEngine::Engine(engine) => engine,
-            CurrentEngine::EarlyReturn(rows) => return Ok(rows),
+            CurrentEngine::EarlyReturn(rows) => return Ok(HandleResponse::new(rows)),
         };
 
         // Sets corresponding region status to registering/deregistering before the operation.
@@ -502,7 +505,10 @@ impl RegionServerInner {
                 // Sets corresponding region status to ready.
                 self.set_region_status_ready(region_id, engine, region_change)
                     .await?;
-                Ok(result)
+                Ok(HandleResponse {
+                    affected_rows: result.affected_rows,
+                    extension: result.extension,
+                })
             }
             Err(err) => {
                 // Removes the region status if the operation fails.
@@ -645,6 +651,7 @@ impl RegionServerInner {
             .decode(Bytes::from(plan), catalog_list, "", "")
             .await
             .context(DecodeLogicalPlanSnafu)?;
+
         let result = self
             .query_engine
             .execute(logical_plan.into(), ctx)
@@ -916,11 +923,11 @@ mod tests {
             RegionEngineWithStatus::Registering(engine.clone()),
         );
 
-        let affected_rows = mock_region_server
+        let response = mock_region_server
             .handle_request(region_id, RegionRequest::Create(create_req))
             .await
             .unwrap();
-        assert_eq!(affected_rows, 0);
+        assert_eq!(response.affected_rows, 0);
 
         let status = mock_region_server
             .inner
@@ -931,7 +938,7 @@ mod tests {
 
         assert!(matches!(status, RegionEngineWithStatus::Registering(_)));
 
-        let affected_rows = mock_region_server
+        let response = mock_region_server
             .handle_request(
                 region_id,
                 RegionRequest::Open(RegionOpenRequest {
@@ -943,7 +950,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(affected_rows, 0);
+        assert_eq!(response.affected_rows, 0);
 
         let status = mock_region_server
             .inner
@@ -971,11 +978,11 @@ mod tests {
             RegionEngineWithStatus::Deregistering(engine.clone()),
         );
 
-        let affected_rows = mock_region_server
+        let response = mock_region_server
             .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
             .await
             .unwrap();
-        assert_eq!(affected_rows, 0);
+        assert_eq!(response.affected_rows, 0);
 
         let status = mock_region_server
             .inner
@@ -990,11 +997,11 @@ mod tests {
             RegionEngineWithStatus::Deregistering(engine.clone()),
         );
 
-        let affected_rows = mock_region_server
+        let response = mock_region_server
             .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
             .await
             .unwrap();
-        assert_eq!(affected_rows, 0);
+        assert_eq!(response.affected_rows, 0);
 
         let status = mock_region_server
             .inner

@@ -13,21 +13,15 @@ workspace = true
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true
-async-compat = "0.2"
-async-stream.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 catalog.workspace = true
 client.workspace = true
 common-base.workspace = true
-common-catalog.workspace = true
-common-config.workspace = true
-common-datasource.workspace = true
 common-error.workspace = true
 common-function.workspace = true
 common-greptimedb-telemetry.workspace = true
 common-grpc.workspace = true
-common-grpc-expr.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-procedure.workspace = true
@@ -46,36 +40,27 @@ file-engine.workspace = true
 futures = "0.3"
 futures-util.workspace = true
 humantime-serde.workspace = true
-hyper = { version = "0.14", features = ["full"] }
 lazy_static.workspace = true
 log-store.workspace = true
 meta-client.workspace = true
 metric-engine.workspace = true
 mito2.workspace = true
 object-store.workspace = true
-pin-project = "1.0"
 prometheus.workspace = true
 prost.workspace = true
 query.workspace = true
 reqwest.workspace = true
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
-serde_json.workspace = true
 servers.workspace = true
 session.workspace = true
 snafu.workspace = true
-sql.workspace = true
 store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
-tower = { version = "0.4", features = ["full"] }
-tower-http = { version = "0.4", features = ["full"] }
-url = "2.3.1"
-uuid.workspace = true
 
 [dev-dependencies]
 client.workspace = true

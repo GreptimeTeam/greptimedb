@@ -805,7 +805,6 @@ impl Server for HttpServer {
 async fn handle_error(err: BoxError) -> Json<HttpResponse> {
     error!(err; "Unhandled internal error");
     Json(HttpResponse::Error(ErrorResponse::from_error_message(
-        ResponseFormat::GreptimedbV1,
         StatusCode::Unexpected,
         format!("Unhandled internal error: {err}"),
     )))

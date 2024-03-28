@@ -28,7 +28,7 @@ pub mod sql;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::prom_store::remote::{ReadRequest, WriteRequest};
+use api::prom_store::remote::ReadRequest;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
@@ -90,14 +90,6 @@ pub struct PromStoreResponse {
 pub trait PromStoreProtocolHandler {
     /// Handling prometheus remote write requests
     async fn write(
-        &self,
-        request: WriteRequest,
-        ctx: QueryContextRef,
-        with_metric_engine: bool,
-    ) -> Result<Output>;
-
-    /// Handling prometheus remote write requests
-    async fn write_fast(
         &self,
         request: RowInsertRequests,
         ctx: QueryContextRef,

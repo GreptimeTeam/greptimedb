@@ -166,23 +166,28 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
             } else {
                 (
                     if !header.catalog.is_empty() {
-                        &header.catalog
+                        header.catalog.to_lowercase()
                     } else {
-                        DEFAULT_CATALOG_NAME
+                        DEFAULT_CATALOG_NAME.to_string()
                     },
                     if !header.schema.is_empty() {
-                        &header.schema
+                        header.schema.to_lowercase()
                     } else {
-                        DEFAULT_SCHEMA_NAME
+                        DEFAULT_SCHEMA_NAME.to_string()
                     },
                 )
             }
         })
-        .unwrap_or((DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME));
+        .unwrap_or_else(|| {
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+            )
+        });
     let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
     QueryContextBuilder::default()
-        .current_catalog(catalog.to_string())
-        .current_schema(schema.to_string())
+        .current_catalog(catalog)
+        .current_schema(schema)
         .timezone(Arc::new(timezone))
         .build()
 }

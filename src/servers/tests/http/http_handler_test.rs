@@ -46,7 +46,7 @@ async fn test_sql_not_provided() {
         script_handler: None,
     };
 
-    for format in ["greptimedb_v1", "influxdb_v1", "csv"] {
+    for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
         let query = http_handler::SqlQuery {
             db: None,
             sql: None,
@@ -82,7 +82,7 @@ async fn test_sql_output_rows() {
         script_handler: None,
     };
 
-    for format in ["greptimedb_v1", "influxdb_v1", "csv"] {
+    for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
         let query = create_query(format);
         let json = http_handler::sql(
             State(api_state.clone()),
@@ -154,6 +154,23 @@ async fn test_sql_output_rows() {
                     hyper::body::Bytes::from_static(b"4950\n"),
                 );
             }
+            HttpResponse::Table(resp) => {
+                use http_body::Body as HttpBody;
+                let mut resp = resp.into_response();
+                assert_eq!(
+                    resp.headers().get(header::CONTENT_TYPE),
+                    Some(HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref())).as_ref(),
+                );
+                assert_eq!(
+                    resp.body_mut().data().await.unwrap().unwrap(),
+                    hyper::body::Bytes::from(
+                        r#"┌─SUM(numbers.uint32s)─┐
+│ 4950                 │
+└──────────────────────┘
+"#
+                    ),
+                );
+            }
             _ => unreachable!(),
         }
     }
@@ -172,7 +189,7 @@ async fn test_sql_form() {
         script_handler: None,
     };
 
-    for format in ["greptimedb_v1", "influxdb_v1", "csv"] {
+    for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
         let form = create_form(format);
         let json = http_handler::sql(
             State(api_state.clone()),
@@ -242,6 +259,23 @@ async fn test_sql_form() {
                 assert_eq!(
                     resp.body_mut().data().await.unwrap().unwrap(),
                     hyper::body::Bytes::from_static(b"4950\n"),
+                );
+            }
+            HttpResponse::Table(resp) => {
+                use http_body::Body as HttpBody;
+                let mut resp = resp.into_response();
+                assert_eq!(
+                    resp.headers().get(header::CONTENT_TYPE),
+                    Some(HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref())).as_ref(),
+                );
+                assert_eq!(
+                    resp.body_mut().data().await.unwrap().unwrap(),
+                    hyper::body::Bytes::from(
+                        r#"┌─SUM(numbers.uint32s)─┐
+│ 4950                 │
+└──────────────────────┘
+"#
+                    ),
                 );
             }
             _ => unreachable!(),

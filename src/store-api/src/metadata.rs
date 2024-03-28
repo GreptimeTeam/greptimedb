@@ -95,6 +95,16 @@ impl ColumnMetadata {
             column_id,
         })
     }
+
+    /// Encodes a vector of `ColumnMetadata` into a JSON byte vector.
+    pub fn encode_list(columns: &[Self]) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec(columns)
+    }
+
+    /// Decodes a JSON byte vector into a vector of `ColumnMetadata`.
+    pub fn decode_list(bytes: &[u8]) -> serde_json::Result<Vec<Self>> {
+        serde_json::from_slice(bytes)
+    }
 }
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
