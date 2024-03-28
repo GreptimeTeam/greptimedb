@@ -7,5 +7,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+codec = ["dep:serde", "dep:schemars"]
+
 [dependencies]
 build-data = "0.1.4"
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }

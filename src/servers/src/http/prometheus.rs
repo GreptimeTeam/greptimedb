@@ -27,6 +27,7 @@ use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use common_telemetry::tracing;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
+use common_version::BuildInfo;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector};
@@ -76,6 +77,7 @@ pub enum PrometheusResponse {
     Series(Vec<HashMap<String, String>>),
     LabelValues(Vec<String>),
     FormatQuery(String),
+    BuildInfo(BuildInfo),
 }
 
 impl Default for PrometheusResponse {
@@ -111,6 +113,19 @@ pub async fn format_query(
             PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
         }
     }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct BuildInfoQuery {}
+
+#[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "build_info_query")
+)]
+pub async fn build_info_query() -> PrometheusJsonResponse {
+    let build_info = common_version::build_info().clone();
+    PrometheusJsonResponse::success(PrometheusResponse::BuildInfo(build_info))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
