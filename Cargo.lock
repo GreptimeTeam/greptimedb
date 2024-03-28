@@ -3410,6 +3410,7 @@ dependencies = [
  "common-macro",
  "common-telemetry",
  "common-time",
+ "datafusion-substrait",
  "datatypes",
  "enum_dispatch",
  "hydroflow",
@@ -3420,6 +3421,7 @@ dependencies = [
  "servers",
  "smallvec",
  "snafu",
+ "substrait 0.17.1",
  "tokio",
  "tonic 0.10.2",
 ]

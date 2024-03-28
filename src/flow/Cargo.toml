@@ -25,6 +25,11 @@ smallvec.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 tonic.workspace = true
+datafusion-substrait.workspace = true
+
+[dependencies.substrait_proto]
+package = "substrait"
+version = "0.17"
 
 [dev-dependencies]
 serde_json = "1.0"

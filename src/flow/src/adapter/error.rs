@@ -54,6 +54,12 @@ pub enum Error {
 
     #[snafu(display("No protobuf type for value: {value}"))]
     NoProtoType { value: Value, location: Location },
+
+    #[snafu(display("Not implement in flow: {reason}"))]
+    NotImplemented { reason: String, location: Location },
+
+    #[snafu(display("Flow plan error: {reason}"))]
+    Plan { reason: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -64,8 +70,9 @@ impl ErrorExt for Error {
             Self::Eval { .. } | &Self::JoinTask { .. } => StatusCode::Internal,
             &Self::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. } => StatusCode::TableNotFound,
-            &Self::InvalidQuery { .. } => StatusCode::PlanQuery,
+            &Self::InvalidQuery { .. } | &Self::Plan { .. } => StatusCode::PlanQuery,
             Self::NoProtoType { .. } => StatusCode::Unexpected,
+            &Self::NotImplemented { .. } => StatusCode::Unsupported,
         }
     }
 
