@@ -33,7 +33,9 @@ use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
 use super::header::{collect_plan_metrics, GREPTIME_DB_HEADER_METRICS};
-use super::prometheus::{PromData, PromSeries, PrometheusResponse};
+use super::prometheus::{
+    PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
+};
 use crate::error::{CollectRecordbatchSnafu, InternalSnafu, Result};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -256,24 +258,35 @@ impl PrometheusJsonResponse {
             }
         }
 
-        let result = buffer
-            .into_iter()
-            .map(|(tags, mut values)| {
-                let metric = tags.into_iter().collect();
-                match result_type {
-                    ValueType::Vector | ValueType::Scalar | ValueType::String => Ok(PromSeries {
+        // initialize result to return
+        let mut result = match result_type {
+            ValueType::Vector => PromQueryResult::Vector(vec![]),
+            ValueType::Matrix => PromQueryResult::Matrix(vec![]),
+            ValueType::Scalar => PromQueryResult::Scalar(None),
+            ValueType::String => PromQueryResult::String(None),
+        };
+
+        // accumulate data into result
+        buffer.into_iter().for_each(|(tags, mut values)| {
+            let metric = tags.into_iter().collect();
+            match result {
+                PromQueryResult::Vector(ref mut v) => {
+                    v.push(PromSeriesVector {
                         metric,
                         value: values.pop(),
-                        ..Default::default()
-                    }),
-                    ValueType::Matrix => Ok(PromSeries {
-                        metric,
-                        values,
-                        ..Default::default()
-                    }),
+                    });
                 }
-            })
-            .collect::<Result<Vec<_>>>()?;
+                PromQueryResult::Matrix(ref mut v) => {
+                    v.push(PromSeriesMatrix { metric, values });
+                }
+                PromQueryResult::Scalar(ref mut v) => {
+                    *v = values.pop();
+                }
+                PromQueryResult::String(ref mut _v) => {
+                    // Not supported yet
+                }
+            }
+        });
 
         let result_type_string = result_type.to_string();
         let data = PrometheusResponse::PromData(PromData {

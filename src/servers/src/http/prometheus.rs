@@ -52,21 +52,42 @@ use crate::http::header::collect_plan_metrics;
 use crate::prom_store::METRIC_NAME_LABEL;
 use crate::prometheus_handler::PrometheusHandlerRef;
 
+/// For [ValueType::Vector] result type
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct PromSeries {
+pub struct PromSeriesVector {
     pub metric: HashMap<String, String>,
-    /// For [ValueType::Matrix] result type
-    pub values: Vec<(f64, String)>,
-    /// For [ValueType::Vector] result type
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<(f64, String)>,
+}
+
+/// For [ValueType::Matrix] result type
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct PromSeriesMatrix {
+    pub metric: HashMap<String, String>,
+    pub values: Vec<(f64, String)>,
+}
+
+/// Variants corresponding to [ValueType]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(untagged)]
+pub enum PromQueryResult {
+    Matrix(Vec<PromSeriesMatrix>),
+    Vector(Vec<PromSeriesVector>),
+    Scalar(#[serde(skip_serializing_if = "Option::is_none")] Option<(f64, String)>),
+    String(#[serde(skip_serializing_if = "Option::is_none")] Option<(f64, String)>),
+}
+
+impl Default for PromQueryResult {
+    fn default() -> Self {
+        PromQueryResult::Matrix(Default::default())
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromData {
     #[serde(rename = "resultType")]
     pub result_type: String,
-    pub result: Vec<PromSeries>,
+    pub result: PromQueryResult,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
