@@ -355,9 +355,8 @@ pub fn build_scripts_schema() -> (String, Vec<String>, Vec<ColumnDef>) {
 
     let primary_keys = cols
         .iter()
-        .filter_map(|c| {
-            (c.semantic_type == (SemanticType::Tag as i32)).then(|| c.column_name.clone())
-        })
+        .filter(|c| (c.semantic_type == (SemanticType::Tag as i32)))
+        .map(|c| c.column_name.clone())
         .collect();
 
     let column_defs = cols
