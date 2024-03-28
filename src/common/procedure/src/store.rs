@@ -151,10 +151,10 @@ impl ProcedureStore {
                 continue;
             };
             if curr_key.key_type == KeyType::Step {
-                step_keys.push(keyset);
+                step_keys.extend(keyset.keys());
             } else {
                 // .commit or .rollback
-                finish_keys.push(keyset);
+                finish_keys.extend(keyset.keys());
             }
         }
 
@@ -165,25 +165,9 @@ impl ProcedureStore {
             finish_keys
         );
         // We delete all step keys first.
-        self.store
-            .batch_delete(
-                step_keys
-                    .into_iter()
-                    .flat_map(|set| set.keys())
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            )
-            .await?;
+        self.store.batch_delete(step_keys.as_slice()).await?;
         // Then we delete the finish keys, to ensure
-        self.store
-            .batch_delete(
-                finish_keys
-                    .into_iter()
-                    .flat_map(|set| set.keys())
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            )
-            .await?;
+        self.store.batch_delete(finish_keys.as_slice()).await?;
         // Finally we remove the directory itself.
         self.store.delete(&path).await?;
         // Maybe we could use procedure_id.commit/rollback as the file name so we could
