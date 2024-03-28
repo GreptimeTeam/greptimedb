@@ -23,7 +23,6 @@ use futures::{Stream, StreamExt};
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
 
-use super::util::{single_value_collector, MultipleValuesStream};
 use crate::error::{DeleteStateSnafu, ListStateSnafu, PutStateSnafu, Result};
 
 /// The set of keys.
@@ -180,12 +179,11 @@ impl StateStore for ObjectStateStore {
                             ))
                         })
                         .context(ListStateSnafu { path: key })?;
-                    yield (key.to_string(), value);
+                    yield (key.into(), value);
                 }
             }
         });
 
-        let stream = MultipleValuesStream::new(Box::pin(stream), Box::new(single_value_collector));
         Ok(Box::pin(stream))
     }
 

@@ -26,15 +26,6 @@ pub struct CollectingState {
     pairs: Vec<(String, Vec<u8>)>,
 }
 
-/// # Panic
-/// The `pairs` is empty.
-pub fn single_value_collector(
-    CollectingState { pairs }: CollectingState,
-) -> Result<(KeySet, Vec<u8>)> {
-    let (key, value) = pairs.into_iter().next().unwrap();
-    Ok((KeySet::new(key, 0), value))
-}
-
 fn parse_segments(segments: Vec<(String, Vec<u8>)>, prefix: &str) -> Result<Vec<(usize, Vec<u8>)>> {
     segments
         .into_iter()
@@ -213,35 +204,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_single_value_collector() {
-        let upstream = stream::iter(vec![
-            Ok(("foo".to_string(), vec![0, 1, 2, 3])),
-            Ok(("bar".to_string(), vec![0, 1, 2])),
-            Ok(("baz".to_string(), vec![0, 1])),
-        ]);
-        let mut stream =
-            MultipleValuesStream::new(Box::pin(upstream), Box::new(single_value_collector));
-        let (key, value) = stream.try_next().await.unwrap().unwrap();
-        let keys = key.keys();
-        assert_eq!(keys[0], "foo");
-        assert_eq!(keys.len(), 1);
-        assert_eq!(value, vec![0, 1, 2, 3]);
-        let (key, value) = stream.try_next().await.unwrap().unwrap();
-        let keys = key.keys();
-        assert_eq!(keys[0], "bar");
-        assert_eq!(keys.len(), 1);
-        assert_eq!(value, vec![0, 1, 2]);
-        let (key, value) = stream.try_next().await.unwrap().unwrap();
-        let keys = key.keys();
-        assert_eq!(keys[0], "baz");
-        assert_eq!(keys.len(), 1);
-        assert_eq!(value, vec![0, 1]);
-        assert!(stream.try_next().await.unwrap().is_none());
-        // Call again
-        assert!(stream.try_next().await.unwrap().is_none());
-    }
-
-    #[tokio::test]
     async fn test_multiple_values_collector() {
         let upstream = stream::iter(vec![
             Ok(("foo".to_string(), vec![0, 1, 2, 3])),
@@ -284,13 +246,6 @@ mod tests {
         assert!(stream.try_next().await.unwrap().is_none());
         // Call again
         assert!(stream.try_next().await.unwrap().is_none());
-
-        let upstream = stream::iter(vec![]);
-        let mut stream =
-            MultipleValuesStream::new(Box::pin(upstream), Box::new(single_value_collector));
-        assert!(stream.try_next().await.unwrap().is_none());
-        // Call again
-        assert!(stream.try_next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -312,28 +267,6 @@ mod tests {
         ]);
         let mut stream =
             MultipleValuesStream::new(Box::pin(upstream), Box::new(multiple_values_collector));
-        let err = stream.try_next().await.unwrap_err();
-        assert_matches!(err, error::Error::Unexpected { .. });
-    }
-
-    #[tokio::test]
-    async fn test_single_value_collector_err() {
-        let upstream = stream::iter(vec![
-            Err(error::UnexpectedSnafu { err_msg: "mock" }.build()),
-            Ok(("foo".to_string(), vec![0, 1, 2, 3])),
-            Ok(("bar".to_string(), vec![4, 5])),
-        ]);
-        let mut stream =
-            MultipleValuesStream::new(Box::pin(upstream), Box::new(single_value_collector));
-        let err = stream.try_next().await.unwrap_err();
-        assert_matches!(err, error::Error::Unexpected { .. });
-
-        let upstream = stream::iter(vec![
-            Ok(("foo".to_string(), vec![0, 1, 2, 3])),
-            Err(error::UnexpectedSnafu { err_msg: "mock" }.build()),
-        ]);
-        let mut stream =
-            MultipleValuesStream::new(Box::pin(upstream), Box::new(single_value_collector));
         let err = stream.try_next().await.unwrap_err();
         assert_matches!(err, error::Error::Unexpected { .. });
     }
