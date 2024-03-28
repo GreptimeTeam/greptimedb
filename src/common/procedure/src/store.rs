@@ -25,6 +25,7 @@ pub(crate) use crate::store::state_store::StateStoreRef;
 use crate::ProcedureId;
 
 pub mod state_store;
+pub mod util;
 
 /// Key prefix of procedure store.
 const PROC_PATH: &str = "procedure/";

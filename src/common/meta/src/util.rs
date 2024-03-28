@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod multiple_values_stream;
-
 /// Get prefix end key of `key`.
 #[inline]
 pub fn get_prefix_end_key(key: &[u8]) -> Vec<u8> {

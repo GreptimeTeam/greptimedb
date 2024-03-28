@@ -15,10 +15,10 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use common_procedure::store::state_store::KeySet;
 use futures::{ready, Stream, StreamExt};
 use snafu::{ensure, ResultExt};
 
+use super::state_store::KeySet;
 use crate::error;
 use crate::error::Result;
 
@@ -75,7 +75,7 @@ pub fn multiple_values_collector(
             parsed_segments.len() == segment_num,
             error::UnexpectedSnafu {
                 err_msg: format!(
-                    "Corrupt segment keys, parsed segments: {:?}",
+                    "Corrupted segment keys, parsed segment indexes: {:?}",
                     parsed_segments
                         .into_iter()
                         .map(|(key, _)| key)
@@ -194,7 +194,6 @@ mod tests {
 
     use super::*;
     use crate::error::{self};
-    use crate::util::multiple_values_stream::MultipleValuesStream;
 
     #[test]
     fn test_key_set_keys() {

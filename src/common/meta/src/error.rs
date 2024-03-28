@@ -122,14 +122,6 @@ pub enum Error {
         error: common_procedure::ParseIdError,
     },
 
-    #[snafu(display("Failed to parse segment key: {key}"))]
-    ParseSegmentKey {
-        location: Location,
-        key: String,
-        #[snafu(source)]
-        error: std::num::ParseIntError,
-    },
-
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
@@ -457,8 +449,7 @@ impl ErrorExt for Error {
             | EmptyTopicPool { .. }
             | UnexpectedLogicalRouteTable { .. }
             | ProcedureOutput { .. }
-            | MetadataCorruption { .. }
-            | ParseSegmentKey { .. } => StatusCode::Unexpected,
+            | MetadataCorruption { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
