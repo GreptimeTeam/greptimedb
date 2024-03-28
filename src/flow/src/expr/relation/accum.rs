@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::expr::error::{InternalSnafu, OverflowSnafu, TryFromValueSnafu, TypeMismatchSnafu};
-use crate::expr::relation::func::GenericFn;
+use crate::expr::signature::GenericFn;
 use crate::expr::{AggregateFunc, EvalError};
 use crate::repr::Diff;
 

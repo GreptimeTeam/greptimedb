@@ -17,14 +17,15 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
-use hydroflow::bincode::Error;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
+use crate::adapter::error::{Error, InvalidQuerySnafu};
 use crate::expr::error::{
     CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, TryFromValueSnafu,
     TypeMismatchSnafu,
 };
+use crate::expr::signature::{GenericFn, Signature};
 use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
 use crate::repr::Row;
 
@@ -47,6 +48,31 @@ pub enum UnaryFunc {
 }
 
 impl UnaryFunc {
+    pub fn from_str_and_type(
+        name: &str,
+        arg_type: Option<ConcreteDataType>,
+    ) -> Result<Self, Error> {
+        match name {
+            "not" => Ok(Self::Not),
+            "is_null" => Ok(Self::IsNull),
+            "is_true" => Ok(Self::IsTrue),
+            "is_false" => Ok(Self::IsFalse),
+            "step_timestamp" => Ok(Self::StepTimestamp),
+            "cast" => {
+                let arg_type = arg_type.ok_or_else(|| {
+                    InvalidQuerySnafu {
+                        reason: "cast function requires a type argument".to_string(),
+                    }
+                    .build()
+                })?;
+                Ok(UnaryFunc::Cast(arg_type))
+            }
+            _ => InvalidQuerySnafu {
+                reason: format!("Unknown unary function: {}", name),
+            }
+            .fail(),
+        }
+    }
     pub fn eval(&self, values: &[Value], expr: &ScalarExpr) -> Result<Value, EvalError> {
         let arg = expr.eval(values)?;
         match self {
@@ -155,6 +181,171 @@ pub enum BinaryFunc {
 }
 
 impl BinaryFunc {
+
+    pub fn specialization(generic: GenericFn, input_type: ConcreteDataType)->Result<Self, Error>{
+        let spec_fn = match generic {
+            GenericFn::Eq => Self::Eq,
+            GenericFn::NotEq => Self::NotEq,
+            GenericFn::Lt => Self::Lt,
+            GenericFn::Lte => Self::Lte,
+            GenericFn::Gt => Self::Gt,
+            GenericFn::Gte => Self::Gte,
+            GenericFn::Add => {
+                match input_type {
+                    ConcreteDataType::Int16(_) => Self::AddInt16,
+                    ConcreteDataType::Int32(_) => Self::AddInt32,
+                    ConcreteDataType::Int64(_) => Self::AddInt64,
+                    ConcreteDataType::UInt16(_) => Self::AddUInt16,
+                    ConcreteDataType::UInt32(_) => Self::AddUInt32,
+                    ConcreteDataType::UInt64(_) => Self::AddUInt64,
+                    ConcreteDataType::Float32(_) => Self::AddFloat32,
+                    ConcreteDataType::Float64(_) => Self::AddFloat64,
+                    _ => {
+                        return InvalidQuerySnafu {
+                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
+                        }
+                        .fail();
+                    }
+                }
+            }
+            GenericFn::Sub => {
+                match input_type {
+                    ConcreteDataType::Int16(_) => Self::SubInt16,
+                    ConcreteDataType::Int32(_) => Self::SubInt32,
+                    ConcreteDataType::Int64(_) => Self::SubInt64,
+                    ConcreteDataType::UInt16(_) => Self::SubUInt16,
+                    ConcreteDataType::UInt32(_) => Self::SubUInt32,
+                    ConcreteDataType::UInt64(_) => Self::SubUInt64,
+                    ConcreteDataType::Float32(_) => Self::SubFloat32,
+                    ConcreteDataType::Float64(_) => Self::SubFloat64,
+                    _ => {
+                        return InvalidQuerySnafu {
+                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
+                        }
+                        .fail();
+                    }
+                }
+            }
+            GenericFn::Mul => {
+                match input_type {
+                    ConcreteDataType::Int16(_) => Self::SubInt16,
+                    ConcreteDataType::Int32(_) => Self::SubInt32,
+                    ConcreteDataType::Int64(_) => Self::SubInt64,
+                    ConcreteDataType::UInt16(_) => Self::SubUInt16,
+                    ConcreteDataType::UInt32(_) => Self::SubUInt32,
+                    ConcreteDataType::UInt64(_) => Self::SubUInt64,
+                    ConcreteDataType::Float32(_) => Self::SubFloat32,
+                    ConcreteDataType::Float64(_) => Self::SubFloat64,
+                    _ => {
+                        return InvalidQuerySnafu {
+                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
+                        }
+                        .fail();
+                    }
+                }
+            }
+            GenericFn::Div => {
+                match input_type {
+                    ConcreteDataType::Int16(_) => Self::DivInt16,
+                    ConcreteDataType::Int32(_) => Self::DivInt32,
+                    ConcreteDataType::Int64(_) => Self::DivInt64,
+                    ConcreteDataType::UInt16(_) => Self::DivUInt16,
+                    ConcreteDataType::UInt32(_) => Self::DivUInt32,
+                    ConcreteDataType::UInt64(_) => Self::DivUInt64,
+                    ConcreteDataType::Float32(_) => Self::DivFloat32,
+                    ConcreteDataType::Float64(_) => Self::DivFloat64,
+                    _ => {
+                        return InvalidQuerySnafu {
+                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
+                        }
+                        .fail();
+                    }
+                }
+            }
+            GenericFn::Mod => {
+                match input_type {
+                    ConcreteDataType::Int16(_) => Self::ModInt16,
+                    ConcreteDataType::Int32(_) => Self::ModInt32,
+                    ConcreteDataType::Int64(_) => Self::ModInt64,
+                    ConcreteDataType::UInt16(_) => Self::ModUInt16,
+                    ConcreteDataType::UInt32(_) => Self::ModUInt32,
+                    ConcreteDataType::UInt64(_) => Self::ModUInt64,
+
+                    _ => {
+                        return InvalidQuerySnafu {
+                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
+                        }
+                        .fail();
+                    }
+                }
+            }
+            _ => {
+                return InvalidQuerySnafu {
+                    reason: format!("Unknown binary function: {:?}", generic),
+                }
+                .fail();
+            }
+        };
+        Ok(spec_fn)
+    }
+
+    pub fn from_str_and_types(
+        name: &str,
+        arg_types: &[Option<ConcreteDataType>; 2],
+    ) -> Result<Self, Error> {
+        // get first arg type and make sure if both is some, they are the same
+        let generic_fn = {
+            match name {
+                "eq" => GenericFn::Eq,
+                "not_eq" => GenericFn::NotEq,
+                "lt" => GenericFn::Lt,
+                "lte" => GenericFn::Lte,
+                "gt" => GenericFn::Gt,
+                "gte" => GenericFn::Gte,
+                "add" => GenericFn::Add,
+                "sub" => GenericFn::Sub,
+                "mul" => GenericFn::Mul,
+                "div" => GenericFn::Div,
+                "mod" => GenericFn::Mod,
+                _ => {
+                    return InvalidQuerySnafu {
+                        reason: format!("Unknown binary function: {}", name),
+                    }
+                    .fail();
+                }
+            }
+        };
+        let need_type = matches!(
+            generic_fn,
+            GenericFn::Add | GenericFn::Sub | GenericFn::Mul | GenericFn::Div | GenericFn::Mod
+        );
+        let arg_type = {
+            if arg_types[0].is_some() && arg_types[1].is_some() {
+                if arg_types[0] != arg_types[1] {
+                    return InvalidQuerySnafu {
+                        reason: format!(
+                            "Binary function {} requires both arguments to have the same type",
+                            name
+                        ),
+                    }
+                    .fail();
+                }
+
+                arg_types[0].clone()
+            } else {
+                arg_types[0].clone().or_else(|| arg_types[1].clone())
+            }
+        };
+        if need_type && arg_type.is_none() {
+            return InvalidQuerySnafu {
+                reason: format!("Binary function {} requires a type argument", name),
+            }
+            .fail();
+        }
+
+        todo!()
+    }
+
     pub fn eval(
         &self,
         values: &[Value],

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
 use crate::expr::relation::accum::{Accum, Accumulator};
+use crate::expr::signature::{GenericFn, Signature};
 use crate::repr::Diff;
 
 /// Aggregate functions that can be applied to a group of rows.
@@ -119,21 +120,6 @@ impl AggregateFunc {
     }
 }
 
-pub struct Signature {
-    pub input: ConcreteDataType,
-    pub output: ConcreteDataType,
-    pub generic_fn: GenericFn,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum GenericFn {
-    Max,
-    Min,
-    Sum,
-    Count,
-    Any,
-    All,
-}
 
 impl AggregateFunc {
     /// all concrete datatypes with precision types will be returned with largest possible variant
