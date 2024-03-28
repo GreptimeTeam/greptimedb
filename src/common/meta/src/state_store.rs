@@ -17,8 +17,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{DeleteStatesSnafu, ListStateSnafu, PutStateSnafu};
-use common_procedure::store::state_store::{KeyValueStream, StateStore};
+use common_procedure::store::state_store::{KeySet, KeyValueStream, StateStore};
+use common_procedure::store::util::{multiple_values_collector, MultipleValuesStream};
 use common_procedure::Result as ProcedureResult;
+use futures::future::try_join_all;
 use futures::StreamExt;
 use snafu::ResultExt;
 
@@ -42,16 +44,20 @@ fn strip_prefix(key: &str) -> String {
 
 pub struct KvStateStore {
     kv_backend: KvBackendRef,
-    // limit is set to 0, it is treated as no limit.
-    max_size_per_range: usize,
+    // The max num of keys to be returned in a range scan request
+    // `None` stands no limit.
+    max_num_per_range: Option<usize>,
+    // The max bytes of value.
+    // `None` stands no limit.
+    max_size_per_value: Option<usize>,
 }
 
 impl KvStateStore {
-    // `max_size_per_range` is set to 0, it is treated as no limit.
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             kv_backend,
-            max_size_per_range: 0,
+            max_num_per_range: None,
+            max_size_per_value: None,
         }
     }
 }
@@ -64,20 +70,75 @@ fn decode_kv(kv: KeyValue) -> Result<(String, Vec<u8>)> {
     Ok((key, value))
 }
 
+enum SplitValue<'a> {
+    Single(&'a [u8]),
+    Multiple(Vec<&'a [u8]>),
+}
+
+fn split_value(value: &[u8], max_size_per_value: Option<usize>) -> SplitValue<'_> {
+    if let Some(max_size_per_value) = max_size_per_value {
+        if value.len() < max_size_per_value {
+            SplitValue::Single(value)
+        } else {
+            SplitValue::Multiple(value.chunks(max_size_per_value).collect::<Vec<_>>())
+        }
+    } else {
+        SplitValue::Single(value)
+    }
+}
+
 #[async_trait]
 impl StateStore for KvStateStore {
     async fn put(&self, key: &str, value: Vec<u8>) -> ProcedureResult<()> {
-        let _ = self
-            .kv_backend
-            .put(PutRequest {
-                key: with_prefix(key).into_bytes(),
-                value,
-                ..Default::default()
-            })
-            .await
-            .map_err(BoxedError::new)
-            .context(PutStateSnafu { key })?;
-        Ok(())
+        let split = split_value(&value, self.max_size_per_value);
+        let key = with_prefix(key);
+        match split {
+            SplitValue::Single(_) => {
+                self.kv_backend
+                    .put(
+                        PutRequest::new()
+                            .with_key(key.to_string().into_bytes())
+                            .with_value(value),
+                    )
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(PutStateSnafu { key })?;
+                Ok(())
+            }
+            SplitValue::Multiple(values) => {
+                // The first segment key: "0b00001111"
+                // The 2nd segment key: "0b00001111/0000000001"
+                // The 3rd segment key: "0b00001111/0000000002"
+                let operations = values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, value)| {
+                        let key = if idx > 0 {
+                            KeySet::with_segment_suffix(&key, idx)
+                        } else {
+                            key.to_string()
+                        };
+                        let kv_backend = self.kv_backend.clone();
+                        async move {
+                            kv_backend
+                                .put(
+                                    PutRequest::new()
+                                        .with_key(key.into_bytes())
+                                        .with_value(value),
+                                )
+                                .await
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                try_join_all(operations)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(PutStateSnafu { key })?;
+
+                Ok(())
+            }
+        }
     }
 
     async fn walk_top_down(&self, path: &str) -> ProcedureResult<KeyValueStream> {
@@ -90,7 +151,7 @@ impl StateStore for KvStateStore {
         let stream = PaginationStream::new(
             self.kv_backend.clone(),
             req,
-            self.max_size_per_range,
+            self.max_num_per_range.unwrap_or_default(),
             Arc::new(decode_kv),
         );
 
@@ -99,6 +160,9 @@ impl StateStore for KvStateStore {
             r.map_err(BoxedError::new)
                 .with_context(|_| ListStateSnafu { path })
         });
+
+        let stream =
+            MultipleValuesStream::new(Box::pin(stream), Box::new(multiple_values_collector));
 
         Ok(Box::pin(stream))
     }
@@ -140,7 +204,8 @@ mod tests {
     async fn test_meta_state_store() {
         let store = &KvStateStore {
             kv_backend: Arc::new(MemoryKvBackend::new()),
-            max_size_per_range: 1, // for testing "more" in range
+            max_num_per_range: Some(1), // for testing "more" in range
+            max_size_per_value: None,
         };
 
         let walk_top_down = async move |path: &str| -> Vec<KeyValue> {
@@ -165,9 +230,9 @@ mod tests {
         let data = walk_top_down("/").await;
         assert_eq!(
             vec![
-                ("a/1".to_string(), b"v1".to_vec()),
-                ("a/2".to_string(), b"v2".to_vec()),
-                ("b/1".to_string(), b"v3".to_vec())
+                ("a/1".into(), b"v1".to_vec()),
+                ("a/2".into(), b"v2".to_vec()),
+                ("b/1".into(), b"v3".to_vec())
             ],
             data
         );
@@ -175,8 +240,8 @@ mod tests {
         let data = walk_top_down("a/").await;
         assert_eq!(
             vec![
-                ("a/1".to_string(), b"v1".to_vec()),
-                ("a/2".to_string(), b"v2".to_vec()),
+                ("a/1".into(), b"v1".to_vec()),
+                ("a/2".into(), b"v2".to_vec()),
             ],
             data
         );
@@ -187,6 +252,6 @@ mod tests {
             .unwrap();
 
         let data = walk_top_down("a/").await;
-        assert_eq!(vec![("a/1".to_string(), b"v1".to_vec()),], data);
+        assert_eq!(vec![("a/1".into(), b"v1".to_vec()),], data);
     }
 }
