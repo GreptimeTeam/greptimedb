@@ -255,7 +255,7 @@ pub async fn labels_query(
         queries = form_params.matches.0;
     }
     if queries.is_empty() {
-        match get_all_column_names(catalog, schema, &handler.catalog_manager()).await {
+        match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await {
             Ok(labels) => {
                 return PrometheusJsonResponse::success(PrometheusResponse::Labels(labels))
             }
@@ -530,7 +530,11 @@ pub async fn label_values_query(
     let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
     if label_name == METRIC_NAME_LABEL {
-        let mut table_names = match handler.catalog_manager().table_names(catalog, schema).await {
+        let mut table_names = match handler
+            .catalog_manager()
+            .table_names(&catalog, &schema)
+            .await
+        {
             Ok(table_names) => table_names,
             Err(e) => {
                 return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg());
