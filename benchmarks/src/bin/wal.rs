@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::intrinsics::unreachable;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,20 +50,6 @@ enum WalProvider {
     RaftEngine,
 }
 
-/// The workload determines the size of each wal entry.
-#[derive(Clone, ValueEnum, Default, Debug)]
-enum Workload {
-    /// 5 rows, 4 cols.
-    #[default]
-    Normal,
-    /// 5 rows, 16 cols.
-    Fat,
-    /// 20 rows, 4 cols.
-    Thin,
-    /// 50 rows, 25 cols.
-    Monster,
-}
-
 #[derive(Parser)]
 struct Args {
     /// There are two modes to run the benchmarker:
@@ -76,15 +63,16 @@ struct Args {
     wal_provider: WalProvider,
 
     /// The advertised addresses of the kafka brokers.
+    /// If there're multiple bootstrap brokers, their addresses should be separated by comma, for e.g. "localhost:9092,localhost:9093".
     #[clap(long, short = 'b', default_value = "localhost:9092")]
     bootstrap_brokers: String,
 
-    /// The number of workers each running a dedicated thread.
+    /// The number of workers each running in a dedicated thread.
     #[clap(long, default_value_t = num_cpus::get() as u32)]
     num_workers: u32,
 
     /// The number of kafka topics to be created.
-    #[clap(long, default_value_t = 16)]
+    #[clap(long, default_value_t = 32)]
     num_topics: u32,
 
     /// The number of regions.
@@ -92,47 +80,58 @@ struct Args {
     num_regions: u32,
 
     /// The number of times each region is scraped.
-    /// The total number of bytes written into the wal are identical for both modes.
-    /// However, in dedicated mode, the number of writes would be larger than or equal to that in the steal mode.
+    /// The total amount of data written into the wal are identical for both modes.
+    /// However, in the steal mode, the amount of data written to the wal in a single write will be relatively large than that in the dedicated mode.
     #[clap(long, default_value_t = 1000)]
     num_scrapes: u32,
 
+    /// The number of rows in each wal entry.
+    /// Each time a region is scraped, a wal entry containing will be produced.
+    #[clap(long, default_value_t = 5)]
+    num_rows: u32,
+
+    /// The column types of the schema for each region.
+    /// Currently, three column types are supported:
+    /// - i = ColumnDataType::Int64
+    /// - f = ColumnDataType::Float64
+    /// - s = ColumnDataType::String  
+    /// For e.g., "ifs" will be parsed as three columns: i64, f64, and string.
+    #[clap(long, default_value = "ifs")]
+    col_types: String,
+
     /// The maximum size of a batch of kafka records.
-    #[clap(long, default_value_t = 1)]
-    max_batch_size: u64,
+    /// The default value is 1mb.
+    #[clap(long, default_value = "1mb")]
+    max_batch_size: ReadableSize,
 
     /// The minimum latency the kafka client issues a batch of kafka records.
-    /// However, a batch of kafka records would be immediately issued if its free space cannot fit the next record.
-    #[clap(long, default_value_t = 20)]
-    linger: u64,
+    /// However, a batch of kafka records would be immediately issued if a record cannot be fit into the batch.
+    #[clap(long, default_value = "20ms")]
+    linger: ReadableSize,
 
     /// The initial backoff delay of the kafka consumer.
-    #[clap(long, default_value_t = 10)]
-    backoff_init: u64,
+    #[clap(long, default_value = "10ms")]
+    backoff_init: ReadableSize,
 
     /// The maximum backoff delay of the kafka consumer.
-    #[clap(long, default_value_t = 1000)]
-    backoff_max: u64,
+    #[clap(long, default_value = "1s")]
+    backoff_max: ReadableSize,
 
-    /// The exponential backoff rate of the kafka consumer. Next back off = base * current backoff.
+    /// The exponential backoff rate of the kafka consumer. The next back off = base * the current backoff.
     #[clap(long, default_value_t = 2)]
     backoff_base: u32,
 
     /// The deadline of backoff. The backoff ends if the total backoff delay reaches the deadline.
-    #[clap(long, default_value_t = 3000)]
-    backoff_deadline: u64,
+    #[clap(long, default_value = "3s")]
+    backoff_deadline: ReadableSize,
 
-    /// The compression algorithm of kafka records.
-    #[clap(long, default_value = "no")]
+    /// The client-side compression algorithm for kafka records.
+    #[clap(long, default_value = "zstd")]
     compression: String,
 
     /// The seed of random number generators.
     #[clap(long, default_value_t = 42)]
     rng_seed: u64,
-
-    /// The write workload.
-    #[clap(long, value_enum, default_value_t = Workload::default())]
-    workload: Workload,
 
     /// Skips the read phase, aka. region replay, if set to true.
     #[clap(long, default_value_t = false)]
@@ -162,6 +161,8 @@ struct Config {
     num_topics: u32,
     num_regions: u32,
     num_scrapes: u32,
+    num_rows: u32,
+    col_types: String,
     max_batch_size: u64,
     linger: u64,
     backoff_init: Duration,
@@ -170,7 +171,6 @@ struct Config {
     backoff_deadline: Duration,
     compression: Compression,
     rng_seed: u64,
-    workload: Workload,
     skip_read: bool,
     skip_write: bool,
     random_topics: bool,
@@ -337,30 +337,6 @@ impl Benchmarker {
     }
 }
 
-fn parse_compression(comp: &str) -> Compression {
-    match comp {
-        "no" => Compression::NoCompression,
-        "gzip" => Compression::Gzip,
-        "lz4" => Compression::Lz4,
-        "snappy" => Compression::Snappy,
-        "zstd" => Compression::Zstd,
-        _ => unreachable!(),
-    }
-}
-
-fn parse_workload(workload: &Workload) -> (usize, usize) {
-    // Normally, a wal entry contains mutations of 5 rows and 4 cols.
-    // The factors controls how a wal entry is inflated.
-    let (rows_factor, cols_factor) = match workload {
-        Workload::Normal => (1, 1),
-        Workload::Fat => (1, 5),
-        Workload::Thin => (4, 1),
-        Workload::Monster => (10, 8),
-    };
-    assert!(rows_factor > 0 && cols_factor > 0);
-    (rows_factor, cols_factor)
-}
-
 fn build_region(id: u64, topics: &[String], rng: &mut SmallRng, cfg: &Config) -> Region {
     let (rows_factor, cols_factor) = parse_workload(&cfg.workload);
     let wal_options = match cfg.wal_provider {
@@ -462,6 +438,29 @@ fn dump_report(cfg: &Config, write_elapsed: u128, read_elapsed: u128) {
     info!("Benchmark config: {:?}\n\nBenchmark report:\n\n{cost_report}\n\n{throughput_report}\n\n{metrics_report}", cfg);
 }
 
+fn parse_col_types(col_types: &str) -> Vec<ColumnDataType> {
+    col_types
+        .chars()
+        .map(|c| match c {
+            'i' => ColumnDataType::Int64,
+            'f' => ColumnDataType::Float64,
+            's' => ColumnDataType::String,
+            other => unreachable!(format!("Cannot parse {other} as a column data type")),
+        })
+        .collect()
+}
+
+fn parse_compression(comp: &str) -> Compression {
+    match comp {
+        "no" => Compression::NoCompression,
+        "gzip" => Compression::Gzip,
+        "lz4" => Compression::Lz4,
+        "snappy" => Compression::Snappy,
+        "zstd" => Compression::Zstd,
+        other => unreachable!(format!("Unrecognized compression {other}")),
+    }
+}
+
 fn main() {
     common_telemetry::init_default_ut_logging();
 
@@ -478,6 +477,8 @@ fn main() {
         num_topics: args.num_topics,
         num_regions: args.num_regions,
         num_scrapes: args.num_scrapes,
+        num_rows: args.num_rows,
+        col_types: parse_col_types(&args.col_types),
         max_batch_size: args.max_batch_size,
         linger: args.linger,
         backoff_init: Duration::from_millis(args.backoff_init),
@@ -486,7 +487,6 @@ fn main() {
         backoff_deadline: Duration::from_millis(args.backoff_deadline),
         compression: parse_compression(&args.compression),
         rng_seed: args.rng_seed,
-        workload: args.workload,
         skip_read: args.skip_read,
         skip_write: args.skip_write,
         random_topics: args.random_topics,
