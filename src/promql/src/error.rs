@@ -135,6 +135,13 @@ pub enum Error {
         operator: String,
         location: Location,
     },
+
+    #[snafu(display("Matcher operator {matcher_op} is not supported for {matcher}"))]
+    UnsupportedMatcherOp {
+        matcher_op: String,
+        matcher: String,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -157,6 +164,7 @@ impl ErrorExt for Error {
             | DataFusionPlanning { .. }
             | MultiFieldsNotSupported { .. }
             | UnexpectedPlanExpr { .. }
+            | UnsupportedMatcherOp { .. }
             | IllegalRange { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. } | EmptyRange { .. } => StatusCode::Internal,
