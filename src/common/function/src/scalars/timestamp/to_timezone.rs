@@ -127,7 +127,7 @@ impl Function for ToTimezoneFunction {
                 function: NAME,
                 datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
             }
-                .fail()?,
+            .fail()?,
         };
 
         let tzs = {
