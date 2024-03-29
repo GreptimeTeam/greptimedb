@@ -114,7 +114,7 @@ impl QueryContext {
         let (catalog, schema) = db_name
             .map(|db| {
                 let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-                (catalog.to_string(), schema.to_string())
+                (catalog, schema)
             })
             .unwrap_or_else(|| {
                 (

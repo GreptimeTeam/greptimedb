@@ -77,6 +77,7 @@ opentelemetry-proto.workspace = true
 partition.workspace = true
 paste.workspace = true
 prost.workspace = true
+rand.workspace = true
 script.workspace = true
 session = { workspace = true, features = ["testing"] }
 store-api.workspace = true

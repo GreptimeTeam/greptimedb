@@ -64,8 +64,8 @@ pub async fn inner_auth<B>(
     // TODO(ruihang): move this out of auth module
     let timezone = Arc::new(extract_timezone(&req));
     let query_ctx_builder = QueryContextBuilder::default()
-        .current_catalog(catalog.to_string())
-        .current_schema(schema.to_string())
+        .current_catalog(catalog.clone())
+        .current_schema(schema.clone())
         .timezone(timezone);
 
     let query_ctx = query_ctx_builder.build();
@@ -97,8 +97,8 @@ pub async fn inner_auth<B>(
         .auth(
             auth::Identity::UserId(&username, None),
             auth::Password::PlainText(password),
-            catalog,
-            schema,
+            &catalog,
+            &schema,
         )
         .await
     {
@@ -132,7 +132,7 @@ fn err_response(err: impl ErrorExt) -> Response {
     (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(err)).into_response()
 }
 
-pub fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {
+pub fn extract_catalog_and_schema<B>(request: &Request<B>) -> (String, String) {
     // parse database from header
     let dbname = request
         .headers()
@@ -414,7 +414,7 @@ mod tests {
             .unwrap();
 
         let db = extract_catalog_and_schema(&req);
-        assert_eq!(db, ("greptime", "tomcat"));
+        assert_eq!(db, ("greptime".to_string(), "tomcat".to_string()));
     }
 
     #[test]
