@@ -5,24 +5,31 @@ use std::collections::HashMap;
 use common_decimal::Decimal128;
 use common_time::{Date, Timestamp};
 use datafusion_substrait::variation_const::{
-    DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF, TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF,
-    TIMESTAMP_SECOND_TYPE_REF, UNSIGNED_INTEGER_TYPE_REF,
+    DATE_32_TYPE_REF, DATE_64_TYPE_REF, DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF,
+    TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
+    UNSIGNED_INTEGER_TYPE_REF,
 };
+use datatypes::arrow::ipc::Binary;
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::value::Value;
+use itertools::Itertools;
 use snafu::OptionExt;
 use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
 use substrait_proto::proto::expression::literal::LiteralType;
 use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
 use substrait_proto::proto::expression::{Literal, RexType};
 use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
+use substrait_proto::proto::function_argument::ArgType;
 use substrait_proto::proto::r#type::Kind;
 use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{plan_rel, Expression, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{Error, NotImplementedSnafu, PlanSnafu, TableNotFoundSnafu};
-use crate::expr::{GlobalId, ScalarExpr};
-use crate::plan::Plan;
+use crate::expr::{
+    BinaryFunc, GlobalId, ScalarExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
+};
+use crate::plan::{Plan, TypedPlan};
+use crate::repr::{ColumnType, RelationType};
 
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -71,7 +78,7 @@ impl DataflowContext {
     }
 }
 
-pub fn from_substrait_plan(ctx: &mut DataflowContext, plan: &SubPlan) -> Result<Plan, Error> {
+pub fn from_substrait_plan(ctx: &mut DataflowContext, plan: &SubPlan) -> Result<TypedPlan, Error> {
     // Register function extension
     let function_extension = plan
         .extensions
@@ -110,19 +117,27 @@ pub fn from_substrait_rel(
     ctx: &mut DataflowContext,
     rel: &Rel,
     extensions: &HashMap<u32, &String>,
-) -> Result<Plan, Error> {
+) -> Result<TypedPlan, Error> {
     todo!()
 }
 
 /// Convert Substrait Rex into Flow's ScalarExpr
 pub fn from_substrait_rex(
     e: &Expression,
+    input_schema: &RelationType,
     extensions: &HashMap<u32, &String>,
-) -> Result<ScalarExpr, Error> {
+) -> Result<(ScalarExpr, ColumnType), Error> {
     match &e.rex_type {
         Some(RexType::Literal(lit)) => {
             let lit = from_substrait_literal(lit)?;
-            Ok(ScalarExpr::Literal(lit.0, lit.1))
+            Ok((
+                ScalarExpr::Literal(lit.0, lit.1.clone()),
+                ColumnType::new(lit.1, true),
+            ))
+        }
+        Some(RexType::SingularOrList(s)) => {
+            let substrait_expr = s.value.as_ref().unwrap();
+            from_substrait_rex(substrait_expr, input_schema, extensions)
         }
         Some(RexType::Selection(field_ref)) => match &field_ref.reference_type {
             Some(DirectReference(direct)) => match &direct.reference_type.as_ref() {
@@ -132,7 +147,8 @@ pub fn from_substrait_rex(
                     }
                     None => {
                         let column = x.field as usize;
-                        Ok(ScalarExpr::Column(column))
+                        let column_type = input_schema.column_types[column].clone();
+                        Ok((ScalarExpr::Column(column), column_type))
                     }
                 },
                 _ => not_impl_err!(
@@ -151,10 +167,89 @@ pub fn from_substrait_rex(
                 }
                 .build()
             })?;
+            let arg_len = f.arguments.len();
+            let arg_exprs: Vec<_> = f
+                .arguments
+                .iter()
+                .map(|arg| match &arg.arg_type {
+                    Some(ArgType::Value(e)) => from_substrait_rex(e, input_schema, extensions),
+                    _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
+                })
+                .try_collect()?;
+            let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_exprs.into_iter().unzip();
+
+            match arg_len {
+                1 => {
+                    // TODO: deal with cast(col AS type)
+                    let func = UnaryFunc::from_str_and_type(fn_name, None)?;
+                    let arg = arg_exprs[0].clone();
+                    let ret_type = ColumnType::new(func.signature().output.clone(), true);
+
+                    Ok((arg.call_unary(func), ret_type))
+                }
+                2 => {
+                    let arg_types = arg_types[0..2]
+                        .iter()
+                        .map(|t| Some(t.scalar_type.clone()))
+                        .collect_vec();
+                    let func = BinaryFunc::from_str_and_types(fn_name, &arg_types[0..2])?;
+                    let ret_type = ColumnType::new(func.signature().output.clone(), true);
+                    let ret_expr = arg_exprs[0].clone().call_binary(arg_exprs[1].clone(), func);
+                    Ok((ret_expr, ret_type))
+                }
+                _var => {
+                    let arg_types = arg_types[0..2]
+                        .iter()
+                        .map(|t| Some(t.scalar_type.clone()))
+                        .collect_vec();
+                    if let Ok(func) = VariadicFunc::from_str_and_types(fn_name, &arg_types) {
+                        let ret_type = ColumnType::new(func.signature().output.clone(), true);
+                        Ok((
+                            ScalarExpr::CallVariadic {
+                                func,
+                                exprs: arg_exprs,
+                            },
+                            ret_type,
+                        ))
+                    } else if let Ok(func) = UnmaterializableFunc::from_str(fn_name) {
+                        let ret_type = ColumnType::new(func.signature().output.clone(), true);
+                        Ok((ScalarExpr::CallUnmaterializable(func), ret_type))
+                    } else {
+                        not_impl_err!("Unsupported function {fn_name} with {arg_len} arguments")
+                    }
+                }
+            }
+        }
+        Some(RexType::IfThen(if_then)) => {
+            let ifs: Vec<_> = if_then
+                .ifs
+                .iter()
+                .map(|if_clause| {
+                    let proto_if = if_clause.r#if.as_ref().unwrap();
+                    let proto_then = if_clause.then.as_ref().unwrap();
+                    let cond = from_substrait_rex(proto_if, input_schema, extensions)?;
+                    let then = from_substrait_rex(proto_then, input_schema, extensions)?;
+                    Ok((cond, then))
+                })
+                .try_collect()?;
             todo!()
         }
         _ => not_impl_err!("unsupported rex_type"),
     }
+}
+
+/// Convert Substrait Expressions to DataFusion Exprs
+pub async fn from_substrait_rex_vec(
+    exprs: &Vec<Expression>,
+    input_schema: &RelationType,
+    extensions: &HashMap<u32, &String>,
+) -> Result<Vec<(ScalarExpr, ColumnType)>, Error> {
+    let mut expressions: Vec<_> = vec![];
+    for expr in exprs {
+        let expression = from_substrait_rex(expr, input_schema, extensions)?;
+        expressions.push(expression);
+    }
+    Ok(expressions)
 }
 
 /// Convert a Substrait literal into a Value and its ConcreteDataType (So that we can know type even if the value is null)
@@ -210,7 +305,7 @@ pub fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Error> {
         Some(LiteralType::Decimal(d)) => {
             let value: [u8; 16] = d.value.clone().try_into().map_err(|e| {
                 PlanSnafu {
-                    reason: "Failed to parse decimal value".to_string(),
+                    reason: format!("Failed to parse decimal value from {e:?}"),
                 }
                 .build()
             })?;
@@ -276,8 +371,8 @@ fn from_substrait_null(null_type: &substrait_proto::proto::Type) -> Result<CDT, 
                 DATE_64_TYPE_REF => Ok(CDT::date_datatype()),
                 v => not_impl_err!("Unsupported Substrait type variation {v} of type {kind:?}"),
             },
-            Kind::Binary(binary) => Ok(CDT::binary_datatype()),
-            Kind::String(string) => Ok(CDT::string_datatype()),
+            Kind::Binary(_) => Ok(CDT::binary_datatype()),
+            Kind::String(_) => Ok(CDT::string_datatype()),
             Kind::Decimal(d) => Ok(CDT::decimal128_datatype(d.precision as u8, d.scale as i8)),
             _ => not_impl_err!("Unsupported Substrait type: {kind:?}"),
         }
