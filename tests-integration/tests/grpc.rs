@@ -25,7 +25,10 @@ use common_catalog::consts::MITO_ENGINE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use servers::grpc::GrpcServerConfig;
-use servers::http::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
+use servers::http::prometheus::{
+    PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
+    PrometheusResponse,
+};
 use servers::server::Server;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
@@ -465,6 +468,8 @@ pub async fn test_health_check(store_type: StorageType) {
 }
 
 pub async fn test_prom_gateway_query(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
     // prepare connection
     let (addr, mut guard, fe_grpc_server) = setup_grpc_server(store_type, "prom_gateway").await;
     let grpc_client = Client::with_urls(vec![addr]);
@@ -516,8 +521,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
             result_type: "vector".to_string(),
-            result: vec![
-                PromSeries {
+            result: PromQueryResult::Vector(vec![
+                PromSeriesVector {
                     metric: [
                         ("k".to_string(), "a".to_string()),
                         ("__name__".to_string(), "test".to_string()),
@@ -525,9 +530,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     value: Some((5.0, "2".to_string())),
-                    ..Default::default()
                 },
-                PromSeries {
+                PromSeriesVector {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "b".to_string()),
@@ -535,9 +539,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     value: Some((5.0, "1".to_string())),
-                    ..Default::default()
                 },
-            ],
+            ]),
         }),
         error: None,
         error_type: None,
@@ -568,8 +571,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
             result_type: "matrix".to_string(),
-            result: vec![
-                PromSeries {
+            result: PromQueryResult::Matrix(vec![
+                PromSeriesMatrix {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "a".to_string()),
@@ -577,9 +580,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
-                    ..Default::default()
                 },
-                PromSeries {
+                PromSeriesMatrix {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "b".to_string()),
@@ -587,9 +589,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
-                    ..Default::default()
                 },
-            ],
+            ]),
         }),
         error: None,
         error_type: None,
@@ -620,7 +621,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
             result_type: "matrix".to_string(),
-            result: vec![],
+            result: PromQueryResult::Matrix(vec![]),
         }),
         error: None,
         error_type: None,
