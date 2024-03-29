@@ -18,12 +18,11 @@ use crate::key::table_route::TableRouteValue;
 
 impl CreateLogicalTablesProcedure {
     pub(crate) async fn fill_physical_table_info(&mut self) -> Result<()> {
-        let physical_table_id = self.data.physical_table_id();
         let physical_region_numbers = self
             .context
             .table_metadata_manager
             .table_route_manager()
-            .get_physical_table_route(physical_table_id)
+            .get_physical_table_route(self.data.physical_table_id)
             .await
             .map(|(_, route)| TableRouteValue::Physical(route).region_numbers())?;
 

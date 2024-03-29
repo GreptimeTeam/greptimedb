@@ -128,7 +128,7 @@ impl AlterLogicalTablesProcedure {
             });
         }
 
-        // Collects responses from all the alter region tasks.
+        // Collects responses from datanodes.
         let phy_raw_schemas = future::join_all(alter_region_tasks)
             .await
             .into_iter()
