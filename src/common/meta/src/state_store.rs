@@ -77,7 +77,7 @@ enum SplitValue<'a> {
 
 fn split_value(value: &[u8], max_size_per_value: Option<usize>) -> SplitValue<'_> {
     if let Some(max_size_per_value) = max_size_per_value {
-        if value.len() < max_size_per_value {
+        if value.len() <= max_size_per_value {
             SplitValue::Single(value)
         } else {
             SplitValue::Multiple(value.chunks(max_size_per_value).collect::<Vec<_>>())
@@ -106,6 +106,11 @@ impl StateStore for KvStateStore {
                 Ok(())
             }
             SplitValue::Multiple(values) => {
+                // Note:
+                // The length of values can be up to usize::MAX.
+                // The KeySet::with_segment_suffix method uses a 10-digit number to store the segment number,
+                // which is large enough for the usize type.
+
                 // The first segment key: "0b00001111"
                 // The 2nd segment key: "0b00001111/0000000001"
                 // The 3rd segment key: "0b00001111/0000000002"

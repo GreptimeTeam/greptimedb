@@ -144,17 +144,17 @@ impl ProcedureStore {
         // 8 should be enough for most procedures.
         let mut step_keys = Vec::with_capacity(8);
         let mut finish_keys = Vec::new();
-        while let Some((keyset, _)) = key_values.try_next().await? {
-            let key = keyset.key();
+        while let Some((key_set, _)) = key_values.try_next().await? {
+            let key = key_set.key();
             let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
                 logging::warn!("Unknown key while deleting procedures, key: {}", key);
                 continue;
             };
             if curr_key.key_type == KeyType::Step {
-                step_keys.extend(keyset.keys());
+                step_keys.extend(key_set.keys());
             } else {
                 // .commit or .rollback
-                finish_keys.extend(keyset.keys());
+                finish_keys.extend(key_set.keys());
             }
         }
 
@@ -186,8 +186,8 @@ impl ProcedureStore {
 
         // Scan all procedures.
         let mut key_values = self.store.walk_top_down(&self.proc_path).await?;
-        while let Some((keyset, value)) = key_values.try_next().await? {
-            let key = keyset.key();
+        while let Some((key_set, value)) = key_values.try_next().await? {
+            let key = key_set.key();
             let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
                 logging::warn!("Unknown key while loading procedures, key: {}", key);
                 continue;
