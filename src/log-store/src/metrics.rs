@@ -104,10 +104,4 @@ lazy_static! {
     /// Timer of the append_batch operation on the raft-engine logstore.
     /// This timer only measures the duration of the read operation, not measures the total duration of replay.
     pub static ref METRIC_RAFT_ENGINE_READ_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["raft-engine", "read"]);
-
-    /// Timer of the produce operation on the kafka client.
-    pub static ref METRIC_KAFKA_PRODUCE_ELAPSED: Histogram = register_histogram!(
-        "greptime_kafka_produce_elapsed",
-        "kafka produce elapsed",
-    ).unwrap();
 }

@@ -36,21 +36,4 @@ lazy_static! {
     pub static ref METRIC_WAL_READ_BYTES_TOTAL: IntCounter = METRIC_WAL_OP_BYTES_TOTAL.with_label_values(
         &["read"],
     );
-
-    /// Timer of each operation on a logstore.
-    pub static ref METRIC_LOGSTORE_OP_ELAPSED: HistogramVec = register_histogram_vec!(
-        "greptime_bench_logstore_op_elapsed",
-        "logstore operation elapsed",
-        &[LOGSTORE_LABEL, OPTYPE_LABEL],
-    )
-    .unwrap();
-    /// Timer of the write operation on the kafka logstore.
-    pub static ref METRIC_KAFKA_WRITE_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["kafka", "write"]);
-    /// Timer of the write operation on the kafka logstore.
-    /// This timer only measures the duration of the read operation, not measures the total duration of replay.
-    pub static ref METRIC_KAFKA_READ_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["kafka", "read"]);
-    /// Timer of the write operation on the raft-engine logstore.
-    pub static ref METRIC_RAFT_ENGINE_WRITE_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["raft-engine", "write"]);
-    /// Timer of the read operation on the raft-engine logstore.
-    pub static ref METRIC_RAFT_ENGINE_READ_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["raft-engine", "read"]);
 }

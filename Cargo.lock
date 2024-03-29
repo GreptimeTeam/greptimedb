@@ -882,8 +882,10 @@ dependencies = [
  "common-base",
  "common-telemetry",
  "common-wal",
+ "dotenv",
  "futures",
  "futures-util",
+ "humantime",
  "indicatif",
  "itertools 0.10.5",
  "lazy_static",
@@ -894,8 +896,10 @@ dependencies = [
  "prometheus",
  "rand",
  "rskafka",
+ "serde",
  "store-api",
  "tokio",
+ "toml 0.8.8",
  "uuid",
 ]
 

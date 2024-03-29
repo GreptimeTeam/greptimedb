@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
@@ -27,7 +26,6 @@ use store_api::logstore::entry::Id as EntryId;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
-use tokio::time::Instant;
 
 use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
@@ -35,11 +33,6 @@ use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
 use crate::kafka::{entry_estimated_size, EntryImpl, NamespaceImpl};
 use crate::metrics;
-
-lazy_static::lazy_static!(
-    pub static ref APPEND_BATCH_ELAPSED_TOTAL: AtomicU64 = AtomicU64::new(0);
-    pub static ref PRODUCED_ELAPSED_TOTAL: AtomicU64 = AtomicU64::new(0);
-);
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
@@ -98,7 +91,6 @@ impl LogStore for KafkaLogStore {
         metrics::METRIC_KAFKA_APPEND_BATCH_BYTES_TOTAL
             .inc_by(entries.iter().map(entry_estimated_size).sum::<usize>() as u64);
         let _timer = metrics::METRIC_KAFKA_APPEND_BATCH_ELAPSED.start_timer();
-        let now = Instant::now();
 
         if entries.is_empty() {
             return Ok(AppendBatchResponse::default());
@@ -127,8 +119,6 @@ impl LogStore for KafkaLogStore {
         .await?
         .into_iter()
         .collect::<HashMap<_, _>>();
-
-        APPEND_BATCH_ELAPSED_TOTAL.fetch_add(now.elapsed().as_millis() as u64, Ordering::Relaxed);
 
         Ok(AppendBatchResponse { last_entry_ids })
     }

@@ -17,14 +17,12 @@ use std::collections::HashMap;
 use rskafka::record::Record as KafkaRecord;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use tokio::time::Instant;
 
 use crate::error::{
     DecodeJsonSnafu, EmptyEntriesSnafu, EncodeJsonSnafu, GetClientSnafu, IllegalSequenceSnafu,
     MissingKeySnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
 };
 use crate::kafka::client_manager::ClientManagerRef;
-use crate::kafka::log_store::PRODUCED_ELAPSED_TOTAL;
 use crate::kafka::util::offset::Offset;
 use crate::kafka::{EntryId, EntryImpl, NamespaceImpl};
 use crate::metrics;
@@ -182,9 +180,6 @@ impl RecordProducer {
                 metrics::METRIC_KAFKA_PRODUCE_RECORD_COUNTS.inc();
                 metrics::METRIC_KAFKA_PRODUCE_RECORD_BYTES_TOTAL
                     .inc_by(kafka_record.approximate_size() as u64);
-                let _timer = metrics::METRIC_KAFKA_PRODUCE_ELAPSED.start_timer();
-
-                let now = Instant::now();
 
                 // Records of a certain region cannot be produced in parallel since their order must be static.
                 let offset = producer
@@ -196,12 +191,6 @@ impl RecordProducer {
                         size: kafka_record.approximate_size(),
                         limit: max_record_size,
                     })?;
-
-                PRODUCED_ELAPSED_TOTAL.fetch_add(
-                    now.elapsed().as_millis() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-
                 last_offset = Some(offset);
             }
         }
