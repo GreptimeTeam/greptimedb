@@ -23,7 +23,7 @@ use datatypes::prelude::VectorRef;
 use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use datatypes::vectors::{
-    StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    Int64Vector, StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
 use snafu::{ensure, OptionExt};
@@ -43,6 +43,7 @@ fn convert_to_timezone(arg: &str) -> Option<Timezone> {
 fn convert_to_timestamp(arg: &Value) -> Option<Timestamp> {
     match arg {
         Value::Timestamp(ts) => Some(*ts),
+        Value::Int64(i) => Some(Timestamp::new_millisecond(*i)),
         _ => None,
     }
 }
@@ -66,6 +67,8 @@ impl Function for ToTimezoneFunction {
     fn signature(&self) -> Signature {
         helper::one_of_sigs2(
             vec![
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
                 ConcreteDataType::timestamp_second_datatype(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::timestamp_microsecond_datatype(),
@@ -86,39 +89,45 @@ impl Function for ToTimezoneFunction {
             }
         );
 
-        // TODO: maybe support epoch timestamp? https://github.com/GreptimeTeam/greptimedb/issues/3477
-        let ts = columns[0].data_type().as_timestamp().with_context(|| {
-            UnsupportedInputDataTypeSnafu {
+        let array = columns[0].to_arrow_array();
+        let times = match columns[0].data_type() {
+            ConcreteDataType::Int64(_) | ConcreteDataType::Int32(_) => {
+                let vector = Int64Vector::try_from_arrow_array(array).unwrap();
+                (0..vector.len())
+                    .map(|i| convert_to_timestamp(&vector.get(i)))
+                    .collect::<Vec<_>>()
+            }
+            ConcreteDataType::Timestamp(ts) => match ts {
+                TimestampType::Second(_) => {
+                    let vector = TimestampSecondVector::try_from_arrow_array(array).unwrap();
+                    (0..vector.len())
+                        .map(|i| convert_to_timestamp(&vector.get(i)))
+                        .collect::<Vec<_>>()
+                }
+                TimestampType::Millisecond(_) => {
+                    let vector = TimestampMillisecondVector::try_from_arrow_array(array).unwrap();
+                    (0..vector.len())
+                        .map(|i| convert_to_timestamp(&vector.get(i)))
+                        .collect::<Vec<_>>()
+                }
+                TimestampType::Microsecond(_) => {
+                    let vector = TimestampMicrosecondVector::try_from_arrow_array(array).unwrap();
+                    (0..vector.len())
+                        .map(|i| convert_to_timestamp(&vector.get(i)))
+                        .collect::<Vec<_>>()
+                }
+                TimestampType::Nanosecond(_) => {
+                    let vector = TimestampNanosecondVector::try_from_arrow_array(array).unwrap();
+                    (0..vector.len())
+                        .map(|i| convert_to_timestamp(&vector.get(i)))
+                        .collect::<Vec<_>>()
+                }
+            },
+            _ => UnsupportedInputDataTypeSnafu {
                 function: NAME,
                 datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
             }
-        })?;
-        let array = columns[0].to_arrow_array();
-        let times = match ts {
-            TimestampType::Second(_) => {
-                let vector = TimestampSecondVector::try_from_arrow_array(array).unwrap();
-                (0..vector.len())
-                    .map(|i| convert_to_timestamp(&vector.get(i)))
-                    .collect::<Vec<_>>()
-            }
-            TimestampType::Millisecond(_) => {
-                let vector = TimestampMillisecondVector::try_from_arrow_array(array).unwrap();
-                (0..vector.len())
-                    .map(|i| convert_to_timestamp(&vector.get(i)))
-                    .collect::<Vec<_>>()
-            }
-            TimestampType::Microsecond(_) => {
-                let vector = TimestampMicrosecondVector::try_from_arrow_array(array).unwrap();
-                (0..vector.len())
-                    .map(|i| convert_to_timestamp(&vector.get(i)))
-                    .collect::<Vec<_>>()
-            }
-            TimestampType::Nanosecond(_) => {
-                let vector = TimestampNanosecondVector::try_from_arrow_array(array).unwrap();
-                (0..vector.len())
-                    .map(|i| convert_to_timestamp(&vector.get(i)))
-                    .collect::<Vec<_>>()
-            }
+            .fail()?,
         };
 
         let tzs = {
@@ -153,7 +162,7 @@ mod tests {
     use datatypes::timestamp::{
         TimestampMicrosecond, TimestampMillisecond, TimestampNanosecond, TimestampSecond,
     };
-    use datatypes::vectors::StringVector;
+    use datatypes::vectors::{Int64Vector, StringVector};
 
     use super::*;
 
@@ -254,6 +263,50 @@ mod tests {
         ];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
+        let expect_times: VectorRef = Arc::new(StringVector::from(results));
+        assert_eq!(expect_times, vector);
+    }
+
+    #[test]
+    fn test_numerical_to_timezone() {
+        let f = ToTimezoneFunction;
+        let results = vec![
+            Some("1969-12-31 19:00:00.001"),
+            None,
+            Some("1970-01-01 03:00:00.001"),
+            None,
+            Some("2024-03-26 23:01:50"),
+            None,
+            Some("2024-03-27 06:02:00"),
+            None,
+        ];
+        let times: Vec<Option<i64>> = vec![
+            Some(1),
+            None,
+            Some(1),
+            None,
+            Some(1711508510000),
+            None,
+            Some(1711508520000),
+            None,
+        ];
+        let ts_vector: Int64Vector = Int64Vector::from_owned_iterator(times.into_iter());
+        let tzs = vec![
+            Some("America/New_York"),
+            None,
+            Some("Europe/Moscow"),
+            None,
+            Some("America/New_York"),
+            None,
+            Some("Europe/Moscow"),
+            None,
+        ];
+        let args: Vec<VectorRef> = vec![
+            Arc::new(ts_vector),
+            Arc::new(StringVector::from(tzs.clone())),
+        ];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(8, vector.len());
         let expect_times: VectorRef = Arc::new(StringVector::from(results));
         assert_eq!(expect_times, vector);
     }
