@@ -23,7 +23,7 @@ use common_catalog::consts::{
 };
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef, Context};
+use common_meta::cache_invalidator::{CacheInvalidator, Context, MultiCacheInvalidator};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
@@ -56,7 +56,6 @@ use crate::CatalogManager;
 /// comes from `SystemCatalog`, which is static and read-only.
 #[derive(Clone)]
 pub struct KvBackendCatalogManager {
-    cache_invalidator: CacheInvalidatorRef,
     partition_manager: PartitionRuleManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     /// A sub-CatalogManager that handles system tables
@@ -64,14 +63,24 @@ pub struct KvBackendCatalogManager {
     table_cache: AsyncCache<String, TableRef>,
 }
 
+struct TableCacheInvalidator {
+    table_cache: AsyncCache<String, TableRef>,
+}
+
+impl TableCacheInvalidator {
+    pub fn new(table_cache: AsyncCache<String, TableRef>) -> Self {
+        Self { table_cache }
+    }
+}
+
 #[async_trait::async_trait]
-impl CacheInvalidator for KvBackendCatalogManager {
+impl CacheInvalidator for TableCacheInvalidator {
     async fn invalidate(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         caches: Vec<CacheIdent>,
     ) -> common_meta::error::Result<()> {
-        for cache in &caches {
+        for cache in caches {
             if let CacheIdent::TableName(table_name) = cache {
                 let table_cache_key = format_full_table_name(
                     &table_name.catalog_name,
@@ -81,7 +90,7 @@ impl CacheInvalidator for KvBackendCatalogManager {
                 self.table_cache.invalidate(&table_cache_key).await;
             }
         }
-        self.cache_invalidator.invalidate(ctx, caches).await
+        Ok(())
     }
 }
 
@@ -91,11 +100,21 @@ const TABLE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const TABLE_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
 impl KvBackendCatalogManager {
-    pub fn new(backend: KvBackendRef, cache_invalidator: CacheInvalidatorRef) -> Arc<Self> {
+    pub async fn new(
+        backend: KvBackendRef,
+        multi_cache_invalidator: Arc<MultiCacheInvalidator>,
+    ) -> Arc<Self> {
+        let table_cache: AsyncCache<String, TableRef> = CacheBuilder::new(TABLE_CACHE_MAX_CAPACITY)
+            .time_to_live(TABLE_CACHE_TTL)
+            .time_to_idle(TABLE_CACHE_TTI)
+            .build();
+        multi_cache_invalidator
+            .add_invalidator(Arc::new(TableCacheInvalidator::new(table_cache.clone())))
+            .await;
+
         Arc::new_cyclic(|me| Self {
             partition_manager: Arc::new(PartitionRuleManager::new(backend.clone())),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
-            cache_invalidator,
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),
                 catalog_cache: Cache::new(CATALOG_CACHE_MAX_CAPACITY),
@@ -104,10 +123,7 @@ impl KvBackendCatalogManager {
                     me.clone(),
                 )),
             },
-            table_cache: CacheBuilder::new(TABLE_CACHE_MAX_CAPACITY)
-                .time_to_live(TABLE_CACHE_TTL)
-                .time_to_idle(TABLE_CACHE_TTI)
-                .build(),
+            table_cache,
         })
     }
 
