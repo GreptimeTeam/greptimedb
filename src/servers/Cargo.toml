@@ -41,6 +41,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+common-version = { workspace = true, features = ["codec"] }
 dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
@@ -83,7 +84,7 @@ rust-embed = { version = "6.6", features = ["debug-embed"] }
 rustls = "0.22"
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
-schemars = "0.8"
+schemars.workspace = true
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
 serde_json.workspace = true

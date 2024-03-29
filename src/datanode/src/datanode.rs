@@ -467,7 +467,7 @@ async fn open_all_regions(
             ));
         }
     }
-    info!("going to open {} regions", regions.len());
+    info!("going to open {} region(s)", regions.len());
     let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
     let mut tasks = vec![];
 

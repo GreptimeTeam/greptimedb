@@ -35,6 +35,7 @@ use crate::config::MitoConfig;
 use crate::error::{self, CompactRegionSnafu};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::read::projection::ProjectionMapper;
+use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::{BoxedBatchReader, Source};
 use crate::region::options::IndexOptions;
@@ -577,13 +578,12 @@ async fn build_sst_reader(
     inputs: &[FileHandle],
     append_mode: bool,
 ) -> error::Result<BoxedBatchReader> {
-    SeqScan::new(sst_layer, ProjectionMapper::all(&metadata)?)
+    let scan_input = ScanInput::new(sst_layer, ProjectionMapper::all(&metadata)?)
         .with_files(inputs.to_vec())
         .with_append_mode(append_mode)
         // We ignore file not found error during compaction.
-        .with_ignore_file_not_found(true)
-        .build_reader()
-        .await
+        .with_ignore_file_not_found(true);
+    SeqScan::new(scan_input).build_reader().await
 }
 
 #[cfg(test)]

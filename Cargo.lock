@@ -1236,6 +1236,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 name = "catalog"
 version = "0.7.1"
 dependencies = [
+ "api",
  "arrow",
  "arrow-schema",
  "async-stream",
@@ -2082,6 +2083,8 @@ name = "common-version"
 version = "0.7.1"
 dependencies = [
  "build-data",
+ "schemars",
+ "serde",
 ]
 
 [[package]]
@@ -9374,6 +9377,7 @@ name = "sql"
 version = "0.7.1"
 dependencies = [
  "api",
+ "chrono",
  "common-base",
  "common-catalog",
  "common-datasource",
@@ -9382,6 +9386,10 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-time",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "datafusion-physical-expr",
  "datafusion-sql",
  "datatypes",
  "hex",

@@ -11,6 +11,7 @@ testing = []
 workspace = true
 
 [dependencies]
+api.workspace = true
 arrow.workspace = true
 arrow-schema.workspace = true
 async-stream.workspace = true

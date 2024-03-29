@@ -394,7 +394,7 @@ async fn test_delete_not_null_fields() {
     assert_eq!(expected, batches.pretty_print().unwrap());
 
     // Reopen and scan again.
-    reopen_region(&engine, region_id, region_dir, false).await;
+    reopen_region(&engine, region_id, region_dir, false, HashMap::new()).await;
     let request = ScanRequest::default();
     let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

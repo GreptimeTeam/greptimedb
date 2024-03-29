@@ -331,22 +331,18 @@ impl AlterTableProcedure {
     async fn on_broadcast(&mut self) -> Result<Status> {
         let alter_kind = self.alter_kind()?;
         let cache_invalidator = &self.context.cache_invalidator;
-
-        if matches!(alter_kind, Kind::RenameTable { .. }) {
-            cache_invalidator
-                .invalidate(
-                    &Context::default(),
-                    vec![CacheIdent::TableName(self.data.table_ref().into())],
-                )
-                .await?;
+        let cache_keys = if matches!(alter_kind, Kind::RenameTable { .. }) {
+            vec![CacheIdent::TableName(self.data.table_ref().into())]
         } else {
-            cache_invalidator
-                .invalidate(
-                    &Context::default(),
-                    vec![CacheIdent::TableId(self.data.table_id())],
-                )
-                .await?;
+            vec![
+                CacheIdent::TableId(self.data.table_id()),
+                CacheIdent::TableName(self.data.table_ref().into()),
+            ]
         };
+
+        cache_invalidator
+            .invalidate(&Context::default(), cache_keys)
+            .await?;
 
         Ok(Status::done())
     }
