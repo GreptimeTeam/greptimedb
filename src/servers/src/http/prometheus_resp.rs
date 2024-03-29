@@ -283,7 +283,7 @@ impl PrometheusJsonResponse {
                     *v = values.pop();
                 }
                 PromQueryResult::String(ref mut _v) => {
-                    // Not supported yet
+                    // TODO(ruihang): Not supported yet
                 }
             }
         });
