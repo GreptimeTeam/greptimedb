@@ -786,6 +786,7 @@ pub async fn reopen_region(
     region_id: RegionId,
     region_dir: String,
     writable: bool,
+    options: HashMap<String, String>,
 ) {
     // Close the region.
     engine
@@ -800,7 +801,7 @@ pub async fn reopen_region(
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
-                options: HashMap::default(),
+                options,
                 skip_wal_replay: false,
             }),
         )
