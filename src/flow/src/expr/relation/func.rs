@@ -97,7 +97,7 @@ impl AggregateFunc {
 
     /// Eval value, diff with accumulator
     ///
-    /// Expect self to be accumulable aggregate functio, i.e. sum/count
+    /// Expect self to be accumulable aggregate function, i.e. sum/count
     ///
     /// TODO(discord9): deal with overflow&better accumulator
     pub fn eval_diff_accumulable<I>(
