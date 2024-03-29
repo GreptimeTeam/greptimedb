@@ -34,8 +34,10 @@ use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{utils, DdlContext, ExecutorContext, ProcedureExecutor};
 use crate::error::{
-    self, EmptyDdlTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
-    SubmitProcedureSnafu, TableNotFoundSnafu, UnsupportedSnafu, WaitProcedureSnafu,
+    EmptyDdlTasksSnafu, ParseProcedureIdSnafu, ProcedureNotFoundSnafu, ProcedureOutputSnafu,
+    QueryProcedureSnafu, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu,
+    TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
+    UnexpectedLogicalRouteTableSnafu, UnsupportedSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -53,7 +55,6 @@ use crate::rpc::ddl::{
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 use crate::rpc::router::RegionRoute;
-use crate::table_name::TableName;
 use crate::ClusterId;
 
 pub type DdlManagerRef = Arc<DdlManager>;
@@ -197,17 +198,11 @@ impl DdlManager {
         cluster_id: ClusterId,
         alter_table_task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        physical_table_info: Option<(TableId, TableName)>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = AlterTableProcedure::new(
-            cluster_id,
-            alter_table_task,
-            table_info_value,
-            physical_table_info,
-            context,
-        )?;
+        let procedure =
+            AlterTableProcedure::new(cluster_id, alter_table_task, table_info_value, context)?;
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -371,12 +366,11 @@ async fn handle_truncate_table_task(
     let (table_info_value, table_route_value) =
         table_metadata_manager.get_full_table_info(table_id).await?;
 
-    let table_info_value = table_info_value.with_context(|| error::TableInfoNotFoundSnafu {
+    let table_info_value = table_info_value.with_context(|| TableInfoNotFoundSnafu {
         table: table_ref.to_string(),
     })?;
 
-    let table_route_value =
-        table_route_value.context(error::TableRouteNotFoundSnafu { table_id })?;
+    let table_route_value = table_route_value.context(TableRouteNotFoundSnafu { table_id })?;
 
     let table_route = table_route_value.into_inner().region_routes()?.clone();
 
@@ -418,50 +412,28 @@ async fn handle_alter_table_task(
         })?
         .table_id();
 
-    let table_info_value = ddl_manager
+    let (table_info_value, table_route_value) = ddl_manager
         .table_metadata_manager()
-        .table_info_manager()
-        .get(table_id)
-        .await?
-        .with_context(|| error::TableInfoNotFoundSnafu {
-            table: table_ref.to_string(),
-        })?;
-
-    let physical_table_id = ddl_manager
-        .table_metadata_manager()
-        .table_route_manager()
-        .get_physical_table_id(table_id)
+        .get_full_table_info(table_id)
         .await?;
 
-    let physical_table_info = if physical_table_id == table_id {
-        None
-    } else {
-        let physical_table_info = &ddl_manager
-            .table_metadata_manager()
-            .table_info_manager()
-            .get(physical_table_id)
-            .await?
-            .with_context(|| error::TableInfoNotFoundSnafu {
-                table: table_ref.to_string(),
-            })?
-            .table_info;
-        Some((
-            physical_table_id,
-            TableName {
-                catalog_name: physical_table_info.catalog_name.clone(),
-                schema_name: physical_table_info.schema_name.clone(),
-                table_name: physical_table_info.name.clone(),
-            },
-        ))
-    };
+    let table_route_value = table_route_value
+        .context(TableRouteNotFoundSnafu { table_id })?
+        .into_inner();
+
+    ensure!(
+        table_route_value.is_physical(),
+        UnexpectedLogicalRouteTableSnafu {
+            err_msg: format!("{:?} is a non-physical TableRouteValue.", table_ref),
+        }
+    );
+
+    let table_info_value = table_info_value.with_context(|| TableInfoNotFoundSnafu {
+        table: table_ref.to_string(),
+    })?;
 
     let (id, _) = ddl_manager
-        .submit_alter_table_task(
-            cluster_id,
-            alter_table_task,
-            table_info_value,
-            physical_table_info,
-        )
+        .submit_alter_table_task(cluster_id, alter_table_task, table_info_value)
         .await?;
 
     info!("Table: {table_id} is altered via procedure_id {id:?}");
@@ -490,7 +462,7 @@ async fn handle_drop_table_task(
         .get_physical_table_route(table_id)
         .await?;
 
-    let table_info_value = table_info_value.with_context(|| error::TableInfoNotFoundSnafu {
+    let table_info_value = table_info_value.with_context(|| TableInfoNotFoundSnafu {
         table: table_ref.to_string(),
     })?;
 
@@ -704,15 +676,15 @@ impl ProcedureExecutor for DdlManager {
         _ctx: &ExecutorContext,
         pid: &str,
     ) -> Result<ProcedureStateResponse> {
-        let pid = ProcedureId::parse_str(pid)
-            .with_context(|_| error::ParseProcedureIdSnafu { key: pid })?;
+        let pid =
+            ProcedureId::parse_str(pid).with_context(|_| ParseProcedureIdSnafu { key: pid })?;
 
         let state = self
             .procedure_manager
             .procedure_state(pid)
             .await
-            .context(error::QueryProcedureSnafu)?
-            .context(error::ProcedureNotFoundSnafu {
+            .context(QueryProcedureSnafu)?
+            .context(ProcedureNotFoundSnafu {
                 pid: pid.to_string(),
             })?;
 
