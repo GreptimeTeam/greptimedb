@@ -59,7 +59,8 @@ use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::prometheus::{
-    format_query, instant_query, label_values_query, labels_query, range_query, series_query,
+    build_info_query, format_query, instant_query, label_values_query, labels_query, range_query,
+    series_query,
 };
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
@@ -682,6 +683,7 @@ impl HttpServer {
                 "/format_query",
                 routing::post(format_query).get(format_query),
             )
+            .route("/status/buildinfo", routing::get(build_info_query))
             .route("/query", routing::post(instant_query).get(instant_query))
             .route("/query_range", routing::post(range_query).get(range_query))
             .route("/labels", routing::post(labels_query).get(labels_query))

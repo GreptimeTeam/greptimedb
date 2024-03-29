@@ -110,7 +110,7 @@ impl QueryContext {
             .build()
     }
 
-    pub fn with_db_name(db_name: Option<&String>) -> QueryContextRef {
+    pub fn with_db_name(db_name: Option<&str>) -> QueryContextRef {
         let (catalog, schema) = db_name
             .map(|db| {
                 let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);

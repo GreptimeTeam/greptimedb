@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager};
 use clap::Parser;
 use client::client_manager::DatanodeClients;
+use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::logging;
@@ -247,13 +248,20 @@ impl StartCommand {
             .cache_tti(cache_tti)
             .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
-
-        let catalog_manager =
-            KvBackendCatalogManager::new(cached_meta_backend.clone(), cached_meta_backend.clone());
+        let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::with_invalidators(vec![
+            cached_meta_backend.clone(),
+        ]));
+        let catalog_manager = KvBackendCatalogManager::new(
+            cached_meta_backend.clone(),
+            multi_cache_invalidator.clone(),
+        )
+        .await;
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(catalog_manager.clone())),
+            Arc::new(InvalidateTableCacheHandler::new(
+                multi_cache_invalidator.clone(),
+            )),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -264,12 +272,12 @@ impl StartCommand {
 
         let mut instance = FrontendBuilder::new(
             cached_meta_backend.clone(),
-            catalog_manager.clone(),
+            catalog_manager,
             Arc::new(DatanodeClients::default()),
             meta_client,
         )
-        .with_cache_invalidator(catalog_manager.clone())
         .with_plugin(plugins.clone())
+        .with_cache_invalidator(multi_cache_invalidator)
         .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await
