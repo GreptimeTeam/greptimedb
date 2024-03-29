@@ -23,7 +23,7 @@ use tests_integration::test_util::{
     setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
     setup_pg_server_with_user_provider, StorageType,
 };
-use tokio_postgres::{NoTls, SimpleQueryMessage};
+use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
 #[macro_export]
 macro_rules! sql_test {
@@ -493,6 +493,39 @@ pub async fn test_postgres_datestyle(store_type: StorageType) {
     tokio::spawn(async move {
         connection.await.unwrap();
     });
+
+    let validate_datestyle = |client: Client, datestyle: &str, is_valid: bool| {
+        let datestyle = datestyle.to_string();
+        async move {
+            assert_eq!(
+                client
+                    .simple_query(format!("SET DATESTYLE={}", datestyle).as_str())
+                    .await
+                    .is_ok(),
+                is_valid
+            );
+            client
+        }
+    };
+
+    // style followed by order is valid
+    let client = validate_datestyle(client, "'ISO,MDY'", true).await;
+
+    // Mix of string and ident is valid
+    let client = validate_datestyle(client, "'ISO',MDY", true).await;
+
+    // list of string that didn't corrupt is valid
+    let client = validate_datestyle(client, "'ISO,MDY','ISO,MDY'", true).await;
+
+    // corrupted style
+    let client = validate_datestyle(client, "'ISO,German'", false).await;
+
+    // corrupted order
+    let client = validate_datestyle(client, "'ISO,DMY','ISO,MDY'", false).await;
+
+    // as long as the value is not corrupted, it's valid
+    let client = validate_datestyle(client, "ISO,ISO,ISO,ISO,ISO,MDY,MDY,MDY,MDY", true).await;
+
     let _ = client
         .simple_query("CREATE TABLE ts_test(ts TIMESTAMP TIME INDEX)")
         .await
