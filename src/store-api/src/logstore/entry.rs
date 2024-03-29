@@ -35,4 +35,7 @@ pub trait Entry: Send + Sync {
 
     /// Returns the namespace of the entry.
     fn namespace(&self) -> Self::Namespace;
+
+    /// Computes the estimated size in bytes of the entry.
+    fn estimated_size(&self) -> usize;
 }

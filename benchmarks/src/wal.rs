@@ -35,6 +35,7 @@ use crate::metrics;
 
 /// The wal provider.
 #[derive(Clone, ValueEnum, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WalProvider {
     #[default]
     RaftEngine,
@@ -44,7 +45,8 @@ pub enum WalProvider {
 #[derive(Parser)]
 pub struct Args {
     /// The provided configuration file.
-    #[clap(long, default_value = "")]
+    /// The example configuration file can be found at `greptimedb/benchmarks/config/wal_bench.example.toml`.
+    #[clap(long, short = 'c')]
     pub cfg_file: String,
 
     /// The wal provider.
@@ -83,17 +85,21 @@ pub struct Args {
     /// - f = ColumnDataType::Float64
     /// - s = ColumnDataType::String  
     /// For e.g., "ifs" will be parsed as three columns: i64, f64, and string.
+    ///
+    /// Additionally, a "x" sign can be provided to repeat the column types for a given number of times.
+    /// For e.g., "iix2" will be parsed as 4 columns: i64, i64, i64, and i64.
+    /// This feature is useful if you want to specify many columns.
     #[clap(long, default_value = "ifs")]
     pub col_types: String,
 
     /// The maximum size of a batch of kafka records.
     /// The default value is 1mb.
-    #[clap(long, default_value = "1MB")]
+    #[clap(long, default_value = "512KB")]
     pub max_batch_size: ReadableSize,
 
     /// The minimum latency the kafka client issues a batch of kafka records.
     /// However, a batch of kafka records would be immediately issued if a record cannot be fit into the batch.
-    #[clap(long, default_value = "20ms")]
+    #[clap(long, default_value = "1ms")]
     pub linger: String,
 
     /// The initial backoff delay of the kafka consumer.
@@ -150,10 +156,14 @@ pub struct Config {
     pub num_rows: u32,
     pub col_types: String,
     pub max_batch_size: ReadableSize,
+    #[serde(with = "humantime_serde")]
     pub linger: Duration,
+    #[serde(with = "humantime_serde")]
     pub backoff_init: Duration,
+    #[serde(with = "humantime_serde")]
     pub backoff_max: Duration,
     pub backoff_base: u32,
+    #[serde(with = "humantime_serde")]
     pub backoff_deadline: Duration,
     pub compression: String,
     pub rng_seed: u64,

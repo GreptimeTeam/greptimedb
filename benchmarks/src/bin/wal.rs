@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(int_roundings)]
+
 use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
@@ -37,161 +39,154 @@ use rskafka::client::partition::Compression;
 use rskafka::client::ClientBuilder;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
-use tokio::sync::Barrier;
 
-struct Benchmarker;
+async fn run_benchmarker<S: LogStore>(cfg: &Config, topics: &[String], wal: Arc<Wal<S>>) {
+    let chunk_size = cfg.num_regions.div_ceil(cfg.num_workers);
+    let region_chunks = (0..cfg.num_regions)
+        .map(|id| {
+            build_region(
+                id as u64,
+                topics,
+                &mut SmallRng::seed_from_u64(cfg.rng_seed),
+                cfg,
+            )
+        })
+        .chunks(chunk_size as usize)
+        .into_iter()
+        .map(|chunk| Arc::new(chunk.collect::<Vec<_>>()))
+        .collect::<Vec<_>>();
 
-impl Benchmarker {
-    async fn run<S: LogStore>(cfg: &Config, topics: &[String], wal: Arc<Wal<S>>) {
-        let chunk_size = (cfg.num_regions as f32 / cfg.num_workers as f32).ceil() as usize;
-        let region_chunks = (0..cfg.num_regions)
-            .map(|id| {
-                Self::build_region(
-                    id as u64,
-                    topics,
-                    &mut SmallRng::seed_from_u64(cfg.rng_seed),
-                    cfg,
-                )
+    let mut write_elapsed = 0;
+    let mut read_elapsed = 0;
+
+    if !cfg.skip_write {
+        info!("Benchmarking write ...");
+
+        let num_scrapes = cfg.num_scrapes;
+        let timer = Instant::now();
+        futures::future::join_all((0..cfg.num_workers).map(|i| {
+            let wal = wal.clone();
+            let regions = region_chunks[i as usize].clone();
+            tokio::spawn(async move {
+                for _ in 0..num_scrapes {
+                    let mut wal_writer = wal.writer();
+                    regions
+                        .iter()
+                        .for_each(|region| region.add_wal_entry(&mut wal_writer));
+                    wal_writer.write_to_wal().await.unwrap();
+                }
             })
-            .chunks(chunk_size)
-            .into_iter()
-            .map(|chunk| Arc::new(chunk.collect::<Vec<_>>()))
-            .collect::<Vec<_>>();
-
-        let mut write_elapsed = 0;
-        let mut read_elapsed = 0;
-
-        if !cfg.skip_write {
-            info!("Benchmarking write ...");
-
-            let barrier = Arc::new(Barrier::new(cfg.num_workers as usize));
-            let num_scrapes = cfg.num_scrapes;
-            let timer = Instant::now();
-
-            futures::future::join_all((0..cfg.num_workers).map(|i| {
-                let barrier = barrier.clone();
-                let wal = wal.clone();
-                let regions = region_chunks[i as usize].clone();
-                tokio::spawn(async move {
-                    barrier.wait().await;
-                    for _ in 0..num_scrapes {
-                        let mut wal_writer = wal.writer();
-                        regions
-                            .iter()
-                            .for_each(|region| region.add_wal_entry(&mut wal_writer));
-                        wal_writer.write_to_wal().await.unwrap();
-                    }
-                })
-            }))
-            .await;
-
-            write_elapsed += timer.elapsed().as_millis();
-        }
-
-        if !cfg.skip_read {
-            info!("Benchmarking read ...");
-
-            let barrier = Arc::new(Barrier::new(cfg.num_workers as usize));
-            let timer = Instant::now();
-
-            futures::future::join_all((0..cfg.num_workers).map(|i| {
-                let barrier = barrier.clone();
-                let wal = wal.clone();
-                let regions = region_chunks[i as usize].clone();
-                tokio::spawn(async move {
-                    barrier.wait().await;
-                    for region in regions.iter() {
-                        region.replay(&wal).await;
-                    }
-                })
-            }))
-            .await;
-
-            read_elapsed = timer.elapsed().as_millis();
-        }
-
-        Self::dump_report(cfg, write_elapsed, read_elapsed);
+        }))
+        .await;
+        write_elapsed += timer.elapsed().as_millis() as u64;
     }
 
-    fn build_region(id: u64, topics: &[String], rng: &mut SmallRng, cfg: &Config) -> Region {
-        let wal_options = match cfg.wal_provider {
-            WalProvider::Kafka => {
-                assert!(!topics.is_empty());
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: topics.get(id as usize % topics.len()).cloned().unwrap(),
-                })
-            }
-            WalProvider::RaftEngine => WalOptions::RaftEngine,
-        };
-        Region::new(
-            RegionId::from_u64(id),
-            Self::build_schema(&parse_col_types(&cfg.col_types), rng),
-            wal_options,
-            cfg.num_rows,
-            cfg.rng_seed,
-        )
-    }
+    if !cfg.skip_read {
+        info!("Benchmarking read ...");
 
-    fn build_schema(col_types: &[ColumnDataType], mut rng: &mut SmallRng) -> Vec<ColumnSchema> {
-        col_types
-            .iter()
-            .map(|col_type| ColumnSchema {
-                column_name: Alphanumeric.sample_string(&mut rng, 5),
-                datatype: *col_type as i32,
-                semantic_type: SemanticType::Field as i32,
-                datatype_extension: None,
+        let timer = Instant::now();
+        futures::future::join_all((0..cfg.num_workers).map(|i| {
+            let wal = wal.clone();
+            let regions = region_chunks[i as usize].clone();
+            tokio::spawn(async move {
+                for region in regions.iter() {
+                    region.replay(&wal).await;
+                }
             })
-            .chain(vec![ColumnSchema {
-                column_name: "ts".to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as i32,
-                semantic_type: SemanticType::Tag as i32,
-                datatype_extension: None,
-            }])
-            .collect()
+        }))
+        .await;
+        read_elapsed = timer.elapsed().as_millis() as u64;
     }
 
-    fn dump_report(cfg: &Config, write_elapsed: u128, read_elapsed: u128) {
-        let cost_report = format!(
-            "write costs: {} ms, read costs: {} ms",
-            write_elapsed, read_elapsed,
-        );
+    dump_report(cfg, write_elapsed, read_elapsed);
+}
 
-        let total_written_bytes = metrics::METRIC_WAL_WRITE_BYTES_TOTAL.get();
-        let write_throughput = if write_elapsed > 0 {
-            total_written_bytes as f64 / write_elapsed as f64 * 1000.0
-        } else {
-            0.0
-        };
-        // This is the effective read throughput from which the read amplification is removed.
-        let total_read_bytes = metrics::METRIC_WAL_READ_BYTES_TOTAL.get();
-        let read_throughput = if read_elapsed > 0 {
-            total_read_bytes as f64 / read_elapsed as f64 * 1000.0
-        } else {
-            0.0
-        };
+fn build_region(id: u64, topics: &[String], rng: &mut SmallRng, cfg: &Config) -> Region {
+    let wal_options = match cfg.wal_provider {
+        WalProvider::Kafka => {
+            assert!(!topics.is_empty());
+            WalOptions::Kafka(KafkaWalOptions {
+                topic: topics.get(id as usize % topics.len()).cloned().unwrap(),
+            })
+        }
+        WalProvider::RaftEngine => WalOptions::RaftEngine,
+    };
+    Region::new(
+        RegionId::from_u64(id),
+        build_schema(&parse_col_types(&cfg.col_types), rng),
+        wal_options,
+        cfg.num_rows,
+        cfg.rng_seed,
+    )
+}
 
-        let throughput_report = format!(
-            "total written bytes: {} bytes, total read bytes: {} bytes, write throuput: {} bytes/s ({} mb/s), read throughput: {} bytes/s ({} mb/s)",
-            total_written_bytes,
-            total_read_bytes,
-            write_throughput.floor() as u128,
-            (write_throughput / (1 << 20) as f64).floor() as u128,
-            read_throughput.floor() as u128,
-            (read_throughput / (1 << 20) as f64).floor() as u128,
-        );
+fn build_schema(col_types: &[ColumnDataType], mut rng: &mut SmallRng) -> Vec<ColumnSchema> {
+    col_types
+        .iter()
+        .map(|col_type| ColumnSchema {
+            column_name: Alphanumeric.sample_string(&mut rng, 5),
+            datatype: *col_type as i32,
+            semantic_type: SemanticType::Field as i32,
+            datatype_extension: None,
+        })
+        .chain(vec![ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Tag as i32,
+            datatype_extension: None,
+        }])
+        .collect()
+}
 
-        let metrics_report = if cfg.report_metrics {
-            let mut buffer = Vec::new();
-            let encoder = TextEncoder::new();
-            let metrics = prometheus::gather();
-            encoder.encode(&metrics, &mut buffer).unwrap();
-            String::from_utf8(buffer).unwrap()
-        } else {
-            String::new()
-        };
+fn dump_report(cfg: &Config, write_elapsed: u64, read_elapsed: u64) {
+    let cost_report = format!(
+        "write costs: {} ms, read costs: {} ms",
+        write_elapsed, read_elapsed,
+    );
 
-        info!("Benchmark config: {:?}\n\nBenchmark report:\n\n{cost_report}\n\n{throughput_report}\n\n{metrics_report}", cfg);
-    }
+    let total_written_bytes = metrics::METRIC_WAL_WRITE_BYTES_TOTAL.get();
+    let write_throughput = if write_elapsed > 0 {
+        (total_written_bytes * 1000).div_floor(write_elapsed)
+    } else {
+        0
+    };
+    let total_read_bytes = metrics::METRIC_WAL_READ_BYTES_TOTAL.get();
+    let read_throughput = if read_elapsed > 0 {
+        (total_read_bytes * 1000).div_floor(read_elapsed)
+    } else {
+        0
+    };
+
+    let throughput_report = format!(
+        "total written bytes: {} bytes, total read bytes: {} bytes, write throuput: {} bytes/s ({} mb/s), read throughput: {} bytes/s ({} mb/s)",
+        total_written_bytes,
+        total_read_bytes,
+        write_throughput,
+        write_throughput.div_floor(1 << 20),
+        read_throughput,
+        read_throughput.div_floor(1 << 20),
+    );
+
+    let metrics_report = if cfg.report_metrics {
+        let mut buffer = Vec::new();
+        let encoder = TextEncoder::new();
+        let metrics = prometheus::gather();
+        encoder.encode(&metrics, &mut buffer).unwrap();
+        String::from_utf8(buffer).unwrap()
+    } else {
+        String::new()
+    };
+
+    info!(
+        r#"
+Benchmark config: 
+{cfg:?}
+
+Benchmark report:
+{cost_report}
+{throughput_report}
+{metrics_report}"#
+    );
 }
 
 async fn create_topics(cfg: &Config) -> Vec<String> {
@@ -239,7 +234,16 @@ fn parse_compression(comp: &str) -> Compression {
 }
 
 fn parse_col_types(col_types: &str) -> Vec<ColumnDataType> {
-    col_types
+    let parts = col_types.split('x').collect::<Vec<_>>();
+    assert!(parts.len() <= 2);
+
+    let pattern = parts[0];
+    let repeat = parts
+        .get(1)
+        .map(|r| r.parse::<usize>().unwrap())
+        .unwrap_or(1);
+
+    pattern
         .chars()
         .map(|c| match c {
             'i' | 'I' => ColumnDataType::Int64,
@@ -247,10 +251,13 @@ fn parse_col_types(col_types: &str) -> Vec<ColumnDataType> {
             's' | 'S' => ColumnDataType::String,
             other => unreachable!("Cannot parse {other} as a column data type"),
         })
+        .cycle()
+        .take(pattern.len() * repeat)
         .collect()
 }
 
 fn main() {
+    // Sets the global logging to INFO and suppress loggings from rskafka other than ERROR and upper ones.
     std::env::set_var("UNITTEST_LOG_LEVEL", "info,rskafka=error");
     common_telemetry::init_default_ut_logging();
 
@@ -272,7 +279,7 @@ fn main() {
         .min(cfg.num_scrapes)
         .min(cfg.max_batch_size.as_bytes() as u32)
         .min(cfg.bootstrap_brokers.len() as u32)
-        > 0
+        == 0
     {
         panic!("Invalid arguments");
     }
@@ -300,7 +307,7 @@ fn main() {
                     };
                     let store = Arc::new(KafkaLogStore::try_new(&kafka_cfg).await.unwrap());
                     let wal = Arc::new(Wal::new(store));
-                    Benchmarker::run(&cfg, &topics, wal).await;
+                    run_benchmarker(&cfg, &topics, wal).await;
                 }
                 WalProvider::RaftEngine => {
                     // The benchmarker assumes the raft engine directory exists.
@@ -312,7 +319,7 @@ fn main() {
                     .map(Arc::new)
                     .unwrap();
                     let wal = Arc::new(Wal::new(store));
-                    Benchmarker::run(&cfg, &[], wal).await;
+                    run_benchmarker(&cfg, &[], wal).await;
                 }
             }
         });

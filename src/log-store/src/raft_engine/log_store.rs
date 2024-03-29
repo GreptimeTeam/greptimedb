@@ -25,7 +25,7 @@ use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::options::WalOptions;
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, ResultExt};
-use store_api::logstore::entry::Id as EntryId;
+use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace as NamespaceTrait};
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
@@ -37,7 +37,6 @@ use crate::error::{
 };
 use crate::metrics;
 use crate::raft_engine::backend::SYSTEM_NAMESPACE;
-use crate::raft_engine::entry_estimated_size;
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace};
 
 const NAMESPACE_PREFIX: &str = "$sys/";
@@ -251,8 +250,12 @@ impl LogStore for RaftEngineLogStore {
     /// batch append.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
         metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_CALLS_TOTAL.inc();
-        metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_BYTES_TOTAL
-            .inc_by(entries.iter().map(entry_estimated_size).sum::<usize>() as u64);
+        metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_BYTES_TOTAL.inc_by(
+            entries
+                .iter()
+                .map(EntryTrait::estimated_size)
+                .sum::<usize>() as u64,
+        );
         let _timer = metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_ELAPSED.start_timer();
 
         ensure!(self.started(), IllegalStateSnafu);

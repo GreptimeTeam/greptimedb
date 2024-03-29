@@ -70,6 +70,10 @@ impl Entry for EntryImpl {
     fn namespace(&self) -> Self::Namespace {
         self.ns.clone()
     }
+
+    fn estimated_size(&self) -> usize {
+        size_of::<Self>() + self.data.capacity() * size_of::<u8>() + self.ns.topic.capacity()
+    }
 }
 
 impl Display for EntryImpl {
@@ -84,7 +88,26 @@ impl Display for EntryImpl {
     }
 }
 
-/// Computes the estimated size in bytes of the entry.
-pub fn entry_estimated_size(entry: &EntryImpl) -> usize {
-    size_of::<EntryImpl>() + entry.data.capacity() * size_of::<u8>() + entry.ns.topic.capacity()
+#[cfg(test)]
+mod tests {
+    use std::mem::size_of;
+
+    use store_api::logstore::entry::Entry;
+
+    use crate::kafka::{EntryImpl, NamespaceImpl};
+
+    #[test]
+    fn test_estimated_size() {
+        let entry = EntryImpl {
+            data: Vec::with_capacity(100),
+            id: 0,
+            ns: NamespaceImpl {
+                region_id: 0,
+                topic: String::with_capacity(10),
+            },
+        };
+        let expected = size_of::<EntryImpl>() + 100 * size_of::<u8>() + 10;
+        let got = entry.estimated_size();
+        assert_eq!(expected, got);
+    }
 }

@@ -84,9 +84,25 @@ impl Entry for EntryImpl {
             ..Default::default()
         }
     }
+
+    fn estimated_size(&self) -> usize {
+        size_of::<Self>() + self.data.capacity() * size_of::<u8>()
+    }
 }
 
-/// Computes the estimated size in bytes of the entry.
-pub fn entry_estimated_size(entry: &EntryImpl) -> usize {
-    size_of::<EntryImpl>() + entry.data.capacity() * size_of::<u8>()
+#[cfg(test)]
+mod tests {
+    use std::mem::size_of;
+
+    use store_api::logstore::entry::Entry;
+
+    use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl};
+
+    #[test]
+    fn test_estimated_size() {
+        let entry = EntryImpl::create(1, 1, Vec::with_capacity(100));
+        let expected = size_of::<EntryImpl>() + 100;
+        let got = entry.estimated_size();
+        assert_eq!(expected, got);
+    }
 }

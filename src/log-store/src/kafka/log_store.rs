@@ -22,7 +22,7 @@ use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
 use snafu::ResultExt;
-use store_api::logstore::entry::Id as EntryId;
+use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
@@ -31,7 +31,7 @@ use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSna
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
-use crate::kafka::{entry_estimated_size, EntryImpl, NamespaceImpl};
+use crate::kafka::{EntryImpl, NamespaceImpl};
 use crate::metrics;
 
 /// A log store backed by Kafka.
@@ -88,8 +88,12 @@ impl LogStore for KafkaLogStore {
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
         metrics::METRIC_KAFKA_APPEND_BATCH_CALLS_TOTAL.inc();
-        metrics::METRIC_KAFKA_APPEND_BATCH_BYTES_TOTAL
-            .inc_by(entries.iter().map(entry_estimated_size).sum::<usize>() as u64);
+        metrics::METRIC_KAFKA_APPEND_BATCH_BYTES_TOTAL.inc_by(
+            entries
+                .iter()
+                .map(EntryTrait::estimated_size)
+                .sum::<usize>() as u64,
+        );
         let _timer = metrics::METRIC_KAFKA_APPEND_BATCH_ELAPSED.start_timer();
 
         if entries.is_empty() {
