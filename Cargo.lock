@@ -9377,6 +9377,7 @@ name = "sql"
 version = "0.7.1"
 dependencies = [
  "api",
+ "chrono",
  "common-base",
  "common-catalog",
  "common-datasource",
@@ -9385,6 +9386,10 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-time",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "datafusion-physical-expr",
  "datafusion-sql",
  "datatypes",
  "hex",
