@@ -100,8 +100,8 @@ pub fn validate_client_encoding(set: SetVariables) -> Result<()> {
     Ok(())
 }
 
-// return Ok(Some(new_val)) if value not exist or new_value equals to value
-// else return error.
+// if one of original value and new value is none, return the other one
+// returns new values only when it equals to original one else return error.
 // This is only used for handling datestyle
 fn merge_datestyle_value<T>(value: Option<T>, new_value: Option<T>) -> Result<Option<T>>
 where
