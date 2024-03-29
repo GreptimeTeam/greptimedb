@@ -14,10 +14,13 @@
 
 use std::time::Instant;
 
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::table_name::TableName;
 
-use super::{bench_self_recorded, create_region_routes, create_table_info};
+use crate::cli::bench::{
+    bench_self_recorded, create_region_routes, create_region_wal_options, create_table_info,
+};
 
 pub struct TableMetadataBencher {
     table_metadata_manager: TableMetadataManagerRef,
@@ -43,12 +46,19 @@ impl TableMetadataBencher {
                 let table_name = format!("bench_table_name_{}", i);
                 let table_name = TableName::new("bench_catalog", "bench_schema", table_name);
                 let table_info = create_table_info(i, table_name);
-                let region_routes = create_region_routes();
+
+                let regions: Vec<_> = (0..64).collect();
+                let region_routes = create_region_routes(regions.clone());
+                let region_wal_options = create_region_wal_options(regions);
 
                 let start = Instant::now();
 
                 self.table_metadata_manager
-                    .create_table_metadata(table_info, region_routes)
+                    .create_table_metadata(
+                        table_info,
+                        TableRouteValue::physical(region_routes),
+                        region_wal_options,
+                    )
                     .await
                     .unwrap();
 
@@ -96,9 +106,15 @@ impl TableMetadataBencher {
                     .await
                     .unwrap();
                 let start = Instant::now();
+                let table_info = table_info.unwrap();
+                let table_id = table_info.table_info.ident.table_id;
                 let _ = self
                     .table_metadata_manager
-                    .delete_table_metadata(&table_info.unwrap(), &table_route.unwrap())
+                    .delete_table_metadata(
+                        table_id,
+                        &table_info.table_name(),
+                        table_route.unwrap().region_routes().unwrap(),
+                    )
                     .await;
                 start.elapsed()
             },

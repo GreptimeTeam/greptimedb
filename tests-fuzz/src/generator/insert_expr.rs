@@ -1,0 +1,105 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::marker::PhantomData;
+
+use datatypes::value::Value;
+use derive_builder::Builder;
+use rand::seq::SliceRandom;
+use rand::Rng;
+
+use crate::context::TableContextRef;
+use crate::error::{Error, Result};
+use crate::fake::WordGenerator;
+use crate::generator::{Generator, Random};
+use crate::ir::insert_expr::{InsertIntoExpr, RowValue};
+use crate::ir::{generate_random_value, Ident};
+
+/// Generates [InsertIntoExpr].
+#[derive(Builder)]
+#[builder(pattern = "owned")]
+pub struct InsertExprGenerator<R: Rng + 'static> {
+    table_ctx: TableContextRef,
+    #[builder(default = "1")]
+    rows: usize,
+    #[builder(default = "Box::new(WordGenerator)")]
+    word_generator: Box<dyn Random<Ident, R>>,
+    #[builder(default)]
+    _phantom: PhantomData<R>,
+}
+
+impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
+    type Error = Error;
+
+    /// Generates the [InsertIntoExpr].
+    fn generate(&self, rng: &mut R) -> Result<InsertIntoExpr> {
+        // Whether to omit all columns, i.e. INSERT INTO table_name VALUES (...)
+        let omit_column_list = rng.gen_bool(0.2);
+
+        let mut values_columns = vec![];
+        if omit_column_list {
+            // If omit column list, then all columns are required in the values list
+            values_columns = self.table_ctx.columns.clone();
+        } else {
+            for column in &self.table_ctx.columns {
+                let can_omit = column.is_nullable() || column.has_default_value();
+
+                // 50% chance to omit a column if it's not required
+                if !can_omit || rng.gen_bool(0.5) {
+                    values_columns.push(column.clone());
+                }
+            }
+            values_columns.shuffle(rng);
+
+            // If all columns are omitted, pick a random column
+            if values_columns.is_empty() {
+                values_columns.push(self.table_ctx.columns.choose(rng).unwrap().clone());
+            }
+        }
+
+        let mut values_list = Vec::with_capacity(self.rows);
+        for _ in 0..self.rows {
+            let mut row = Vec::with_capacity(values_columns.len());
+            for column in &values_columns {
+                if column.is_nullable() && rng.gen_bool(0.2) {
+                    row.push(RowValue::Value(Value::Null));
+                    continue;
+                }
+
+                if column.has_default_value() && rng.gen_bool(0.2) {
+                    row.push(RowValue::Default);
+                    continue;
+                }
+
+                row.push(RowValue::Value(generate_random_value(
+                    rng,
+                    &column.column_type,
+                    Some(self.word_generator.as_ref()),
+                )));
+            }
+
+            values_list.push(row);
+        }
+
+        Ok(InsertIntoExpr {
+            table_name: self.table_ctx.name.to_string(),
+            columns: if omit_column_list {
+                vec![]
+            } else {
+                values_columns
+            },
+            values_list,
+        })
+    }
+}

@@ -12,116 +12,72 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::Partition;
-use common_catalog::format_full_table_name;
+use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
-use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_meta::rpc::router::{Region, RegionRoute};
-use common_meta::sequence::SequenceRef;
-use common_telemetry::warn;
+use common_meta::ddl::table_meta::PeerAllocator;
+use common_meta::ddl::TableMetadataAllocatorContext;
+use common_meta::error::{ExternalSnafu, Result as MetaResult};
+use common_meta::peer::Peer;
 use snafu::{ensure, ResultExt};
-use store_api::storage::{RegionId, TableId, MAX_REGION_SEQ};
-use table::metadata::RawTableInfo;
+use store_api::storage::MAX_REGION_SEQ;
 
 use crate::error::{self, Result, TooManyPartitionsSnafu};
 use crate::metasrv::{SelectorContext, SelectorRef};
+use crate::selector::SelectorOptions;
 
-pub struct MetaSrvTableMetadataAllocator {
+pub struct MetasrvPeerAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,
-    table_id_sequence: SequenceRef,
 }
 
-impl MetaSrvTableMetadataAllocator {
-    pub fn new(
-        ctx: SelectorContext,
-        selector: SelectorRef,
-        table_id_sequence: SequenceRef,
-    ) -> Self {
-        Self {
-            ctx,
-            selector,
-            table_id_sequence,
-        }
+impl MetasrvPeerAllocator {
+    pub fn new(ctx: SelectorContext, selector: SelectorRef) -> Self {
+        Self { ctx, selector }
     }
-}
 
-#[async_trait::async_trait]
-impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
-    async fn create(
+    async fn alloc(
         &self,
         ctx: &TableMetadataAllocatorContext,
-        raw_table_info: &mut RawTableInfo,
-        partitions: &[Partition],
-    ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
-        handle_create_region_routes(
-            ctx.cluster_id,
-            raw_table_info,
-            partitions,
-            &self.ctx,
-            &self.selector,
-            &self.table_id_sequence,
-        )
-        .await
-        .map_err(BoxedError::new)
-        .context(meta_error::ExternalSnafu)
+        regions: usize,
+    ) -> Result<Vec<Peer>> {
+        ensure!(regions <= MAX_REGION_SEQ as usize, TooManyPartitionsSnafu);
+
+        let mut peers = self
+            .selector
+            .select(
+                ctx.cluster_id,
+                &self.ctx,
+                SelectorOptions {
+                    min_required_items: regions,
+                    allow_duplication: true,
+                },
+            )
+            .await?;
+
+        ensure!(
+            peers.len() >= regions,
+            error::NoEnoughAvailableDatanodeSnafu {
+                required: regions,
+                available: peers.len(),
+            }
+        );
+
+        peers.truncate(regions);
+
+        Ok(peers)
     }
 }
 
-/// pre-allocates create table's table id and region routes.
-async fn handle_create_region_routes(
-    cluster_id: u64,
-    table_info: &mut RawTableInfo,
-    partitions: &[Partition],
-    ctx: &SelectorContext,
-    selector: &SelectorRef,
-    table_id_sequence: &SequenceRef,
-) -> Result<(TableId, Vec<RegionRoute>)> {
-    let mut peers = selector.select(cluster_id, ctx).await?;
-
-    if peers.len() < partitions.len() {
-        warn!("Create table failed due to no enough available datanodes, table: {}, partition number: {}, datanode number: {}", format_full_table_name(&table_info.catalog_name,&table_info.schema_name,&table_info.name), partitions.len(), peers.len());
-        return error::NoEnoughAvailableDatanodeSnafu {
-            expected: partitions.len(),
-            available: peers.len(),
-        }
-        .fail();
+#[async_trait]
+impl PeerAllocator for MetasrvPeerAllocator {
+    async fn alloc(
+        &self,
+        ctx: &TableMetadataAllocatorContext,
+        regions: usize,
+    ) -> MetaResult<Vec<Peer>> {
+        self.alloc(ctx, regions)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
     }
-
-    // We don't need to keep all peers, just truncate it to the number of partitions.
-    // If the peers are not enough, some peers will be used for multiple partitions.
-    peers.truncate(partitions.len());
-
-    let table_id = table_id_sequence
-        .next()
-        .await
-        .context(error::NextSequenceSnafu)? as u32;
-    table_info.ident.table_id = table_id;
-
-    ensure!(
-        partitions.len() <= MAX_REGION_SEQ as usize,
-        TooManyPartitionsSnafu
-    );
-
-    let region_routes = partitions
-        .iter()
-        .enumerate()
-        .map(|(i, partition)| {
-            let region = Region {
-                id: RegionId::new(table_id, i as u32),
-                partition: Some(partition.clone().into()),
-                ..Default::default()
-            };
-            let peer = peers[i % peers.len()].clone();
-            RegionRoute {
-                region,
-                leader_peer: Some(peer.into()),
-                follower_peers: vec![], // follower_peers is not supported at the moment
-                leader_status: None,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    Ok((table_id, region_routes))
 }

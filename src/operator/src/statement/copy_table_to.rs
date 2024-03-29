@@ -14,16 +14,17 @@
 
 use std::sync::Arc;
 
+use client::OutputData;
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
+use common_datasource::file_format::parquet::stream_to_parquet;
 use common_datasource::file_format::Format;
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
-use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::debug;
+use common_telemetry::{debug, tracing};
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference as DfTableReference;
 use datafusion_expr::LogicalPlanBuilder;
@@ -31,16 +32,19 @@ use object_store::ObjectStore;
 use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use storage::sst::SstInfo;
-use storage::{ParquetWriter, Source};
-use table::engine::TableReference;
 use table::requests::CopyTableRequest;
 use table::table::adapter::DfTableProviderAdapter;
+use table::table_reference::TableReference;
 
-use crate::error::{
-    self, BuildDfLogicalPlanSnafu, ExecLogicalPlanSnafu, Result, WriteParquetSnafu,
-};
+use crate::error::{self, BuildDfLogicalPlanSnafu, ExecLogicalPlanSnafu, Result};
 use crate::statement::StatementExecutor;
+
+// The buffer size should be greater than 5MB (minimum multipart upload size).
+/// Buffer size to flush data to object stores.
+const WRITE_BUFFER_THRESHOLD: ReadableSize = ReadableSize::mb(8);
+
+/// Default number of concurrent write, it only works on object store backend(e.g., S3).
+const WRITE_CONCURRENCY: usize = 8;
 
 impl StatementExecutor {
     async fn stream_to_file(
@@ -50,7 +54,7 @@ impl StatementExecutor {
         object_store: ObjectStore,
         path: &str,
     ) -> Result<usize> {
-        let threshold = ReadableSize::mb(4).as_bytes() as usize;
+        let threshold = WRITE_BUFFER_THRESHOLD.as_bytes() as usize;
 
         match format {
             Format::Csv(_) => stream_to_csv(
@@ -58,6 +62,7 @@ impl StatementExecutor {
                 object_store,
                 path,
                 threshold,
+                WRITE_CONCURRENCY,
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),
@@ -66,24 +71,24 @@ impl StatementExecutor {
                 object_store,
                 path,
                 threshold,
+                WRITE_CONCURRENCY,
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),
-            Format::Parquet(_) => {
-                let writer = ParquetWriter::new(path, Source::Stream(stream), object_store);
-                let rows_copied = writer
-                    .write_sst(&storage::sst::WriteOptions::default())
-                    .await
-                    .context(WriteParquetSnafu)?
-                    .map(|SstInfo { num_rows, .. }| num_rows)
-                    .unwrap_or(0);
-
-                Ok(rows_copied)
-            }
+            Format::Parquet(_) => stream_to_parquet(
+                Box::pin(DfRecordBatchStreamAdapter::new(stream)),
+                object_store,
+                path,
+                threshold,
+                WRITE_CONCURRENCY,
+            )
+            .await
+            .context(error::WriteStreamToFileSnafu { path }),
             _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn copy_table_to(
         &self,
         req: CopyTableRequest,
@@ -112,24 +117,26 @@ impl StatementExecutor {
         let table_provider = Arc::new(DfTableProviderAdapter::new(table));
         let table_source = Arc::new(DefaultTableSource::new(table_provider));
 
-        let plan = LogicalPlanBuilder::scan_with_filters(
+        let mut builder = LogicalPlanBuilder::scan_with_filters(
             df_table_ref.to_owned_reference(),
             table_source,
             None,
-            filters,
+            filters.clone(),
         )
-        .context(BuildDfLogicalPlanSnafu)?
-        .build()
         .context(BuildDfLogicalPlanSnafu)?;
+        for f in filters {
+            builder = builder.filter(f).context(BuildDfLogicalPlanSnafu)?;
+        }
+        let plan = builder.build().context(BuildDfLogicalPlanSnafu)?;
 
         let output = self
             .query_engine
             .execute(LogicalPlan::DfPlan(plan), query_ctx)
             .await
             .context(ExecLogicalPlanSnafu)?;
-        let stream = match output {
-            Output::Stream(stream) => stream,
-            Output::RecordBatches(record_batches) => record_batches.as_stream(),
+        let stream = match output.data {
+            OutputData::Stream(stream) => stream,
+            OutputData::RecordBatches(record_batches) => record_batches.as_stream(),
             _ => unreachable!(),
         };
 

@@ -18,19 +18,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::Peer;
 use common_base::Plugins;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
-use common_meta::sequence::SequenceRef;
+use common_meta::peer::Peer;
+use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
+use common_meta::{distributed_time_constants, ClusterId};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
+use common_wal::config::MetaSrvWalConfig;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use snafu::ResultExt;
 use table::metadata::TableId;
@@ -39,11 +43,14 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
-    self, InitMetadataSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
+    InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
     StopProcedureManagerSnafu,
 };
+use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
+use crate::lease::lookup_alive_datanode_peer;
 use crate::lock::DistLockRef;
+use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
@@ -53,7 +60,7 @@ use crate::state::{become_follower, become_leader, StateRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetaSrvOptions {
     pub bind_addr: String,
@@ -65,9 +72,30 @@ pub struct MetaSrvOptions {
     pub http: HttpOptions,
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
+    pub failure_detector: PhiAccrualFailureDetectorOptions,
     pub datanode: DatanodeOptions,
     pub enable_telemetry: bool,
     pub data_home: String,
+    pub wal: MetaSrvWalConfig,
+    pub export_metrics: ExportMetricsOption,
+    pub store_key_prefix: String,
+    /// The max operations per txn
+    ///
+    /// This value is usually limited by which store is used for the `KvBackend`.
+    /// For example, if using etcd, this value should ensure that it is less than
+    /// or equal to the `--max-txn-ops` option value of etcd.
+    ///
+    /// TODO(jeremy): Currently, this option only affects the etcd store, but it may
+    /// also affect other stores in the future. In other words, each store needs to
+    /// limit the number of operations in a txn because an infinitely large txn could
+    /// potentially block other operations.
+    pub max_txn_ops: usize,
+}
+
+impl MetaSrvOptions {
+    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["wal.broker_endpoints"])
+    }
 }
 
 impl Default for MetaSrvOptions {
@@ -88,9 +116,14 @@ impl Default for MetaSrvOptions {
                 max_retry_times: 12,
                 retry_delay: Duration::from_millis(500),
             },
+            failure_detector: PhiAccrualFailureDetectorOptions::default(),
             datanode: DatanodeOptions::default(),
             enable_telemetry: true,
             data_home: METASRV_HOME.to_string(),
+            wal: MetaSrvWalConfig::default(),
+            export_metrics: ExportMetricsOption::default(),
+            store_key_prefix: String::new(),
+            max_txn_ops: 128,
         }
     }
 }
@@ -138,20 +171,11 @@ pub struct Context {
     pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
-    pub skip_all: Arc<AtomicBool>,
     pub is_infancy: bool,
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl Context {
-    pub fn is_skip_all(&self) -> bool {
-        self.skip_all.load(Ordering::Relaxed)
-    }
-
-    pub fn set_skip_all(&self) {
-        self.skip_all.store(true, Ordering::Relaxed);
-    }
-
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
     }
@@ -177,6 +201,7 @@ pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
 pub struct MetaStateHandler {
     procedure_manager: ProcedureManagerRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
     subscribe_manager: Option<SubscribeManagerRef>,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
@@ -196,6 +221,11 @@ impl MetaStateHandler {
         if let Err(e) = self.procedure_manager.start().await {
             error!(e; "Failed to start procedure manager");
         }
+
+        if let Err(e) = self.wal_options_allocator.start().await {
+            error!(e; "Failed to start wal options allocator");
+        }
+
         self.greptimedb_telemetry_task.should_report(true);
     }
 
@@ -228,7 +258,6 @@ pub struct MetaSrv {
     in_memory: ResettableKvBackendRef,
     kv_backend: KvBackendRef,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
-    table_id_sequence: SequenceRef,
     meta_peer_client: MetaPeerClientRef,
     selector: SelectorRef,
     handler_group: HeartbeatHandlerGroup,
@@ -236,9 +265,12 @@ pub struct MetaSrv {
     lock: DistLockRef,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
-    ddl_executor: DdlTaskExecutorRef,
+    procedure_executor: ProcedureExecutorRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
+    memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
+    region_migration_manager: RegionMigrationManagerRef,
 
     plugins: Plugins,
 }
@@ -270,6 +302,7 @@ impl MetaSrv {
                 greptimedb_telemetry_task,
                 subscribe_manager,
                 procedure_manager,
+                wal_options_allocator: self.wal_options_allocator.clone(),
                 state: self.state.clone(),
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
             };
@@ -317,11 +350,14 @@ impl MetaSrv {
                 info!("MetaSrv stopped");
             });
         } else {
+            if let Err(e) = self.wal_options_allocator.start().await {
+                error!(e; "Failed to start wal options allocator");
+            }
             // Always load kv into cached kv store.
             self.leader_cached_kv_backend
                 .load()
                 .await
-                .context(error::KvBackendSnafu)?;
+                .context(KvBackendSnafu)?;
             self.procedure_manager
                 .start()
                 .await
@@ -347,6 +383,21 @@ impl MetaSrv {
             .context(StopProcedureManagerSnafu)
     }
 
+    /// Lookup a peer by peer_id, return it only when it's alive.
+    pub(crate) async fn lookup_peer(
+        &self,
+        cluster_id: ClusterId,
+        peer_id: u64,
+    ) -> Result<Option<Peer>> {
+        lookup_alive_datanode_peer(
+            cluster_id,
+            peer_id,
+            &self.meta_peer_client,
+            distributed_time_constants::DATANODE_LEASE_SECS,
+        )
+        .await
+    }
+
     #[inline]
     pub fn options(&self) -> &MetaSrvOptions {
         &self.options
@@ -362,10 +413,6 @@ impl MetaSrv {
 
     pub fn meta_peer_client(&self) -> &MetaPeerClientRef {
         &self.meta_peer_client
-    }
-
-    pub fn table_id_sequence(&self) -> &SequenceRef {
-        &self.table_id_sequence
     }
 
     pub fn selector(&self) -> &SelectorRef {
@@ -388,8 +435,8 @@ impl MetaSrv {
         &self.mailbox
     }
 
-    pub fn ddl_executor(&self) -> &DdlTaskExecutorRef {
-        &self.ddl_executor
+    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
+        &self.procedure_executor
     }
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {
@@ -398,6 +445,14 @@ impl MetaSrv {
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
+    }
+
+    pub fn memory_region_keeper(&self) -> &MemoryRegionKeeperRef {
+        &self.memory_region_keeper
+    }
+
+    pub fn region_migration_manager(&self) -> &RegionMigrationManagerRef {
+        &self.region_migration_manager
     }
 
     pub fn publish(&self) -> Option<PublishRef> {
@@ -421,7 +476,6 @@ impl MetaSrv {
         let meta_peer_client = self.meta_peer_client.clone();
         let mailbox = self.mailbox.clone();
         let election = self.election.clone();
-        let skip_all = Arc::new(AtomicBool::new(false));
         let table_metadata_manager = self.table_metadata_manager.clone();
 
         Context {
@@ -432,7 +486,6 @@ impl MetaSrv {
             meta_peer_client,
             mailbox,
             election,
-            skip_all,
             is_infancy: false,
             table_metadata_manager,
         }

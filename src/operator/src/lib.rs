@@ -11,13 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 pub mod delete;
 pub mod error;
 pub mod expr_factory;
 pub mod insert;
 pub mod metrics;
+pub mod procedure;
 pub mod region_req_factory;
 pub mod req_convert;
+pub mod request;
 pub mod statement;
 pub mod table;
 #[cfg(test)]

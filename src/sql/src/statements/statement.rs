@@ -16,15 +16,20 @@ use datafusion_sql::parser::Statement as DfStatement;
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
+use super::drop::DropDatabase;
+use super::show::ShowVariables;
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::alter::AlterTable;
-use crate::statements::create::{CreateDatabase, CreateExternalTable, CreateTable};
+use crate::statements::create::{
+    CreateDatabase, CreateExternalTable, CreateTable, CreateTableLike,
+};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::DropTable;
 use crate::statements::explain::Explain;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
+use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
 use crate::statements::tql::Tql;
 use crate::statements::truncate::TruncateTable;
@@ -43,8 +48,12 @@ pub enum Statement {
     CreateTable(CreateTable),
     // CREATE EXTERNAL TABLE
     CreateExternalTable(CreateExternalTable),
+    // CREATE TABLE ... LIKE
+    CreateTableLike(CreateTableLike),
     // DROP TABLE
     DropTable(DropTable),
+    // DROP DATABASE
+    DropDatabase(DropDatabase),
     // CREATE DATABASE
     CreateDatabase(CreateDatabase),
     /// ALTER TABLE
@@ -64,6 +73,10 @@ pub enum Statement {
     Tql(Tql),
     // TRUNCATE TABLE
     TruncateTable(TruncateTable),
+    // SET VARIABLES
+    SetVariables(SetVariables),
+    // SHOW VARIABLES
+    ShowVariables(ShowVariables),
 }
 
 /// Comment hints from SQL.

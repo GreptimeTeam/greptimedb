@@ -8,7 +8,7 @@ Affected Rows: 3
 
 SELECT a FROM test ORDER BY 2;
 
-Error: 3000(PlanQuery), Error during planning: Order by column out of bounds, specified: 2, max: 1
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Order by column out of bounds, specified: 2, max: 1
 
 -- Not work in greptimedb
 SELECT a FROM test ORDER BY 'hello', a;
@@ -38,7 +38,7 @@ SELECT a AS k, b FROM test UNION SELECT a AS k, b FROM test ORDER BY k;
 
 SELECT a % 2, b FROM test UNION SELECT b, a % 2 AS k ORDER BY a % 2;
 
-Error: 3000(PlanQuery), No field named b.
+Error: 3000(PlanQuery), Failed to plan SQL: No field named b.
 
 -- Works duckdb, but not work in greptimedb
 -- TODO(LFC): Failed to meet the expected error:
@@ -46,11 +46,11 @@ Error: 3000(PlanQuery), No field named b.
 --   Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'test.a % Int64(2)', 'b'.
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY a % 2;
 
-Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY expressions a must appear in select list
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: For SELECT DISTINCT, ORDER BY expressions a must appear in select list
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 3;
 
-Error: 3000(PlanQuery), Error during planning: Order by column out of bounds, specified: 3, max: 2
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Order by column out of bounds, specified: 3, max: 2
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 
@@ -58,7 +58,7 @@ Error: 3001(EngineExecuteQuery), Error during planning: Sort operation is not ap
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
 
-Error: 3000(PlanQuery), Error during planning: Union queries must have the same number of columns, (left is 2, right is 1)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Union queries must have the same number of columns, (left is 2, right is 1)
 
 DROP TABLE test;
 

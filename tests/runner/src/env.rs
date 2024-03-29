@@ -28,7 +28,7 @@ use client::{
     Client, Database as DB, Error as ClientError, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 use common_error::ext::ErrorExt;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
@@ -42,12 +42,28 @@ const SERVER_ADDR: &str = "127.0.0.1:4001";
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
 #[derive(Clone)]
+pub enum WalConfig {
+    RaftEngine,
+    Kafka {
+        /// Indicates whether the runner needs to start a kafka cluster
+        /// (it might be available in the external system environment).
+        needs_kafka_cluster: bool,
+        broker_endpoints: Vec<String>,
+    },
+}
+
+#[derive(Clone)]
 pub struct Env {
     data_home: PathBuf,
     server_addr: Option<String>,
+    wal: WalConfig,
+
+    /// The path to the directory that contains the pre-built GreptimeDB binary.
+    /// When running in CI, this is expected to be set.
+    /// If not set, this runner will build the GreptimeDB binary itself when needed, and set this field by then.
+    bins_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
-#[allow(clippy::print_stdout)]
 #[async_trait]
 impl EnvController for Env {
     type DB = GreptimeDB;
@@ -66,12 +82,18 @@ impl EnvController for Env {
     }
 }
 
-#[allow(clippy::print_stdout)]
 impl Env {
-    pub fn new(data_home: PathBuf, server_addr: Option<String>) -> Self {
+    pub fn new(
+        data_home: PathBuf,
+        server_addr: Option<String>,
+        wal: WalConfig,
+        bins_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             data_home,
             server_addr,
+            wal,
+            bins_dir: Arc::new(Mutex::new(bins_dir)),
         }
     }
 
@@ -79,9 +101,10 @@ impl Env {
         if let Some(server_addr) = self.server_addr.clone() {
             self.connect_db(&server_addr)
         } else {
-            Self::build_db().await;
+            self.build_db();
+            self.setup_wal();
 
-            let db_ctx = GreptimeDBContext::new();
+            let db_ctx = GreptimeDBContext::new(self.wal.clone());
 
             let server_process = self.start_server("standalone", &db_ctx, true).await;
 
@@ -104,9 +127,10 @@ impl Env {
         if let Some(server_addr) = self.server_addr.clone() {
             self.connect_db(&server_addr)
         } else {
-            Self::build_db().await;
+            self.build_db();
+            self.setup_wal();
 
-            let db_ctx = GreptimeDBContext::new();
+            let db_ctx = GreptimeDBContext::new(self.wal.clone());
 
             // start a distributed GreptimeDB
             let meta_server = self.start_server("metasrv", &db_ctx, true).await;
@@ -145,6 +169,7 @@ impl Env {
             ctx: GreptimeDBContext {
                 time: 0,
                 datanode_id: Default::default(),
+                wal: self.wal.clone(),
             },
             is_standalone: false,
             env: self.clone(),
@@ -174,10 +199,13 @@ impl Env {
         };
         let log_file_name = self.data_home.join(log_file_name).display().to_string();
 
+        println!("{subcommand} log file at {log_file_name}");
+
         let log_file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(truncate_log)
+            .append(!truncate_log)
             .open(log_file_name)
             .unwrap();
 
@@ -190,7 +218,7 @@ impl Env {
                     "start".to_string(),
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
-                    "--http-addr=127.0.0.1:5001".to_string(),
+                    "--http-addr=127.0.0.1:5002".to_string(),
                 ];
                 (args, SERVER_ADDR.to_string())
             }
@@ -213,7 +241,9 @@ impl Env {
                     "true".to_string(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
-                    "--http-addr=127.0.0.1:5001".to_string(),
+                    "--http-addr=127.0.0.1:5002".to_string(),
+                    "-c".to_string(),
+                    self.generate_config_file(subcommand, db_ctx),
                 ];
                 (args, METASRV_ADDR.to_string())
             }
@@ -232,8 +262,12 @@ impl Env {
         #[cfg(windows)]
         let program = "greptime.exe";
 
+        let bins_dir = self.bins_dir.lock().unwrap().clone().expect(
+            "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
+        );
+
         let mut process = Command::new(program)
-            .current_dir(util::get_binary_dir("debug"))
+            .current_dir(bins_dir)
             .env("TZ", "UTC")
             .args(args)
             .stdout(log_file)
@@ -305,13 +339,18 @@ impl Env {
         }
     }
 
+    /// Setup kafka wal cluster if needed. The counterpart is in [GreptimeDB::stop].
+    fn setup_wal(&self) {
+        if matches!(self.wal, WalConfig::Kafka { needs_kafka_cluster, .. } if needs_kafka_cluster) {
+            util::setup_wal();
+        }
+    }
+
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
     fn generate_config_file(&self, subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
         let mut tt = TinyTemplate::new();
 
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.pop();
-        path.push("conf");
+        let mut path = util::sqlness_conf_path();
         path.push(format!("{subcommand}-test.toml.template"));
         let template = std::fs::read_to_string(path).unwrap();
         tt.add_template(subcommand, &template).unwrap();
@@ -321,11 +360,11 @@ impl Env {
             wal_dir: String,
             data_home: String,
             procedure_dir: String,
+            is_raft_engine: bool,
+            kafka_wal_broker_endpoints: String,
         }
 
-        let data_home = self
-            .data_home
-            .join(format!("greptimedb-{subcommand}-{}", db_ctx.time));
+        let data_home = self.data_home.join(format!("greptimedb-{subcommand}"));
         std::fs::create_dir_all(data_home.as_path()).unwrap();
 
         let wal_dir = data_home.join("wal").display().to_string();
@@ -334,6 +373,8 @@ impl Env {
             wal_dir,
             data_home: data_home.display().to_string(),
             procedure_dir,
+            is_raft_engine: db_ctx.is_raft_engine(),
+            kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
         };
         let rendered = tt.render(subcommand, &ctx).unwrap();
 
@@ -348,7 +389,11 @@ impl Env {
     }
 
     /// Build the DB with `cargo build --bin greptime`
-    async fn build_db() {
+    fn build_db(&self) {
+        if self.bins_dir.lock().unwrap().is_some() {
+            return;
+        }
+
         println!("Going to build the DB...");
         let output = Command::new("cargo")
             .current_dir(util::get_workspace_root())
@@ -363,7 +408,12 @@ impl Env {
             io::stderr().write_all(&output.stderr).unwrap();
             panic!();
         }
-        println!("Build finished, starting...");
+
+        let _ = self
+            .bins_dir
+            .lock()
+            .unwrap()
+            .insert(util::get_binary_dir("debug"));
     }
 }
 
@@ -385,7 +435,9 @@ impl Database for GreptimeDB {
         }
 
         let mut client = self.client.lock().await;
+
         if query.trim().to_lowercase().starts_with("use ") {
+            // use [db]
             let database = query
                 .split_ascii_whitespace()
                 .nth(1)
@@ -393,13 +445,36 @@ impl Database for GreptimeDB {
                 .trim_end_matches(';');
             client.set_schema(database);
             Box::new(ResultDisplayer {
-                result: Ok(Output::AffectedRows(0)),
+                result: Ok(Output::new_with_affected_rows(0)),
+            }) as _
+        } else if query.trim().to_lowercase().starts_with("set time_zone") {
+            // set time_zone='xxx'
+            let timezone = query
+                .split('=')
+                .nth(1)
+                .expect("Illegal `SET TIMEZONE` statement: expecting a timezone expr.")
+                .trim()
+                .strip_prefix('\'')
+                .unwrap()
+                .strip_suffix("';")
+                .unwrap();
+
+            client.set_timezone(timezone);
+
+            Box::new(ResultDisplayer {
+                result: Ok(Output::new_with_affected_rows(0)),
             }) as _
         } else {
             let mut result = client.sql(&query).await;
-            if let Ok(Output::Stream(stream)) = result {
+            if let Ok(Output {
+                data: OutputData::Stream(stream),
+                ..
+            }) = result
+            {
                 match RecordBatches::try_collect(stream).await {
-                    Ok(recordbatches) => result = Ok(Output::RecordBatches(recordbatches)),
+                    Ok(recordbatches) => {
+                        result = Ok(Output::new_with_record_batches(recordbatches));
+                    }
                     Err(e) => {
                         let status_code = e.status_code();
                         let msg = e.output_msg();
@@ -417,21 +492,29 @@ impl Database for GreptimeDB {
 }
 
 impl GreptimeDB {
-    #![allow(clippy::print_stdout)]
     fn stop(&mut self) {
         if let Some(server_processes) = self.server_processes.clone() {
             let mut server_processes = server_processes.lock().unwrap();
-            for server_process in server_processes.iter_mut() {
-                Env::stop_server(server_process);
+            for mut server_process in server_processes.drain(..) {
+                Env::stop_server(&mut server_process);
+                println!(
+                    "Standalone or Datanode (pid = {}) is stopped",
+                    server_process.id()
+                );
             }
         }
         if let Some(mut metasrv) = self.metasrv_process.take() {
             Env::stop_server(&mut metasrv);
+            println!("Metasrv (pid = {}) is stopped", metasrv.id());
         }
-        if let Some(mut datanode) = self.frontend_process.take() {
-            Env::stop_server(&mut datanode);
+        if let Some(mut frontend) = self.frontend_process.take() {
+            Env::stop_server(&mut frontend);
+            println!("Frontend (pid = {}) is stopped", frontend.id());
         }
-        println!("Stopped DB.");
+        if matches!(self.ctx.wal, WalConfig::Kafka { needs_kafka_cluster, .. } if needs_kafka_cluster)
+        {
+            util::teardown_wal();
+        }
     }
 }
 
@@ -447,13 +530,28 @@ struct GreptimeDBContext {
     /// Start time in millisecond
     time: i64,
     datanode_id: AtomicU32,
+    wal: WalConfig,
 }
 
 impl GreptimeDBContext {
-    pub fn new() -> Self {
+    pub fn new(wal: WalConfig) -> Self {
         Self {
             time: common_time::util::current_time_millis(),
             datanode_id: AtomicU32::new(0),
+            wal,
+        }
+    }
+
+    fn is_raft_engine(&self) -> bool {
+        matches!(self.wal, WalConfig::RaftEngine)
+    }
+
+    fn kafka_wal_broker_endpoints(&self) -> String {
+        match &self.wal {
+            WalConfig::RaftEngine => String::new(),
+            WalConfig::Kafka {
+                broker_endpoints, ..
+            } => serde_json::to_string(&broker_endpoints).unwrap(),
         }
     }
 
@@ -477,11 +575,11 @@ struct ResultDisplayer {
 impl Display for ResultDisplayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.result {
-            Ok(result) => match result {
-                Output::AffectedRows(rows) => {
+            Ok(result) => match &result.data {
+                OutputData::AffectedRows(rows) => {
                     write!(f, "Affected Rows: {rows}")
                 }
-                Output::RecordBatches(recordbatches) => {
+                OutputData::RecordBatches(recordbatches) => {
                     let pretty = recordbatches.pretty_print().map_err(|e| e.to_string());
                     match pretty {
                         Ok(s) => write!(f, "{s}"),
@@ -490,7 +588,7 @@ impl Display for ResultDisplayer {
                         }
                     }
                 }
-                Output::Stream(_) => unreachable!(),
+                OutputData::Stream(_) => unreachable!(),
             },
             Err(e) => {
                 let status_code = e.status_code();

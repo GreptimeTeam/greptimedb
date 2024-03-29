@@ -12,18 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::env;
 use std::sync::Arc;
 
+use client::OutputData;
 use common_query::Output;
 use common_recordbatch::util;
+use common_telemetry::warn;
 use common_test_util::find_workspace_path;
+use common_wal::config::kafka::{DatanodeKafkaConfig, MetaSrvKafkaConfig};
+use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
+use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+use crate::test_util::StorageType;
 use crate::tests::{create_distributed_instance, MockDistributedInstance};
 
-pub(crate) trait MockInstance {
+#[async_trait::async_trait]
+pub(crate) trait RebuildableMockInstance: MockInstance {
+    // Rebuilds the instance and returns rebuilt frontend instance.
+    async fn rebuild(&mut self);
+}
+
+pub(crate) trait MockInstance: Sync + Send {
     fn frontend(&self) -> Arc<Instance>;
 
     fn is_distributed_mode(&self) -> bool;
@@ -49,6 +62,117 @@ impl MockInstance for MockDistributedInstance {
     }
 }
 
+/// For test purpose.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum MockInstanceBuilder {
+    Standalone(GreptimeDbStandaloneBuilder),
+    Distributed(GreptimeDbClusterBuilder),
+}
+
+pub(crate) enum MockInstanceImpl {
+    Standalone(GreptimeDbStandalone),
+    Distributed(GreptimeDbCluster),
+}
+
+impl MockInstance for MockInstanceImpl {
+    fn frontend(&self) -> Arc<Instance> {
+        match self {
+            MockInstanceImpl::Standalone(instance) => instance.frontend(),
+            MockInstanceImpl::Distributed(instance) => instance.frontend.clone(),
+        }
+    }
+
+    fn is_distributed_mode(&self) -> bool {
+        matches!(self, &MockInstanceImpl::Distributed(_))
+    }
+}
+
+impl MockInstanceBuilder {
+    async fn build(&self) -> MockInstanceImpl {
+        match self {
+            MockInstanceBuilder::Standalone(builder) => {
+                MockInstanceImpl::Standalone(builder.build().await)
+            }
+            MockInstanceBuilder::Distributed(builder) => {
+                MockInstanceImpl::Distributed(builder.build().await)
+            }
+        }
+    }
+
+    async fn rebuild(&self, instance: MockInstanceImpl) -> MockInstanceImpl {
+        match self {
+            MockInstanceBuilder::Standalone(builder) => {
+                let MockInstanceImpl::Standalone(instance) = instance else {
+                    unreachable!()
+                };
+                let GreptimeDbStandalone {
+                    mix_options,
+                    guard,
+                    kv_backend,
+                    procedure_manager,
+                    ..
+                } = instance;
+                MockInstanceImpl::Standalone(
+                    builder
+                        .build_with(kv_backend, guard, mix_options, procedure_manager, false)
+                        .await,
+                )
+            }
+            MockInstanceBuilder::Distributed(builder) => {
+                let MockInstanceImpl::Distributed(instance) = instance else {
+                    unreachable!()
+                };
+                let GreptimeDbCluster {
+                    storage_guards,
+                    dir_guards,
+                    datanode_options,
+                    ..
+                } = instance;
+
+                MockInstanceImpl::Distributed(
+                    builder
+                        .build_with(datanode_options, storage_guards, dir_guards)
+                        .await,
+                )
+            }
+        }
+    }
+}
+
+pub(crate) struct TestContext {
+    instance: Option<MockInstanceImpl>,
+    builder: MockInstanceBuilder,
+}
+
+impl TestContext {
+    async fn new(builder: MockInstanceBuilder) -> Self {
+        let instance = builder.build().await;
+
+        Self {
+            instance: Some(instance),
+            builder,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RebuildableMockInstance for TestContext {
+    async fn rebuild(&mut self) {
+        let instance = self.builder.rebuild(self.instance.take().unwrap()).await;
+        self.instance = Some(instance);
+    }
+}
+
+impl MockInstance for TestContext {
+    fn frontend(&self) -> Arc<Instance> {
+        self.instance.as_ref().unwrap().frontend()
+    }
+
+    fn is_distributed_mode(&self) -> bool {
+        self.instance.as_ref().unwrap().is_distributed_mode()
+    }
+}
+
 pub(crate) async fn standalone() -> Arc<dyn MockInstance> {
     let test_name = uuid::Uuid::new_v4().to_string();
     let instance = GreptimeDbStandaloneBuilder::new(&test_name).build().await;
@@ -59,6 +183,114 @@ pub(crate) async fn distributed() -> Arc<dyn MockInstance> {
     let test_name = uuid::Uuid::new_v4().to_string();
     let instance = create_distributed_instance(&test_name).await;
     Arc::new(instance)
+}
+
+pub(crate) async fn standalone_with_multiple_object_stores() -> Arc<dyn MockInstance> {
+    let _ = dotenv::dotenv();
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let storage_types = StorageType::build_storage_types_based_on_env();
+    let instance = GreptimeDbStandaloneBuilder::new(&test_name)
+        .with_store_providers(storage_types)
+        .build()
+        .await;
+    Arc::new(instance)
+}
+
+pub(crate) async fn distributed_with_multiple_object_stores() -> Arc<dyn MockInstance> {
+    let _ = dotenv::dotenv();
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let providers = StorageType::build_storage_types_based_on_env();
+    let cluster = GreptimeDbClusterBuilder::new(&test_name)
+        .await
+        .with_store_providers(providers)
+        .build()
+        .await;
+    Arc::new(MockDistributedInstance(cluster))
+}
+
+pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMockInstance>> {
+    let _ = dotenv::dotenv();
+    let endpoints = env::var("GT_KAFKA_ENDPOINTS").unwrap_or_default();
+    common_telemetry::init_default_ut_logging();
+    if endpoints.is_empty() {
+        warn!("The endpoints is empty, skipping the test");
+        return None;
+    }
+
+    let endpoints = endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let builder = GreptimeDbStandaloneBuilder::new(&test_name)
+        .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
+            broker_endpoints: endpoints.clone(),
+            ..Default::default()
+        }))
+        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+            broker_endpoints: endpoints,
+            topic_name_prefix: test_name.to_string(),
+            num_topics: 3,
+            ..Default::default()
+        }));
+    let instance = TestContext::new(MockInstanceBuilder::Standalone(builder)).await;
+    Some(Box::new(instance))
+}
+
+pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMockInstance>> {
+    let _ = dotenv::dotenv();
+    let endpoints = env::var("GT_KAFKA_ENDPOINTS").unwrap_or_default();
+    common_telemetry::init_default_ut_logging();
+    if endpoints.is_empty() {
+        warn!("The endpoints is empty, skipping the test");
+        return None;
+    }
+
+    let endpoints = endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let builder = GreptimeDbClusterBuilder::new(&test_name)
+        .await
+        .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
+            broker_endpoints: endpoints.clone(),
+            ..Default::default()
+        }))
+        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+            broker_endpoints: endpoints,
+            topic_name_prefix: test_name.to_string(),
+            num_topics: 3,
+            ..Default::default()
+        }));
+    let instance = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
+    Some(Box::new(instance))
+}
+
+#[template]
+#[rstest]
+#[case::test_with_standalone(standalone_with_kafka_wal())]
+#[case::test_with_distributed(distributed_with_kafka_wal())]
+#[awt]
+#[tokio::test(flavor = "multi_thread")]
+pub(crate) fn both_instances_cases_with_kafka_wal(
+    #[future]
+    #[case]
+    rebuildable_instance: Option<Box<dyn RebuildableMockInstance>>,
+) {
+}
+
+#[template]
+#[rstest]
+#[case::test_with_standalone(standalone_with_multiple_object_stores())]
+#[case::test_with_distributed(distributed_with_multiple_object_stores())]
+#[awt]
+#[tokio::test(flavor = "multi_thread")]
+pub(crate) fn both_instances_cases_with_custom_storages(
+    #[future]
+    #[case]
+    instance: Arc<dyn MockInstance>,
+) {
 }
 
 #[template]
@@ -98,14 +330,19 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str
             .unwrap()
     };
 
-    let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
-        Output::RecordBatches(recordbatches) => recordbatches,
+    let recordbatches = match output.data {
+        OutputData::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(recordbatches) => recordbatches,
         _ => unreachable!(),
     };
     let pretty_print = sort_table(&recordbatches.pretty_print().unwrap());
     let expected = sort_table(expected);
-    assert_eq!(pretty_print, expected);
+    assert_eq!(
+        pretty_print,
+        expected,
+        "\n{}",
+        recordbatches.pretty_print().unwrap()
+    );
 }
 
 pub fn prepare_path(p: &str) -> String {

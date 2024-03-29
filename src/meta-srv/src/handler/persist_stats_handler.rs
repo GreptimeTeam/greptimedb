@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,7 +22,7 @@ use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::handler::node_stat::Stat;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::keys::{StatKey, StatValue};
 use crate::metasrv::Context;
 
@@ -82,9 +82,9 @@ impl HeartbeatHandler for PersistStatsHandler {
         _req: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         let Some(current_stat) = acc.stat.take() else {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         };
 
         let key = current_stat.stat_key();
@@ -118,7 +118,7 @@ impl HeartbeatHandler for PersistStatsHandler {
         epoch_stats.push(current_stat);
 
         if !refresh && epoch_stats.len() < MAX_CACHED_STATS_PER_KEY {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         }
 
         let value: Vec<u8> = StatValue {
@@ -137,18 +137,17 @@ impl HeartbeatHandler for PersistStatsHandler {
             .await
             .context(error::KvBackendSnafu)?;
 
-        Ok(())
+        Ok(HandleControl::Continue)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::sequence::Sequence;
+    use common_meta::sequence::SequenceBuilder;
 
     use super::*;
     use crate::cluster::MetaPeerClientBuilder;
@@ -163,7 +162,7 @@ mod tests {
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::with_always_leader(
             kv_backend.clone(),
         ));
-        let seq = Sequence::new("test_seq", 0, 10, kv_backend.clone());
+        let seq = SequenceBuilder::new("test_seq", kv_backend.clone()).build();
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let meta_peer_client = MetaPeerClientBuilder::default()
             .election(None)
@@ -180,7 +179,6 @@ mod tests {
             meta_peer_client,
             mailbox,
             election: None,
-            skip_all: Arc::new(AtomicBool::new(false)),
             is_infancy: false,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
         };
@@ -192,7 +190,7 @@ mod tests {
             cluster_id: 3,
             node_id: 101,
         };
-        let key: Vec<u8> = key.try_into().unwrap();
+        let key: Vec<u8> = key.into();
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let key: StatKey = kv.key.clone().try_into().unwrap();
@@ -205,7 +203,7 @@ mod tests {
 
         handle_request_many_times(ctx.clone(), &handler, 10).await;
 
-        let key: Vec<u8> = key.try_into().unwrap();
+        let key: Vec<u8> = key.into();
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let val: StatValue = kv.value.try_into().unwrap();

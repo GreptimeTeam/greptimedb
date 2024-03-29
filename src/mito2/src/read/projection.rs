@@ -177,10 +177,14 @@ impl ProjectionMapper {
 
         // Skips decoding pk if we don't need to output it.
         let pk_values = if self.has_tags {
-            self.codec
-                .decode(batch.primary_key())
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
+            match batch.pk_values() {
+                Some(v) => v.to_vec(),
+                None => self
+                    .codec
+                    .decode(batch.primary_key())
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?,
+            }
         } else {
             Vec::new()
         };
@@ -342,7 +346,8 @@ mod tests {
         assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
         assert_eq!([3, 4], mapper.batch_fields());
 
-        let cache = CacheManager::new(0, 1024);
+        // With vector cache.
+        let cache = CacheManager::builder().vector_cache_size(1024).build();
         let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
         let record_batch = mapper.convert(&batch, Some(&cache)).unwrap();
         let expect = "\

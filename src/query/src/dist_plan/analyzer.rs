@@ -21,6 +21,8 @@ use datafusion_common::tree_node::{RewriteRecursion, Transformed, TreeNode, Tree
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::{col, Expr, LogicalPlan, LogicalPlanBuilder, Subquery};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
+use datafusion_optimizer::{OptimizerContext, OptimizerRule};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -42,6 +44,12 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
+        // preprocess the input plan
+        let optimizer_context = OptimizerContext::new();
+        let plan = SimplifyExpressions::new()
+            .try_optimize(&plan, &optimizer_context)?
+            .unwrap_or(plan);
+
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();
         let result = plan.rewrite(&mut rewriter)?;
@@ -150,17 +158,19 @@ impl PlanRewriter {
             }
             Commutativity::ConditionalCommutative(transformer) => {
                 if let Some(transformer) = transformer
-                    && let Some(plan) = transformer(plan) {
+                    && let Some(plan) = transformer(plan)
+                {
                     self.stage.push(plan)
                 }
-            },
+            }
             Commutativity::TransformedCommutative(transformer) => {
                 if let Some(transformer) = transformer
-                    && let Some(plan) = transformer(plan) {
+                    && let Some(plan) = transformer(plan)
+                {
                     self.stage.push(plan)
                 }
-            },
-            | Commutativity::NonCommutative
+            }
+            Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
                 return true;

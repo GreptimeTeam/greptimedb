@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap::ArgMatches;
 use common_config::KvBackendConfig;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
+use common_wal::config::MetaSrvWalConfig;
 use config::{Config, Environment, File, FileFormat};
 use datanode::config::{DatanodeOptions, ProcedureConfig};
-use frontend::frontend::FrontendOptions;
+use frontend::error::{Result as FeResult, TomlFormatSnafu};
+use frontend::frontend::{FrontendOptions, TomlSerializable};
 use meta_srv::metasrv::MetaSrvOptions;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -27,6 +30,7 @@ pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
 /// Options mixed up from datanode, frontend and metasrv.
+#[derive(Serialize, Debug, Clone)]
 pub struct MixOptions {
     pub data_home: String,
     pub procedure: ProcedureConfig,
@@ -34,6 +38,19 @@ pub struct MixOptions {
     pub frontend: FrontendOptions,
     pub datanode: DatanodeOptions,
     pub logging: LoggingOptions,
+    pub wal_meta: MetaSrvWalConfig,
+}
+
+impl From<MixOptions> for FrontendOptions {
+    fn from(value: MixOptions) -> Self {
+        value.frontend
+    }
+}
+
+impl TomlSerializable for MixOptions {
+    fn to_toml(&self) -> FeResult<String> {
+        toml::to_string(self).context(TomlFormatSnafu)
+    }
 }
 
 pub enum Options {
@@ -44,10 +61,32 @@ pub enum Options {
     Cli(Box<LoggingOptions>),
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct TopLevelOptions {
+#[derive(Default)]
+pub struct CliOptions {
     pub log_dir: Option<String>,
     pub log_level: Option<String>,
+
+    #[cfg(feature = "tokio-console")]
+    pub tokio_console_addr: Option<String>,
+}
+
+impl CliOptions {
+    pub fn new(args: &ArgMatches) -> Self {
+        Self {
+            log_dir: args.get_one::<String>("log-dir").cloned(),
+            log_level: args.get_one::<String>("log-level").cloned(),
+
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: args.get_one::<String>("tokio-console-addr").cloned(),
+        }
+    }
+
+    pub fn tracing_options(&self) -> TracingOptions {
+        TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: self.tokio_console_addr.clone(),
+        }
+    }
 }
 
 impl Options {
@@ -119,14 +158,23 @@ impl Options {
 
         Ok(opts)
     }
+
+    pub fn node_id(&self) -> Option<String> {
+        match self {
+            Options::Metasrv(_) | Options::Cli(_) => None,
+            Options::Datanode(opt) => opt.node_id.map(|x| x.to_string()),
+            Options::Frontend(opt) => opt.node_id.clone(),
+            Options::Standalone(opt) => opt.frontend.node_id.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-    use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
+    use common_wal::config::DatanodeWalConfig;
     use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 
     use super::*;
@@ -149,17 +197,13 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
+            provider = "raft_engine"
             dir = "/tmp/greptimedb/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
             read_batch_size = 128
             sync_write = false
-
-            [storage.compaction]
-            max_inflight_tasks = 3
-            max_files_in_level0 = 7
-            max_purge_tasks = 32
 
             [logging]
             level = "debug"
@@ -171,17 +215,6 @@ mod tests {
         temp_env::with_vars(
             // The following environment variables will be used to override the values in the config file.
             [
-                (
-                    // storage.manifest.checkpoint_margin = 99
-                    [
-                        env_prefix.to_string(),
-                        "storage".to_uppercase(),
-                        "manifest".to_uppercase(),
-                        "checkpoint_margin".to_uppercase(),
-                    ]
-                    .join(ENV_VAR_SEP),
-                    Some("99"),
-                ),
                 (
                     // storage.type = S3
                     [
@@ -201,17 +234,6 @@ mod tests {
                     ]
                     .join(ENV_VAR_SEP),
                     Some("mybucket"),
-                ),
-                (
-                    // storage.manifest.gc_duration = 42s
-                    [
-                        env_prefix.to_string(),
-                        "storage".to_uppercase(),
-                        "manifest".to_uppercase(),
-                        "gc_duration".to_uppercase(),
-                    ]
-                    .join(ENV_VAR_SEP),
-                    Some("42s"),
                 ),
                 (
                     // wal.dir = /other/wal/dir
@@ -243,17 +265,12 @@ mod tests {
                 .unwrap();
 
                 // Check the configs from environment variables.
-                assert_eq!(opts.storage.manifest.checkpoint_margin, Some(99));
-                match opts.storage.store {
+                match &opts.storage.store {
                     ObjectStoreConfig::S3(s3_config) => {
                         assert_eq!(s3_config.bucket, "mybucket".to_string());
                     }
                     _ => panic!("unexpected store type"),
                 }
-                assert_eq!(
-                    opts.storage.manifest.gc_duration,
-                    Some(Duration::from_secs(42))
-                );
                 assert_eq!(
                     opts.meta_client.unwrap().metasrv_addrs,
                     vec![
@@ -264,7 +281,10 @@ mod tests {
                 );
 
                 // Should be the values from config file, not environment variables.
-                assert_eq!(opts.wal.dir.unwrap(), "/tmp/greptimedb/wal");
+                let DatanodeWalConfig::RaftEngine(raft_engine_config) = opts.wal else {
+                    unreachable!()
+                };
+                assert_eq!(raft_engine_config.dir.unwrap(), "/tmp/greptimedb/wal");
 
                 // Should be default values.
                 assert_eq!(opts.node_id, None);

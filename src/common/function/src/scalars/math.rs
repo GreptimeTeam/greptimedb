@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod clamp;
+mod modulo;
 mod pow;
 mod rate;
 
 use std::fmt;
 use std::sync::Arc;
 
+pub use clamp::ClampFunction;
 use common_query::error::{GeneralDataFusionSnafu, Result};
 use common_query::prelude::Signature;
 use datafusion::error::DataFusionError;
@@ -28,17 +31,19 @@ pub use pow::PowFunction;
 pub use rate::RateFunction;
 use snafu::ResultExt;
 
-use super::function::FunctionContext;
-use super::Function;
-use crate::scalars::function_registry::FunctionRegistry;
+use crate::function::{Function, FunctionContext};
+use crate::function_registry::FunctionRegistry;
+use crate::scalars::math::modulo::ModuloFunction;
 
 pub(crate) struct MathFunction;
 
 impl MathFunction {
     pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(ModuloFunction));
         registry.register(Arc::new(PowFunction));
         registry.register(Arc::new(RateFunction));
-        registry.register(Arc::new(RangeFunction))
+        registry.register(Arc::new(RangeFunction));
+        registry.register(Arc::new(ClampFunction));
     }
 }
 

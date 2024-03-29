@@ -12,15 +12,15 @@ Affected Rows: 2
 
 insert into demo2(host) select * from demo1;
 
-Error: 3000(PlanQuery), Error during planning: Column count doesn't match insert query!
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Column count doesn't match insert query!
 
 insert into demo2 select cpu,memory from demo1;
 
-Error: 3000(PlanQuery), Error during planning: Column count doesn't match insert query!
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Column count doesn't match insert query!
 
 insert into demo2(ts) select memory from demo1;
 
-Error: 3000(PlanQuery), Error during planning: Cannot automatically convert Float64 to Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot automatically convert Float64 to Timestamp(Millisecond, None)
 
 insert into demo2 select * from demo1;
 

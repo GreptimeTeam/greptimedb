@@ -15,10 +15,13 @@
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
+use snafu::prelude::*;
 
+use crate::error::{Result, TomlFormatSnafu};
 use crate::service_config::{
     DatanodeOptions, GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
     PostgresOptions, PromStoreOptions,
@@ -29,6 +32,7 @@ use crate::service_config::{
 pub struct FrontendOptions {
     pub mode: Mode,
     pub node_id: Option<String>,
+    pub default_timezone: Option<String>,
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
@@ -42,6 +46,7 @@ pub struct FrontendOptions {
     pub logging: LoggingOptions,
     pub datanode: DatanodeOptions,
     pub user_provider: Option<String>,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for FrontendOptions {
@@ -49,6 +54,7 @@ impl Default for FrontendOptions {
         Self {
             mode: Mode::Standalone,
             node_id: None,
+            default_timezone: None,
             heartbeat: HeartbeatOptions::frontend_default(),
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
@@ -62,6 +68,7 @@ impl Default for FrontendOptions {
             logging: LoggingOptions::default(),
             datanode: DatanodeOptions::default(),
             user_provider: None,
+            export_metrics: ExportMetricsOption::default(),
         }
     }
 }
@@ -73,6 +80,16 @@ impl FrontendOptions {
 
     pub fn to_toml_string(&self) -> String {
         toml::to_string(&self).unwrap()
+    }
+}
+
+pub trait TomlSerializable {
+    fn to_toml(&self) -> Result<String>;
+}
+
+impl TomlSerializable for FrontendOptions {
+    fn to_toml(&self) -> Result<String> {
+        toml::to_string(&self).context(TomlFormatSnafu)
     }
 }
 

@@ -1,4 +1,4 @@
-## Setup
+## Setup tests for multiple storage backend
 
 To run the integration test, please copy `.env.example` to `.env` in the project root folder and change the values on need.
 
@@ -13,7 +13,7 @@ GT_S3_ACCESS_KEY=S3 secret access key
 ```
 
 
-## Run
+### Run
 
 Execute the following command in the project root folder:
 
@@ -38,3 +38,22 @@ Test azblob storage:
 ```
 cargo test azblob
 ```
+
+## Setup tests with Kafka wal
+
+To run the integration test, please copy `.env.example` to `.env` in the project root folder and change the values on need.
+
+```sh
+GT_KAFKA_ENDPOINTS = localhost:9092
+```
+
+### Setup kafka standalone 
+
+```
+cd tests-integration/fixtures/kafka 
+
+docker compose -f docker-compose-standalone.yml up
+```
+
+
+

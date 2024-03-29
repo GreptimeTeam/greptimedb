@@ -26,6 +26,7 @@ use query::parser::PromQuery;
 use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
+use servers::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -53,7 +54,7 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
-    async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<()> {
+    async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<Output> {
         let requests: RowInsertRequests = request.try_into()?;
         for expr in requests.inserts {
             let _ = self
@@ -62,7 +63,7 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
                 .await;
         }
 
-        Ok(())
+        Ok(Output::new_with_affected_rows(0))
     }
 }
 
@@ -119,8 +120,7 @@ fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>)
         })
     }
     let server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(instance.clone())
-        .with_grpc_handler(instance.clone())
+        .with_sql_handler(instance.clone(), None)
         .with_user_provider(Arc::new(user_provider))
         .with_influxdb_handler(instance)
         .build();
@@ -141,7 +141,7 @@ async fn test_influxdb_write() {
     let result = client.get("/v1/influxdb/ping").send().await;
     assert_eq!(result.status(), 204);
 
-    // right request
+    // right request using v2 token auth
     let result = client
         .post("/v1/influxdb/write?db=public")
         .body("monitor,host=host1 cpu=1.2 1664370459457010101")
@@ -160,6 +160,19 @@ async fn test_influxdb_write() {
     assert_eq!(result.status(), 204);
     assert!(result.text().await.is_empty());
 
+    // right request using basic auth
+    let result = client
+        .post("/v1/influxdb/write?db=public")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(
+            http::header::AUTHORIZATION,
+            "basic Z3JlcHRpbWU6Z3JlcHRpbWU=",
+        )
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
     // wrong pwd
     let result = client
         .post("/v1/influxdb/write?db=public")
@@ -168,6 +181,10 @@ async fn test_influxdb_write() {
         .send()
         .await;
     assert_eq!(result.status(), 401);
+    assert_eq!(
+        "{\"code\":7002,\"error\":\"Username and password does not match, username: greptime\",\"execution_time_ms\":0}",
+        result.text().await
+    );
 
     // no auth
     let result = client
@@ -176,6 +193,10 @@ async fn test_influxdb_write() {
         .send()
         .await;
     assert_eq!(result.status(), 401);
+    assert_eq!(
+        "{\"code\":7003,\"error\":\"Not found influx http authorization info\",\"execution_time_ms\":0}",
+        result.text().await
+    );
 
     // make new app for db=influxdb
     let app = make_test_app(tx, Some("influxdb"));
@@ -210,7 +231,127 @@ async fn test_influxdb_write() {
         vec![
             ("public".to_string(), "monitor".to_string()),
             ("public".to_string(), "monitor".to_string()),
+            ("public".to_string(), "monitor".to_string()),
             ("influxdb".to_string(), "monitor".to_string())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_influxdb_write_v2() {
+    let (tx, mut rx) = mpsc::channel(100);
+    let tx = Arc::new(tx);
+
+    let public_db_app = make_test_app(tx.clone(), None);
+    let public_db_client = TestClient::new(public_db_app);
+
+    let result = public_db_client.get("/v1/influxdb/health").send().await;
+    assert_eq!(result.status(), 200);
+
+    let result = public_db_client.get("/v1/influxdb/ping").send().await;
+    assert_eq!(result.status(), 204);
+
+    // right request with no query string
+    let result = public_db_client
+        .post("/v1/influxdb/api/v2/write")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // right request with `bucket` query string
+    let result = public_db_client
+        .post("/v1/influxdb/api/v2/write?bucket=public")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // right request with `db` query string
+    let result = public_db_client
+        .post("/v1/influxdb/api/v2/write?db=public")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // make new app for 'influxdb' database
+    let app = make_test_app(tx, Some("influxdb"));
+    let client = TestClient::new(app);
+
+    // right request with `bucket` query string
+    let result = client
+        .post("/v1/influxdb/api/v2/write?bucket=influxdb")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // right request with `db` query string
+    let result = client
+        .post("/v1/influxdb/api/v2/write?db=influxdb")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // right request with no query string, `public_db_client` is used otherwise the auth will fail
+    let result = public_db_client
+        .post("/v1/influxdb/api/v2/write")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // right request with the 'greptime' header and 'db' query string
+    let result = client
+        .post("/v1/influxdb/api/v2/write?db=influxdbv2")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .header(GREPTIME_DB_HEADER_NAME, "influxdb")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // right request with the 'greptime' header and 'bucket' query string
+    let result = client
+        .post("/v1/influxdb/api/v2/write?bucket=influxdbv2")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(http::header::AUTHORIZATION, "token greptime:greptime")
+        .header(GREPTIME_DB_HEADER_NAME, "influxdb")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    let mut metrics = vec![];
+    while let Ok(s) = rx.try_recv() {
+        metrics.push(s);
+    }
+    assert_eq!(
+        metrics,
+        vec![
+            ("public".to_string(), "monitor".to_string()),
+            ("public".to_string(), "monitor".to_string()),
+            ("public".to_string(), "monitor".to_string()),
+            ("influxdb".to_string(), "monitor".to_string()),
+            ("influxdb".to_string(), "monitor".to_string()),
+            ("public".to_string(), "monitor".to_string()),
+            ("influxdb".to_string(), "monitor".to_string()),
+            ("influxdb".to_string(), "monitor".to_string()),
         ]
     );
 }

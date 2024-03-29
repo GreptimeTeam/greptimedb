@@ -13,16 +13,27 @@
 // limitations under the License.
 
 mod columns;
-mod tables;
+mod key_column_usage;
+mod memory_table;
+mod partitions;
+mod predicate;
+mod region_peers;
+mod runtime_metrics;
+pub mod schemata;
+mod table_names;
+pub mod tables;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use common_catalog::consts::INFORMATION_SCHEMA_NAME;
+use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
-use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
+use lazy_static::lazy_static;
+use paste::paste;
+pub(crate) use predicate::Predicates;
 use snafu::ResultExt;
 use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
@@ -32,46 +43,150 @@ use table::metadata::{
 };
 use table::thin_table::{ThinTable, ThinTableAdapter};
 use table::TableRef;
+pub use table_names::*;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
+use crate::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
+use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
+use crate::information_schema::partitions::InformationSchemaPartitions;
+use crate::information_schema::region_peers::InformationSchemaRegionPeers;
+use crate::information_schema::runtime_metrics::InformationSchemaMetrics;
+use crate::information_schema::schemata::InformationSchemaSchemata;
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
 
-pub const TABLES: &str = "tables";
-pub const COLUMNS: &str = "columns";
+lazy_static! {
+    // Memory tables in `information_schema`.
+    static ref MEMORY_TABLES: &'static [&'static str] = &[
+        ENGINES,
+        COLUMN_PRIVILEGES,
+        COLUMN_STATISTICS,
+        CHARACTER_SETS,
+        COLLATIONS,
+        COLLATION_CHARACTER_SET_APPLICABILITY,
+        CHECK_CONSTRAINTS,
+        EVENTS,
+        FILES,
+        OPTIMIZER_TRACE,
+        PARAMETERS,
+        PROFILING,
+        REFERENTIAL_CONSTRAINTS,
+        ROUTINES,
+        SCHEMA_PRIVILEGES,
+        TABLE_PRIVILEGES,
+        TRIGGERS,
+        GLOBAL_STATUS,
+        SESSION_STATUS,
+        PARTITIONS,
+    ];
+}
 
+macro_rules! setup_memory_table {
+    ($name: expr) => {
+        paste! {
+            {
+                let (schema, columns) = get_schema_columns($name);
+                Some(Arc::new(MemoryTable::new(
+                    consts::[<INFORMATION_SCHEMA_ $name  _TABLE_ID>],
+                    $name,
+                    schema,
+                    columns
+                )) as _)
+            }
+        }
+    };
+}
+
+/// The `information_schema` tables info provider.
 pub struct InformationSchemaProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    tables: HashMap<String, TableRef>,
 }
 
 impl InformationSchemaProvider {
     pub fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
-        Self {
+        let mut provider = Self {
             catalog_name,
             catalog_manager,
-        }
+            tables: HashMap::new(),
+        };
+
+        provider.build_tables();
+
+        provider
     }
 
-    /// Build a map of [TableRef] in information schema.
-    /// Including `tables` and `columns`.
-    pub fn build(
-        catalog_name: String,
-        catalog_manager: Weak<dyn CatalogManager>,
-    ) -> HashMap<String, TableRef> {
-        let provider = Self::new(catalog_name, catalog_manager);
+    /// Returns table names in the order of table id.
+    pub fn table_names(&self) -> Vec<String> {
+        let mut tables = self.tables.values().clone().collect::<Vec<_>>();
 
-        let mut schema = HashMap::new();
-        schema.insert(TABLES.to_owned(), provider.table(TABLES).unwrap());
-        schema.insert(COLUMNS.to_owned(), provider.table(COLUMNS).unwrap());
-        schema
+        tables.sort_by(|t1, t2| {
+            t1.table_info()
+                .table_id()
+                .partial_cmp(&t2.table_info().table_id())
+                .unwrap()
+        });
+        tables
+            .into_iter()
+            .map(|t| t.table_info().name.clone())
+            .collect()
     }
 
+    /// Returns a map of [TableRef] in information schema.
+    pub fn tables(&self) -> &HashMap<String, TableRef> {
+        assert!(!self.tables.is_empty());
+
+        &self.tables
+    }
+
+    /// Returns the [TableRef] by table name.
     pub fn table(&self, name: &str) -> Option<TableRef> {
+        self.tables.get(name).cloned()
+    }
+
+    fn build_tables(&mut self) {
+        let mut tables = HashMap::new();
+
+        // Carefully consider the tables that may expose sensitive cluster configurations,
+        // authentication details, and other critical information.
+        // Only put these tables under `greptime` catalog to prevent info leak.
+        if self.catalog_name == DEFAULT_CATALOG_NAME {
+            tables.insert(
+                RUNTIME_METRICS.to_string(),
+                self.build_table(RUNTIME_METRICS).unwrap(),
+            );
+            tables.insert(
+                BUILD_INFO.to_string(),
+                self.build_table(BUILD_INFO).unwrap(),
+            );
+            tables.insert(
+                REGION_PEERS.to_string(),
+                self.build_table(REGION_PEERS).unwrap(),
+            );
+        }
+
+        tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
+        tables.insert(SCHEMATA.to_string(), self.build_table(SCHEMATA).unwrap());
+        tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
+        tables.insert(
+            KEY_COLUMN_USAGE.to_string(),
+            self.build_table(KEY_COLUMN_USAGE).unwrap(),
+        );
+
+        // Add memory tables
+        for name in MEMORY_TABLES.iter() {
+            tables.insert((*name).to_string(), self.build_table(name).expect(name));
+        }
+
+        self.tables = tables;
+    }
+
+    fn build_table(&self, name: &str) -> Option<TableRef> {
         self.information_table(name).map(|table| {
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
-            let filter_pushdown = FilterPushDownType::Unsupported;
+            let filter_pushdown = FilterPushDownType::Inexact;
             let thin_table = ThinTable::new(table_info, filter_pushdown);
 
             let data_source = Arc::new(InformationTableDataSource::new(table));
@@ -89,6 +204,45 @@ impl InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
+            ENGINES => setup_memory_table!(ENGINES),
+            COLUMN_PRIVILEGES => setup_memory_table!(COLUMN_PRIVILEGES),
+            COLUMN_STATISTICS => setup_memory_table!(COLUMN_STATISTICS),
+            BUILD_INFO => setup_memory_table!(BUILD_INFO),
+            CHARACTER_SETS => setup_memory_table!(CHARACTER_SETS),
+            COLLATIONS => setup_memory_table!(COLLATIONS),
+            COLLATION_CHARACTER_SET_APPLICABILITY => {
+                setup_memory_table!(COLLATION_CHARACTER_SET_APPLICABILITY)
+            }
+            CHECK_CONSTRAINTS => setup_memory_table!(CHECK_CONSTRAINTS),
+            EVENTS => setup_memory_table!(EVENTS),
+            FILES => setup_memory_table!(FILES),
+            OPTIMIZER_TRACE => setup_memory_table!(OPTIMIZER_TRACE),
+            PARAMETERS => setup_memory_table!(PARAMETERS),
+            PROFILING => setup_memory_table!(PROFILING),
+            REFERENTIAL_CONSTRAINTS => setup_memory_table!(REFERENTIAL_CONSTRAINTS),
+            ROUTINES => setup_memory_table!(ROUTINES),
+            SCHEMA_PRIVILEGES => setup_memory_table!(SCHEMA_PRIVILEGES),
+            TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES),
+            TRIGGERS => setup_memory_table!(TRIGGERS),
+            GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS),
+            SESSION_STATUS => setup_memory_table!(SESSION_STATUS),
+            KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            SCHEMATA => Some(Arc::new(InformationSchemaSchemata::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            RUNTIME_METRICS => Some(Arc::new(InformationSchemaMetrics::new())),
+            PARTITIONS => Some(Arc::new(InformationSchemaPartitions::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            REGION_PEERS => Some(Arc::new(InformationSchemaRegionPeers::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             _ => None,
         }
     }
@@ -102,9 +256,9 @@ impl InformationSchemaProvider {
             .unwrap();
         let table_info = TableInfoBuilder::default()
             .table_id(table.table_id())
-            .name(table.table_name().to_owned())
+            .name(table.table_name().to_string())
             .catalog_name(catalog_name)
-            .schema_name(INFORMATION_SCHEMA_NAME.to_owned())
+            .schema_name(INFORMATION_SCHEMA_NAME.to_string())
             .meta(table_meta)
             .table_type(table.table_type())
             .build()
@@ -120,7 +274,7 @@ trait InformationTable {
 
     fn schema(&self) -> SchemaRef;
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream>;
+    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
     fn table_type(&self) -> TableType {
         TableType::Temporary
@@ -154,7 +308,7 @@ impl DataSource for InformationTableDataSource {
         &self,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        let projection = request.projection;
+        let projection = request.projection.clone();
         let projected_schema = match &projection {
             Some(projection) => self.try_project(projection)?,
             None => self.table.schema(),
@@ -162,7 +316,7 @@ impl DataSource for InformationTableDataSource {
 
         let stream = self
             .table
-            .to_stream()
+            .to_stream(request)
             .map_err(BoxedError::new)
             .context(TablesRecordBatchSnafu)
             .map_err(BoxedError::new)?
@@ -171,11 +325,13 @@ impl DataSource for InformationTableDataSource {
                 None => batch,
             });
 
-        let stream = RecordBatchStreamAdaptor {
+        let stream = RecordBatchStreamWrapper {
             schema: projected_schema,
             stream: Box::pin(stream),
             output_ordering: None,
+            metrics: Default::default(),
         };
+
         Ok(Box::pin(stream))
     }
 }

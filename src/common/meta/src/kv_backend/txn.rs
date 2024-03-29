@@ -12,17 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod etcd;
+use std::cmp::max;
 
 use common_error::ext::ErrorExt;
 
 use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
+
+mod etcd;
 
 #[async_trait::async_trait]
 pub trait TxnService: Sync + Send {
     type Error: ErrorExt;
 
     async fn txn(&self, _txn: Txn) -> Result<TxnResponse, Self::Error> {
+        unimplemented!("txn is not implemented")
+    }
+
+    /// Maximum number of operations permitted in a transaction.
+    fn max_txn_ops(&self) -> usize {
         unimplemented!("txn is not implemented")
     }
 }
@@ -122,7 +129,8 @@ pub struct TxnResponse {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Txn {
-    req: TxnRequest,
+    // HACK - chroot would modify this field
+    pub(super) req: TxnRequest,
     c_when: bool,
     c_then: bool,
     c_else: bool,
@@ -185,6 +193,12 @@ impl Txn {
         self.c_else = true;
         self.req.failure = operations.into();
         self
+    }
+
+    #[inline]
+    pub fn max_operations(&self) -> usize {
+        let opc = max(self.req.compare.len(), self.req.success.len());
+        max(opc, self.req.failure.len())
     }
 }
 

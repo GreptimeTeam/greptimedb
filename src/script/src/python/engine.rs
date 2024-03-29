@@ -21,13 +21,15 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_function::scalars::{Function, FUNCTION_REGISTRY};
+use common_function::function::Function;
+use common_function::function_registry::FUNCTION_REGISTRY;
 use common_query::error::{PyUdfSnafu, UdfTempRecordBatchSnafu};
 use common_query::prelude::Signature;
-use common_query::Output;
+use common_query::{Output, OutputData};
+use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{
-    RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
+    OrderOption, RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
 };
 use datafusion_expr::Volatility;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -35,7 +37,6 @@ use datatypes::vectors::VectorRef;
 use futures::Stream;
 use query::parser::{QueryLanguageParser, QueryStatement};
 use query::QueryEngineRef;
-use session::context::QueryContextBuilder;
 use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
@@ -113,7 +114,7 @@ impl Function for PyUDF {
         _input_types: &[datatypes::prelude::ConcreteDataType],
     ) -> common_query::error::Result<datatypes::prelude::ConcreteDataType> {
         // TODO(discord9): use correct return annotation if exist
-        match self.copr.return_types.get(0) {
+        match self.copr.return_types.first() {
             Some(Some(AnnotationInfo {
                 datatype: Some(ty), ..
             })) => Ok(ty.clone()),
@@ -150,19 +151,25 @@ impl Function for PyUDF {
 
     fn eval(
         &self,
-        _func_ctx: common_function::scalars::function::FunctionContext,
+        func_ctx: common_function::function::FunctionContext,
         columns: &[datatypes::vectors::VectorRef],
     ) -> common_query::error::Result<datatypes::vectors::VectorRef> {
         // FIXME(discord9): exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
         let schema = self.fake_schema(columns);
         let columns = columns.to_vec();
         let rb = Some(RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?);
-        let res = exec_parsed(&self.copr, &rb, &HashMap::new()).map_err(|err| {
-            PyUdfSnafu {
-                msg: format!("{err:#?}"),
-            }
-            .build()
-        })?;
+
+        let res = exec_parsed(
+            &self.copr,
+            &rb,
+            &HashMap::new(),
+            &EvalContext {
+                query_ctx: func_ctx.query_ctx.clone(),
+            },
+        )
+        .map_err(BoxedError::new)
+        .context(common_query::error::ExecuteSnafu)?;
+
         let len = res.columns().len();
         if len == 0 {
             return PyUdfSnafu {
@@ -205,6 +212,7 @@ pub struct CoprStream {
     copr: CoprocessorRef,
     ret_schema: SchemaRef,
     params: HashMap<String, String>,
+    eval_ctx: EvalContext,
 }
 
 impl CoprStream {
@@ -212,6 +220,7 @@ impl CoprStream {
         stream: SendableRecordBatchStream,
         copr: CoprocessorRef,
         params: HashMap<String, String>,
+        eval_ctx: EvalContext,
     ) -> Result<Self> {
         let mut schema = vec![];
         for (ty, name) in copr.return_types.iter().zip(&copr.deco_args.ret_names) {
@@ -237,6 +246,7 @@ impl CoprStream {
             copr,
             ret_schema,
             params,
+            eval_ctx,
         })
     }
 }
@@ -245,6 +255,14 @@ impl RecordBatchStream for CoprStream {
     fn schema(&self) -> SchemaRef {
         // FIXME(discord9): use copr returns for schema
         self.ret_schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 
@@ -255,9 +273,10 @@ impl Stream for CoprStream {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(recordbatch))) => {
-                let batch = exec_parsed(&self.copr, &Some(recordbatch), &self.params)
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?;
+                let batch =
+                    exec_parsed(&self.copr, &Some(recordbatch), &self.params, &self.eval_ctx)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
                 Poll::Ready(Some(Ok(batch)))
             }
             Poll::Ready(other) => Poll::Ready(other),
@@ -282,40 +301,39 @@ impl Script for PyScript {
         self
     }
 
-    async fn execute(&self, params: HashMap<String, String>, _ctx: EvalContext) -> Result<Output> {
+    async fn execute(&self, params: HashMap<String, String>, ctx: EvalContext) -> Result<Output> {
         if let Some(sql) = &self.copr.deco_args.sql {
-            let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+            let stmt = QueryLanguageParser::parse_sql(sql, &ctx.query_ctx).unwrap();
             ensure!(
                 matches!(stmt, QueryStatement::Sql(Statement::Query { .. })),
                 error::UnsupportedSqlSnafu { sql }
             );
-            let ctx = QueryContextBuilder::default().build();
             let plan = self
                 .query_engine
                 .planner()
-                .plan(stmt, ctx.clone())
+                .plan(stmt, ctx.query_ctx.clone())
                 .await
                 .context(DatabaseQuerySnafu)?;
             let res = self
                 .query_engine
-                .execute(plan, ctx)
+                .execute(plan, ctx.query_ctx.clone())
                 .await
                 .context(DatabaseQuerySnafu)?;
             let copr = self.copr.clone();
-            match res {
-                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream::try_new(
-                    stream, copr, params,
-                )?))),
+            match res.data {
+                OutputData::Stream(stream) => Ok(Output::new_with_stream(Box::pin(
+                    CoprStream::try_new(stream, copr, params, ctx)?,
+                ))),
                 _ => unreachable!(),
             }
         } else {
             let copr = self.copr.clone();
             let params = params.clone();
-            let batch = spawn_blocking_script(move || exec_parsed(&copr, &None, &params))
+            let batch = spawn_blocking_script(move || exec_parsed(&copr, &None, &params, &ctx))
                 .await
                 .context(TokioJoinSnafu)??;
             let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
-            Ok(Output::RecordBatches(batches))
+            Ok(Output::new_with_record_batches(batches))
         }
     }
 }
@@ -376,7 +394,7 @@ mod tests {
         let catalog_manager =
             MemoryCatalogManager::new_with_table(NumbersTable::table(NUMBERS_TABLE_ID));
         let query_engine =
-            QueryEngineFactory::new(catalog_manager, None, None, false).query_engine();
+            QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine();
 
         PyEngine::new(query_engine.clone())
     }
@@ -401,8 +419,8 @@ def test(number) -> vector[u32]:
             .execute(HashMap::default(), EvalContext::default())
             .await
             .unwrap();
-        let res = common_recordbatch::util::collect_batches(match output {
-            Output::Stream(s) => s,
+        let res = common_recordbatch::util::collect_batches(match output.data {
+            OutputData::Stream(s) => s,
             _ => unreachable!(),
         })
         .await
@@ -432,8 +450,8 @@ def test(**params) -> vector[i64]:
             .execute(params, EvalContext::default())
             .await
             .unwrap();
-        let res = match _output {
-            Output::RecordBatches(s) => s,
+        let res = match _output.data {
+            OutputData::RecordBatches(s) => s,
             _ => todo!(),
         };
         let rb = res.iter().next().expect("One and only one recordbatch");
@@ -462,8 +480,8 @@ def test(number) -> vector[u32]:
             .execute(HashMap::new(), EvalContext::default())
             .await
             .unwrap();
-        let res = common_recordbatch::util::collect_batches(match _output {
-            Output::Stream(s) => s,
+        let res = common_recordbatch::util::collect_batches(match _output.data {
+            OutputData::Stream(s) => s,
             _ => todo!(),
         })
         .await
@@ -494,8 +512,8 @@ def test(a, b, c) -> vector[f64]:
             .execute(HashMap::new(), EvalContext::default())
             .await
             .unwrap();
-        match output {
-            Output::Stream(stream) => {
+        match output.data {
+            OutputData::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());
@@ -532,8 +550,8 @@ def test(a) -> vector[i64]:
             .execute(HashMap::new(), EvalContext::default())
             .await
             .unwrap();
-        match output {
-            Output::Stream(stream) => {
+        match output.data {
+            OutputData::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());

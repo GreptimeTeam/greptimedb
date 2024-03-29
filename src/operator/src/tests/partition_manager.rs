@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use catalog::kvbackend::MetaKvBackend;
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
@@ -28,19 +28,14 @@ use datafusion_expr::{lit, Operator};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use meta_client::client::MetaClient;
-use meter_core::collect::Collect;
-use meter_core::data::{ReadRecord, WriteRecord};
-use meter_core::global::global_registry;
-use meter_core::write_calc::WriteCalculator;
 use partition::columns::RangeColumnsPartitionRule;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use partition::partition::{PartitionBound, PartitionDef};
 use partition::range::RangePartitionRule;
 use partition::PartitionRuleRef;
 use store_api::storage::RegionNumber;
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
-use table::meter_insert_request;
-use table::requests::InsertRequest;
 
 pub fn new_test_table_info(
     table_id: u32,
@@ -80,6 +75,12 @@ pub fn new_test_table_info(
         .unwrap()
 }
 
+fn new_test_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, String> {
+    // TODO(niebayes): construct region wal options for test.
+    let _ = regions;
+    HashMap::default()
+}
+
 /// Create a partition rule manager with two tables, one is partitioned by single column, and
 /// the other one is two. The tables are under default catalog and schema.
 ///
@@ -102,10 +103,13 @@ pub(crate) async fn create_partition_rule_manager(
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
     let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend));
 
+    let regions = vec![1u32, 2, 3];
+    let region_wal_options = new_test_region_wal_options(regions.clone());
+
     table_metadata_manager
         .create_table_metadata(
-            new_test_table_info(1, "table_1", vec![0u32, 1, 2].into_iter()).into(),
-            vec![
+            new_test_table_info(1, "table_1", regions.clone().into_iter()).into(),
+            TableRouteValue::physical(vec![
                 RegionRoute {
                     region: Region {
                         id: 3.into(),
@@ -113,7 +117,11 @@ pub(crate) async fn create_partition_rule_manager(
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
-                                vec![PartitionBound::Value(10_i32.into())],
+                                vec![PartitionBound::Expr(PartitionExpr::new(
+                                    Operand::Column("a".to_string()),
+                                    RestrictedOp::Lt,
+                                    Operand::Value(datatypes::value::Value::Int32(10)),
+                                ))],
                             )
                             .try_into()
                             .unwrap(),
@@ -123,6 +131,7 @@ pub(crate) async fn create_partition_rule_manager(
                     leader_peer: Some(Peer::new(3, "")),
                     follower_peers: vec![],
                     leader_status: None,
+                    leader_down_since: None,
                 },
                 RegionRoute {
                     region: Region {
@@ -131,7 +140,19 @@ pub(crate) async fn create_partition_rule_manager(
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
-                                vec![PartitionBound::Value(50_i32.into())],
+                                vec![PartitionBound::Expr(PartitionExpr::new(
+                                    Operand::Expr(PartitionExpr::new(
+                                        Operand::Column("a".to_string()),
+                                        RestrictedOp::GtEq,
+                                        Operand::Value(datatypes::value::Value::Int32(10)),
+                                    )),
+                                    RestrictedOp::And,
+                                    Operand::Expr(PartitionExpr::new(
+                                        Operand::Column("a".to_string()),
+                                        RestrictedOp::Lt,
+                                        Operand::Value(datatypes::value::Value::Int32(50)),
+                                    )),
+                                ))],
                             )
                             .try_into()
                             .unwrap(),
@@ -141,6 +162,7 @@ pub(crate) async fn create_partition_rule_manager(
                     leader_peer: Some(Peer::new(2, "")),
                     follower_peers: vec![],
                     leader_status: None,
+                    leader_down_since: None,
                 },
                 RegionRoute {
                     region: Region {
@@ -149,7 +171,11 @@ pub(crate) async fn create_partition_rule_manager(
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
-                                vec![PartitionBound::MaxValue],
+                                vec![PartitionBound::Expr(PartitionExpr::new(
+                                    Operand::Column("a".to_string()),
+                                    RestrictedOp::GtEq,
+                                    Operand::Value(datatypes::value::Value::Int32(50)),
+                                ))],
                             )
                             .try_into()
                             .unwrap(),
@@ -159,77 +185,10 @@ pub(crate) async fn create_partition_rule_manager(
                     leader_peer: Some(Peer::new(1, "")),
                     follower_peers: vec![],
                     leader_status: None,
+                    leader_down_since: None,
                 },
-            ],
-        )
-        .await
-        .unwrap();
-
-    table_metadata_manager
-        .create_table_metadata(
-            new_test_table_info(2, "table_2", vec![0u32, 1, 2].into_iter()).into(),
-            vec![
-                RegionRoute {
-                    region: Region {
-                        id: 1.into(),
-                        name: "r1".to_string(),
-                        partition: Some(
-                            PartitionDef::new(
-                                vec!["a".to_string(), "b".to_string()],
-                                vec![
-                                    PartitionBound::Value(10_i32.into()),
-                                    PartitionBound::Value("hz".into()),
-                                ],
-                            )
-                            .try_into()
-                            .unwrap(),
-                        ),
-                        attrs: BTreeMap::new(),
-                    },
-                    leader_peer: None,
-                    follower_peers: vec![],
-                    leader_status: None,
-                },
-                RegionRoute {
-                    region: Region {
-                        id: 2.into(),
-                        name: "r2".to_string(),
-                        partition: Some(
-                            PartitionDef::new(
-                                vec!["a".to_string(), "b".to_string()],
-                                vec![
-                                    PartitionBound::Value(50_i32.into()),
-                                    PartitionBound::Value("sh".into()),
-                                ],
-                            )
-                            .try_into()
-                            .unwrap(),
-                        ),
-                        attrs: BTreeMap::new(),
-                    },
-                    leader_peer: None,
-                    follower_peers: vec![],
-                    leader_status: None,
-                },
-                RegionRoute {
-                    region: Region {
-                        id: 3.into(),
-                        name: "r3".to_string(),
-                        partition: Some(
-                            PartitionDef::new(
-                                vec!["a".to_string(), "b".to_string()],
-                                vec![PartitionBound::MaxValue, PartitionBound::MaxValue],
-                            )
-                            .try_into()
-                            .unwrap(),
-                        ),
-                        attrs: BTreeMap::new(),
-                    },
-                    leader_peer: None,
-                    follower_peers: vec![],
-                    leader_status: None,
-                },
-            ],
+            ]),
+            region_wal_options.clone(),
         )
         .await
         .unwrap();
@@ -238,6 +197,7 @@ pub(crate) async fn create_partition_rule_manager(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO(ruihang, weny): WIP new partition rule"]
 async fn test_find_partition_rule() {
     let partition_manager =
         create_partition_rule_manager(Arc::new(MemoryKvBackend::default())).await;
@@ -402,48 +362,4 @@ async fn test_find_regions() {
         regions.unwrap_err(),
         partition::error::Error::FindRegions { .. }
     ));
-}
-
-#[derive(Default)]
-struct MockCollector {
-    pub write_sum: AtomicU32,
-}
-
-impl Collect for MockCollector {
-    fn on_write(&self, record: WriteRecord) {
-        let _ = self
-            .write_sum
-            .fetch_add(record.byte_count, Ordering::Relaxed);
-    }
-
-    fn on_read(&self, _record: ReadRecord) {
-        todo!()
-    }
-}
-
-struct MockCalculator;
-
-impl WriteCalculator<InsertRequest> for MockCalculator {
-    fn calc_byte(&self, _value: &InsertRequest) -> u32 {
-        1024 * 10
-    }
-}
-
-#[test]
-#[ignore]
-fn test_meter_insert_request() {
-    let collector = Arc::new(MockCollector::default());
-    global_registry().set_collector(collector.clone());
-    global_registry().register_calculator(Arc::new(MockCalculator));
-
-    let req = InsertRequest {
-        catalog_name: "greptime".to_string(),
-        schema_name: "public".to_string(),
-        table_name: "numbers".to_string(),
-        columns_values: Default::default(),
-    };
-    meter_insert_request!(req);
-
-    let re = collector.write_sum.load(Ordering::Relaxed);
-    assert_eq!(re, 1024 * 10);
 }

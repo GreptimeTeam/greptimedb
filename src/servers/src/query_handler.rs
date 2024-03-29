@@ -28,15 +28,14 @@ pub mod sql;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::prom_store::remote::{ReadRequest, WriteRequest};
+use api::prom_store::remote::ReadRequest;
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
-use opentelemetry_proto::tonic::collector::metrics::v1::{
-    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
-};
-use opentelemetry_proto::tonic::collector::trace::v1::{
-    ExportTraceServiceRequest, ExportTraceServiceResponse,
-};
+use headers::HeaderValue;
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use serde_json::Value;
 use session::context::QueryContextRef;
 
 use crate::error::Result;
@@ -70,7 +69,7 @@ pub trait ScriptHandler {
 pub trait InfluxdbLineProtocolHandler {
     /// A successful request will not return a response.
     /// Only on error will the socket return a line of data.
-    async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<()>;
+    async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<Output>;
 }
 
 #[async_trait]
@@ -81,15 +80,22 @@ pub trait OpentsdbProtocolHandler {
 }
 
 pub struct PromStoreResponse {
-    pub content_type: String,
-    pub content_encoding: String,
+    pub content_type: HeaderValue,
+    pub content_encoding: HeaderValue,
+    pub resp_metrics: HashMap<String, Value>,
     pub body: Vec<u8>,
 }
 
 #[async_trait]
 pub trait PromStoreProtocolHandler {
     /// Handling prometheus remote write requests
-    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()>;
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> Result<Output>;
+
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
     /// Handling push gateway requests
@@ -103,12 +109,12 @@ pub trait OpenTelemetryProtocolHandler {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> Result<ExportMetricsServiceResponse>;
+    ) -> Result<Output>;
 
     /// Handling opentelemetry traces request
     async fn traces(
         &self,
         request: ExportTraceServiceRequest,
         ctx: QueryContextRef,
-    ) -> Result<ExportTraceServiceResponse>;
+    ) -> Result<Output>;
 }

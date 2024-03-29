@@ -17,15 +17,18 @@ use api::v1::promql_request::Promql;
 use api::v1::{
     column, AddColumn, AddColumns, AlterExpr, Basic, Column, ColumnDataType, ColumnDef,
     CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
-    PromqlRequest, RequestHeader, SemanticType, TableId,
+    PromqlRequest, RequestHeader, SemanticType,
 };
 use auth::user_provider_from_option;
-use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
+use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::MITO_ENGINE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use servers::grpc::GrpcServerConfig;
-use servers::http::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
+use servers::http::prometheus::{
+    PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
+    PrometheusResponse,
+};
 use servers::server::Server;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
@@ -71,6 +74,7 @@ macro_rules! grpc_tests {
                 test_grpc_auth,
                 test_health_check,
                 test_prom_gateway_query,
+                test_grpc_timezone,
             );
         )*
     };
@@ -267,6 +271,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
         null_mask: vec![2],
         semantic_type: SemanticType::Field as i32,
         datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
     };
     let expected_mem_col = Column {
         column_name: "memory".to_string(),
@@ -277,6 +282,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
         null_mask: vec![4],
         semantic_type: SemanticType::Field as i32,
         datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
     };
     let expected_ts_col = Column {
         column_name: "ts".to_string(),
@@ -308,7 +314,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     // create
     let expr = testing_create_expr();
     let result = db.create(expr).await.unwrap();
-    assert!(matches!(result, Output::AffectedRows(0)));
+    assert!(matches!(result.data, OutputData::AffectedRows(0)));
 
     //alter
     let add_column = ColumnDef {
@@ -332,7 +338,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         kind: Some(kind),
     };
     let result = db.alter(expr).await.unwrap();
-    assert!(matches!(result, Output::AffectedRows(0)));
+    assert!(matches!(result.data, OutputData::AffectedRows(0)));
 
     // insert
     insert_and_assert(&db).await;
@@ -370,7 +376,7 @@ async fn insert_and_assert(db: &Database) {
         )
         .await
         .unwrap();
-    assert!(matches!(result, Output::AffectedRows(2)));
+    assert!(matches!(result.data, OutputData::AffectedRows(2)));
 
     // select
     let output = db
@@ -378,10 +384,10 @@ async fn insert_and_assert(db: &Database) {
         .await
         .unwrap();
 
-    let record_batches = match output {
-        Output::RecordBatches(record_batches) => record_batches,
-        Output::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
-        Output::AffectedRows(_) => unreachable!(),
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
     };
 
     let pretty = record_batches.pretty_print().unwrap();
@@ -445,9 +451,7 @@ fn testing_create_expr() -> CreateTableExpr {
         primary_keys: vec!["host".to_string()],
         create_if_not_exists: true,
         table_options: Default::default(),
-        table_id: Some(TableId {
-            id: MIN_USER_TABLE_ID,
-        }),
+        table_id: None,
         engine: MITO_ENGINE.to_string(),
     }
 }
@@ -464,6 +468,8 @@ pub async fn test_health_check(store_type: StorageType) {
 }
 
 pub async fn test_prom_gateway_query(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
     // prepare connection
     let (addr, mut guard, fe_grpc_server) = setup_grpc_server(store_type, "prom_gateway").await;
     let grpc_client = Client::with_urls(vec![addr]);
@@ -478,14 +484,16 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     assert!(matches!(
         db.sql("CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);")
             .await
-            .unwrap(),
-        Output::AffectedRows(0)
+            .unwrap()
+            .data,
+        OutputData::AffectedRows(0)
     ));
     assert!(matches!(
         db.sql(r#"INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");"#)
             .await
-            .unwrap(),
-        Output::AffectedRows(3)
+            .unwrap()
+            .data,
+        OutputData::AffectedRows(3)
     ));
 
     // Instant query using prometheus gateway service
@@ -513,8 +521,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
             result_type: "vector".to_string(),
-            result: vec![
-                PromSeries {
+            result: PromQueryResult::Vector(vec![
+                PromSeriesVector {
                     metric: [
                         ("k".to_string(), "a".to_string()),
                         ("__name__".to_string(), "test".to_string()),
@@ -522,9 +530,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     value: Some((5.0, "2".to_string())),
-                    ..Default::default()
                 },
-                PromSeries {
+                PromSeriesVector {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "b".to_string()),
@@ -532,13 +539,13 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     value: Some((5.0, "1".to_string())),
-                    ..Default::default()
                 },
-            ],
+            ]),
         }),
         error: None,
         error_type: None,
         warnings: None,
+        resp_metrics: Default::default(),
     };
     assert_eq!(instant_query_result, expected);
 
@@ -564,8 +571,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
             result_type: "matrix".to_string(),
-            result: vec![
-                PromSeries {
+            result: PromQueryResult::Matrix(vec![
+                PromSeriesMatrix {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "a".to_string()),
@@ -573,9 +580,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
-                    ..Default::default()
                 },
-                PromSeries {
+                PromSeriesMatrix {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "b".to_string()),
@@ -583,13 +589,13 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
-                    ..Default::default()
                 },
-            ],
+            ]),
         }),
         error: None,
         error_type: None,
         warnings: None,
+        resp_metrics: Default::default(),
     };
     assert_eq!(range_query_result, expected);
 
@@ -615,15 +621,77 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
             result_type: "matrix".to_string(),
-            result: vec![],
+            result: PromQueryResult::Matrix(vec![]),
         }),
         error: None,
         error_type: None,
         warnings: None,
+        resp_metrics: Default::default(),
     };
     assert_eq!(range_query_result, expected);
 
     // clean up
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
+}
+
+pub async fn test_grpc_timezone(store_type: StorageType) {
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024,
+        max_send_message_size: 1024,
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let mut db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    db.set_timezone("Asia/Shanghai");
+    let sys1 = to_batch(db.sql("show variables system_time_zone;").await.unwrap()).await;
+    let user1 = to_batch(db.sql("show variables time_zone;").await.unwrap()).await;
+    db.set_timezone("");
+    let sys2 = to_batch(db.sql("show variables system_time_zone;").await.unwrap()).await;
+    let user2 = to_batch(db.sql("show variables time_zone;").await.unwrap()).await;
+    assert_eq!(sys1, sys2);
+    assert_eq!(
+        sys2,
+        "\
++------------------+
+| SYSTEM_TIME_ZONE |
++------------------+
+| UTC              |
++------------------+"
+    );
+    assert_eq!(
+        user1,
+        "\
++---------------+
+| TIME_ZONE     |
++---------------+
+| Asia/Shanghai |
++---------------+"
+    );
+    assert_eq!(
+        user2,
+        "\
++-----------+
+| TIME_ZONE |
++-----------+
+| UTC       |
++-----------+"
+    );
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+async fn to_batch(output: Output) -> String {
+    match output.data {
+        OutputData::RecordBatches(batch) => batch,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    }
+    .pretty_print()
+    .unwrap()
 }

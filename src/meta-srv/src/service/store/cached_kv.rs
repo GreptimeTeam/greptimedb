@@ -94,7 +94,8 @@ impl LeaderCachedKvBackend {
     /// The caller MUST ensure during the loading, there are no mutation requests reaching the `LeaderCachedKvStore`.
     pub async fn load(&self) -> Result<()> {
         for prefix in &CACHE_KEY_PREFIXES[..] {
-            let _timer = metrics::METRIC_META_LEADER_CACHED_KV_LOAD.with_label_values(&[prefix]);
+            let _timer =
+                metrics::METRIC_META_LEADER_CACHED_KV_LOAD_ELAPSED.with_label_values(&[prefix]);
 
             // TODO(weny): Refactors PaginationStream's output to unary output.
             let stream = PaginationStream::new(
@@ -260,12 +261,21 @@ impl KvBackend for LeaderCachedKvBackend {
             .iter()
             .map(|kv| kv.key.clone())
             .collect::<HashSet<_>>();
+
+        metrics::METRIC_META_KV_CACHE_HIT
+            .with_label_values(&[&"batch_get"])
+            .inc_by(hit_keys.len() as u64);
+
         let missed_keys = req
             .keys
             .iter()
             .filter(|key| !hit_keys.contains(*key))
             .cloned()
             .collect::<Vec<_>>();
+        metrics::METRIC_META_KV_CACHE_MISS
+            .with_label_values(&[&"batch_get"])
+            .inc_by(missed_keys.len() as u64);
+
         let remote_req = BatchGetRequest { keys: missed_keys };
 
         let ver = self.get_version();
@@ -369,6 +379,10 @@ impl TxnService for LeaderCachedKvBackend {
         self.invalid_keys(keys).await?;
 
         Ok(res)
+    }
+
+    fn max_txn_ops(&self) -> usize {
+        self.store.max_txn_ops()
     }
 }
 

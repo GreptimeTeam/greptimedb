@@ -28,6 +28,7 @@ use common_telemetry::{debug, info, warn};
 use dashmap::DashMap;
 use futures::future::join_all;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
 
@@ -67,7 +68,16 @@ pub trait HeartbeatHandler: Send + Sync {
         req: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()>;
+    ) -> Result<HandleControl>;
+}
+
+/// HandleControl
+///
+/// Controls process of handling heartbeat request.
+#[derive(PartialEq)]
+pub enum HandleControl {
+    Continue,
+    Done,
 }
 
 #[derive(Debug, Default)]
@@ -75,7 +85,7 @@ pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
     pub instructions: Vec<Instruction>,
     pub stat: Option<Stat>,
-    pub inactive_region_ids: HashSet<u64>,
+    pub inactive_region_ids: HashSet<RegionId>,
     pub region_lease: Option<RegionLease>,
 }
 
@@ -219,7 +229,7 @@ impl HeartbeatHandlerGroup {
         let _ = self.pushers.insert(key.to_string(), pusher).await;
     }
 
-    pub async fn unregister(&self, key: impl AsRef<str>) -> Option<Pusher> {
+    pub async fn deregister(&self, key: impl AsRef<str>) -> Option<Pusher> {
         let key = key.as_ref();
         METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         info!("Pusher unregister: {}", key);
@@ -246,15 +256,16 @@ impl HeartbeatHandlerGroup {
             })?;
 
         for NameCachedHandler { name, handler } in handlers.iter() {
-            if ctx.is_skip_all() {
-                break;
+            if !handler.is_acceptable(role) {
+                continue;
             }
 
-            if handler.is_acceptable(role) {
-                let _timer = METRIC_META_HANDLER_EXECUTE
-                    .with_label_values(&[*name])
-                    .start_timer();
-                handler.handle(&req, &mut ctx, &mut acc).await?;
+            let _timer = METRIC_META_HANDLER_EXECUTE
+                .with_label_values(&[*name])
+                .start_timer();
+
+            if handler.handle(&req, &mut ctx, &mut acc).await? == HandleControl::Done {
+                break;
             }
         }
         let header = std::mem::take(&mut acc.header);
@@ -277,6 +288,19 @@ pub struct HeartbeatMailbox {
 
 impl HeartbeatMailbox {
     pub(crate) fn json_reply(msg: &MailboxMessage) -> Result<InstructionReply> {
+        let Payload::Json(payload) =
+            msg.payload
+                .as_ref()
+                .with_context(|| UnexpectedInstructionReplySnafu {
+                    mailbox_message: msg.to_string(),
+                    reason: format!("empty payload, msg: {msg:?}"),
+                })?;
+        serde_json::from_str(payload).context(DeserializeFromJsonSnafu { input: payload })
+    }
+
+    /// Parses the [Instruction] from [MailboxMessage].
+    #[cfg(test)]
+    pub(crate) fn json_instruction(msg: &MailboxMessage) -> Result<Instruction> {
         let Payload::Json(payload) =
             msg.payload
                 .as_ref()
@@ -410,7 +434,7 @@ mod tests {
 
     use api::v1::meta::{MailboxMessage, RequestHeader, Role, PROTOCOL_VERSION};
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::sequence::Sequence;
+    use common_meta::sequence::SequenceBuilder;
     use tokio::sync::mpsc;
 
     use crate::handler::check_leader_handler::CheckLeaderHandler;
@@ -463,7 +487,7 @@ mod tests {
             .await;
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
-        let seq = Sequence::new("test_seq", 0, 10, kv_backend);
+        let seq = SequenceBuilder::new("test_seq", kv_backend).build();
         let mailbox = HeartbeatMailbox::create(handler_group.pushers(), seq);
 
         let msg = MailboxMessage {

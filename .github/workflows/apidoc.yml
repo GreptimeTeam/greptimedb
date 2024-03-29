@@ -1,7 +1,7 @@
 on:
   push:
     branches:
-      - develop
+      - main
     paths-ignore:
       - 'docs/**'
       - 'config/**'
@@ -13,14 +13,14 @@ on:
 name: Build API docs
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-08-07
+  RUST_TOOLCHAIN: nightly-2023-12-19
 
 jobs:
   apidoc:
     runs-on: ubuntu-20.04
     steps:
-    - uses: actions/checkout@v3
-    - uses: arduino/setup-protoc@v1
+    - uses: actions/checkout@v4
+    - uses: arduino/setup-protoc@v3
       with:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
     - uses: dtolnay/rust-toolchain@master
@@ -40,3 +40,4 @@ jobs:
       uses: JamesIves/github-pages-deploy-action@v4
       with:
         folder: target/doc
+        single-commit: true

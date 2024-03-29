@@ -17,17 +17,15 @@ mod row_to_region;
 mod stmt_to_region;
 mod table_to_region;
 
-use api::helper::ColumnDataTypeWrapper;
-use api::v1::{ColumnDataType, SemanticType};
+use api::v1::SemanticType;
 pub use column_to_row::ColumnToRow;
-use datatypes::prelude::ConcreteDataType;
 pub use row_to_region::RowToRegion;
 use snafu::{OptionExt, ResultExt};
 pub use stmt_to_region::StatementToRegion;
 use table::metadata::TableInfo;
 pub use table_to_region::TableToRegion;
 
-use crate::error::{ColumnDataTypeSnafu, ColumnNotFoundSnafu, MissingTimeIndexColumnSnafu, Result};
+use crate::error::{ColumnNotFoundSnafu, MissingTimeIndexColumnSnafu, Result};
 
 fn semantic_type(table_info: &TableInfo, column: &str) -> Result<SemanticType> {
     let table_meta = &table_info.meta;
@@ -57,9 +55,4 @@ fn semantic_type(table_info: &TableInfo, column: &str) -> Result<SemanticType> {
     };
 
     Ok(semantic_type)
-}
-
-fn data_type(data_type: ConcreteDataType) -> Result<ColumnDataType> {
-    let datatype: ColumnDataTypeWrapper = data_type.try_into().context(ColumnDataTypeSnafu)?;
-    Ok(datatype.datatype())
 }

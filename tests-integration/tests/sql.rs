@@ -21,7 +21,7 @@ use tests_integration::test_util::{
     setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
     setup_pg_server_with_user_provider, StorageType,
 };
-use tokio_postgres::NoTls;
+use tokio_postgres::{NoTls, SimpleQueryMessage};
 
 #[macro_export]
 macro_rules! sql_test {
@@ -56,9 +56,13 @@ macro_rules! sql_tests {
                 test_mysql_auth,
                 test_mysql_crud,
                 test_mysql_timezone,
+                test_mysql_async_timestamp,
                 test_postgres_auth,
                 test_postgres_crud,
+                test_postgres_timezone,
+                test_postgres_bytea,
                 test_postgres_parameter_inference,
+                test_mysql_prepare_stmt_insert_timestamp,
             );
         )*
     };
@@ -164,10 +168,10 @@ pub async fn test_mysql_crud(store_type: StorageType) {
     assert_eq!(rows.len(), 10);
 
     for (i, row) in rows.iter().enumerate() {
-        let ret: i64 = row.get(0);
-        let d: NaiveDate = row.get(1);
-        let dt: DateTime<Utc> = row.get(2);
-        let bytes: Vec<u8> = row.get(3);
+        let ret: i64 = row.get("i");
+        let d: NaiveDate = row.get("d");
+        let dt: DateTime<Utc> = row.get("dt");
+        let bytes: Vec<u8> = row.get("b");
         assert_eq!(ret, i as i64);
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
@@ -190,9 +194,26 @@ pub async fn test_mysql_crud(store_type: StorageType) {
     assert_eq!(rows.len(), 1);
 
     for row in rows {
-        let ret: i64 = row.get(0);
+        let ret: i64 = row.get("i");
         assert_eq!(ret, 6);
     }
+
+    // parameter type mismatch
+    let query_re = sqlx::query("select i from demo where i = ?")
+        .bind("test")
+        .fetch_all(&pool)
+        .await;
+    assert!(query_re.is_err());
+    assert_eq!(
+        query_re
+            .err()
+            .unwrap()
+            .into_database_error()
+            .unwrap()
+            .downcast::<MySqlDatabaseError>()
+            .code(),
+        Some("22007")
+    );
 
     let _ = sqlx::query("delete from demo")
         .execute(&pool)
@@ -216,9 +237,19 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
         .await
         .unwrap();
 
+    let _ = conn
+        .execute("SET time_zone = 'Asia/Shanghai'")
+        .await
+        .unwrap();
+    let timezone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "Asia/Shanghai");
+    let timezone = conn.fetch_all("SELECT @@system_time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "UTC");
     let _ = conn.execute("SET time_zone = 'UTC'").await.unwrap();
-    let time_zone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
-    assert_eq!(time_zone[0].get::<String, usize>(0), "UTC");
+    let timezone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "UTC");
+    let timezone = conn.fetch_all("SELECT @@system_time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "UTC");
 
     // test data
     let _ = conn
@@ -345,9 +376,9 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     assert_eq!(rows.len(), 10);
 
     for (i, row) in rows.iter().enumerate() {
-        let ret: i64 = row.get(0);
-        let d: NaiveDate = row.get(1);
-        let dt: NaiveDateTime = row.get(2);
+        let ret: i64 = row.get("i");
+        let d: NaiveDate = row.get("d");
+        let dt: NaiveDateTime = row.get("dt");
 
         assert_eq!(ret, i as i64);
 
@@ -368,7 +399,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     assert_eq!(rows.len(), 1);
 
     for row in rows {
-        let ret: i64 = row.get(0);
+        let ret: i64 = row.get("i");
         assert_eq!(ret, 6);
     }
 
@@ -382,6 +413,123 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         .unwrap();
     assert_eq!(rows.len(), 0);
 
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+pub async fn test_postgres_bytea(store_type: StorageType) {
+    let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_bytea_output").await;
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+    let _ = client
+        .simple_query("CREATE TABLE test(b BLOB, ts TIMESTAMP TIME INDEX)")
+        .await
+        .unwrap();
+    let _ = client
+        .simple_query("INSERT INTO test VALUES(X'6162636b6c6d2aa954', 0)")
+        .await
+        .unwrap();
+    let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
+        match &mess[0] {
+            SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
+            _ => unreachable!(),
+        }
+    };
+
+    let r = client.simple_query("SELECT b FROM test").await.unwrap();
+    let b = get_row(r);
+    assert_eq!(b, "\\x6162636b6c6d2aa954");
+
+    let _ = client.simple_query("SET bytea_output='hex'").await.unwrap();
+    let r = client.simple_query("SELECT b FROM test").await.unwrap();
+    let b = get_row(r);
+    assert_eq!(b, "\\x6162636b6c6d2aa954");
+
+    let _ = client
+        .simple_query("SET bytea_output='escape'")
+        .await
+        .unwrap();
+    let r = client.simple_query("SELECT b FROM test").await.unwrap();
+    let b = get_row(r);
+    assert_eq!(b, "abcklm*\\251T");
+
+    let _e = client
+        .simple_query("SET bytea_output='invalid'")
+        .await
+        .unwrap_err();
+
+    // binary format shall not be affected by bytea_output
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("postgres://{addr}/public"))
+        .await
+        .unwrap();
+
+    let row = sqlx::query("select b from test")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let val: Vec<u8> = row.get("b");
+    assert_eq!(val, [97, 98, 99, 107, 108, 109, 42, 169, 84]);
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+pub async fn test_postgres_timezone(store_type: StorageType) {
+    let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_inference").await;
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+
+    let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
+        match &mess[0] {
+            SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
+            _ => unreachable!(),
+        }
+    };
+
+    let _ = client.simple_query("SET time_zone = 'UTC'").await.unwrap();
+    let timezone = get_row(
+        client
+            .simple_query("SHOW VARIABLES time_zone")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(timezone, "UTC");
+    let timezone = get_row(
+        client
+            .simple_query("SHOW VARIABLES system_time_zone")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(timezone, "UTC");
+    let _ = client
+        .simple_query("SET time_zone = 'Asia/Shanghai'")
+        .await
+        .unwrap();
+    let timezone = get_row(
+        client
+            .simple_query("SHOW VARIABLES time_zone")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(timezone, "Asia/Shanghai");
+    let timezone = get_row(
+        client
+            .simple_query("SHOW VARIABLES system_time_zone")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(timezone, "UTC");
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
@@ -421,5 +569,235 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
     assert_eq!(1, rows.len());
 
     let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_async_timestamp(store_type: StorageType) {
+    use mysql_async::prelude::*;
+    use time::PrimitiveDateTime;
+
+    #[derive(Debug)]
+    struct CpuMetric {
+        hostname: String,
+        environment: String,
+        usage_user: f64,
+        usage_system: f64,
+        usage_idle: f64,
+        ts: i64,
+    }
+
+    impl CpuMetric {
+        fn new(
+            hostname: String,
+            environment: String,
+            usage_user: f64,
+            usage_system: f64,
+            usage_idle: f64,
+            ts: i64,
+        ) -> Self {
+            Self {
+                hostname,
+                environment,
+                usage_user,
+                usage_system,
+                usage_idle,
+                ts,
+            }
+        }
+    }
+    common_telemetry::init_default_ut_logging();
+
+    let (addr, mut guard, fe_mysql_server) = setup_mysql_server(store_type, "sql_timestamp").await;
+    let url = format!("mysql://{addr}/public");
+    let opts = mysql_async::Opts::from_url(&url).unwrap();
+    let mut conn = mysql_async::Conn::new(opts)
+        .await
+        .expect("create connection failure");
+
+    r"CREATE TABLE IF NOT EXISTS cpu_metrics (
+    hostname STRING,
+    environment STRING,
+    usage_user DOUBLE,
+    usage_system DOUBLE,
+    usage_idle DOUBLE,
+    ts TIMESTAMP,
+    TIME INDEX(ts),
+    PRIMARY KEY(hostname, environment)
+);"
+    .ignore(&mut conn)
+    .await
+    .expect("create table failure");
+
+    let metrics = vec![
+        CpuMetric::new(
+            "host0".into(),
+            "test".into(),
+            32f64,
+            3f64,
+            4f64,
+            1680307200050,
+        ),
+        CpuMetric::new(
+            "host1".into(),
+            "test".into(),
+            29f64,
+            32f64,
+            50f64,
+            1680307200050,
+        ),
+        CpuMetric::new(
+            "host0".into(),
+            "test".into(),
+            32f64,
+            3f64,
+            4f64,
+            1680307260050,
+        ),
+        CpuMetric::new(
+            "host1".into(),
+            "test".into(),
+            29f64,
+            32f64,
+            50f64,
+            1680307260050,
+        ),
+        CpuMetric::new(
+            "host0".into(),
+            "test".into(),
+            32f64,
+            3f64,
+            4f64,
+            1680307320050,
+        ),
+        CpuMetric::new(
+            "host1".into(),
+            "test".into(),
+            29f64,
+            32f64,
+            50f64,
+            1680307320050,
+        ),
+    ];
+
+    r"INSERT INTO cpu_metrics (hostname, environment, usage_user, usage_system, usage_idle, ts)
+      VALUES (:hostname, :environment, :usage_user, :usage_system, :usage_idle, :ts)"
+        .with(metrics.iter().map(|metric| {
+            params! {
+                "hostname" => &metric.hostname,
+                "environment" => &metric.environment,
+                "usage_user" => metric.usage_user,
+                "usage_system" => metric.usage_system,
+                "usage_idle" => metric.usage_idle,
+                "ts" => metric.ts,
+            }
+        }))
+        .batch(&mut conn)
+        .await
+        .expect("insert data failure");
+
+    // query data
+    let loaded_metrics = "SELECT * FROM cpu_metrics"
+        .with(())
+        .map(
+            &mut conn,
+            |(hostname, environment, usage_user, usage_system, usage_idle, raw_ts): (
+                String,
+                String,
+                f64,
+                f64,
+                f64,
+                PrimitiveDateTime,
+            )| {
+                let ts = raw_ts.assume_utc().unix_timestamp() * 1000;
+                CpuMetric::new(
+                    hostname,
+                    environment,
+                    usage_user,
+                    usage_system,
+                    usage_idle,
+                    ts,
+                )
+            },
+        )
+        .await
+        .expect("query data failure");
+    assert_eq!(loaded_metrics.len(), 6);
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_prepare_stmt_insert_timestamp(store_type: StorageType) {
+    let (addr, mut guard, server) =
+        setup_mysql_server(store_type, "test_mysql_prepare_stmt_insert_timestamp").await;
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    sqlx::query("create table demo(i bigint, ts timestamp time index)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Valid timestamp binary encoding: https://mariadb.com/kb/en/resultset-row/#timestamp-binary-encoding
+
+    // Timestamp data length = 4, year-month-day(ymd) only:
+    sqlx::query("insert into demo values(?, ?)")
+        .bind(0)
+        .bind(
+            NaiveDate::from_ymd_opt(2023, 12, 19)
+                // Though hour, minute and second are provided, `sqlx` will not encode them if they are all zeroes,
+                // which is just what we desire here.
+                // See https://github.com/launchbadge/sqlx/blob/bb064e3789d68ad4e9affe7cba34944abb000f72/sqlx-core/src/mysql/types/chrono.rs#L186C22-L186C22
+                .and_then(|x| x.and_hms_opt(0, 0, 0))
+                .unwrap(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Timestamp data length = 7, ymd and hour-minute-second(hms):
+    sqlx::query("insert into demo values(?, ?)")
+        .bind(1)
+        .bind(
+            NaiveDate::from_ymd_opt(2023, 12, 19)
+                .and_then(|x| x.and_hms_opt(13, 19, 1))
+                .unwrap(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Timestamp data length = 11, ymd, hms and microseconds:
+    sqlx::query("insert into demo values(?, ?)")
+        .bind(2)
+        .bind(
+            NaiveDate::from_ymd_opt(2023, 12, 19)
+                .and_then(|x| x.and_hms_micro_opt(13, 20, 1, 123456))
+                .unwrap(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let rows = sqlx::query("select i, ts from demo order by i")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+
+    let x: DateTime<Utc> = rows[0].get("ts");
+    assert_eq!(x.to_string(), "2023-12-19 00:00:00 UTC");
+
+    let x: DateTime<Utc> = rows[1].get("ts");
+    assert_eq!(x.to_string(), "2023-12-19 13:19:01 UTC");
+
+    let x: DateTime<Utc> = rows[2].get("ts");
+    assert_eq!(x.to_string(), "2023-12-19 13:20:01.123 UTC");
+
+    let _ = server.shutdown().await;
     guard.remove_all().await;
 }

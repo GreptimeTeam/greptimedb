@@ -23,17 +23,20 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::info;
-use common_time::util::current_time_millis;
+use common_wal::options::WalOptions;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
+use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::OnFailure;
 use crate::sst::file_purger::FilePurgerRef;
+use crate::time_provider::TimeProviderRef;
 
 /// This is the approximate factor to estimate the size of wal.
 const ESTIMATED_WAL_FACTOR: f32 = 0.42825;
@@ -74,10 +77,16 @@ pub(crate) struct MitoRegion {
     pub(crate) manifest_manager: RegionManifestManager,
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
+    /// Wal options of this region.
+    pub(crate) wal_options: WalOptions,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
     /// Whether the region is writable.
     writable: AtomicBool,
+    /// Provider to get current time.
+    time_provider: TimeProviderRef,
+    /// Memtable builder for the region.
+    pub(crate) memtable_builder: MemtableBuilderRef,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
@@ -114,13 +123,18 @@ impl MitoRegion {
 
     /// Update flush time to current time.
     pub(crate) fn update_flush_millis(&self) {
-        let now = current_time_millis();
+        let now = self.time_provider.current_time_millis();
         self.last_flush_millis.store(now, Ordering::Relaxed);
     }
 
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
         self.writable.load(Ordering::Relaxed)
+    }
+
+    /// Returns the region dir.
+    pub(crate) fn region_dir(&self) -> &str {
+        self.access_layer.region_dir()
     }
 
     /// Sets the writable flag.
@@ -154,6 +168,25 @@ impl MitoRegion {
     /// Use the memtables size to estimate the size of wal.
     fn estimated_wal_usage(&self, memtable_usage: u64) -> u64 {
         ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
+    }
+
+    pub(crate) async fn apply_edit(
+        &self,
+        edit: RegionEdit,
+        memtables_to_remove: &[MemtableId],
+    ) -> Result<()> {
+        info!("Applying {edit:?} to region {}", self.region_id);
+
+        self.manifest_manager
+            .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
+                edit.clone(),
+            )))
+            .await?;
+
+        // Apply edit to region's version.
+        self.version_control
+            .apply_edit(edit, memtables_to_remove, self.file_purger.clone());
+        Ok(())
     }
 }
 

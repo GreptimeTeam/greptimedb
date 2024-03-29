@@ -25,7 +25,6 @@ use paste::paste;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
-use super::LogicalPrimitiveType;
 use crate::data_type::DataType;
 use crate::duration::{
     DurationMicrosecond, DurationMillisecond, DurationNanosecond, DurationSecond,
@@ -34,6 +33,7 @@ use crate::error;
 use crate::prelude::{
     ConcreteDataType, LogicalTypeId, MutableVector, ScalarVectorBuilder, Value, ValueRef, Vector,
 };
+use crate::types::LogicalPrimitiveType;
 use crate::vectors::{
     DurationMicrosecondVector, DurationMicrosecondVectorBuilder, DurationMillisecondVector,
     DurationMillisecondVectorBuilder, DurationNanosecondVector, DurationNanosecondVectorBuilder,
@@ -78,8 +78,8 @@ macro_rules! impl_data_type_for_duration {
             pub struct [<Duration $unit Type>];
 
             impl DataType for [<Duration $unit Type>] {
-                fn name(&self) -> &str {
-                    stringify!([<Duration $unit>])
+                fn name(&self) -> String {
+                    stringify!([<Duration $unit>]).to_string()
                 }
 
                 fn logical_type_id(&self) -> LogicalTypeId {

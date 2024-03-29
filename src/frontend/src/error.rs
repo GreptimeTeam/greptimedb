@@ -44,7 +44,7 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display(""))]
+    #[snafu(display("External error"))]
     External {
         location: Location,
         source: BoxedError,
@@ -108,9 +108,6 @@ pub enum Error {
     #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
     InvalidDeleteRequest { reason: String, location: Location },
 
-    #[snafu(display("Invalid system table definition: {err_msg}"))]
-    InvalidSystemTableDef { err_msg: String, location: Location },
-
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
 
@@ -170,14 +167,11 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display(""))]
+    #[snafu(display("Operation to region server failed"))]
     InvokeRegionServer {
         location: Location,
         source: servers::error::Error,
     },
-
-    #[snafu(display("Missing meta_client_options section in config"))]
-    MissingMetasrvOpts { location: Location },
 
     #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
     LeaderNotFound { table: String, location: Location },
@@ -240,12 +234,6 @@ pub enum Error {
     #[snafu(display("Unsupported format: {:?}", format))]
     UnsupportedFormat { location: Location, format: Format },
 
-    #[snafu(display("Table metadata manager error"))]
-    TableMetadataManager {
-        source: common_meta::error::Error,
-        location: Location,
-    },
-
     #[snafu(display("Failed to pass permission check"))]
     Permission {
         source: auth::error::Error,
@@ -272,6 +260,12 @@ pub enum Error {
 
     #[snafu(display("Invalid auth config"))]
     IllegalAuthConfig { source: auth::error::Error },
+
+    #[snafu(display("Failed to serialize options to TOML"))]
+    TomlFormat {
+        #[snafu(source)]
+        error: toml::ser::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -279,14 +273,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ParseAddr { .. }
+            Error::TomlFormat { .. }
+            | Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::SchemaExists { .. }
             | Error::ColumnNotFound { .. }
-            | Error::MissingMetasrvOpts { .. }
             | Error::UnsupportedFormat { .. }
             | Error::IllegalAuthConfig { .. }
             | Error::EmptyData { .. }
@@ -299,8 +293,7 @@ impl ErrorExt for Error {
 
             Error::DescribeStatement { source, .. } => source.status_code(),
 
-            Error::HandleHeartbeatResponse { source, .. }
-            | Error::TableMetadataManager { source, .. } => source.status_code(),
+            Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             Error::RuntimeResource { source, .. } => source.status_code(),
             Error::PromStoreRemoteQueryPlan { source, .. }
@@ -326,9 +319,7 @@ impl ErrorExt for Error {
             | Error::VectorToGrpcColumn { .. }
             | Error::InvalidRegionRequest { .. } => StatusCode::Internal,
 
-            Error::ContextValueNotFound { .. } | Error::InvalidSystemTableDef { .. } => {
-                StatusCode::Unexpected
-            }
+            Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
 

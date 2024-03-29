@@ -12,6 +12,10 @@ rpc_runtime_size = 8
 # It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
 require_lease_before_startup = false
 
+# Initialize all regions in the background during the startup.
+# By default, it provides services after all regions have been initialized.
+init_regions_in_background = false
+
 [heartbeat]
 # Interval for sending heartbeat messages to the Metasrv, 3 seconds by default.
 interval = "3s"
@@ -29,9 +33,11 @@ connect_timeout = "1s"
 # `TCP_NODELAY` option for accepted connections, true by default.
 tcp_nodelay = true
 
-# WAL options, see `standalone.example.toml`.
+# WAL options.
 [wal]
-# WAL data directory
+provider = "raft_engine"
+
+# Raft-engine wal options, see `standalone.example.toml`.
 # dir = "/tmp/greptimedb/wal"
 file_size = "256MB"
 purge_threshold = "4GB"
@@ -39,10 +45,22 @@ purge_interval = "10m"
 read_batch_size = 128
 sync_write = false
 
+# Kafka wal options, see `standalone.example.toml`.
+# broker_endpoints = ["127.0.0.1:9092"]
+# Warning: Kafka has a default limit of 1MB per message in a topic.
+# max_batch_size = "1MB"
+# linger = "200ms"
+# consumer_wait_timeout = "100ms"
+# backoff_init = "500ms"
+# backoff_max = "10s"
+# backoff_base = 2
+# backoff_deadline = "5mins"
+
 # Storage options, see `standalone.example.toml`.
 [storage]
 # The working home directory.
 data_home = "/tmp/greptimedb/"
+# Storage type.
 type = "File"
 # TTL for all tables. Disabled by default.
 # global_ttl = "7d"
@@ -53,32 +71,11 @@ type = "File"
 # The local file cache capacity in bytes.
 # cache_capacity = "256MB"
 
-# Compaction options, see `standalone.example.toml`.
-[storage.compaction]
-max_inflight_tasks = 4
-max_files_in_level0 = 8
-max_purge_tasks = 32
-
-# Storage manifest options
-[storage.manifest]
-# Region checkpoint actions margin.
-# Create a checkpoint every <checkpoint_margin> actions.
-checkpoint_margin = 10
-# Region manifest logs and checkpoints gc execution duration
-gc_duration = '10m'
-
-# Storage flush options
-[storage.flush]
-# Max inflight flush tasks.
-max_flush_tasks = 8
-# Default write buffer size for a region.
-region_write_buffer_size = "32MB"
-# Interval to check whether a region needs flush.
-picker_schedule_interval = "5m"
-# Interval to auto flush a region if it has not flushed yet.
-auto_flush_interval = "1h"
-# Global write buffer size for all regions.
-global_write_buffer_size = "1GB"
+# Custom storage options
+#[[storage.providers]]
+#type = "S3"
+#[[storage.providers]]
+#type = "Gcs"
 
 # Mito engine options
 [[region_engine]]
@@ -91,24 +88,84 @@ worker_channel_size = 128
 worker_request_batch_size = 64
 # Number of meta action updated to trigger a new checkpoint for the manifest
 manifest_checkpoint_distance = 10
-# Manifest compression type
-manifest_compress_type = "Uncompressed"
+# Whether to compress manifest and checkpoint file by gzip (default false).
+compress_manifest = false
 # Max number of running background jobs
 max_background_jobs = 4
 # Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
-# Global write buffer size for all regions.
+# Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
 global_write_buffer_size = "1GB"
-# Global write buffer size threshold to reject write requests (default 2G).
+# Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`
 global_write_buffer_reject_size = "2GB"
-# Cache size for SST metadata (default 128MB). Setting it to 0 to disable the cache.
+# Cache size for SST metadata. Setting it to 0 to disable the cache.
+# If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
 sst_meta_cache_size = "128MB"
-# Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
+# Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
+# If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
 vector_cache_size = "512MB"
+# Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
+# If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+page_cache_size = "512MB"
+# Buffer size for SST writing.
+sst_write_buffer_size = "8MB"
+# Parallelism to scan a region (default: 1/4 of cpu cores).
+# - 0: using the default value (1/4 of cpu cores).
+# - 1: scan in current thread.
+# - n: scan in parallelism n.
+scan_parallelism = 0
+# Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
+parallel_scan_channel_size = 32
+# Whether to allow stale WAL entries read during replay.
+allow_stale_entries = false
 
-# Log options
+[region_engine.mito.inverted_index]
+# Whether to create the index on flush.
+# - "auto": automatically
+# - "disable": never
+create_on_flush = "auto"
+# Whether to create the index on compaction.
+# - "auto": automatically
+# - "disable": never
+create_on_compaction = "auto"
+# Whether to apply the index on query
+# - "auto": automatically
+# - "disable": never
+apply_on_query = "auto"
+# Memory threshold for performing an external sort during index creation.
+# Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
+mem_threshold_on_create = "64M"
+# File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`).
+intermediate_path = ""
+
+[region_engine.mito.memtable]
+# Memtable type.
+# - "partition_tree": partition tree memtable
+# - "time_series": time-series memtable (deprecated)
+type = "partition_tree"
+# The max number of keys in one shard.
+index_max_keys_per_shard = 8192
+# The max rows of data inside the actively writing buffer in one shard.
+data_freeze_threshold = 32768
+# Max dictionary bytes.
+fork_dictionary_bytes = "1GiB"
+
+# Log options, see `standalone.example.toml`
 # [logging]
-# Specify logs directory.
 # dir = "/tmp/greptimedb/logs"
-# Specify the log level [info | debug | error | warn]
 # level = "info"
+
+# Datanode export the metrics generated by itself
+# encoded to Prometheus remote-write format
+# and send to Prometheus remote-write compatible receiver (e.g. send to `greptimedb` itself)
+# This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
+# [export_metrics]
+# whether enable export metrics, default is false
+# enable = false
+# The interval of export metrics
+# write_interval = "30s"
+# [export_metrics.remote_write]
+# The url the metrics send to. The url is empty by default, url example: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`
+# url = ""
+# HTTP headers of Prometheus remote-write carry
+# headers = {}

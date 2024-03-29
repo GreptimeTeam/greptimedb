@@ -18,14 +18,17 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use object_store::services::Fs;
+use object_store::util::join_dir;
 use object_store::ObjectStore;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef};
+use crate::cache::CacheManager;
 use crate::compaction::CompactionScheduler;
 use crate::flush::FlushScheduler;
 use crate::request::WorkerRequest;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
+use crate::sst::index::intermediate::IntermediateManager;
 
 /// Scheduler mocker.
 pub(crate) struct SchedulerEnv {
@@ -38,15 +41,20 @@ pub(crate) struct SchedulerEnv {
 
 impl SchedulerEnv {
     /// Creates a new mocker.
-    pub(crate) fn new() -> SchedulerEnv {
+    pub(crate) async fn new() -> SchedulerEnv {
         let path = create_temp_dir("");
+        let path_str = path.path().display().to_string();
         let mut builder = Fs::default();
-        builder.root(path.path().to_str().unwrap());
+        builder.root(&path_str);
+
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&path_str, "intm"))
+            .await
+            .unwrap();
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        let access_layer = Arc::new(AccessLayer::new("", object_store.clone()));
+        let access_layer = Arc::new(AccessLayer::new("", object_store.clone(), intm_mgr));
 
         SchedulerEnv {
-            path: create_temp_dir(""),
+            path,
             access_layer,
             scheduler: None,
         }
@@ -65,7 +73,7 @@ impl SchedulerEnv {
     ) -> CompactionScheduler {
         let scheduler = self.get_scheduler();
 
-        CompactionScheduler::new(scheduler, request_sender)
+        CompactionScheduler::new(scheduler, request_sender, Arc::new(CacheManager::default()))
     }
 
     /// Creates a new flush scheduler.

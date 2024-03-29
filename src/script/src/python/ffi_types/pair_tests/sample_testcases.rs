@@ -613,7 +613,7 @@ def answer() -> vector[i64]:
     except ImportError:
         # Python didn't have pyarrow
         print("Warning: no pyarrow in current python")
-        return vector([42, 43, 44])
+        return vector([42])
     a = vector.from_pyarrow(pa.array([42]))
     return a[0:1]
 "#

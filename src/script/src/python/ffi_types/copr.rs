@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
+use common_query::OutputData;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
@@ -34,12 +35,13 @@ use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
 #[cfg(test)]
 use serde::Deserialize;
-use session::context::QueryContextBuilder;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use vm::convert::ToPyObject;
 use vm::{pyclass as rspyclass, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
 use super::py_recordbatch::PyRecordBatch;
+use crate::engine::EvalContext;
 use crate::python::error::{ensure, ArrowSnafu, OtherSnafu, Result, TypeCastSnafu};
 use crate::python::ffi_types::PyVector;
 #[cfg(feature = "pyo3_backend")]
@@ -325,12 +327,16 @@ pub(crate) fn check_args_anno_real_type(
 /// You can return constant in python code like `return 1, 1.0, True`
 /// which create a constant array(with same value)(currently support int, float and bool) as column on return
 #[cfg(test)]
-pub fn exec_coprocessor(script: &str, rb: &Option<RecordBatch>) -> Result<RecordBatch> {
+pub fn exec_coprocessor(
+    script: &str,
+    rb: &Option<RecordBatch>,
+    eval_ctx: &EvalContext,
+) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // cache the result of parse_copr
     let copr = parse::parse_and_compile_copr(script, None)?;
-    exec_parsed(&copr, rb, &HashMap::new())
+    exec_parsed(&copr, rb, &HashMap::new(), eval_ctx)
 }
 
 #[cfg_attr(feature = "pyo3_backend", pyo3class(name = "query_engine"))]
@@ -338,6 +344,7 @@ pub fn exec_coprocessor(script: &str, rb: &Option<RecordBatch>) -> Result<Record
 #[derive(Debug, PyPayload, Clone)]
 pub struct PyQueryEngine {
     inner: QueryEngineWeakRef,
+    query_ctx: QueryContextRef,
 }
 pub(crate) enum Either {
     Rb(RecordBatches),
@@ -365,14 +372,16 @@ impl PyQueryEngine {
 
 #[rspyclass]
 impl PyQueryEngine {
-    pub(crate) fn from_weakref(inner: QueryEngineWeakRef) -> Self {
-        Self { inner }
+    pub(crate) fn from_weakref(inner: QueryEngineWeakRef, query_ctx: QueryContextRef) -> Self {
+        Self { inner, query_ctx }
     }
     pub(crate) fn query_with_new_thread(&self, s: String) -> StdResult<Either, String> {
         let query = self.inner.0.upgrade();
+        let query_ctx = self.query_ctx.clone();
         let thread_handle = std::thread::spawn(move || -> std::result::Result<_, String> {
             if let Some(engine) = query {
-                let stmt = QueryLanguageParser::parse_sql(&s).map_err(|e| e.to_string())?;
+                let stmt =
+                    QueryLanguageParser::parse_sql(&s, &query_ctx).map_err(|e| e.to_string())?;
 
                 // To prevent the error of nested creating Runtime, if is nested, use the parent runtime instead
 
@@ -391,13 +400,14 @@ impl PyQueryEngine {
                         .await
                         .map_err(|e| e.to_string());
                     match res {
-                        Ok(common_query::Output::AffectedRows(cnt)) => {
-                            Ok(Either::AffectedRows(cnt))
-                        }
-                        Ok(common_query::Output::RecordBatches(rbs)) => Ok(Either::Rb(rbs)),
-                        Ok(common_query::Output::Stream(s)) => Ok(Either::Rb(
-                            common_recordbatch::util::collect_batches(s).await.unwrap(),
-                        )),
+                        Ok(o) => match o.data {
+                            OutputData::AffectedRows(cnt) => Ok(Either::AffectedRows(cnt)),
+                            OutputData::RecordBatches(rbs) => Ok(Either::Rb(rbs)),
+                            OutputData::Stream(s) => Ok(Either::Rb(
+                                common_recordbatch::util::collect_batches(s).await.unwrap(),
+                            )),
+                        },
+
                         Err(e) => Err(e),
                     }
                 })?;
@@ -445,13 +455,14 @@ pub fn exec_parsed(
     copr: &Coprocessor,
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
+    eval_ctx: &EvalContext,
 ) -> Result<RecordBatch> {
     match copr.backend {
-        BackendType::RustPython => rspy_exec_parsed(copr, rb, params),
+        BackendType::RustPython => rspy_exec_parsed(copr, rb, params, eval_ctx),
         BackendType::CPython => {
             #[cfg(feature = "pyo3_backend")]
             {
-                pyo3_exec_parsed(copr, rb, params)
+                pyo3_exec_parsed(copr, rb, params, eval_ctx)
             }
             #[cfg(not(feature = "pyo3_backend"))]
             {
@@ -477,8 +488,9 @@ pub fn exec_copr_print(
     rb: &Option<RecordBatch>,
     ln_offset: usize,
     filename: &str,
+    eval_ctx: &EvalContext,
 ) -> StdResult<RecordBatch, String> {
-    let res = exec_coprocessor(script, rb);
+    let res = exec_coprocessor(script, rb, eval_ctx);
     res.map_err(|e| {
         crate::python::error::pretty_print_error_in_src(script, &e, ln_offset, filename)
     })

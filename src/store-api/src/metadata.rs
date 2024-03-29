@@ -81,7 +81,11 @@ impl ColumnMetadata {
                     .context(ConvertDatatypesSnafu)?,
             )
         };
-        let data_type = ColumnDataTypeWrapper::new(column_def.data_type()).into();
+        let data_type = ColumnDataTypeWrapper::new(
+            column_def.data_type(),
+            column_def.datatype_extension.clone(),
+        )
+        .into();
         let column_schema = ColumnSchema::new(column_def.name, data_type, column_def.is_nullable)
             .with_default_constraint(default_constrain)
             .context(ConvertDatatypesSnafu)?;
@@ -90,6 +94,16 @@ impl ColumnMetadata {
             semantic_type,
             column_id,
         })
+    }
+
+    /// Encodes a vector of `ColumnMetadata` into a JSON byte vector.
+    pub fn encode_list(columns: &[Self]) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec(columns)
+    }
+
+    /// Decodes a JSON byte vector into a vector of `ColumnMetadata`.
+    pub fn decode_list(bytes: &[u8]) -> serde_json::Result<Vec<Self>> {
+        serde_json::from_slice(bytes)
     }
 }
 
@@ -213,6 +227,13 @@ impl RegionMetadata {
         self.id_to_index.get(&column_id).copied()
     }
 
+    /// Find column index by name.
+    pub fn column_index_by_name(&self, column_name: &str) -> Option<usize> {
+        self.column_metadatas
+            .iter()
+            .position(|col| col.column_schema.name == column_name)
+    }
+
     /// Returns the time index column
     ///
     /// # Panics
@@ -243,7 +264,10 @@ impl RegionMetadata {
             .map(|id| self.column_by_id(*id).unwrap())
     }
 
-    /// Returns all field columns.
+    /// Returns all field columns before projection.
+    ///
+    /// **Use with caution**. On read path where might have projection, this method
+    /// can return columns that not present in data batch.
     pub fn field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         self.column_metadatas
             .iter()
@@ -255,6 +279,61 @@ impl RegionMetadata {
     /// This does a linear search.
     pub fn primary_key_index(&self, column_id: ColumnId) -> Option<usize> {
         self.primary_key.iter().position(|id| *id == column_id)
+    }
+
+    /// Project the metadata to a new one using specified column ids.
+    ///
+    /// [RegionId] and schema version are preserved.
+    pub fn project(&self, projection: &[ColumnId]) -> Result<RegionMetadata> {
+        // check time index
+        ensure!(
+            projection.iter().any(|id| *id == self.time_index),
+            TimeIndexNotFoundSnafu
+        );
+
+        // prepare new indices
+        let indices_to_preserve = projection
+            .iter()
+            .map(|id| {
+                self.column_index_by_id(*id)
+                    .with_context(|| InvalidRegionRequestSnafu {
+                        region_id: self.region_id,
+                        err: format!("column id {} not found", id),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // project schema
+        let projected_schema =
+            self.schema
+                .try_project(&indices_to_preserve)
+                .with_context(|_| SchemaProjectSnafu {
+                    origin_schema: self.schema.clone(),
+                    projection: projection.to_vec(),
+                })?;
+
+        // project columns, generate projected primary key and new id_to_index
+        let mut projected_column_metadatas = Vec::with_capacity(indices_to_preserve.len());
+        let mut projected_primary_key = vec![];
+        let mut projected_id_to_index = HashMap::with_capacity(indices_to_preserve.len());
+        for index in indices_to_preserve {
+            let col = self.column_metadatas[index].clone();
+            if col.semantic_type == SemanticType::Tag {
+                projected_primary_key.push(col.column_id);
+            }
+            projected_id_to_index.insert(col.column_id, projected_column_metadatas.len());
+            projected_column_metadatas.push(col);
+        }
+
+        Ok(RegionMetadata {
+            schema: Arc::new(projected_schema),
+            time_index: self.time_index,
+            id_to_index: projected_id_to_index,
+            column_metadatas: projected_column_metadatas,
+            primary_key: projected_primary_key,
+            region_id: self.region_id,
+            schema_version: self.schema_version,
+        })
     }
 
     /// Checks whether the metadata is valid.
@@ -617,6 +696,17 @@ pub enum MetadataError {
         err: String,
         location: Location,
     },
+
+    #[snafu(display("Unexpected schema error during project"))]
+    SchemaProject {
+        origin_schema: SchemaRef,
+        projection: Vec<ColumnId>,
+        location: Location,
+        source: datatypes::Error,
+    },
+
+    #[snafu(display("Time index column not found"))]
+    TimeIndexNotFound { location: Location },
 }
 
 impl ErrorExt for MetadataError {
@@ -1137,6 +1227,6 @@ mod test {
     fn test_debug_for_column_metadata() {
         let region_metadata = build_test_region_metadata();
         let formatted = format!("{:?}", region_metadata);
-        assert_eq!(formatted, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c Timestamp not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0 }");
+        assert_eq!(formatted, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c TimestampMillisecond not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0 }");
     }
 }

@@ -22,6 +22,7 @@ use catalog::CatalogManagerRef;
 use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
+use common_telemetry::tracing_context::TracingContext;
 use futures_util::future;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
@@ -90,14 +91,15 @@ impl Deleter {
         .await?;
 
         let affected_rows = self.do_request(deletes, &ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+
+        Ok(Output::new_with_affected_rows(affected_rows))
     }
 
     pub async fn handle_table_delete(
         &self,
         request: TableDeleteRequest,
         ctx: QueryContextRef,
-    ) -> Result<usize> {
+    ) -> Result<AffectedRows> {
         let catalog = request.catalog_name.as_str();
         let schema = request.schema_name.as_str();
         let table = request.table_name.as_str();
@@ -119,8 +121,10 @@ impl Deleter {
         requests: RegionDeleteRequests,
         ctx: &QueryContextRef,
     ) -> Result<AffectedRows> {
-        let header: RegionRequestHeader = ctx.as_ref().into();
-        let request_factory = RegionRequestFactory::new(header);
+        let request_factory = RegionRequestFactory::new(RegionRequestHeader {
+            tracing_context: TracingContext::from_current_span().to_w3c(),
+            dbname: ctx.get_db_string(),
+        });
 
         let tasks = self
             .group_requests_by_peer(requests)
@@ -140,8 +144,11 @@ impl Deleter {
             });
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
-        let affected_rows = results.into_iter().sum::<Result<u64>>()?;
-        crate::metrics::DIST_DELETE_ROW_COUNT.inc_by(affected_rows);
+        let affected_rows = results
+            .into_iter()
+            .map(|resp| resp.map(|r| r.affected_rows))
+            .sum::<Result<AffectedRows>>()?;
+        crate::metrics::DIST_DELETE_ROW_COUNT.inc_by(affected_rows as u64);
         Ok(affected_rows)
     }
 

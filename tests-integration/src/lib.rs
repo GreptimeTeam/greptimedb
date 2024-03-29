@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(assert_matches)]
+
 pub mod cluster;
 mod grpc;
 mod influxdb;
@@ -21,7 +23,7 @@ mod otlp;
 mod prom_store;
 pub mod test_util;
 
-mod standalone;
+pub mod standalone;
 #[cfg(test)]
 mod tests;
 

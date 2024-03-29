@@ -27,7 +27,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::{ensure, ResultExt};
 
-use crate::scalars::function::{Function, FunctionContext};
+use crate::function::{Function, FunctionContext};
 
 #[derive(Clone, Debug, Default)]
 pub struct GreatestFunction;
@@ -104,7 +104,6 @@ impl fmt::Display for GreatestFunction {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
     use std::sync::Arc;
 
     use common_time::Date;
@@ -113,10 +112,7 @@ mod tests {
     use datatypes::value::Value;
     use datatypes::vectors::{DateVector, StringVector, Vector};
 
-    use super::GreatestFunction;
-    use crate::scalars::function::FunctionContext;
-    use crate::scalars::Function;
-
+    use super::*;
     #[test]
     fn test_greatest_takes_string_vector() {
         let function = GreatestFunction;
@@ -140,11 +136,11 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(
             result.get(0),
-            Value::Date(Date::from_str("2001-02-01").unwrap())
+            Value::Date(Date::from_str_utc("2001-02-01").unwrap())
         );
         assert_eq!(
             result.get(1),
-            Value::Date(Date::from_str("2012-12-23").unwrap())
+            Value::Date(Date::from_str_utc("2012-12-23").unwrap())
         );
     }
 
@@ -165,11 +161,11 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(
             result.get(0),
-            Value::Date(Date::from_str("1970-01-01").unwrap())
+            Value::Date(Date::from_str_utc("1970-01-01").unwrap())
         );
         assert_eq!(
             result.get(1),
-            Value::Date(Date::from_str("1970-01-03").unwrap())
+            Value::Date(Date::from_str_utc("1970-01-03").unwrap())
         );
     }
 }

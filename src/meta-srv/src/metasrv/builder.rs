@@ -18,20 +18,26 @@ use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_grpc::channel_manager::ChannelConfig;
+use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
-use common_meta::sequence::{Sequence, SequenceRef};
+use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
+use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
+use common_meta::wal_options_allocator::WalOptionsAllocator;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
+use snafu::ResultExt;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
 use crate::handler::collect_stats_handler::CollectStatsHandler;
@@ -51,12 +57,14 @@ use crate::metasrv::{
     ElectionRef, MetaSrv, MetaSrvOptions, MetasrvInfo, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
 use crate::procedure::region_failover::RegionFailoverManager;
+use crate::procedure::region_migration::manager::RegionMigrationManager;
+use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublishRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvBackend};
 use crate::state::State;
-use crate::table_meta_alloc::MetaSrvTableMetadataAllocator;
+use crate::table_meta_alloc::MetasrvPeerAllocator;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
@@ -68,8 +76,9 @@ pub struct MetaSrvBuilder {
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClientRef>,
     lock: Option<DistLockRef>,
-    datanode_clients: Option<Arc<DatanodeClients>>,
+    datanode_manager: Option<DatanodeManagerRef>,
     plugins: Option<Plugins>,
+    table_metadata_allocator: Option<TableMetadataAllocatorRef>,
 }
 
 impl MetaSrvBuilder {
@@ -83,8 +92,9 @@ impl MetaSrvBuilder {
             election: None,
             options: None,
             lock: None,
-            datanode_clients: None,
+            datanode_manager: None,
             plugins: None,
+            table_metadata_allocator: None,
         }
     }
 
@@ -128,13 +138,21 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn datanode_clients(mut self, clients: Arc<DatanodeClients>) -> Self {
-        self.datanode_clients = Some(clients);
+    pub fn datanode_manager(mut self, datanode_manager: DatanodeManagerRef) -> Self {
+        self.datanode_manager = Some(datanode_manager);
         self
     }
 
     pub fn plugins(mut self, plugins: Plugins) -> Self {
         self.plugins = Some(plugins);
+        self
+    }
+
+    pub fn table_metadata_allocator(
+        mut self,
+        table_metadata_allocator: TableMetadataAllocatorRef,
+    ) -> Self {
+        self.table_metadata_allocator = Some(table_metadata_allocator);
         self
     }
 
@@ -150,8 +168,9 @@ impl MetaSrvBuilder {
             selector,
             handler_group,
             lock,
-            datanode_clients,
+            datanode_manager,
             plugins,
+            table_metadata_allocator,
         } = self;
 
         let options = options.unwrap_or_default();
@@ -168,7 +187,6 @@ impl MetaSrvBuilder {
             state.clone(),
             kv_backend.clone(),
         ));
-        let kv_backend = leader_cached_kv_backend.clone() as _;
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
@@ -176,8 +194,10 @@ impl MetaSrvBuilder {
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_backend);
-        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend.clone()));
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(
+            leader_cached_kv_backend.clone() as _,
+        ));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
@@ -186,16 +206,51 @@ impl MetaSrvBuilder {
             meta_peer_client: meta_peer_client.clone(),
             table_id: None,
         };
+
+        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
+            options.wal.clone(),
+            kv_backend.clone(),
+        ));
+        let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
+            let sequence = Arc::new(
+                SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
+                    .initial(MIN_USER_TABLE_ID as u64)
+                    .step(10)
+                    .build(),
+            );
+            let peer_allocator = Arc::new(MetasrvPeerAllocator::new(
+                selector_ctx.clone(),
+                selector.clone(),
+            ));
+            Arc::new(TableMetadataAllocator::with_peer_allocator(
+                sequence,
+                wal_options_allocator.clone(),
+                peer_allocator,
+            ))
+        });
+
+        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
+
         let ddl_manager = build_ddl_manager(
             &options,
-            datanode_clients,
+            datanode_manager,
             &procedure_manager,
             &mailbox,
             &table_metadata_manager,
-            (&selector, &selector_ctx),
-            &table_id_sequence,
-        );
-        let _ = ddl_manager.try_start();
+            &table_metadata_allocator,
+            &opening_region_keeper,
+        )?;
+
+        let region_migration_manager = Arc::new(RegionMigrationManager::new(
+            procedure_manager.clone(),
+            DefaultContextFactory::new(
+                table_metadata_manager.clone(),
+                opening_region_keeper.clone(),
+                mailbox.clone(),
+                options.server_addr.clone(),
+            ),
+        ));
+        region_migration_manager.try_start()?;
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
@@ -204,6 +259,7 @@ impl MetaSrvBuilder {
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
                         distributed_time_constants::REGION_LEASE_SECS,
                         in_memory.clone(),
+                        kv_backend.clone(),
                         mailbox.clone(),
                         procedure_manager.clone(),
                         (selector.clone(), selector_ctx.clone()),
@@ -211,8 +267,12 @@ impl MetaSrvBuilder {
                         table_metadata_manager.clone(),
                     ));
                     Some(
-                        RegionFailureHandler::try_new(election.clone(), region_failover_manager)
-                            .await?,
+                        RegionFailureHandler::try_new(
+                            election.clone(),
+                            region_failover_manager,
+                            options.failure_detector.clone(),
+                        )
+                        .await?,
                     )
                 } else {
                     None
@@ -223,8 +283,11 @@ impl MetaSrvBuilder {
                     .and_then(|plugins| plugins.get::<PublishRef>())
                     .map(|publish| PublishHeartbeatHandler::new(publish.clone()));
 
-                let region_lease_handler =
-                    RegionLeaseHandler::new(distributed_time_constants::REGION_LEASE_SECS);
+                let region_lease_handler = RegionLeaseHandler::new(
+                    distributed_time_constants::REGION_LEASE_SECS,
+                    table_metadata_manager.clone(),
+                    opening_region_keeper.clone(),
+                );
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler).await;
@@ -260,14 +323,14 @@ impl MetaSrvBuilder {
             kv_backend,
             leader_cached_kv_backend,
             meta_peer_client: meta_peer_client.clone(),
-            table_id_sequence,
             selector,
             handler_group,
             election,
             lock,
             procedure_manager,
             mailbox,
-            ddl_executor: ddl_manager,
+            procedure_executor: ddl_manager,
+            wal_options_allocator,
             table_metadata_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
                 Some(metasrv_home),
@@ -276,6 +339,8 @@ impl MetaSrvBuilder {
             )
             .await,
             plugins: plugins.unwrap_or_else(Plugins::default),
+            memory_region_keeper: opening_region_keeper,
+            region_migration_manager,
         })
     }
 }
@@ -294,7 +359,11 @@ fn build_default_meta_peer_client(
 }
 
 fn build_mailbox(kv_backend: &KvBackendRef, pushers: &Pushers) -> MailboxRef {
-    let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_backend.clone());
+    let mailbox_sequence = SequenceBuilder::new("heartbeat_mailbox", kv_backend.clone())
+        .initial(1)
+        .step(100)
+        .build();
+
     HeartbeatMailbox::create(pushers.clone(), mailbox_sequence)
 }
 
@@ -313,13 +382,13 @@ fn build_procedure_manager(
 
 fn build_ddl_manager(
     options: &MetaSrvOptions,
-    datanode_clients: Option<Arc<DatanodeClients>>,
+    datanode_clients: Option<DatanodeManagerRef>,
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
-    (selector, selector_ctx): (&SelectorRef, &SelectorContext),
-    table_id_sequence: &SequenceRef,
-) -> DdlManagerRef {
+    table_metadata_allocator: &TableMetadataAllocatorRef,
+    memory_region_keeper: &MemoryRegionKeeperRef,
+) -> Result<DdlManagerRef> {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {
         let datanode_client_channel_config = ChannelConfig::new()
             .timeout(Duration::from_millis(
@@ -338,18 +407,17 @@ fn build_ddl_manager(
         },
     ));
 
-    let table_meta_allocator = Arc::new(MetaSrvTableMetadataAllocator::new(
-        selector_ctx.clone(),
-        selector.clone(),
-        table_id_sequence.clone(),
-    ));
-
-    Arc::new(DdlManager::new(
-        procedure_manager.clone(),
-        datanode_clients,
-        cache_invalidator,
-        table_metadata_manager.clone(),
-        table_meta_allocator,
+    Ok(Arc::new(
+        DdlManager::try_new(
+            procedure_manager.clone(),
+            datanode_clients,
+            cache_invalidator,
+            table_metadata_manager.clone(),
+            table_metadata_allocator.clone(),
+            memory_region_keeper.clone(),
+            true,
+        )
+        .context(error::InitDdlManagerSnafu)?,
     ))
 }
 

@@ -3,7 +3,7 @@ name: License checker
 on:
   push:
     branches:
-    - develop
+    - main
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 jobs:
@@ -11,6 +11,6 @@ jobs:
     runs-on: ubuntu-20.04
     name: license-header-check
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Check License Header
-      uses: apache/skywalking-eyes/header@df70871af1a8109c9a5b1dc824faaf65246c5236
+      uses: korandoru/hawkeye@v4

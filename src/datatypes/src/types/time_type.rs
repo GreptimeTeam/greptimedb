@@ -92,8 +92,8 @@ macro_rules! impl_data_type_for_time {
             pub struct [<Time $unit Type>];
 
             impl DataType for [<Time $unit Type>] {
-                fn name(&self) -> &str {
-                    stringify!([<Time $unit>])
+                fn name(&self) -> String {
+                    stringify!([<Time $unit>]).to_string()
                 }
 
                 fn logical_type_id(&self) -> LogicalTypeId {

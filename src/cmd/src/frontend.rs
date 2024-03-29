@@ -12,26 +12,58 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager};
 use clap::Parser;
+use client::client_manager::DatanodeClients;
+use common_meta::cache_invalidator::MultiCacheInvalidator;
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::logging;
+use common_time::timezone::set_default_timezone;
 use frontend::frontend::FrontendOptions;
+use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
+use frontend::heartbeat::HeartbeatTask;
+use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use frontend::server::Services;
 use meta_client::MetaClientOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, Result, StartFrontendSnafu};
-use crate::options::{Options, TopLevelOptions};
+use crate::error::{self, InitTimezoneSnafu, MissingConfigSnafu, Result, StartFrontendSnafu};
+use crate::options::{CliOptions, Options};
+use crate::App;
 
 pub struct Instance {
     frontend: FeInstance,
 }
 
 impl Instance {
-    pub async fn start(&mut self) -> Result<()> {
+    pub fn new(frontend: FeInstance) -> Self {
+        Self { frontend }
+    }
+
+    pub fn mut_inner(&mut self) -> &mut FeInstance {
+        &mut self.frontend
+    }
+
+    pub fn inner(&self) -> &FeInstance {
+        &self.frontend
+    }
+}
+
+#[async_trait]
+impl App for Instance {
+    fn name(&self) -> &str {
+        "greptime-frontend"
+    }
+
+    async fn start(&mut self) -> Result<()> {
         plugins::start_frontend_plugins(self.frontend.plugins().clone())
             .await
             .context(StartFrontendSnafu)?;
@@ -39,7 +71,7 @@ impl Instance {
         self.frontend.start().await.context(StartFrontendSnafu)
     }
 
-    pub async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         self.frontend
             .shutdown()
             .await
@@ -58,8 +90,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        self.subcmd.load_options(top_level_opts)
+    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+        self.subcmd.load_options(cli_options)
     }
 }
 
@@ -75,9 +107,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Start(cmd) => cmd.load_options(cli_options),
         }
     }
 }
@@ -100,7 +132,7 @@ pub struct StartCommand {
     config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
-    #[clap(long, multiple = true, value_delimiter = ',')]
+    #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addr: Option<Vec<String>>,
     #[clap(long)]
     tls_mode: Option<TlsMode>,
@@ -117,19 +149,19 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         let mut opts: FrontendOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             FrontendOptions::env_list_keys(),
         )?;
 
-        if let Some(dir) = top_level_opts.log_dir {
-            opts.logging.dir = dir;
+        if let Some(dir) = &cli_options.log_dir {
+            opts.logging.dir = dir.clone();
         }
 
-        if top_level_opts.log_level.is_some() {
-            opts.logging.level = top_level_opts.log_level;
+        if cli_options.log_level.is_some() {
+            opts.logging.level = cli_options.log_level.clone();
         }
 
         let tls_opts = TlsOption::new(
@@ -196,16 +228,70 @@ impl StartCommand {
         logging::info!("Frontend start command: {:#?}", self);
         logging::info!("Frontend options: {:#?}", opts);
 
-        let mut instance = FeInstance::try_new_distributed(&opts, plugins.clone())
+        set_default_timezone(opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
+
+        let meta_client_options = opts.meta_client.as_ref().context(MissingConfigSnafu {
+            msg: "'meta_client'",
+        })?;
+
+        let cache_max_capacity = meta_client_options.metadata_cache_max_capacity;
+        let cache_ttl = meta_client_options.metadata_cache_ttl;
+        let cache_tti = meta_client_options.metadata_cache_tti;
+
+        let meta_client = FeInstance::create_meta_client(meta_client_options)
             .await
             .context(StartFrontendSnafu)?;
 
+        let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
+            .cache_max_capacity(cache_max_capacity)
+            .cache_ttl(cache_ttl)
+            .cache_tti(cache_tti)
+            .build();
+        let cached_meta_backend = Arc::new(cached_meta_backend);
+        let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::with_invalidators(vec![
+            cached_meta_backend.clone(),
+        ]));
+        let catalog_manager = KvBackendCatalogManager::new(
+            cached_meta_backend.clone(),
+            multi_cache_invalidator.clone(),
+        )
+        .await;
+
+        let executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler),
+            Arc::new(InvalidateTableCacheHandler::new(
+                multi_cache_invalidator.clone(),
+            )),
+        ]);
+
+        let heartbeat_task = HeartbeatTask::new(
+            meta_client.clone(),
+            opts.heartbeat.clone(),
+            Arc::new(executor),
+        );
+
+        let mut instance = FrontendBuilder::new(
+            cached_meta_backend.clone(),
+            catalog_manager,
+            Arc::new(DatanodeClients::default()),
+            meta_client,
+        )
+        .with_plugin(plugins.clone())
+        .with_cache_invalidator(multi_cache_invalidator)
+        .with_heartbeat_task(heartbeat_task)
+        .try_build()
+        .await
+        .context(StartFrontendSnafu)?;
+
+        let servers = Services::new(opts.clone(), Arc::new(instance.clone()), plugins)
+            .build()
+            .await
+            .context(StartFrontendSnafu)?;
         instance
-            .build_servers(&opts)
-            .await
+            .build_servers(opts, servers)
             .context(StartFrontendSnafu)?;
 
-        Ok(Instance { frontend: instance })
+        Ok(Instance::new(instance))
     }
 }
 
@@ -221,7 +307,7 @@ mod tests {
     use servers::http::HttpOptions;
 
     use super::*;
-    use crate::options::ENV_VAR_SEP;
+    use crate::options::{CliOptions, ENV_VAR_SEP};
 
     #[test]
     fn test_try_from_start_command() {
@@ -235,8 +321,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(opts) = command.load_options(TopLevelOptions::default()).unwrap()
-        else {
+        let Options::Frontend(opts) = command.load_options(&CliOptions::default()).unwrap() else {
             unreachable!()
         };
 
@@ -288,7 +373,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(fe_opts) = command.load_options(TopLevelOptions::default()).unwrap()
+        let Options::Frontend(fe_opts) = command.load_options(&CliOptions::default()).unwrap()
         else {
             unreachable!()
         };
@@ -327,16 +412,19 @@ mod tests {
     }
 
     #[test]
-    fn test_top_level_options() {
+    fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
             disable_dashboard: Some(false),
             ..Default::default()
         };
 
         let options = cmd
-            .load_options(TopLevelOptions {
+            .load_options(&CliOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
+
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: None,
             })
             .unwrap();
 
@@ -416,11 +504,8 @@ mod tests {
                     ..Default::default()
                 };
 
-                let top_level_opts = TopLevelOptions {
-                    log_dir: None,
-                    log_level: Some("error".to_string()),
-                };
-                let Options::Frontend(fe_opts) = command.load_options(top_level_opts).unwrap()
+                let Options::Frontend(fe_opts) =
+                    command.load_options(&CliOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };

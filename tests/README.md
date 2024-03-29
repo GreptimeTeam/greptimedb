@@ -3,7 +3,9 @@
 ## Sqlness manual
 
 ### Case file
-Sqlness has two types of file
+
+Sqlness has two types of file:
+
 - `.sql`: test input, SQL only
 - `.result`: expected test output, SQL and its results
 
@@ -14,17 +16,35 @@ check change logs to solve the problem.
 You only need to write test SQL in `.sql` file, and run the test.
 
 ### Case organization
-The root dir of input cases is `tests/cases`. It contains several sub-directories stand for different test
+
+The root dir of input cases is `tests/cases`. It contains several subdirectories stand for different test
 modes. E.g., `standalone/` contains all the tests to run under `greptimedb standalone start` mode.
 
-Under the first level of sub-directory (e.g. the `cases/standalone`), you can organize your cases as you like.
+Under the first level of subdirectory (e.g. the `cases/standalone`), you can organize your cases as you like.
 Sqlness walks through every file recursively and runs them.
 
+### Kafka WAL
+
+Sqlness supports Kafka WAL. You can either provide a Kafka cluster or let sqlness to start one for you.
+
+To run test with kafka, you need to pass the option `-w kafka`. If no other options are provided, sqlness will use `conf/kafka-cluster.yml` to start a Kafka cluster. This requires `docker` and `docker-compose` commands in your environment.
+
+Otherwise, you can additionally pass the your existing kafka environment to sqlness with `-k` option. E.g.:
+
+```shell
+cargo sqlness -w kafka -k localhost:9092
+```
+
+In this case, sqlness will not start its own kafka cluster and the one you provided instead.
+
 ## Run the test
-Unlike other tests, this harness is in a binary target form. You can run it with
+
+Unlike other tests, this harness is in a binary target form. You can run it with:
+
 ```shell
 cargo sqlness
 ```
+
 It automatically finishes the following procedures: compile `GreptimeDB`, start it, grab tests and feed it to
 the server, then collect and compare the results. You only need to check if the `.result` files are changed.
 If not, congratulations, the test is passed 🥳!

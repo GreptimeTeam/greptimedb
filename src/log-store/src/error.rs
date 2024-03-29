@@ -17,7 +17,11 @@ use std::any::Any;
 use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
+use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
+use store_api::storage::RegionId;
+
+use crate::kafka::NamespaceImpl as KafkaNamespace;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -46,6 +50,14 @@ pub enum Error {
     RaftEngine {
         #[snafu(source)]
         error: raft_engine::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to perform IO on path: {}", path))]
+    Io {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
         location: Location,
     },
 
@@ -83,6 +95,116 @@ pub enum Error {
         first_index: u64,
         attempt_index: u64,
         location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to build a Kafka client, broker endpoints: {:?}",
+        broker_endpoints
+    ))]
+    BuildClient {
+        broker_endpoints: Vec<String>,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
+    ResolveKafkaEndpoint { source: common_wal::error::Error },
+
+    #[snafu(display(
+        "Failed to build a Kafka partition client, topic: {}, partition: {}",
+        topic,
+        partition
+    ))]
+    BuildPartitionClient {
+        topic: String,
+        partition: i32,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to get a Kafka topic client, topic: {}, source: {}",
+        topic,
+        error
+    ))]
+    GetClient {
+        topic: String,
+        location: Location,
+        error: String,
+    },
+
+    #[snafu(display("Missing required key in a record"))]
+    MissingKey { location: Location },
+
+    #[snafu(display("Missing required value in a record"))]
+    MissingValue { location: Location },
+
+    #[snafu(display("Cannot build a record from empty entries"))]
+    EmptyEntries { location: Location },
+
+    #[snafu(display(
+        "Failed to produce records to Kafka, topic: {}, size: {}, limit: {}",
+        topic,
+        size,
+        limit,
+    ))]
+    ProduceRecord {
+        topic: String,
+        size: usize,
+        limit: usize,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::producer::Error,
+    },
+
+    #[snafu(display("Failed to read a record from Kafka, ns: {}", ns))]
+    ConsumeRecord {
+        ns: KafkaNamespace,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to get the latest offset, ns: {}", ns))]
+    GetOffset {
+        ns: KafkaNamespace,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to do a cast"))]
+    Cast { location: Location },
+
+    #[snafu(display("Failed to encode object into json"))]
+    EncodeJson {
+        location: Location,
+        #[snafu(source)]
+        error: JsonError,
+    },
+
+    #[snafu(display("Failed to decode object from json"))]
+    DecodeJson {
+        location: Location,
+        #[snafu(source)]
+        error: JsonError,
+    },
+
+    #[snafu(display("The record sequence is not legal, error: {}", error))]
+    IllegalSequence { location: Location, error: String },
+
+    #[snafu(display(
+        "Attempt to append discontinuous log entry, region: {}, last index: {}, attempt index: {}",
+        region_id,
+        last_index,
+        attempt_index
+    ))]
+    DiscontinuousLogIndex {
+        region_id: RegionId,
+        last_index: u64,
+        attempt_index: u64,
     },
 }
 

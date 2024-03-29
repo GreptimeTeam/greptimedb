@@ -30,7 +30,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display(""))]
+    #[snafu(display("DataFusion error"))]
     Datafusion {
         #[snafu(source)]
         error: DataFusionError,
@@ -42,12 +42,6 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
-
-    #[snafu(display("Engine not found: {}", engine))]
-    EngineNotFound { engine: String, location: Location },
-
-    #[snafu(display("Engine exist: {}", engine))]
-    EngineExist { engine: String, location: Location },
 
     #[snafu(display("Table projection error"))]
     TableProjection {
@@ -164,9 +158,7 @@ impl ErrorExt for Error {
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
-            Error::ParseTableOption { .. }
-            | Error::EngineNotFound { .. }
-            | Error::EngineExist { .. } => StatusCode::InvalidArguments,
+            Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
 
             Error::InvalidTable { .. } | Error::MissingTimeIndexColumn { .. } => {
                 StatusCode::Internal

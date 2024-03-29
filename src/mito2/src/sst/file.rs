@@ -20,13 +20,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_time::Timestamp;
-use object_store::util::join_path;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use snafu::{ResultExt, Snafu};
 use store_api::storage::RegionId;
 use uuid::Uuid;
 
 use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
+use crate::sst::location;
 
 /// Type to store SST level.
 pub type Level = u8;
@@ -56,6 +57,11 @@ impl FileId {
     /// Append `.parquet` to file id to make a complete file name
     pub fn as_parquet(&self) -> String {
         format!("{}{}", self, ".parquet")
+    }
+
+    /// Append `.puffin` to file id to make a complete file name
+    pub fn as_puffin(&self) -> String {
+        format!("{}{}", self, ".puffin")
     }
 }
 
@@ -90,6 +96,23 @@ pub struct FileMeta {
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
+    /// Available indexes of the file.
+    pub available_indexes: SmallVec<[IndexType; 4]>,
+    /// Size of the index file.
+    pub index_file_size: u64,
+}
+
+/// Type of index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum IndexType {
+    /// Inverted index.
+    InvertedIndex,
+}
+
+impl FileMeta {
+    pub fn inverted_index_available(&self) -> bool {
+        self.available_indexes.contains(&IndexType::InvertedIndex)
+    }
 }
 
 /// Handle to a SST file.
@@ -131,7 +154,7 @@ impl FileHandle {
 
     /// Returns the complete file path of the file.
     pub fn file_path(&self, file_dir: &str) -> String {
-        join_path(file_dir, &self.file_id().as_parquet())
+        location::sst_file_path(file_dir, self.file_id())
     }
 
     /// Returns the time range of the file.
@@ -171,8 +194,7 @@ impl Drop for FileHandleInner {
     fn drop(&mut self) {
         if self.deleted.load(Ordering::Relaxed) {
             self.file_purger.send_request(PurgeRequest {
-                region_id: self.meta.region_id,
-                file_id: self.meta.file_id,
+                file_meta: self.meta.clone(),
             });
         }
     }
@@ -231,6 +253,8 @@ mod tests {
             time_range: FileTimeRange::default(),
             level,
             file_size: 0,
+            available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            index_file_size: 0,
         }
     }
 
@@ -245,7 +269,8 @@ mod tests {
     #[test]
     fn test_deserialize_from_string() {
         let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\
-        \"time_range\":[{\"value\":0,\"unit\":\"Millisecond\"},{\"value\":0,\"unit\":\"Millisecond\"}],\"level\":0}";
+        \"time_range\":[{\"value\":0,\"unit\":\"Millisecond\"},{\"value\":0,\"unit\":\"Millisecond\"}],\
+        \"available_indexes\":[\"InvertedIndex\"],\"level\":0}";
         let file_meta = create_file_meta(
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
             0,

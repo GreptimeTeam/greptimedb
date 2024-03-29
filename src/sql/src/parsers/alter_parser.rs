@@ -33,20 +33,22 @@ impl<'a> ParserContext<'a> {
         let parser = &mut self.parser;
         parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
 
-        let table_name = parser.parse_object_name()?;
+        let raw_table_name = parser.parse_object_name()?;
+        let table_name = Self::canonicalize_object_name(raw_table_name);
 
         let alter_operation = if parser.parse_keyword(Keyword::ADD) {
             if let Some(constraint) = parser.parse_optional_table_constraint()? {
                 AlterTableOperation::AddConstraint(constraint)
             } else {
                 let _ = parser.parse_keyword(Keyword::COLUMN);
-                let column_def = parser.parse_column_def()?;
+                let mut column_def = parser.parse_column_def()?;
+                column_def.name = Self::canonicalize_identifier(column_def.name);
                 let location = if parser.parse_keyword(Keyword::FIRST) {
                     Some(AddColumnLocation::First)
                 } else if let Token::Word(word) = parser.peek_token().token {
                     if word.value.to_ascii_uppercase() == "AFTER" {
                         let _ = parser.next_token();
-                        let name = parser.parse_identifier()?;
+                        let name = Self::canonicalize_identifier(parser.parse_identifier()?);
                         Some(AddColumnLocation::After {
                             column_name: name.value,
                         })
@@ -63,7 +65,7 @@ impl<'a> ParserContext<'a> {
             }
         } else if parser.parse_keyword(Keyword::DROP) {
             if parser.parse_keyword(Keyword::COLUMN) {
-                let name = self.parser.parse_identifier()?;
+                let name = Self::canonicalize_identifier(self.parser.parse_identifier()?);
                 AlterTableOperation::DropColumn { name }
             } else {
                 return Err(ParserError::ParserError(format!(
@@ -72,7 +74,8 @@ impl<'a> ParserContext<'a> {
                 )));
             }
         } else if parser.parse_keyword(Keyword::RENAME) {
-            let new_table_name_obj = parser.parse_object_name()?;
+            let new_table_name_obj_raw = parser.parse_object_name()?;
+            let new_table_name_obj = Self::canonicalize_object_name(new_table_name_obj_raw);
             let new_table_name = match &new_table_name_obj.0[..] {
                 [table] => table.value.clone(),
                 _ => {
@@ -101,11 +104,14 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
 
     #[test]
     fn test_parse_alter_add_column() {
         let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null;";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -139,7 +145,9 @@ mod tests {
     #[test]
     fn test_parse_alter_add_column_with_first() {
         let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null FIRST;";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -173,7 +181,9 @@ mod tests {
     #[test]
     fn test_parse_alter_add_column_with_after() {
         let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null AFTER ts;";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -212,12 +222,16 @@ mod tests {
     #[test]
     fn test_parse_alter_drop_column() {
         let sql = "ALTER TABLE my_metric_1 DROP a";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
         let err = result.output_msg();
         assert!(err.contains("expect keyword COLUMN after ALTER TABLE DROP"));
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -242,12 +256,16 @@ mod tests {
     #[test]
     fn test_parse_alter_rename_table() {
         let sql = "ALTER TABLE test_table table_t";
-        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
         let err = result.output_msg();
         assert!(err.contains("expect keyword ADD or DROP or RENAME after ALTER TABLE"));
 
         let sql = "ALTER TABLE test_table RENAME table_t";
-        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);

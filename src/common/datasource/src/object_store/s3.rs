@@ -28,12 +28,15 @@ const REGION: &str = "region";
 const ENABLE_VIRTUAL_HOST_STYLE: &str = "enable_virtual_host_style";
 
 pub fn is_supported_in_s3(key: &str) -> bool {
-    key == ENDPOINT
-        || key == ACCESS_KEY_ID
-        || key == SECRET_ACCESS_KEY
-        || key == SESSION_TOKEN
-        || key == REGION
-        || key == ENABLE_VIRTUAL_HOST_STYLE
+    [
+        ENDPOINT,
+        ACCESS_KEY_ID,
+        SECRET_ACCESS_KEY,
+        SESSION_TOKEN,
+        REGION,
+        ENABLE_VIRTUAL_HOST_STYLE,
+    ]
+    .contains(&key)
 }
 
 pub fn build_s3_backend(
@@ -80,8 +83,18 @@ pub fn build_s3_backend(
         }
     }
 
+    // TODO(weny): Consider finding a better way to eliminate duplicate code.
     Ok(ObjectStore::new(builder)
         .context(error::BuildBackendSnafu)?
+        .layer(
+            object_store::layers::LoggingLayer::default()
+                // Print the expected error only in DEBUG level.
+                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
+                .with_error_level(Some("debug"))
+                .expect("input error level must be valid"),
+        )
+        .layer(object_store::layers::TracingLayer)
+        .layer(object_store::layers::PrometheusMetricsLayer)
         .finish())
 }
 

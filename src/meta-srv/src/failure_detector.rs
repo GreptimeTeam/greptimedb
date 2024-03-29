@@ -13,10 +13,15 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
-/// This is our port of Akka's "[PhiAccrualFailureDetector](https://github.com/akka/akka/blob/main/akka-remote/src/main/scala/akka/remote/PhiAccrualFailureDetector.scala)"
+use serde::{Deserialize, Serialize};
+
+/// This is our port of Akka's "[PhiAccrualFailureDetector](https://github.com/akka/akka/blob/v2.6.21/akka-remote/src/main/scala/akka/remote/PhiAccrualFailureDetector.scala)"
+/// under Apache License 2.0.
+///
 /// You can find it's document here:
-/// <https://doc.akka.io/docs/akka/current/typed/failure-detector.html>
+/// <https://doc.akka.io/docs/akka/2.6.21/typed/failure-detector.html>
 ///
 /// Implementation of 'The Phi Accrual Failure Detector' by Hayashibara et al. as defined in their
 /// paper: <https://oneofus.la/have-emacs-will-hack/files/HDY04.pdf>
@@ -58,22 +63,50 @@ pub(crate) struct PhiAccrualFailureDetector {
     last_heartbeat_millis: Option<i64>,
 }
 
-impl Default for PhiAccrualFailureDetector {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhiAccrualFailureDetectorOptions {
+    pub threshold: f32,
+    #[serde(with = "humantime_serde")]
+    pub min_std_deviation: Duration,
+    #[serde(with = "humantime_serde")]
+    pub acceptable_heartbeat_pause: Duration,
+    #[serde(with = "humantime_serde")]
+    pub first_heartbeat_estimate: Duration,
+}
+
+impl Default for PhiAccrualFailureDetectorOptions {
     fn default() -> Self {
         // default configuration is the same as of Akka:
-        // https://github.com/akka/akka/blob/main/akka-cluster/src/main/resources/reference.conf#L181
+        // https://github.com/akka/akka/blob/v2.6.21/akka-cluster/src/main/resources/reference.conf#L181
         Self {
             threshold: 8_f32,
-            min_std_deviation_millis: 100_f32,
-            acceptable_heartbeat_pause_millis: 3000,
-            first_heartbeat_estimate_millis: 1000,
-            heartbeat_history: HeartbeatHistory::new(1000),
-            last_heartbeat_millis: None,
+            min_std_deviation: Duration::from_millis(100),
+            acceptable_heartbeat_pause: Duration::from_millis(3000),
+            first_heartbeat_estimate: Duration::from_millis(1000),
         }
     }
 }
 
+impl Default for PhiAccrualFailureDetector {
+    fn default() -> Self {
+        Self::from_options(Default::default())
+    }
+}
+
 impl PhiAccrualFailureDetector {
+    pub(crate) fn from_options(options: PhiAccrualFailureDetectorOptions) -> Self {
+        Self {
+            threshold: options.threshold,
+            min_std_deviation_millis: options.min_std_deviation.as_millis() as f32,
+            acceptable_heartbeat_pause_millis: options.acceptable_heartbeat_pause.as_millis()
+                as u32,
+            first_heartbeat_estimate_millis: options.first_heartbeat_estimate.as_millis() as u32,
+            heartbeat_history: HeartbeatHistory::new(1000),
+            last_heartbeat_millis: None,
+        }
+    }
+
     pub(crate) fn heartbeat(&mut self, ts_millis: i64) {
         if let Some(last_heartbeat_millis) = self.last_heartbeat_millis {
             if ts_millis < last_heartbeat_millis {
@@ -276,8 +309,8 @@ mod tests {
         assert!(fd.phi(now) >= fd.threshold as _);
     }
 
-    // The following test cases are port from Akka's test:
-    // [AccrualFailureDetectorSpec.scala](https://github.com/akka/akka/blob/main/akka-remote/src/test/scala/akka/remote/AccrualFailureDetectorSpec.scala).
+    // The following test cases are port from Akka's tests under Apache License 2.0:
+    // [AccrualFailureDetectorSpec.scala](https://github.com/akka/akka/blob/v2.6.21/akka-remote/src/test/scala/akka/remote/AccrualFailureDetectorSpec.scala).
 
     #[test]
     fn test_use_good_enough_cumulative_distribution_function() {

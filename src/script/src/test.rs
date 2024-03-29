@@ -56,7 +56,7 @@ pub async fn setup_scripts_manager(
 
     let catalog_manager = MemoryCatalogManager::new_with_table(table.clone());
 
-    let factory = QueryEngineFactory::new(catalog_manager.clone(), None, None, false);
+    let factory = QueryEngineFactory::new(catalog_manager.clone(), None, None, None, false);
     let query_engine = factory.query_engine();
     let mgr = ScriptManager::new(Arc::new(MockGrpcQueryHandler {}) as _, query_engine)
         .await
@@ -73,6 +73,6 @@ impl GrpcQueryHandler for MockGrpcQueryHandler {
     type Error = Error;
 
     async fn do_query(&self, _query: Request, _ctx: QueryContextRef) -> Result<Output> {
-        Ok(Output::AffectedRows(1))
+        Ok(Output::new_with_affected_rows(1))
     }
 }

@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use std::sync::Arc;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
@@ -18,6 +19,7 @@ use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::rpc::util;
 use common_telemetry::info;
+use common_telemetry::tracing_context::TracingContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
@@ -48,7 +50,11 @@ impl HeartbeatSender {
 
     #[inline]
     pub async fn send(&self, mut req: HeartbeatRequest) -> Result<()> {
-        req.set_header(self.id, self.role);
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
         self.sender.send(req).await.map_err(|e| {
             error::SendHeartbeatSnafu {
                 err_msg: e.to_string(),
@@ -206,7 +212,11 @@ impl Inner {
 
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
 
-        let header = RequestHeader::new(self.id, self.role);
+        let header = RequestHeader::new(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
         let handshake = HeartbeatRequest {
             header: Some(header),
             ..Default::default()

@@ -4,13 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 arrow.workspace = true
 chrono.workspace = true
-clap = { version = "4.0", features = ["derive"] }
-client = { workspace = true }
+clap.workspace = true
+client.workspace = true
 futures-util.workspace = true
 indicatif = "0.17.1"
-itertools.workspace = true
 parquet.workspace = true
 tokio.workspace = true

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_query::Output;
+use common_query::OutputData;
 use common_recordbatch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -70,8 +70,8 @@ def hello() -> vector[str]:
         .execute_script(query_ctx.clone(), name, HashMap::new())
         .await?;
 
-    match output {
-        Output::RecordBatches(batches) => {
+    match output.data {
+        OutputData::RecordBatches(batches) => {
             let expected = "\
 +-------+
 | n     |
@@ -88,12 +88,12 @@ def hello() -> vector[str]:
         .await
         .remove(0)
         .unwrap();
-    match res {
-        common_query::Output::AffectedRows(_) => (),
-        common_query::Output::RecordBatches(_) => {
+    match res.data {
+        OutputData::AffectedRows(_) => (),
+        OutputData::RecordBatches(_) => {
             unreachable!()
         }
-        common_query::Output::Stream(s) => {
+        OutputData::Stream(s) => {
             let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
             let expected = "\
 +---------+

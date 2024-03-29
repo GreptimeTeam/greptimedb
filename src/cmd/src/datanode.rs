@@ -12,25 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
-use common_telemetry::logging;
+use common_telemetry::{info, logging};
+use common_wal::config::DatanodeWalConfig;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
+use datanode::service::DatanodeServiceBuilder;
 use meta_client::MetaClientOptions;
 use servers::Mode;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
-use crate::options::{Options, TopLevelOptions};
+use crate::options::{CliOptions, Options};
+use crate::App;
 
 pub struct Instance {
     datanode: Datanode,
 }
 
 impl Instance {
-    pub async fn start(&mut self) -> Result<()> {
+    pub fn new(datanode: Datanode) -> Self {
+        Self { datanode }
+    }
+
+    pub fn datanode_mut(&mut self) -> &mut Datanode {
+        &mut self.datanode
+    }
+
+    pub fn datanode(&self) -> &Datanode {
+        &self.datanode
+    }
+}
+
+#[async_trait]
+impl App for Instance {
+    fn name(&self) -> &str {
+        "greptime-datanode"
+    }
+
+    async fn start(&mut self) -> Result<()> {
         plugins::start_datanode_plugins(self.datanode.plugins())
             .await
             .context(StartDatanodeSnafu)?;
@@ -38,7 +63,7 @@ impl Instance {
         self.datanode.start().await.context(StartDatanodeSnafu)
     }
 
-    pub async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         self.datanode
             .shutdown()
             .await
@@ -57,8 +82,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        self.subcmd.load_options(top_level_opts)
+    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+        self.subcmd.load_options(cli_options)
     }
 }
 
@@ -74,9 +99,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Start(cmd) => cmd.load_options(cli_options),
         }
     }
 }
@@ -89,7 +114,7 @@ struct StartCommand {
     rpc_addr: Option<String>,
     #[clap(long)]
     rpc_hostname: Option<String>,
-    #[clap(long, multiple = true, value_delimiter = ',')]
+    #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addr: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
@@ -106,19 +131,19 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         let mut opts: DatanodeOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             DatanodeOptions::env_list_keys(),
         )?;
 
-        if let Some(dir) = top_level_opts.log_dir {
-            opts.logging.dir = dir;
+        if let Some(dir) = &cli_options.log_dir {
+            opts.logging.dir = dir.clone();
         }
 
-        if top_level_opts.log_level.is_some() {
-            opts.logging.level = top_level_opts.log_level;
+        if cli_options.log_level.is_some() {
+            opts.logging.level = cli_options.log_level.clone();
         }
 
         if let Some(addr) = &self.rpc_addr {
@@ -151,8 +176,18 @@ impl StartCommand {
             opts.storage.data_home = data_home.clone();
         }
 
-        if let Some(wal_dir) = &self.wal_dir {
-            opts.wal.dir = Some(wal_dir.clone());
+        // `wal_dir` only affects raft-engine config.
+        if let Some(wal_dir) = &self.wal_dir
+            && let DatanodeWalConfig::RaftEngine(raft_engine_config) = &mut opts.wal
+        {
+            if raft_engine_config
+                .dir
+                .as_ref()
+                .is_some_and(|original_dir| original_dir != wal_dir)
+            {
+                info!("The wal dir of raft-engine is altered to {wal_dir}");
+            }
+            raft_engine_config.dir.replace(wal_dir.clone());
         }
 
         if let Some(http_addr) = &self.http_addr {
@@ -177,12 +212,38 @@ impl StartCommand {
         logging::info!("Datanode start command: {:#?}", self);
         logging::info!("Datanode options: {:#?}", opts);
 
-        let datanode = DatanodeBuilder::new(opts, None, plugins)
+        let node_id = opts
+            .node_id
+            .context(MissingConfigSnafu { msg: "'node_id'" })?;
+
+        let meta_config = opts.meta_client.as_ref().context(MissingConfigSnafu {
+            msg: "'meta_client_options'",
+        })?;
+
+        let meta_client = datanode::heartbeat::new_metasrv_client(node_id, meta_config)
+            .await
+            .context(StartDatanodeSnafu)?;
+
+        let meta_backend = Arc::new(MetaKvBackend {
+            client: Arc::new(meta_client.clone()),
+        });
+
+        let mut datanode = DatanodeBuilder::new(opts.clone(), plugins)
+            .with_meta_client(meta_client)
+            .with_kv_backend(meta_backend)
             .build()
             .await
             .context(StartDatanodeSnafu)?;
 
-        Ok(Instance { datanode })
+        let services = DatanodeServiceBuilder::new(&opts)
+            .with_default_grpc_server(&datanode.region_server())
+            .enable_http_service()
+            .build()
+            .await
+            .context(StartDatanodeSnafu)?;
+        datanode.setup_services(services);
+
+        Ok(Instance::new(datanode))
     }
 }
 
@@ -191,14 +252,13 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
-    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::config::{CompactionConfig, FileConfig, ObjectStoreConfig, RegionManifestConfig};
+    use datanode::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
     use servers::heartbeat_options::HeartbeatOptions;
     use servers::Mode;
 
     use super::*;
-    use crate::options::ENV_VAR_SEP;
+    use crate::options::{CliOptions, ENV_VAR_SEP};
 
     #[test]
     fn test_read_from_config_file() {
@@ -222,6 +282,7 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
+            provider = "raft_engine"
             dir = "/other/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
@@ -230,18 +291,17 @@ mod tests {
             sync_write = false
 
             [storage]
-            type = "File"
             data_home = "/tmp/greptimedb/"
+            type = "File"
 
-            [storage.compaction]
-            max_inflight_tasks = 3
-            max_files_in_level0 = 7
-            max_purge_tasks = 32
+            [[storage.providers]]
+            type = "Gcs"
+            bucket = "foo"
+            endpoint = "bar"
 
-            [storage.manifest]
-            checkpoint_margin = 9
-            gc_duration = '7s'
-            compress = true
+            [[storage.providers]]
+            type = "S3"
+            bucket = "foo"
 
             [logging]
             level = "debug"
@@ -254,19 +314,24 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Datanode(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
-        else {
+        let Options::Datanode(options) = cmd.load_options(&CliOptions::default()).unwrap() else {
             unreachable!()
         };
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!(Some(42), options.node_id);
-        assert_eq!("/other/wal", options.wal.dir.unwrap());
 
-        assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
-        assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
-        assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
-        assert!(!options.wal.sync_write);
+        let DatanodeWalConfig::RaftEngine(raft_engine_config) = options.wal else {
+            unreachable!()
+        };
+        assert_eq!("/other/wal", raft_engine_config.dir.unwrap());
+        assert_eq!(Duration::from_secs(600), raft_engine_config.purge_interval);
+        assert_eq!(1024 * 1024 * 1024, raft_engine_config.file_size.0);
+        assert_eq!(
+            1024 * 1024 * 1024 * 50,
+            raft_engine_config.purge_threshold.0
+        );
+        assert!(!raft_engine_config.sync_write);
 
         let HeartbeatOptions {
             interval: heart_beat_interval,
@@ -294,24 +359,15 @@ mod tests {
             &options.storage.store,
             ObjectStoreConfig::File(FileConfig { .. })
         ));
-
-        assert_eq!(
-            CompactionConfig {
-                max_inflight_tasks: 3,
-                max_files_in_level0: 7,
-                max_purge_tasks: 32,
-                sst_write_buffer_size: ReadableSize::mb(8),
-            },
-            options.storage.compaction,
-        );
-        assert_eq!(
-            RegionManifestConfig {
-                checkpoint_margin: Some(9),
-                gc_duration: Some(Duration::from_secs(7)),
-                compress: true
-            },
-            options.storage.manifest,
-        );
+        assert_eq!(options.storage.providers.len(), 2);
+        assert!(matches!(
+            options.storage.providers[0],
+            ObjectStoreConfig::Gcs(GcsConfig { .. })
+        ));
+        assert!(matches!(
+            options.storage.providers[1],
+            ObjectStoreConfig::S3(S3Config { .. })
+        ));
 
         assert_eq!("debug", options.logging.level.unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
@@ -320,7 +376,7 @@ mod tests {
     #[test]
     fn test_try_from_cmd() {
         if let Options::Datanode(opt) = StartCommand::default()
-            .load_options(TopLevelOptions::default())
+            .load_options(&CliOptions::default())
             .unwrap()
         {
             assert_eq!(Mode::Standalone, opt.mode)
@@ -331,7 +387,7 @@ mod tests {
             metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default())
+        .load_options(&CliOptions::default())
         .unwrap()
         {
             assert_eq!(Mode::Distributed, opt.mode)
@@ -341,7 +397,7 @@ mod tests {
             metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default())
+        .load_options(&CliOptions::default())
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
@@ -349,18 +405,21 @@ mod tests {
             node_id: Some(42),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default())
+        .load_options(&CliOptions::default())
         .is_ok());
     }
 
     #[test]
-    fn test_top_level_options() {
+    fn test_load_log_options_from_cli() {
         let cmd = StartCommand::default();
 
         let options = cmd
-            .load_options(TopLevelOptions {
+            .load_options(&CliOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
+
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: None,
             })
             .unwrap();
 
@@ -386,20 +445,15 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
+            provider = "raft_engine"
             file_size = "1GB"
             purge_threshold = "50GB"
-            purge_interval = "10m"
-            read_batch_size = 128
+            purge_interval = "5m"
             sync_write = false
 
             [storage]
             type = "File"
             data_home = "/tmp/greptimedb/"
-
-            [storage.compaction]
-            max_inflight_tasks = 3
-            max_files_in_level0 = 7
-            max_purge_tasks = 32
 
             [logging]
             level = "debug"
@@ -411,26 +465,24 @@ mod tests {
         temp_env::with_vars(
             [
                 (
-                    // storage.manifest.gc_duration = 9s
+                    // wal.purge_interval = 1m
                     [
                         env_prefix.to_string(),
-                        "storage".to_uppercase(),
-                        "manifest".to_uppercase(),
-                        "gc_duration".to_uppercase(),
+                        "wal".to_uppercase(),
+                        "purge_interval".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
-                    Some("9s"),
+                    Some("1m"),
                 ),
                 (
-                    // storage.compaction.max_purge_tasks = 99
+                    // wal.read_batch_size = 100
                     [
                         env_prefix.to_string(),
-                        "storage".to_uppercase(),
-                        "compaction".to_uppercase(),
-                        "max_purge_tasks".to_uppercase(),
+                        "wal".to_uppercase(),
+                        "read_batch_size".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
-                    Some("99"),
+                    Some("100"),
                 ),
                 (
                     // meta_client.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
@@ -451,17 +503,16 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Datanode(opts) =
-                    command.load_options(TopLevelOptions::default()).unwrap()
+                let Options::Datanode(opts) = command.load_options(&CliOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };
 
                 // Should be read from env, env > default values.
-                assert_eq!(
-                    opts.storage.manifest.gc_duration,
-                    Some(Duration::from_secs(9))
-                );
+                let DatanodeWalConfig::RaftEngine(raft_engine_config) = opts.wal else {
+                    unreachable!()
+                };
+                assert_eq!(raft_engine_config.read_batch_size, 100);
                 assert_eq!(
                     opts.meta_client.unwrap().metasrv_addrs,
                     vec![
@@ -472,19 +523,16 @@ mod tests {
                 );
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.storage.compaction.max_purge_tasks, 32);
+                assert_eq!(
+                    raft_engine_config.purge_interval,
+                    Duration::from_secs(60 * 5)
+                );
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.wal.dir.unwrap(), "/other/wal/dir");
+                assert_eq!(raft_engine_config.dir.unwrap(), "/other/wal/dir");
 
                 // Should be default value.
-                assert_eq!(
-                    opts.storage.manifest.checkpoint_margin,
-                    DatanodeOptions::default()
-                        .storage
-                        .manifest
-                        .checkpoint_margin
-                );
+                assert_eq!(opts.http.addr, DatanodeOptions::default().http.addr);
             },
         );
     }

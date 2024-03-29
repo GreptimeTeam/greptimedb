@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,10 +13,24 @@
 // limitations under the License.
 
 pub(crate) mod static_user_provider;
+pub(crate) mod watch_file_user_provider;
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io;
+use std::io::BufRead;
+use std::path::Path;
+
+use secrecy::ExposeSecret;
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::common::{Identity, Password};
-use crate::error::Result;
-use crate::UserInfoRef;
+use crate::error::{
+    IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
+    UserNotFoundSnafu, UserPasswordMismatchSnafu,
+};
+use crate::user_info::DefaultUserInfo;
+use crate::{auth_mysql, UserInfoRef};
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
@@ -42,5 +56,90 @@ pub trait UserProvider: Send + Sync {
         let user_info = self.authenticate(id, password).await?;
         self.authorize(catalog, schema, &user_info).await?;
         Ok(user_info)
+    }
+}
+
+fn load_credential_from_file(filepath: &str) -> Result<Option<HashMap<String, Vec<u8>>>> {
+    // check valid path
+    let path = Path::new(filepath);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    ensure!(
+        path.is_file(),
+        InvalidConfigSnafu {
+            value: filepath,
+            msg: "UserProvider file must be a file",
+        }
+    );
+    let file = File::open(path).context(IoSnafu)?;
+    let credential = io::BufReader::new(file)
+        .lines()
+        .map_while(std::result::Result::ok)
+        .filter_map(|line| {
+            if let Some((k, v)) = line.split_once('=') {
+                Some((k.to_string(), v.as_bytes().to_vec()))
+            } else {
+                None
+            }
+        })
+        .collect::<HashMap<String, Vec<u8>>>();
+
+    ensure!(
+        !credential.is_empty(),
+        InvalidConfigSnafu {
+            value: filepath,
+            msg: "UserProvider's file must contains at least one valid credential",
+        }
+    );
+
+    Ok(Some(credential))
+}
+
+fn authenticate_with_credential(
+    users: &HashMap<String, Vec<u8>>,
+    input_id: Identity<'_>,
+    input_pwd: Password<'_>,
+) -> Result<UserInfoRef> {
+    match input_id {
+        Identity::UserId(username, _) => {
+            ensure!(
+                !username.is_empty(),
+                IllegalParamSnafu {
+                    msg: "blank username"
+                }
+            );
+            let save_pwd = users.get(username).context(UserNotFoundSnafu {
+                username: username.to_string(),
+            })?;
+
+            match input_pwd {
+                Password::PlainText(pwd) => {
+                    ensure!(
+                        !pwd.expose_secret().is_empty(),
+                        IllegalParamSnafu {
+                            msg: "blank password"
+                        }
+                    );
+                    if save_pwd == pwd.expose_secret().as_bytes() {
+                        Ok(DefaultUserInfo::with_name(username))
+                    } else {
+                        UserPasswordMismatchSnafu {
+                            username: username.to_string(),
+                        }
+                        .fail()
+                    }
+                }
+                Password::MysqlNativePassword(auth_data, salt) => {
+                    auth_mysql(auth_data, salt, username, save_pwd)
+                        .map(|_| DefaultUserInfo::with_name(username))
+                }
+                Password::PgMD5(_, _) => UnsupportedPasswordTypeSnafu {
+                    password_type: "pg_md5",
+                }
+                .fail(),
+            }
+        }
     }
 }

@@ -32,12 +32,6 @@ pub fn region_name(table_id: TableId, region_number: RegionNumber) -> String {
     format!("{table_id}_{region_number:010}")
 }
 
-// TODO(jeremy): There are still some dependencies on it. Someone will be here soon to remove it.
-pub fn table_dir_with_catalog_and_schema(catalog: &str, schema: &str, table_id: TableId) -> String {
-    let path = format!("{}/{}", catalog, schema);
-    table_dir(&path, table_id)
-}
-
 #[inline]
 pub fn table_dir(path: &str, table_id: TableId) -> String {
     format!("{DATA_DIR}{path}/{table_id}/")

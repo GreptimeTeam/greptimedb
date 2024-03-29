@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,8 +19,9 @@ use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use store_api::storage::TableId;
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
 
-pub fn new_test_table_info<I: IntoIterator<Item = u32>>(
+pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
     table_id: TableId,
+    table_name: &str,
     region_numbers: I,
 ) -> TableInfo {
     let column_schemas = vec![
@@ -50,8 +51,14 @@ pub fn new_test_table_info<I: IntoIterator<Item = u32>>(
     TableInfoBuilder::default()
         .table_id(table_id)
         .table_version(5)
-        .name("mytable")
+        .name(table_name)
         .meta(meta)
         .build()
         .unwrap()
+}
+pub fn new_test_table_info<I: IntoIterator<Item = u32>>(
+    table_id: TableId,
+    region_numbers: I,
+) -> TableInfo {
+    new_test_table_info_with_name(table_id, "mytable", region_numbers)
 }

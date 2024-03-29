@@ -15,24 +15,25 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::usize;
 
-use async_compat::CompatExt;
+use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
-use common_datasource::file_format::csv::{CsvConfigBuilder, CsvOpener};
-use common_datasource::file_format::json::JsonOpener;
-use common_datasource::file_format::orc::{
-    infer_orc_schema, new_orc_stream_reader, OrcArrowStreamReaderAdapter,
-};
+use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
+use common_datasource::file_format::json::{JsonFormat, JsonOpener};
+use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
-use common_recordbatch::adapter::ParquetRecordBatchStreamAdapter;
+use common_query::{OutputCost, OutputRows};
+use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
 use common_recordbatch::DfSendableRecordBatchStream;
-use common_telemetry::debug;
+use common_telemetry::{debug, tracing};
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream};
+use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::compute::can_cast_types;
@@ -43,14 +44,48 @@ use object_store::{Entry, EntryMode, ObjectStore};
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use table::engine::TableReference;
 use table::requests::{CopyTableRequest, InsertRequest};
-use tokio::io::BufReader;
+use table::table_reference::TableReference;
 
 use crate::error::{self, IntoVectorsSnafu, Result};
 use crate::statement::StatementExecutor;
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
+const DEFAULT_READ_BUFFER: usize = 256 * 1024;
+
+enum FileMetadata {
+    Parquet {
+        schema: SchemaRef,
+        metadata: ArrowReaderMetadata,
+        path: String,
+    },
+    Orc {
+        schema: SchemaRef,
+        path: String,
+    },
+    Json {
+        schema: SchemaRef,
+        format: JsonFormat,
+        path: String,
+    },
+    Csv {
+        schema: SchemaRef,
+        format: CsvFormat,
+        path: String,
+    },
+}
+
+impl FileMetadata {
+    /// Returns the [SchemaRef]
+    pub fn schema(&self) -> &SchemaRef {
+        match self {
+            FileMetadata::Parquet { schema, .. } => schema,
+            FileMetadata::Orc { schema, .. } => schema,
+            FileMetadata::Json { schema, .. } => schema,
+            FileMetadata::Csv { schema, .. } => schema,
+        }
+    }
+}
 
 impl StatementExecutor {
     async fn list_copy_from_entries(
@@ -83,49 +118,62 @@ impl StatementExecutor {
         Ok((object_store, entries))
     }
 
-    async fn infer_schema(
+    async fn collect_metadata(
         &self,
-        format: &Format,
-        object_store: ObjectStore,
-        path: &str,
-    ) -> Result<SchemaRef> {
+        object_store: &ObjectStore,
+        format: Format,
+        path: String,
+    ) -> Result<FileMetadata> {
         match format {
-            Format::Csv(format) => Ok(Arc::new(
-                format
-                    .infer_schema(&object_store, path)
-                    .await
-                    .context(error::InferSchemaSnafu { path })?,
-            )),
-            Format::Json(format) => Ok(Arc::new(
-                format
-                    .infer_schema(&object_store, path)
-                    .await
-                    .context(error::InferSchemaSnafu { path })?,
-            )),
+            Format::Csv(format) => Ok(FileMetadata::Csv {
+                schema: Arc::new(
+                    format
+                        .infer_schema(object_store, &path)
+                        .await
+                        .context(error::InferSchemaSnafu { path: &path })?,
+                ),
+                format,
+                path,
+            }),
+            Format::Json(format) => Ok(FileMetadata::Json {
+                schema: Arc::new(
+                    format
+                        .infer_schema(object_store, &path)
+                        .await
+                        .context(error::InferSchemaSnafu { path: &path })?,
+                ),
+                format,
+                path,
+            }),
             Format::Parquet(_) => {
-                let reader = object_store
-                    .reader(path)
+                let mut reader = object_store
+                    .reader(&path)
                     .await
-                    .context(error::ReadObjectSnafu { path })?;
-
-                let buf_reader = BufReader::new(reader);
-
-                let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
+                    .context(error::ReadObjectSnafu { path: &path })?;
+                let metadata = ArrowReaderMetadata::load_async(&mut reader, Default::default())
                     .await
-                    .context(error::ReadParquetSnafu)?;
-                Ok(builder.schema().clone())
+                    .context(error::ReadParquetMetadataSnafu)?;
+
+                Ok(FileMetadata::Parquet {
+                    schema: metadata.schema().clone(),
+                    metadata,
+                    path,
+                })
             }
             Format::Orc(_) => {
                 let reader = object_store
-                    .reader(path)
+                    .reader(&path)
                     .await
-                    .context(error::ReadObjectSnafu { path })?;
+                    .context(error::ReadObjectSnafu { path: &path })?;
 
                 let schema = infer_orc_schema(reader)
                     .await
                     .context(error::ReadOrcSnafu)?;
 
-                Ok(Arc::new(schema))
+                Ok(FileMetadata::Orc {
+                    schema: Arc::new(schema),
+                    path,
+                })
             }
         }
     }
@@ -159,100 +207,139 @@ impl StatementExecutor {
 
     async fn build_read_stream(
         &self,
-        format: &Format,
-        object_store: ObjectStore,
-        path: &str,
-        schema: SchemaRef,
+        compat_schema: SchemaRef,
+        object_store: &ObjectStore,
+        file_metadata: &FileMetadata,
         projection: Vec<usize>,
     ) -> Result<DfSendableRecordBatchStream> {
-        match format {
-            Format::Csv(format) => {
+        match file_metadata {
+            FileMetadata::Csv {
+                format,
+                path,
+                schema,
+            } => {
+                let projected_schema = Arc::new(
+                    compat_schema
+                        .project(&projection)
+                        .context(error::ProjectSchemaSnafu)?,
+                );
                 let csv_conf = CsvConfigBuilder::default()
                     .batch_size(DEFAULT_BATCH_SIZE)
                     .file_schema(schema.clone())
-                    .file_projection(Some(projection))
+                    .file_projection(Some(projection.clone()))
                     .build()
                     .context(error::BuildCsvConfigSnafu)?;
 
-                self.build_file_stream(
-                    CsvOpener::new(csv_conf, object_store, format.compression_type),
-                    path,
-                    schema,
-                )
-                .await
+                let stream = self
+                    .build_file_stream(
+                        CsvOpener::new(csv_conf, object_store.clone(), format.compression_type),
+                        path,
+                        schema.clone(),
+                    )
+                    .await?;
+
+                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
+                    projected_schema,
+                    stream,
+                    Some(projection),
+                )))
             }
-            Format::Json(format) => {
-                let projected_schema = Arc::new(
+            FileMetadata::Json {
+                format,
+                path,
+                schema,
+            } => {
+                let projected_file_schema = Arc::new(
                     schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
+                let projected_schema = Arc::new(
+                    compat_schema
+                        .project(&projection)
+                        .context(error::ProjectSchemaSnafu)?,
+                );
+                let stream = self
+                    .build_file_stream(
+                        JsonOpener::new(
+                            DEFAULT_BATCH_SIZE,
+                            projected_file_schema,
+                            object_store.clone(),
+                            format.compression_type,
+                        ),
+                        path,
+                        schema.clone(),
+                    )
+                    .await?;
 
-                self.build_file_stream(
-                    JsonOpener::new(
-                        DEFAULT_BATCH_SIZE,
-                        projected_schema,
-                        object_store,
-                        format.compression_type,
-                    ),
-                    path,
-                    schema,
-                )
-                .await
-            }
-            Format::Parquet(_) => {
-                let reader = object_store
-                    .reader(path)
-                    .await
-                    .context(error::ReadObjectSnafu { path })?;
-
-                let buf_reader = BufReader::new(reader.compat());
-
-                let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
-                    .await
-                    .context(error::ReadParquetSnafu)?;
-
-                let upstream = builder
-                    .build()
-                    .context(error::BuildParquetRecordBatchStreamSnafu)?;
-
-                Ok(Box::pin(ParquetRecordBatchStreamAdapter::new(
-                    schema,
-                    upstream,
+                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
+                    projected_schema,
+                    stream,
                     Some(projection),
                 )))
             }
-            Format::Orc(_) => {
+            FileMetadata::Parquet { metadata, path, .. } => {
                 let reader = object_store
-                    .reader(path)
+                    .reader_with(path)
+                    .buffer(DEFAULT_READ_BUFFER)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?;
+                let builder =
+                    ParquetRecordBatchStreamBuilder::new_with_metadata(reader, metadata.clone());
+                let stream = builder
+                    .build()
+                    .context(error::BuildParquetRecordBatchStreamSnafu)?;
+
+                let projected_schema = Arc::new(
+                    compat_schema
+                        .project(&projection)
+                        .context(error::ProjectSchemaSnafu)?,
+                );
+                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
+                    projected_schema,
+                    stream,
+                    Some(projection),
+                )))
+            }
+            FileMetadata::Orc { path, .. } => {
+                let reader = object_store
+                    .reader_with(path)
+                    .buffer(DEFAULT_READ_BUFFER)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
                 let stream = new_orc_stream_reader(reader)
                     .await
                     .context(error::ReadOrcSnafu)?;
-                let stream = OrcArrowStreamReaderAdapter::new(schema, stream, Some(projection));
 
-                Ok(Box::pin(stream))
+                let projected_schema = Arc::new(
+                    compat_schema
+                        .project(&projection)
+                        .context(error::ProjectSchemaSnafu)?,
+                );
+
+                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
+                    projected_schema,
+                    stream,
+                    Some(projection),
+                )))
             }
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn copy_table_from(
         &self,
         req: CopyTableRequest,
         query_ctx: QueryContextRef,
-    ) -> Result<usize> {
+    ) -> Result<Output> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,
             table: &req.table_name,
         };
         let table = self.get_table(&table_ref).await?;
-
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
-
         let (object_store, entries) = self.list_copy_from_entries(&req).await?;
-
         let mut files = Vec::with_capacity(entries.len());
         let table_schema = table.schema().arrow_schema().clone();
 
@@ -261,12 +348,13 @@ impl StatementExecutor {
                 continue;
             }
             let path = entry.path();
-            let file_schema = self
-                .infer_schema(&format, object_store.clone(), path)
+            let file_metadata = self
+                .collect_metadata(&object_store, format, path.to_string())
                 .await?;
-            let (file_schema_projection, table_schema_projection, compat_schema) =
-                generated_schema_projection_and_compatible_file_schema(&file_schema, &table_schema);
 
+            let file_schema = file_metadata.schema();
+            let (file_schema_projection, table_schema_projection, compat_schema) =
+                generated_schema_projection_and_compatible_file_schema(file_schema, &table_schema);
             let projected_file_schema = Arc::new(
                 file_schema
                     .project(&file_schema_projection)
@@ -277,25 +365,25 @@ impl StatementExecutor {
                     .project(&table_schema_projection)
                     .context(error::ProjectSchemaSnafu)?,
             );
-
             ensure_schema_compatible(&projected_file_schema, &projected_table_schema)?;
 
             files.push((
                 Arc::new(compat_schema),
                 file_schema_projection,
                 projected_table_schema,
-                path,
+                file_metadata,
             ))
         }
 
         let mut rows_inserted = 0;
-        for (schema, file_schema_projection, projected_table_schema, path) in files {
+        let mut insert_cost = 0;
+        for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
+        {
             let mut stream = self
                 .build_read_stream(
-                    &format,
-                    object_store.clone(),
-                    path,
-                    schema,
+                    compat_schema,
+                    &object_store,
+                    &file_metadata,
                     file_schema_projection,
                 )
                 .await?;
@@ -335,28 +423,40 @@ impl StatementExecutor {
                 ));
 
                 if pending_mem_size as u64 >= pending_mem_threshold {
-                    rows_inserted += batch_insert(&mut pending, &mut pending_mem_size).await?;
+                    let (rows, cost) = batch_insert(&mut pending, &mut pending_mem_size).await?;
+                    rows_inserted += rows;
+                    insert_cost += cost;
                 }
             }
 
             if !pending.is_empty() {
-                rows_inserted += batch_insert(&mut pending, &mut pending_mem_size).await?;
+                let (rows, cost) = batch_insert(&mut pending, &mut pending_mem_size).await?;
+                rows_inserted += rows;
+                insert_cost += cost;
             }
         }
 
-        Ok(rows_inserted)
+        Ok(Output::new(
+            OutputData::AffectedRows(rows_inserted),
+            OutputMeta::new_with_cost(insert_cost),
+        ))
     }
 }
 
 /// Executes all pending inserts all at once, drain pending requests and reset pending bytes.
 async fn batch_insert(
-    pending: &mut Vec<impl Future<Output = Result<usize>>>,
+    pending: &mut Vec<impl Future<Output = Result<Output>>>,
     pending_bytes: &mut usize,
-) -> Result<usize> {
+) -> Result<(OutputRows, OutputCost)> {
     let batch = pending.drain(..);
-    let res: usize = futures::future::try_join_all(batch).await?.iter().sum();
+    let result = futures::future::try_join_all(batch)
+        .await?
+        .iter()
+        .map(|o| o.extract_rows_and_cost())
+        .reduce(|(a, b), (c, d)| (a + c, b + d))
+        .unwrap_or((0, 0));
     *pending_bytes = 0;
-    Ok(res)
+    Ok(result)
 }
 
 fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
@@ -380,7 +480,10 @@ fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     }
 }
 
-/// Allows the file schema is a subset of table
+/// Generates a maybe compatible schema of the file schema.
+///
+/// If there is a field is found in table schema,
+/// copy the field data type to maybe compatible schema(`compatible_fields`).
 fn generated_schema_projection_and_compatible_file_schema(
     file: &SchemaRef,
     table: &SchemaRef,

@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -20,11 +21,12 @@ use std::time::Duration;
 use ::auth::{Identity, Password, UserProviderRef};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
-use common_catalog::parse_catalog_and_schema_from_db_string;
+use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{error, logging, warn};
+use common_telemetry::{debug, error, logging, tracing, warn};
 use datatypes::prelude::ConcreteDataType;
+use itertools::Itertools;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
     StatementMetaWriter, ValueInner,
@@ -37,7 +39,7 @@ use session::context::{Channel, QueryContextRef};
 use session::{Session, SessionRef};
 use snafu::{ensure, ResultExt};
 use sql::dialect::MySqlDialect;
-use sql::parser::ParserContext;
+use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
@@ -83,25 +85,27 @@ impl MysqlInstanceShim {
         MysqlInstanceShim {
             query_handler,
             salt: scramble,
-            session: Arc::new(Session::new(Some(client_addr), Channel::Mysql)),
+            session: Arc::new(Session::new(
+                Some(client_addr),
+                Channel::Mysql,
+                Default::default(),
+            )),
             user_provider,
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
         }
     }
 
+    #[tracing::instrument(skip_all, name = "mysql::do_query")]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         if let Some(output) =
             crate::mysql::federated::check(query, query_ctx.clone(), self.session.clone())
         {
             vec![Ok(output)]
         } else {
-            let trace_id = query_ctx.trace_id();
-            common_telemetry::TRACE_ID
-                .scope(trace_id, async move {
-                    self.query_handler.do_query(query, query_ctx).await
-                })
-                .await
+            let output = self.query_handler.do_query(query, query_ctx.clone()).await;
+            query_ctx.update_session(&self.session);
+            output
         }
     }
 
@@ -239,13 +243,27 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         debug_assert_eq!(params.len(), param_num - 1);
 
+        let columns = schema
+            .as_ref()
+            .map(|schema| {
+                schema
+                    .column_schemas()
+                    .iter()
+                    .map(|column_schema| {
+                        create_mysql_column(&column_schema.data_type, &column_schema.name)
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
         let stmt_id = self.save_plan(SqlPlan {
             query: query.to_string(),
             plan,
             schema,
         });
 
-        w.reply(stmt_id, &params, &[]).await?;
+        w.reply(stmt_id, &params, &columns).await?;
         crate::metrics::METRIC_MYSQL_PREPARED_COUNT
             .with_label_values(&[query_ctx.get_db_string().as_str()])
             .inc();
@@ -289,7 +307,26 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     }
                     .fail();
                 }
-                let plan = replace_params_with_values(&plan, param_types, params)?;
+
+                let plan = match replace_params_with_values(&plan, param_types, &params) {
+                    Ok(plan) => plan,
+                    Err(e) => {
+                        if e.status_code().should_log_error() {
+                            error!(e; "params: {}", params
+                                .iter()
+                                .map(|x| format!("({:?}, {:?})", x.value, x.coltype))
+                                .join(", "));
+                        }
+
+                        w.error(
+                            ErrorKind::ER_TRUNCATED_WRONG_VALUE,
+                            e.output_msg().as_bytes(),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+
                 logging::debug!("Mysql execute prepared plan: {}", plan.display_indent());
                 vec![
                     self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
@@ -316,6 +353,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let _ = guard.remove(&stmt_id);
     }
 
+    #[tracing::instrument(skip_all, fields(protocol = "mysql"))]
     async fn on_query<'a>(
         &'a mut self,
         query: &'a str,
@@ -332,9 +370,18 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(database);
+        let (catalog_from_db, schema) = parse_optional_catalog_and_schema_from_db_string(database);
+        let catalog = if let Some(catalog) = &catalog_from_db {
+            catalog.to_string()
+        } else {
+            self.session.get_catalog()
+        };
 
-        if !self.query_handler.is_valid_schema(catalog, schema).await? {
+        if !self
+            .query_handler
+            .is_valid_schema(&catalog, &schema)
+            .await?
+        {
             return w
                 .error(
                     ErrorKind::ER_WRONG_DB_NAME,
@@ -347,22 +394,27 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let user_info = &self.session.user_info();
 
         if let Some(schema_validator) = &self.user_provider {
-            if let Err(e) = schema_validator.authorize(catalog, schema, user_info).await {
+            if let Err(e) = schema_validator
+                .authorize(&catalog, &schema, user_info)
+                .await
+            {
                 METRIC_AUTH_FAILURE
                     .with_label_values(&[e.status_code().as_ref()])
                     .inc();
                 return w
                     .error(
                         ErrorKind::ER_DBACCESS_DENIED_ERROR,
-                        e.to_string().as_bytes(),
+                        e.output_msg().as_bytes(),
                     )
                     .await
                     .map_err(|e| e.into());
             }
         }
 
-        self.session.set_catalog(catalog.into());
-        self.session.set_schema(schema.into());
+        if catalog_from_db.is_some() {
+            self.session.set_catalog(catalog)
+        }
+        self.session.set_schema(schema);
 
         w.ok().await.map_err(|e| e.into())
     }
@@ -398,9 +450,18 @@ fn format_duration(duration: Duration) -> String {
 fn replace_params_with_values(
     plan: &LogicalPlan,
     param_types: HashMap<String, Option<ConcreteDataType>>,
-    params: Vec<ParamValue>,
+    params: &[ParamValue],
 ) -> Result<LogicalPlan> {
     debug_assert_eq!(param_types.len(), params.len());
+
+    debug!(
+        "replace_params_with_values(param_types: {:#?}, params: {:#?})",
+        param_types,
+        params
+            .iter()
+            .map(|x| format!("({:?}, {:?})", x.value, x.coltype))
+            .join(", ")
+    );
 
     let mut values = Vec::with_capacity(params.len());
 
@@ -417,10 +478,11 @@ fn replace_params_with_values(
 }
 
 async fn validate_query(query: &str) -> Result<Statement> {
-    let statement = ParserContext::create_with_dialect(query, &MySqlDialect {});
+    let statement =
+        ParserContext::create_with_dialect(query, &MySqlDialect {}, ParseOptions::default());
     let mut statement = statement.map_err(|e| {
         InvalidPrepareStatementSnafu {
-            err_msg: e.to_string(),
+            err_msg: e.output_msg(),
         }
         .build()
     })?;

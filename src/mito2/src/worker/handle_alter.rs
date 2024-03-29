@@ -16,17 +16,17 @@
 
 use std::sync::Arc;
 
-use common_query::Output;
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{debug, error, info};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
+use crate::error::{
+    InvalidMetadataSnafu, InvalidRegionRequestSchemaVersionSnafu, InvalidRegionRequestSnafu, Result,
+};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
-use crate::memtable::MemtableBuilderRef;
 use crate::region::version::Version;
 use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
@@ -47,14 +47,20 @@ impl<S> RegionWorkerLoop<S> {
 
         // Get the version before alter.
         let version = region.version();
-        if version.metadata.schema_version > request.schema_version {
+        if version.metadata.schema_version != request.schema_version {
             // This is possible if we retry the request.
-            warn!(
-                "Ignores alter request, region id:{}, region schema version {} is greater than request schema version {}",
+            debug!(
+                "Ignores alter request, region id:{}, region schema version {} is not equal to request schema version {}",
                 region_id, version.metadata.schema_version, request.schema_version
             );
-            // Returns if it altered.
-            sender.send(Ok(Output::AffectedRows(0)));
+            // Returns an error.
+            sender.send(
+                InvalidRegionRequestSchemaVersionSnafu {
+                    expect: version.metadata.schema_version,
+                    actual: request.schema_version,
+                }
+                .fail(),
+            );
             return;
         }
         // Validate request.
@@ -69,7 +75,7 @@ impl<S> RegionWorkerLoop<S> {
                 "Ignores alter request as it alters nothing, region_id: {}, request: {:?}",
                 region_id, request
             );
-            sender.send(Ok(Output::AffectedRows(0)));
+            sender.send(Ok(0));
             return;
         }
 
@@ -80,7 +86,7 @@ impl<S> RegionWorkerLoop<S> {
             info!("Flush region: {} before alteration", region_id);
 
             // Try to submit a flush task.
-            let task = self.new_flush_task(&region, FlushReason::Alter, None);
+            let task = self.new_flush_task(&region, FlushReason::Alter, None, self.config.clone());
             if let Err(e) =
                 self.flush_scheduler
                     .schedule_flush(region.region_id, &region.version_control, task)
@@ -102,9 +108,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Now we can alter the region directly.
-        if let Err(e) =
-            alter_region_schema(&region, &version, request, &self.memtable_builder).await
-        {
+        if let Err(e) = alter_region_schema(&region, &version, request).await {
             error!(e; "Failed to alter region schema, region_id: {}", region_id);
             sender.send(Err(e));
             return;
@@ -118,7 +122,7 @@ impl<S> RegionWorkerLoop<S> {
         );
 
         // Notifies waiters.
-        sender.send(Ok(Output::AffectedRows(0)));
+        sender.send(Ok(0));
     }
 }
 
@@ -127,7 +131,6 @@ async fn alter_region_schema(
     region: &MitoRegionRef,
     version: &Version,
     request: RegionAlterRequest,
-    builder: &MemtableBuilderRef,
 ) -> Result<()> {
     let new_meta = metadata_after_alteration(&version.metadata, request)?;
     // Persist the metadata to region's manifest.
@@ -138,7 +141,9 @@ async fn alter_region_schema(
     region.manifest_manager.update(action_list).await?;
 
     // Apply the metadata to region's version.
-    region.version_control.alter_schema(new_meta, builder);
+    region
+        .version_control
+        .alter_schema(new_meta, &region.memtable_builder);
     Ok(())
 }
 

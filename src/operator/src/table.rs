@@ -13,58 +13,37 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use client::Output;
+use common_base::AffectedRows;
 use common_error::ext::BoxedError;
-use query::error as query_error;
-use query::error::Result as QueryResult;
-use query::table_mutation::{AffectedRows, TableMutationHandler};
+use common_function::handlers::TableMutationHandler;
+use common_query::error as query_error;
+use common_query::error::Result as QueryResult;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use sqlparser::ast::ObjectName;
-use table::requests::{DeleteRequest as TableDeleteRequest, InsertRequest as TableInsertRequest};
+use store_api::storage::RegionId;
+use table::requests::{
+    CompactTableRequest, DeleteRequest as TableDeleteRequest, FlushTableRequest,
+    InsertRequest as TableInsertRequest,
+};
 
 use crate::delete::DeleterRef;
-use crate::error::{InvalidSqlSnafu, Result};
 use crate::insert::InserterRef;
-
-// TODO(LFC): Refactor consideration: move this function to some helper mod,
-// could be done together or after `TableReference`'s refactoring, when issue #559 is resolved.
-/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
-pub fn table_idents_to_full_name(
-    obj_name: &ObjectName,
-    query_ctx: QueryContextRef,
-) -> Result<(String, String, String)> {
-    match &obj_name.0[..] {
-        [table] => Ok((
-            query_ctx.current_catalog().to_owned(),
-            query_ctx.current_schema().to_owned(),
-            table.value.clone(),
-        )),
-        [schema, table] => Ok((
-            query_ctx.current_catalog().to_owned(),
-            schema.value.clone(),
-            table.value.clone(),
-        )),
-        [catalog, schema, table] => Ok((
-            catalog.value.clone(),
-            schema.value.clone(),
-            table.value.clone(),
-        )),
-        _ => InvalidSqlSnafu {
-            err_msg: format!(
-                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
-            ),
-        }.fail(),
-    }
-}
+use crate::request::RequesterRef;
 
 pub struct TableMutationOperator {
     inserter: InserterRef,
     deleter: DeleterRef,
+    requester: RequesterRef,
 }
 
 impl TableMutationOperator {
-    pub fn new(inserter: InserterRef, deleter: DeleterRef) -> Self {
-        Self { inserter, deleter }
+    pub fn new(inserter: InserterRef, deleter: DeleterRef, requester: RequesterRef) -> Self {
+        Self {
+            inserter,
+            deleter,
+            requester,
+        }
     }
 }
 
@@ -74,7 +53,7 @@ impl TableMutationHandler for TableMutationOperator {
         &self,
         request: TableInsertRequest,
         ctx: QueryContextRef,
-    ) -> QueryResult<AffectedRows> {
+    ) -> QueryResult<Output> {
         self.inserter
             .handle_table_insert(request, ctx)
             .await
@@ -89,6 +68,54 @@ impl TableMutationHandler for TableMutationOperator {
     ) -> QueryResult<AffectedRows> {
         self.deleter
             .handle_table_delete(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn flush(
+        &self,
+        request: FlushTableRequest,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_table_flush(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn compact(
+        &self,
+        request: CompactTableRequest,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_table_compaction(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn flush_region(
+        &self,
+        region_id: RegionId,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_region_flush(region_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn compact_region(
+        &self,
+        region_id: RegionId,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_region_compaction(region_id, ctx)
             .await
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)

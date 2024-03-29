@@ -17,12 +17,14 @@ use std::str::Utf8Error;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_wal::options::WalOptions;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::peer::Peer;
+use crate::DatanodeId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -31,8 +33,25 @@ pub enum Error {
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey { location: Location },
 
+    #[snafu(display(
+        "Another procedure is operating the region: {} on peer: {}",
+        region_id,
+        peer_id
+    ))]
+    RegionOperatingRace {
+        location: Location,
+        peer_id: DatanodeId,
+        region_id: RegionId,
+    },
+
     #[snafu(display("Invalid result with a txn response: {}", err_msg))]
     InvalidTxnResult { err_msg: String, location: Location },
+
+    #[snafu(display("Invalid engine type: {}", engine_type))]
+    InvalidEngineType {
+        engine_type: String,
+        location: Location,
+    },
 
     #[snafu(display("Failed to connect to Etcd"))]
     ConnectEtcd {
@@ -43,6 +62,14 @@ pub enum Error {
 
     #[snafu(display("Failed to execute via Etcd"))]
     EtcdFailed {
+        #[snafu(source)]
+        error: etcd_client::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute {} txn operations via Etcd", max_operations))]
+    EtcdTxnFailed {
+        max_operations: usize,
         #[snafu(source)]
         error: etcd_client::Error,
         location: Location,
@@ -62,11 +89,8 @@ pub enum Error {
     #[snafu(display("Unexpected sequence value: {}", err_msg))]
     UnexpectedSequenceValue { err_msg: String, location: Location },
 
-    #[snafu(display("Table info not found: {}", table_name))]
-    TableInfoNotFound {
-        table_name: String,
-        location: Location,
-    },
+    #[snafu(display("Table info not found: {}", table))]
+    TableInfoNotFound { table: String, location: Location },
 
     #[snafu(display("Failed to register procedure loader, type name: {}", type_name))]
     RegisterProcedureLoader {
@@ -81,6 +105,23 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to query procedure"))]
+    QueryProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure not found: {pid}"))]
+    ProcedureNotFound { location: Location, pid: String },
+
+    #[snafu(display("Failed to parse procedure id: {key}"))]
+    ParseProcedureId {
+        location: Location,
+        key: String,
+        #[snafu(source)]
+        error: common_procedure::ParseIdError,
+    },
+
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
@@ -91,6 +132,15 @@ pub enum Error {
     WaitProcedure {
         location: Location,
         source: common_procedure::Error,
+    },
+
+    #[snafu(display(
+        "Failed to get procedure output, procedure id: {procedure_id}, error: {err_msg}"
+    ))]
+    ProcedureOutput {
+        procedure_id: String,
+        err_msg: String,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert RawTableInfo into TableInfo"))]
@@ -116,9 +166,9 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Table route not found: {}", table_name))]
+    #[snafu(display("Failed to find table route for table id {}", table_id))]
     TableRouteNotFound {
-        table_name: String,
+        table_id: TableId,
         location: Location,
     },
 
@@ -214,6 +264,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Schema nod found, schema: {}", table_schema))]
+    SchemaNotFound {
+        table_schema: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to rename table, reason: {}", reason))]
     RenameTable { reason: String, location: Location },
 
@@ -266,6 +322,87 @@ pub enum Error {
 
     #[snafu(display("Retry later"))]
     RetryLater { source: BoxedError },
+
+    #[snafu(display(
+        "Failed to encode a wal options to json string, wal_options: {:?}",
+        wal_options
+    ))]
+    EncodeWalOptions {
+        wal_options: WalOptions,
+        #[snafu(source)]
+        error: serde_json::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid number of topics {}", num_topics))]
+    InvalidNumTopics {
+        num_topics: usize,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to build a Kafka client, broker endpoints: {:?}",
+        broker_endpoints
+    ))]
+    BuildKafkaClient {
+        broker_endpoints: Vec<String>,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
+    ResolveKafkaEndpoint { source: common_wal::error::Error },
+
+    #[snafu(display("Failed to build a Kafka controller client"))]
+    BuildKafkaCtrlClient {
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to build a Kafka partition client, topic: {}, partition: {}",
+        topic,
+        partition
+    ))]
+    BuildKafkaPartitionClient {
+        topic: String,
+        partition: i32,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to produce records to Kafka, topic: {}", topic))]
+    ProduceRecord {
+        topic: String,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to create a Kafka wal topic"))]
+    CreateKafkaWalTopic {
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("The topic pool is empty"))]
+    EmptyTopicPool { location: Location },
+
+    #[snafu(display("Unexpected table route type: {}", err_msg))]
+    UnexpectedLogicalRouteTable { location: Location, err_msg: String },
+
+    #[snafu(display("The tasks of {} cannot be empty", name))]
+    EmptyDdlTasks { name: String, location: Location },
+
+    #[snafu(display("Metadata corruption: {}", err_msg))]
+    MetadataCorruption { err_msg: String, location: Location },
+
+    #[snafu(display("Alter logical tables invalid arguments: {}", err_msg))]
+    AlterLogicalTablesInvalidArguments { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -277,6 +414,7 @@ impl ErrorExt for Error {
             IllegalServerState { .. }
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
+            | EtcdTxnFailed { .. }
             | ConnectEtcd { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
@@ -291,7 +429,27 @@ impl ErrorExt for Error {
             | SequenceOutOfRange { .. }
             | UnexpectedSequenceValue { .. }
             | InvalidHeartbeatResponse { .. }
-            | InvalidTxnResult { .. } => StatusCode::Unexpected,
+            | InvalidTxnResult { .. }
+            | EncodeJson { .. }
+            | DecodeJson { .. }
+            | PayloadNotExist { .. }
+            | ConvertRawKey { .. }
+            | DecodeProto { .. }
+            | BuildTableMeta { .. }
+            | TableRouteNotFound { .. }
+            | ConvertRawTableInfo { .. }
+            | RegionOperatingRace { .. }
+            | EncodeWalOptions { .. }
+            | BuildKafkaClient { .. }
+            | BuildKafkaCtrlClient { .. }
+            | BuildKafkaPartitionClient { .. }
+            | ResolveKafkaEndpoint { .. }
+            | ProduceRecord { .. }
+            | CreateKafkaWalTopic { .. }
+            | EmptyTopicPool { .. }
+            | UnexpectedLogicalRouteTable { .. }
+            | ProcedureOutput { .. }
+            | MetadataCorruption { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -301,21 +459,18 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Unsupported { .. } => StatusCode::Internal,
 
-            PrimaryKeyNotFound { .. } | &EmptyKey { .. } => StatusCode::InvalidArguments,
+            ProcedureNotFound { .. }
+            | PrimaryKeyNotFound { .. }
+            | EmptyKey { .. }
+            | InvalidEngineType { .. }
+            | AlterLogicalTablesInvalidArguments { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
-            EncodeJson { .. }
-            | DecodeJson { .. }
-            | PayloadNotExist { .. }
-            | ConvertRawKey { .. }
-            | DecodeProto { .. }
-            | BuildTableMeta { .. }
-            | TableRouteNotFound { .. }
-            | ConvertRawTableInfo { .. } => StatusCode::Unexpected,
-
-            SubmitProcedure { source, .. } | WaitProcedure { source, .. } => source.status_code(),
+            SubmitProcedure { source, .. }
+            | QueryProcedure { source, .. }
+            | WaitProcedure { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),
@@ -323,6 +478,11 @@ impl ErrorExt for Error {
             RetryLater { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
+
+            ParseProcedureId { .. }
+            | InvalidNumTopics { .. }
+            | SchemaNotFound { .. }
+            | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
         }
     }
 

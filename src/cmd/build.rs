@@ -13,5 +13,8 @@
 // limitations under the License.
 
 fn main() {
-    common_version::setup_git_versions();
+    // Trigger this script if the git branch/commit changes
+    println!("cargo:rerun-if-changed=.git/refs/heads");
+
+    common_version::setup_build_info();
 }

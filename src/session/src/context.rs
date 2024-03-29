@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,9 +22,13 @@ use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
-use common_time::TimeZone;
+use common_time::timezone::get_timezone;
+use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
+
+use crate::session_config::PGByteaOutputValue;
+use crate::SessionRef;
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
@@ -34,10 +40,21 @@ pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
     current_user: ArcSwap<Option<UserInfoRef>>,
-    time_zone: Option<TimeZone>,
-    sql_dialect: Box<dyn Dialect + Send + Sync>,
-    trace_id: u64,
-    span_id: u64,
+    #[builder(setter(custom))]
+    timezone: ArcSwap<Timezone>,
+    sql_dialect: Arc<dyn Dialect + Send + Sync>,
+    #[builder(default)]
+    extension: HashMap<String, String>,
+    // The configuration parameter are used to store the parameters that are set by the user
+    #[builder(default)]
+    configuration_parameter: Arc<ConfigurationVariables>,
+}
+
+impl QueryContextBuilder {
+    pub fn timezone(mut self, tz: Arc<Timezone>) -> Self {
+        self.timezone = Some(ArcSwap::new(tz));
+        self
+    }
 }
 
 impl Display for QueryContext {
@@ -51,6 +68,20 @@ impl Display for QueryContext {
     }
 }
 
+impl Clone for QueryContext {
+    fn clone(&self) -> Self {
+        Self {
+            current_catalog: self.current_catalog.clone(),
+            current_schema: self.current_schema.clone(),
+            current_user: self.current_user.load().clone().into(),
+            timezone: self.timezone.load().clone().into(),
+            sql_dialect: self.sql_dialect.clone(),
+            extension: self.extension.clone(),
+            configuration_parameter: self.configuration_parameter.clone(),
+        }
+    }
+}
+
 impl From<&RegionRequestHeader> for QueryContext {
     fn from(value: &RegionRequestHeader) -> Self {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(&value.dbname);
@@ -58,20 +89,11 @@ impl From<&RegionRequestHeader> for QueryContext {
             current_catalog: catalog.to_string(),
             current_schema: schema.to_string(),
             current_user: Default::default(),
-            time_zone: Default::default(),
-            sql_dialect: Box::new(GreptimeDbDialect {}),
-            trace_id: value.trace_id,
-            span_id: value.span_id,
-        }
-    }
-}
-
-impl From<&QueryContext> for RegionRequestHeader {
-    fn from(value: &QueryContext) -> Self {
-        RegionRequestHeader {
-            trace_id: value.trace_id,
-            span_id: value.span_id,
-            dbname: value.get_db_string(),
+            // for request send to datanode, all timestamp have converted to UTC, so timezone is not important
+            timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
+            sql_dialect: Arc::new(GreptimeDbDialect {}),
+            extension: Default::default(),
+            configuration_parameter: Default::default(),
         }
     }
 }
@@ -92,7 +114,7 @@ impl QueryContext {
         let (catalog, schema) = db_name
             .map(|db| {
                 let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-                (catalog.to_string(), schema.to_string())
+                (catalog, schema)
             })
             .unwrap_or_else(|| {
                 (
@@ -106,17 +128,14 @@ impl QueryContext {
             .build()
     }
 
-    #[inline]
     pub fn current_schema(&self) -> &str {
         &self.current_schema
     }
 
-    #[inline]
     pub fn current_catalog(&self) -> &str {
         &self.current_catalog
     }
 
-    #[inline]
     pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
         &*self.sql_dialect
     }
@@ -127,29 +146,52 @@ impl QueryContext {
         build_db_string(catalog, schema)
     }
 
-    #[inline]
-    pub fn time_zone(&self) -> Option<TimeZone> {
-        self.time_zone.clone()
+    pub fn timezone(&self) -> Arc<Timezone> {
+        self.timezone.load().clone()
     }
 
-    #[inline]
     pub fn current_user(&self) -> Option<UserInfoRef> {
         self.current_user.load().as_ref().clone()
     }
 
-    #[inline]
     pub fn set_current_user(&self, user: Option<UserInfoRef>) {
         let _ = self.current_user.swap(Arc::new(user));
     }
 
-    #[inline]
-    pub fn trace_id(&self) -> u64 {
-        self.trace_id
+    pub fn set_timezone(&self, timezone: Timezone) {
+        let _ = self.timezone.swap(Arc::new(timezone));
     }
 
-    #[inline]
-    pub fn span_id(&self) -> u64 {
-        self.span_id
+    pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
+        self.extension.insert(key.into(), value.into());
+    }
+
+    pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
+        self.extension.get(key.as_ref()).map(|v| v.as_str())
+    }
+
+    /// SQL like `set variable` may change timezone or other info in `QueryContext`.
+    /// We need persist these change in `Session`.
+    pub fn update_session(&self, session: &SessionRef) {
+        let tz = self.timezone();
+        if *session.timezone() != *tz {
+            session.set_timezone(tz.as_ref().clone())
+        }
+    }
+
+    /// Default to double quote and fallback to back quote
+    pub fn quote_style(&self) -> char {
+        if self.sql_dialect().is_delimited_identifier_start('"') {
+            '"'
+        } else if self.sql_dialect().is_delimited_identifier_start('\'') {
+            '\''
+        } else {
+            '`'
+        }
+    }
+
+    pub fn configuration_parameter(&self) -> &ConfigurationVariables {
+        &self.configuration_parameter
     }
 }
 
@@ -165,17 +207,21 @@ impl QueryContextBuilder {
             current_user: self
                 .current_user
                 .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
-            time_zone: self.time_zone.unwrap_or(None),
+            timezone: self
+                .timezone
+                .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None).clone()))),
             sql_dialect: self
                 .sql_dialect
-                .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),
-            trace_id: self.trace_id.unwrap_or_else(common_telemetry::gen_trace_id),
-            span_id: self.span_id.unwrap_or_default(),
+                .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
+            extension: self.extension.unwrap_or_default(),
+            configuration_parameter: self.configuration_parameter.unwrap_or_default(),
         })
     }
 
-    pub fn try_trace_id(mut self, trace_id: Option<u64>) -> Self {
-        self.trace_id = trace_id;
+    pub fn set_extension(mut self, key: String, value: String) -> Self {
+        self.extension
+            .get_or_insert_with(HashMap::new)
+            .insert(key, value);
         self
     }
 }
@@ -216,10 +262,10 @@ pub enum Channel {
 }
 
 impl Channel {
-    pub fn dialect(&self) -> Box<dyn Dialect + Send + Sync> {
+    pub fn dialect(&self) -> Arc<dyn Dialect + Send + Sync> {
         match self {
-            Channel::Mysql => Box::new(MySqlDialect {}),
-            Channel::Postgres => Box::new(PostgreSqlDialect {}),
+            Channel::Mysql => Arc::new(MySqlDialect {}),
+            Channel::Postgres => Arc::new(PostgreSqlDialect {}),
         }
     }
 }
@@ -233,6 +279,33 @@ impl Display for Channel {
     }
 }
 
+#[derive(Default, Debug)]
+pub struct ConfigurationVariables {
+    postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
+}
+
+impl Clone for ConfigurationVariables {
+    fn clone(&self) -> Self {
+        Self {
+            postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
+        }
+    }
+}
+
+impl ConfigurationVariables {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_postgres_bytea_output(&self, value: PGByteaOutputValue) {
+        let _ = self.postgres_bytea_output.swap(Arc::new(value));
+    }
+
+    pub fn postgres_bytea_output(&self) -> Arc<PGByteaOutputValue> {
+        self.postgres_bytea_output.load().clone()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
@@ -243,7 +316,11 @@ mod test {
 
     #[test]
     fn test_session() {
-        let session = Session::new(Some("127.0.0.1:9000".parse().unwrap()), Channel::Mysql);
+        let session = Session::new(
+            Some("127.0.0.1:9000".parse().unwrap()),
+            Channel::Mysql,
+            Default::default(),
+        );
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");
 

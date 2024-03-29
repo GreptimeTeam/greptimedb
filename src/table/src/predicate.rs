@@ -15,28 +15,41 @@
 use std::sync::Arc;
 
 use common_query::logical_plan::{DfExpr, Expr};
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{error, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::parquet::file::metadata::RowGroupMetaData;
+use datafusion::common::ScalarValue;
 use datafusion::physical_optimizer::pruning::{PruningPredicate, PruningStatistics};
-use datafusion_common::{ScalarValue, ToDFSchema};
+use datafusion_common::ToDFSchema;
 use datafusion_expr::expr::InList;
-use datafusion_expr::{Between, BinaryExpr, ColumnarValue, Operator};
+use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
 use datatypes::arrow;
-use datatypes::arrow::array::BooleanArray;
-use datatypes::schema::SchemaRef;
 use datatypes::value::scalar_value_to_timestamp;
 use snafu::ResultExt;
 
 use crate::error;
-use crate::predicate::stats::RowGroupPruningStatistics;
 
+#[cfg(test)]
 mod stats;
+
+/// Assert the scalar value is not utf8. Returns `None` if it's utf8.
+/// In theory, it should be converted to a timestamp scalar value by `TypeConversionRule`.
+macro_rules! return_none_if_utf8 {
+    ($lit: ident) => {
+        if matches!($lit, ScalarValue::Utf8(_)) {
+            warn!(
+                "Unexpected ScalarValue::Utf8 in time range predicate: {:?}. Maybe it's an implicit bug, please report it to https://github.com/GreptimeTeam/greptimedb/issues",
+                $lit
+            );
+
+            // Make the predicate ineffective.
+            return None;
+        }
+    };
+}
 
 #[derive(Debug, Clone)]
 pub struct Predicate {
@@ -50,6 +63,11 @@ impl Predicate {
     /// Returns error when failed to convert exprs.
     pub fn new(exprs: Vec<Expr>) -> Self {
         Self { exprs }
+    }
+
+    /// Returns the logical exprs.
+    pub fn exprs(&self) -> &[Expr] {
+        &self.exprs
     }
 
     /// Builds physical exprs according to provided schema.
@@ -75,83 +93,6 @@ impl Predicate {
                     .ok()
             })
             .collect::<Vec<_>>())
-    }
-
-    /// Builds an empty predicate from given schema.
-    pub fn empty() -> Self {
-        Self { exprs: vec![] }
-    }
-
-    /// Evaluates the predicate against row group metadata.
-    /// Returns a vector of boolean values, among which `false` means the row group can be skipped.
-    pub fn prune_row_groups(
-        &self,
-        row_groups: &[RowGroupMetaData],
-        schema: SchemaRef,
-    ) -> Vec<bool> {
-        let mut res = vec![true; row_groups.len()];
-
-        let Ok(physical_exprs) = self.to_physical_exprs(schema.arrow_schema()) else {
-            return res;
-        };
-
-        let arrow_schema = schema.arrow_schema();
-        for expr in &physical_exprs {
-            match PruningPredicate::try_new(expr.clone(), arrow_schema.clone()) {
-                Ok(p) => {
-                    let stat = RowGroupPruningStatistics::new(row_groups, &schema);
-                    match p.prune(&stat) {
-                        Ok(r) => {
-                            for (curr_val, res) in r.into_iter().zip(res.iter_mut()) {
-                                *res &= curr_val
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to prune row groups, error: {:?}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to create predicate for expr, error: {:?}", e);
-                }
-            }
-        }
-        res
-    }
-
-    /// Prunes primary keys
-    pub fn prune_primary_key(&self, primary_key: &RecordBatch) -> error::Result<bool> {
-        let pk_schema = primary_key.schema();
-        let physical_exprs = self.to_physical_exprs(&pk_schema)?;
-        for expr in &physical_exprs {
-            // evaluate every filter against primary key
-            let Ok(eva) = expr.evaluate(primary_key) else {
-                continue;
-            };
-            let result = match eva {
-                ColumnarValue::Array(array) => {
-                    let predicate_array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                    predicate_array
-                        .into_iter()
-                        .map(|x| x.unwrap_or(true))
-                        .next()
-                        .unwrap_or(true)
-                }
-                // result was a column
-                ColumnarValue::Scalar(ScalarValue::Boolean(v)) => v.unwrap_or(true),
-                _ => {
-                    unreachable!("Unexpected primary key record batch evaluation result: {:?}, primary key: {:?}", eva, primary_key);
-                }
-            };
-            debug!(
-                "Evaluate primary key {:?} against filter: {:?}, result: {:?}",
-                primary_key, expr, result
-            );
-            if !result {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     /// Evaluates the predicate against the `stats`.
@@ -358,7 +299,9 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         if col.name != self.ts_col_name {
             return None;
         }
-        scalar_value_to_timestamp(lit).map(|t| (t, reverse))
+
+        return_none_if_utf8!(lit);
+        scalar_value_to_timestamp(lit, None).map(|t| (t, reverse))
     }
 
     fn extract_from_between_expr(
@@ -381,9 +324,12 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 
         match (low, high) {
             (DfExpr::Literal(low), DfExpr::Literal(high)) => {
-                let low_opt =
-                    scalar_value_to_timestamp(low).and_then(|ts| ts.convert_to(self.ts_col_unit));
-                let high_opt = scalar_value_to_timestamp(high)
+                return_none_if_utf8!(low);
+                return_none_if_utf8!(high);
+
+                let low_opt = scalar_value_to_timestamp(low, None)
+                    .and_then(|ts| ts.convert_to(self.ts_col_unit));
+                let high_opt = scalar_value_to_timestamp(high, None)
                     .and_then(|ts| ts.convert_to_ceil(self.ts_col_unit));
                 Some(TimestampRange::new_inclusive(low_opt, high_opt))
             }
@@ -414,7 +360,8 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         let mut init_range = TimestampRange::empty();
         for expr in list {
             if let DfExpr::Literal(scalar) = expr {
-                if let Some(timestamp) = scalar_value_to_timestamp(scalar) {
+                return_none_if_utf8!(scalar);
+                if let Some(timestamp) = scalar_value_to_timestamp(scalar, None) {
                     init_range = init_range.or(&TimestampRange::single(timestamp))
                 } else {
                     // TODO(hl): maybe we should raise an error here since cannot parse
@@ -433,7 +380,6 @@ mod tests {
 
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use datafusion::parquet::arrow::ArrowWriter;
-    pub use datafusion::parquet::schema::types::BasicTypeInfo;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{col, lit, BinaryExpr, Literal, Operator};
     use datatypes::arrow::array::Int32Array;
@@ -444,6 +390,7 @@ mod tests {
     use parquet::file::properties::WriterProperties;
 
     use super::*;
+    use crate::predicate::stats::RowGroupPruningStatistics;
 
     fn check_build_predicate(expr: DfExpr, expect: TimestampRange) {
         assert_eq!(
@@ -569,6 +516,7 @@ mod tests {
             TimestampRange::until_end(Timestamp::new_millisecond(1000), false),
         );
     }
+
     #[test]
     fn test_lt_eq() {
         // ts <= 1ms
@@ -652,8 +600,8 @@ mod tests {
         expect: Vec<bool>,
     ) {
         let dir = create_temp_dir("prune_parquet");
-        let (path, schema) = gen_test_parquet_file(&dir, array_cnt).await;
-        let schema = Arc::new(datatypes::schema::Schema::try_from(schema).unwrap());
+        let (path, arrow_schema) = gen_test_parquet_file(&dir, array_cnt).await;
+        let schema = Arc::new(datatypes::schema::Schema::try_from(arrow_schema.clone()).unwrap());
         let arrow_predicate = Predicate::new(filters);
         let builder = ParquetRecordBatchStreamBuilder::new(
             tokio::fs::OpenOptions::new()
@@ -666,7 +614,9 @@ mod tests {
         .unwrap();
         let metadata = builder.metadata().clone();
         let row_groups = metadata.row_groups();
-        let res = arrow_predicate.prune_row_groups(row_groups, schema);
+
+        let stats = RowGroupPruningStatistics::new(row_groups, &schema);
+        let res = arrow_predicate.prune_with_stats(&stats, &arrow_schema);
         assert_eq!(expect, res);
     }
 

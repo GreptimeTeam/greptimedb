@@ -18,6 +18,7 @@ use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
 use api::v1::greptime_request::Request;
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
@@ -28,6 +29,7 @@ use query::parser::PromQuery;
 use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
+use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::prom_store;
 use servers::prom_store::{snappy_compress, Metrics};
@@ -56,14 +58,15 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl PromStoreProtocolHandler for DummyInstance {
-    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()> {
-        let _ = self
-            .tx
-            .send((ctx.current_schema().to_owned(), request.encode_to_vec()))
-            .await;
-
-        Ok(())
+    async fn write(
+        &self,
+        _request: RowInsertRequests,
+        _ctx: QueryContextRef,
+        _with_metric_engine: bool,
+    ) -> Result<Output> {
+        Ok(Output::new_with_affected_rows(0))
     }
+
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse> {
         let _ = self
             .tx
@@ -77,8 +80,9 @@ impl PromStoreProtocolHandler for DummyInstance {
         };
 
         Ok(PromStoreResponse {
-            content_type: "application/x-protobuf".to_string(),
-            content_encoding: "snappy".to_string(),
+            content_type: CONTENT_TYPE_PROTOBUF.clone(),
+            content_encoding: CONTENT_ENCODING_SNAPPY.clone(),
+            resp_metrics: Default::default(),
             body: response.encode_to_vec(),
         })
     }
@@ -133,15 +137,15 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
 
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
-        .with_grpc_handler(instance.clone())
-        .with_sql_handler(instance.clone())
-        .with_prom_handler(instance)
+        .with_sql_handler(instance.clone(), None)
+        .with_prom_handler(instance, true)
         .build();
     server.build(server.make_app())
 }
 
 #[tokio::test]
 async fn test_prometheus_remote_write_read() {
+    common_telemetry::init_default_ut_logging();
     let (tx, mut rx) = mpsc::channel(100);
 
     let app = make_test_app(tx);
@@ -220,28 +224,17 @@ async fn test_prometheus_remote_write_read() {
         requests.push(s);
     }
 
-    assert_eq!(4, requests.len());
+    assert_eq!(2, requests.len());
 
-    assert_eq!("public", requests[0].0);
-    assert_eq!("prometheus", requests[1].0);
-    assert_eq!("prometheus", requests[2].0);
-    assert_eq!("public", requests[3].0);
-
-    assert_eq!(
-        write_request,
-        WriteRequest::decode(&(requests[0].1)[..]).unwrap()
-    );
-    assert_eq!(
-        write_request,
-        WriteRequest::decode(&(requests[1].1)[..]).unwrap()
-    );
+    assert_eq!("prometheus", requests[0].0);
+    assert_eq!("public", requests[1].0);
 
     assert_eq!(
         read_request,
-        ReadRequest::decode(&(requests[2].1)[..]).unwrap()
+        ReadRequest::decode(&(requests[0].1)[..]).unwrap()
     );
     assert_eq!(
         read_request,
-        ReadRequest::decode(&(requests[3].1)[..]).unwrap()
+        ReadRequest::decode(&(requests[1].1)[..]).unwrap()
     );
 }

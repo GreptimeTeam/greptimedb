@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod backup;
+mod copy_database;
 mod copy_table_from;
 mod copy_table_to;
 mod ddl;
@@ -21,46 +21,49 @@ mod dml;
 mod show;
 mod tql;
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
 use common_query::Output;
+use common_telemetry::tracing;
 use common_time::range::TimestampRange;
-use common_time::Timestamp;
+use common_time::{Timestamp, Timezone};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
-use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use session::session_config::PGByteaOutputValue;
+use session::table_name::table_idents_to_full_name;
+use snafu::{ensure, OptionExt, ResultExt};
+use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use sql::statements::set_variables::SetVariables;
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
-use sqlparser::ast::ObjectName;
-use table::engine::TableReference;
+use sql::util::format_raw_object_name;
+use sqlparser::ast::{Expr, Ident, ObjectName, Value};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
+use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, PlanStatementSnafu,
-    Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidConfigValueSnafu,
+    InvalidSqlSnafu, NotSupportedSnafu, PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
-use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
-use crate::table::table_idents_to_full_name;
+use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 
 #[derive(Clone)]
 pub struct StatementExecutor {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
-    ddl_executor: DdlTaskExecutorRef,
+    procedure_executor: ProcedureExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
@@ -71,7 +74,7 @@ impl StatementExecutor {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
-        ddl_task_executor: DdlTaskExecutorRef,
+        procedure_executor: ProcedureExecutorRef,
         kv_backend: KvBackendRef,
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
@@ -79,7 +82,7 @@ impl StatementExecutor {
         Self {
             catalog_manager,
             query_engine,
-            ddl_executor: ddl_task_executor,
+            procedure_executor,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
             cache_invalidator,
@@ -87,6 +90,7 @@ impl StatementExecutor {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn execute_stmt(
         &self,
         stmt: QueryStatement,
@@ -120,57 +124,78 @@ impl StatementExecutor {
                     CopyDirection::Export => self
                         .copy_table_to(req, query_ctx)
                         .await
-                        .map(Output::AffectedRows),
-                    CopyDirection::Import => self
-                        .copy_table_from(req, query_ctx)
-                        .await
-                        .map(Output::AffectedRows),
+                        .map(Output::new_with_affected_rows),
+                    CopyDirection::Import => self.copy_table_from(req, query_ctx).await,
                 }
             }
 
-            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(arg)) => {
-                self.copy_database(to_copy_database_request(arg, &query_ctx)?)
-                    .await
+            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_database)) => {
+                match copy_database {
+                    CopyDatabase::To(arg) => {
+                        self.copy_database_to(
+                            to_copy_database_request(arg, &query_ctx)?,
+                            query_ctx.clone(),
+                        )
+                        .await
+                    }
+                    CopyDatabase::From(arg) => {
+                        self.copy_database_from(
+                            to_copy_database_request(arg, &query_ctx)?,
+                            query_ctx,
+                        )
+                        .await
+                    }
+                }
             }
 
             Statement::CreateTable(stmt) => {
                 let _ = self.create_table(stmt, query_ctx).await?;
-                Ok(Output::AffectedRows(0))
+                Ok(Output::new_with_affected_rows(0))
+            }
+            Statement::CreateTableLike(stmt) => {
+                let _ = self.create_table_like(stmt, query_ctx).await?;
+                Ok(Output::new_with_affected_rows(0))
             }
             Statement::CreateExternalTable(stmt) => {
                 let _ = self.create_external_table(stmt, query_ctx).await?;
-                Ok(Output::AffectedRows(0))
+                Ok(Output::new_with_affected_rows(0))
             }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.drop_table(table_name).await
+                self.drop_table(table_name, stmt.drop_if_exists()).await
+            }
+            Statement::DropDatabase(stmt) => {
+                self.drop_database(
+                    query_ctx.current_catalog().to_string(),
+                    format_raw_object_name(stmt.name()),
+                    stmt.drop_if_exists(),
+                )
+                .await
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
                 self.truncate_table(table_name).await
             }
-
             Statement::CreateDatabase(stmt) => {
                 self.create_database(
                     query_ctx.current_catalog(),
-                    &stmt.name.to_string(),
+                    &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
                 )
                 .await
             }
-
             Statement::ShowCreateTable(show) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(&show.table_name, query_ctx.clone())
+                    table_idents_to_full_name(&show.table_name, &query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
 
@@ -185,6 +210,35 @@ impl StatementExecutor {
                 self.show_create_table(table_name, table_ref, query_ctx)
                     .await
             }
+            Statement::SetVariables(set_var) => {
+                let var_name = set_var.variable.to_string().to_uppercase();
+                match var_name.as_str() {
+                    "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
+
+                    // Some postgresql client app may submit a "SET bytea_output" stmt upon connection.
+                    // However, currently we lack the support for it (tracked in https://github.com/GreptimeTeam/greptimedb/issues/3438),
+                    // so we just ignore it here instead of returning an error to break the connection.
+                    // Since the "bytea_output" only determines the output format of binary values,
+                    // it won't cause much trouble if we do so.
+                    "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,
+
+                    // Same as "bytea_output", we just ignore it here.
+                    // Not harmful since it only relates to how date is viewed in client app's output.
+                    // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
+                    // TODO(#3442): Remove this temporary workaround after the feature is implemented.
+                    "DATESTYLE" => (),
+
+                    "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
+                    _ => {
+                        return NotSupportedSnafu {
+                            feat: format!("Unsupported set variable {}", var_name),
+                        }
+                        .fail()
+                    }
+                }
+                Ok(Output::new_with_affected_rows(0))
+            }
+            Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
         }
     }
 
@@ -200,6 +254,7 @@ impl StatementExecutor {
             .context(PlanStatementSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
         let plan = self.plan(stmt, query_ctx.clone()).await?;
         self.query_engine
@@ -224,6 +279,85 @@ impl StatementExecutor {
     }
 }
 
+fn validate_client_encoding(set: SetVariables) -> Result<()> {
+    let Some((encoding, [])) = set.value.split_first() else {
+        return InvalidSqlSnafu {
+            err_msg: "must provide one and only one client encoding value",
+        }
+        .fail();
+    };
+    let encoding = match encoding {
+        Expr::Value(Value::SingleQuotedString(x))
+        | Expr::Identifier(Ident {
+            value: x,
+            quote_style: _,
+        }) => x.to_uppercase(),
+        _ => {
+            return InvalidSqlSnafu {
+                err_msg: format!("client encoding must be a string, actual: {:?}", encoding),
+            }
+            .fail();
+        }
+    };
+    // For the sake of simplicity, we only support "UTF8" ("UNICODE" is the alias for it,
+    // see https://www.postgresql.org/docs/current/multibyte.html#MULTIBYTE-CHARSET-SUPPORTED).
+    // "UTF8" is universal and sufficient for almost all cases.
+    // GreptimeDB itself is always using "UTF8" as the internal encoding.
+    ensure!(
+        encoding == "UTF8" || encoding == "UNICODE",
+        NotSupportedSnafu {
+            feat: format!("client encoding of '{}'", encoding)
+        }
+    );
+    Ok(())
+}
+
+fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let tz_expr = exprs.first().context(NotSupportedSnafu {
+        feat: "No timezone find in set variable statement",
+    })?;
+    match tz_expr {
+        Expr::Value(Value::SingleQuotedString(tz)) | Expr::Value(Value::DoubleQuotedString(tz)) => {
+            match Timezone::from_tz_string(tz.as_str()) {
+                Ok(timezone) => ctx.set_timezone(timezone),
+                Err(_) => {
+                    return NotSupportedSnafu {
+                        feat: format!("Invalid timezone expr {} in set variable statement", tz),
+                    }
+                    .fail()
+                }
+            }
+            Ok(())
+        }
+        expr => NotSupportedSnafu {
+            feat: format!(
+                "Unsupported timezone expr {} in set variable statement",
+                expr
+            ),
+        }
+        .fail(),
+    }
+}
+
+fn set_bytea_output(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let Some((var_value, [])) = exprs.split_first() else {
+        return (NotSupportedSnafu {
+            feat: "Set variable value must have one and only one value for bytea_output",
+        })
+        .fail();
+    };
+    let Expr::Value(value) = var_value else {
+        return (NotSupportedSnafu {
+            feat: "Set variable value must be a value",
+        })
+        .fail();
+    };
+    ctx.configuration_parameter().set_postgres_bytea_output(
+        PGByteaOutputValue::try_from(value.clone()).context(InvalidConfigValueSnafu)?,
+    );
+    Ok(())
+}
+
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
     let direction = match stmt {
         CopyTable::To(_) => CopyDirection::Export,
@@ -240,9 +374,12 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         CopyTable::To(arg) => arg,
         CopyTable::From(arg) => arg,
     };
-    let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_name, query_ctx)
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
+    let (catalog_name, schema_name, table_name) =
+        table_idents_to_full_name(&table_name, &query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+    let timestamp_range = timestamp_range_from_option_map(&with, &query_ctx)?;
 
     let pattern = with
         .get(common_datasource::file_format::FILE_PATTERN)
@@ -257,8 +394,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         connection: connection.map,
         pattern,
         direction,
-        // we copy the whole table by default.
-        timestamp_range: None,
+        timestamp_range,
     })
 }
 
@@ -271,16 +407,7 @@ fn to_copy_database_request(
     let (catalog_name, database_name) = idents_to_full_database_name(&arg.database_name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-
-    let start_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_START_KEY)?;
-    let end_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_END_KEY)?;
-
-    let time_range = match (start_timestamp, end_timestamp) {
-        (Some(start), Some(end)) => TimestampRange::new(start, end),
-        (Some(start), None) => Some(TimestampRange::from_start(start)),
-        (None, Some(end)) => Some(TimestampRange::until_end(end, false)), // exclusive end
-        (None, None) => None,
-    };
+    let time_range = timestamp_range_from_option_map(&arg.with, query_ctx)?;
 
     Ok(CopyDatabaseRequest {
         catalog_name,
@@ -292,11 +419,33 @@ fn to_copy_database_request(
     })
 }
 
+/// Extracts timestamp range from OptionMap with keys `start_time` and `end_time`.
+/// The timestamp ranges should be a valid timestamp string as defined in [Timestamp::from_str].
+/// The timezone used for conversion will respect that inside `query_ctx`.
+fn timestamp_range_from_option_map(
+    options: &OptionMap,
+    query_ctx: &QueryContextRef,
+) -> Result<Option<TimestampRange>> {
+    let start_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_START_KEY, query_ctx)?;
+    let end_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_END_KEY, query_ctx)?;
+    let time_range = match (start_timestamp, end_timestamp) {
+        (Some(start), Some(end)) => TimestampRange::new(start, end),
+        (Some(start), None) => Some(TimestampRange::from_start(start)),
+        (None, Some(end)) => Some(TimestampRange::until_end(end, false)), // exclusive end
+        (None, None) => None,
+    };
+    Ok(time_range)
+}
+
 /// Extracts timestamp from a [HashMap<String, String>] with given key.
-fn extract_timestamp(map: &OptionMap, key: &str) -> Result<Option<Timestamp>> {
+fn extract_timestamp(
+    map: &OptionMap,
+    key: &str,
+    query_ctx: &QueryContextRef,
+) -> Result<Option<Timestamp>> {
     map.get(key)
         .map(|v| {
-            Timestamp::from_str(v)
+            Timestamp::from_str(v, Some(&query_ctx.timezone()))
                 .map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
         })
         .transpose()
@@ -318,5 +467,46 @@ fn idents_to_full_database_name(
             ),
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use common_time::{Timestamp, Timezone};
+    use session::context::QueryContextBuilder;
+    use sql::statements::OptionMap;
+
+    use crate::statement::copy_database::{
+        COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY,
+    };
+    use crate::statement::timestamp_range_from_option_map;
+
+    #[test]
+    fn test_timestamp_range_from_option_map() {
+        let query_ctx = QueryContextBuilder::default()
+            .timezone(Arc::new(Timezone::from_tz_string("Asia/Shanghai").unwrap()))
+            .build();
+        let map = OptionMap::from(
+            [
+                (
+                    COPY_DATABASE_TIME_START_KEY.to_string(),
+                    "2022-04-11 08:00:00".to_string(),
+                ),
+                (
+                    COPY_DATABASE_TIME_END_KEY.to_string(),
+                    "2022-04-11 16:00:00".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+        let range = timestamp_range_from_option_map(&map, &query_ctx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(Timestamp::new_second(1649635200), range.start().unwrap());
+        assert_eq!(Timestamp::new_second(1649664000), range.end().unwrap());
     }
 }

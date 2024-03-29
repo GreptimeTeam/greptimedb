@@ -43,7 +43,7 @@ const BYTES_TO_OVERFLOW_RUST_DECIMAL: usize = 28;
 /// **precision**: the total number of digits in the number, it's range is \[1, 38\].
 ///
 /// **scale**: the number of digits to the right of the decimal point, it's range is \[0, precision\].
-#[derive(Debug, Default, Eq, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Eq, Copy, Clone, Serialize, Deserialize)]
 pub struct Decimal128 {
     value: i128,
     precision: u8,
@@ -51,8 +51,18 @@ pub struct Decimal128 {
 }
 
 impl Decimal128 {
-    /// Create a new Decimal128 from i128, precision and scale.
-    pub fn new_unchecked(value: i128, precision: u8, scale: i8) -> Self {
+    /// Create a new Decimal128 from i128, precision and scale without any validation.
+    pub fn new(value: i128, precision: u8, scale: i8) -> Self {
+        // debug assert precision and scale is valid
+        debug_assert!(
+            precision > 0 && precision <= DECIMAL128_MAX_PRECISION,
+            "precision should be in [1, {}]",
+            DECIMAL128_MAX_PRECISION
+        );
+        debug_assert!(
+            scale >= 0 && scale <= precision as i8,
+            "scale should be in [0, precision]"
+        );
         Self {
             value,
             precision,
@@ -60,6 +70,7 @@ impl Decimal128 {
         }
     }
 
+    /// Try new Decimal128 from i128, precision and scale with validation.
     pub fn try_new(value: i128, precision: u8, scale: i8) -> error::Result<Self> {
         // make sure the precision and scale is valid.
         valid_precision_and_scale(precision, scale)?;
@@ -70,6 +81,7 @@ impl Decimal128 {
         })
     }
 
+    /// Return underlying value without precision and scale
     pub fn val(&self) -> i128 {
         self.value
     }
@@ -84,9 +96,41 @@ impl Decimal128 {
         self.scale
     }
 
-    /// Convert to ScalarValue
+    /// Convert to ScalarValue(value,precision,scale)
     pub fn to_scalar_value(&self) -> (Option<i128>, u8, i8) {
         (Some(self.value), self.precision, self.scale)
+    }
+
+    /// split the self.value(i128) to (high-64 bit, low-64 bit), and
+    /// the precision, scale information is discarded.
+    ///
+    /// Return: (high-64 bit, low-64 bit)
+    pub fn split_value(&self) -> (i64, i64) {
+        ((self.value >> 64) as i64, self.value as i64)
+    }
+
+    /// Convert from precision, scale, a i128 value which
+    /// represents by i64 + i64 value(high-64 bit, low-64 bit).
+    pub fn from_value_precision_scale(hi: i64, lo: i64, precision: u8, scale: i8) -> Self {
+        // 128                             64                              0
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        // |               hi              |               lo              |
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        let hi = (hi as u128 & u64::MAX as u128) << 64;
+        let lo = lo as u128 & u64::MAX as u128;
+        let value = (hi | lo) as i128;
+        Self::new(value, precision, scale)
+    }
+}
+
+/// The default value of Decimal128 is 0, and its precision is 1 and scale is 0.
+impl Default for Decimal128 {
+    fn default() -> Self {
+        Self {
+            value: 0,
+            precision: 1,
+            scale: 0,
+        }
     }
 }
 
@@ -270,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_common_decimal128() {
-        let decimal = Decimal128::new_unchecked(123456789, 9, 3);
+        let decimal = Decimal128::new(123456789, 9, 3);
         assert_eq!(decimal.to_string(), "123456.789");
 
         let decimal = Decimal128::try_new(123456789, 9, 0);
@@ -390,5 +434,31 @@ mod tests {
         let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
         let decimal2 = Decimal128::from_str("1234567890.123").unwrap();
         assert_eq!(decimal1.partial_cmp(&decimal2), None);
+    }
+
+    #[test]
+    fn test_convert_with_i128() {
+        let test_decimal128_eq = |value| {
+            let decimal1 =
+                Decimal128::new(value, DECIMAL128_MAX_PRECISION, DECIMAL128_DEFAULT_SCALE);
+            let (hi, lo) = decimal1.split_value();
+            let decimal2 = Decimal128::from_value_precision_scale(
+                hi,
+                lo,
+                DECIMAL128_MAX_PRECISION,
+                DECIMAL128_DEFAULT_SCALE,
+            );
+            assert_eq!(decimal1, decimal2);
+        };
+
+        test_decimal128_eq(1 << 63);
+
+        test_decimal128_eq(0);
+        test_decimal128_eq(1234567890);
+        test_decimal128_eq(-1234567890);
+        test_decimal128_eq(32781372819372817382183218i128);
+        test_decimal128_eq(-32781372819372817382183218i128);
+        test_decimal128_eq(i128::MAX);
+        test_decimal128_eq(i128::MIN);
     }
 }

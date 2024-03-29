@@ -25,6 +25,10 @@ SELECT * from t;
 |   | 1970-01-01T00:00:00.004 |
 +---+-------------------------+
 
+ALTER TABLE t RENAME 'Hi👋';
+
+Error: 1002(Unexpected), Unexpected, violated: Invalid table name: Hi👋
+
 ALTER TABLE t RENAME new_table;
 
 Affected Rows: 0
@@ -35,7 +39,7 @@ Error: 4001(TableNotFound), Table not found: t
 
 SELECT * FROM t;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.t
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.public.t
 
 CREATE TABLE t(i INTEGER, j TIMESTAMP TIME INDEX);
 
@@ -74,6 +78,49 @@ DROP TABLE t;
 Affected Rows: 0
 
 DROP TABLE new_table;
+
+Affected Rows: 0
+
+CREATE TABLE "AbCdE"("CoLa" INTEGER, "cOlB" TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+ALTER TABLE "AbCdE" RENAME "fGhI";
+
+Affected Rows: 0
+
+DESC TABLE "fGhI";
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| CoLa   | Int32                |     | YES  |         | FIELD         |
+| cOlB   | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM "fGhI";
+
+++
+++
+
+ALTER TABLE "fGhI" RENAME JkLmN;
+
+Affected Rows: 0
+
+DESC TABLE "JkLmN";
+
+Error: 4001(TableNotFound), Table not found: JkLmN
+
+DESC TABLE JkLmN;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| CoLa   | Int32                |     | YES  |         | FIELD         |
+| cOlB   | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE jklmn;
 
 Affected Rows: 0
 

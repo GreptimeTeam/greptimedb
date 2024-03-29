@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -64,6 +64,13 @@ pub enum Error {
         username: String,
     },
 
+    #[snafu(display("Failed to initialize a watcher for file {}", path))]
+    FileWatch {
+        path: String,
+        #[snafu(source)]
+        error: notify::Error,
+    },
+
     #[snafu(display("User is not authorized to perform this action"))]
     PermissionDenied { location: Location },
 }
@@ -73,6 +80,7 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
             Error::IllegalParam { .. } => StatusCode::InvalidArguments,
+            Error::FileWatch { .. } => StatusCode::InvalidArguments,
             Error::InternalState { .. } => StatusCode::Unexpected,
             Error::Io { .. } => StatusCode::Internal,
             Error::AuthBackend { .. } => StatusCode::Internal,

@@ -13,15 +13,11 @@
 // limitations under the License.
 
 pub mod aggregate;
+pub(crate) mod date;
 pub mod expression;
-pub mod function;
-pub mod function_registry;
 pub mod math;
 pub mod numpy;
 #[cfg(test)]
 pub(crate) mod test;
-mod timestamp;
+pub(crate) mod timestamp;
 pub mod udf;
-
-pub use function::{Function, FunctionRef};
-pub use function_registry::{FunctionRegistry, FUNCTION_REGISTRY};

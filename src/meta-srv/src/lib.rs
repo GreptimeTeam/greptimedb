@@ -15,6 +15,8 @@
 #![feature(async_closure)]
 #![feature(result_flattening)]
 #![feature(assert_matches)]
+#![feature(option_take_if)]
+#![feature(extract_if)]
 
 pub mod bootstrap;
 mod cache_invalidator;
@@ -39,8 +41,6 @@ pub mod state;
 pub mod table_meta_alloc;
 
 pub use crate::error::Result;
-
-mod inactive_region_manager;
 
 mod greptimedb_telemetry;
 

@@ -1,4 +1,4 @@
-CREATE TABLE demo(host string, cpu double, memory double, ts TIMESTAMP time index);
+CREATE TABLE demo(host string, cpu DOUBLE, memory DOUBLE, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -6,17 +6,17 @@ insert into demo(host, cpu, memory, ts) values ('host1', 66.6, 1024, 16552765570
 
 Affected Rows: 2
 
-Copy demo TO '/tmp/export/demo.parquet';
+COPY demo TO '/tmp/export/demo.parquet' WITH (start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
 
-Affected Rows: 2
+Affected Rows: 1
 
-Copy demo TO '/tmp/export/demo.csv' with (format='csv');
+COPY demo TO '/tmp/export/demo.csv' WITH (format='csv', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
 
-Affected Rows: 2
+Affected Rows: 1
 
-Copy demo TO '/tmp/export/demo.json' with (format='json');
+COPY demo TO '/tmp/export/demo.json' WITH (format='json', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:38');
 
-Affected Rows: 2
+Affected Rows: 1
 
 drop table demo;
 

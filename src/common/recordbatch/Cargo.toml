@@ -4,17 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
-common-error = { workspace = true }
-common-macro = { workspace = true }
-datafusion-common.workspace = true
+arc-swap = "1.6"
+common-error.workspace = true
+common-macro.workspace = true
 datafusion.workspace = true
-datatypes = { workspace = true }
+datafusion-common.workspace = true
+datatypes.workspace = true
 futures.workspace = true
-paste = "1.0"
+pin-project.workspace = true
 serde.workspace = true
-snafu = { version = "0.7", features = ["backtraces"] }
+serde_json.workspace = true
+snafu.workspace = true
 
 [dev-dependencies]
-serde_json = "1.0"
 tokio.workspace = true

@@ -20,11 +20,11 @@ use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
 use common_catalog::consts::default_engine;
 use common_meta::RegionIdent;
-use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::failure_handler::runner::{FailureDetectControl, FailureDetectRunner};
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::{Context, ElectionRef};
 use crate::procedure::region_failover::RegionFailoverManager;
 
@@ -41,11 +41,15 @@ impl RegionFailureHandler {
     pub(crate) async fn try_new(
         election: Option<ElectionRef>,
         region_failover_manager: Arc<RegionFailoverManager>,
+        failure_detector_options: PhiAccrualFailureDetectorOptions,
     ) -> Result<Self> {
         region_failover_manager.try_start()?;
 
-        let mut failure_detect_runner =
-            FailureDetectRunner::new(election, region_failover_manager.clone());
+        let mut failure_detect_runner = FailureDetectRunner::new(
+            election,
+            region_failover_manager.clone(),
+            failure_detector_options,
+        );
         failure_detect_runner.start().await;
 
         Ok(Self {
@@ -65,7 +69,7 @@ impl HeartbeatHandler for RegionFailureHandler {
         _: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         if ctx.is_infancy {
             self.failure_detect_runner
                 .send_control(FailureDetectControl::Purge)
@@ -73,7 +77,7 @@ impl HeartbeatHandler for RegionFailureHandler {
         }
 
         let Some(stat) = acc.stat.as_ref() else {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         };
 
         let heartbeat = DatanodeHeartbeat {
@@ -81,7 +85,7 @@ impl HeartbeatHandler for RegionFailureHandler {
                 .region_stats
                 .iter()
                 .map(|x| {
-                    let region_id = RegionId::from(x.id);
+                    let region_id = x.id;
                     RegionIdent {
                         cluster_id: stat.cluster_id,
                         datanode_id: stat.id,
@@ -96,13 +100,18 @@ impl HeartbeatHandler for RegionFailureHandler {
         };
 
         self.failure_detect_runner.send_heartbeat(heartbeat).await;
-        Ok(())
+
+        Ok(HandleControl::Continue)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
+    use common_meta::key::MAINTENANCE_KEY;
     use store_api::region_engine::RegionRole;
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
@@ -112,9 +121,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_heartbeat() {
         let region_failover_manager = create_region_failover_manager();
-        let handler = RegionFailureHandler::try_new(None, region_failover_manager)
-            .await
-            .unwrap();
+        let failure_detector_options = PhiAccrualFailureDetectorOptions::default();
+        let handler =
+            RegionFailureHandler::try_new(None, region_failover_manager, failure_detector_options)
+                .await
+                .unwrap();
 
         let req = &HeartbeatRequest::default();
 
@@ -126,7 +137,7 @@ mod tests {
         let acc = &mut HeartbeatAccumulator::default();
         fn new_region_stat(region_id: u64) -> RegionStat {
             RegionStat {
-                id: region_id,
+                id: RegionId::from_u64(region_id),
                 rcus: 0,
                 wcus: 0,
                 approximate_bytes: 0,
@@ -154,5 +165,38 @@ mod tests {
         handler.handle(req, &mut ctx, acc).await.unwrap();
         let dump = handler.failure_detect_runner.dump().await;
         assert_eq!(dump.iter().collect::<Vec<_>>().len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_maintenance_mode() {
+        let region_failover_manager = create_region_failover_manager();
+        let kv_backend = region_failover_manager.create_context().kv_backend.clone();
+        let _handler = RegionFailureHandler::try_new(
+            None,
+            region_failover_manager.clone(),
+            PhiAccrualFailureDetectorOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let kv_req = common_meta::rpc::store::PutRequest {
+            key: Vec::from(MAINTENANCE_KEY),
+            value: vec![],
+            prev_kv: false,
+        };
+        let _ = kv_backend.put(kv_req.clone()).await.unwrap();
+        assert_matches!(
+            region_failover_manager.is_maintenance_mode().await,
+            Ok(true)
+        );
+
+        let _ = kv_backend
+            .delete(MAINTENANCE_KEY.as_bytes(), false)
+            .await
+            .unwrap();
+        assert_matches!(
+            region_failover_manager.is_maintenance_mode().await,
+            Ok(false)
+        );
     }
 }

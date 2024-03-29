@@ -19,8 +19,10 @@ use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::logging;
 use tokio::time;
 
+use super::rwlock::OwnedKeyRwLockGuard;
 use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
+use crate::procedure::{Output, StringKey};
 use crate::store::ProcedureStore;
 use crate::ProcedureState::Retrying;
 use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
@@ -56,6 +58,7 @@ impl ExecResult {
 struct ProcedureGuard {
     meta: ProcedureMetaRef,
     manager_ctx: Arc<ManagerContext>,
+    key_guards: Vec<OwnedKeyRwLockGuard>,
     finish: bool,
 }
 
@@ -65,6 +68,7 @@ impl ProcedureGuard {
         ProcedureGuard {
             meta,
             manager_ctx,
+            key_guards: vec![],
             finish: false,
         }
     }
@@ -95,10 +99,15 @@ impl Drop for ProcedureGuard {
             self.manager_ctx.notify_by_subprocedure(parent_id);
         }
 
-        // Release lock in reverse order.
-        for key in self.meta.lock_key.keys_to_unlock() {
-            self.manager_ctx.lock_map.release_lock(key, self.meta.id);
+        // Drops the key guards in the reverse order.
+        while !self.key_guards.is_empty() {
+            self.key_guards.pop();
         }
+
+        // Clean the staled locks.
+        self.manager_ctx
+            .key_lock
+            .clean_keys(self.meta.lock_key.keys_to_lock().map(|k| k.as_string()));
     }
 }
 
@@ -121,7 +130,7 @@ impl Runner {
     /// Run the procedure.
     pub(crate) async fn run(mut self) {
         // Ensure we can update the procedure state.
-        let guard = ProcedureGuard::new(self.meta.clone(), self.manager_ctx.clone());
+        let mut guard = ProcedureGuard::new(self.meta.clone(), self.manager_ctx.clone());
 
         logging::info!(
             "Runner {}-{} starts",
@@ -133,13 +142,17 @@ impl Runner {
         // recursive locking by adding a root procedure id to the meta.
         for key in self.meta.lock_key.keys_to_lock() {
             // Acquire lock for each key.
-            self.manager_ctx
-                .lock_map
-                .acquire_lock(key, self.meta.clone())
-                .await;
+            let key_guard = match key {
+                StringKey::Share(key) => self.manager_ctx.key_lock.read(key.clone()).await.into(),
+                StringKey::Exclusive(key) => {
+                    self.manager_ctx.key_lock.write(key.clone()).await.into()
+                }
+            };
+
+            guard.key_guards.push(key_guard);
         }
 
-        // Execute the procedure. We need to release the lock whenever the the execution
+        // Execute the procedure. We need to release the lock whenever the execution
         // is successful or fail.
         self.execute_procedure_in_loop().await;
 
@@ -275,13 +288,13 @@ impl Runner {
                     Status::Suspended { subprocedures, .. } => {
                         self.on_suspended(subprocedures).await;
                     }
-                    Status::Done => {
+                    Status::Done { output } => {
                         if let Err(e) = self.commit_procedure().await {
                             self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                             return ExecResult::RetryLater;
                         }
 
-                        self.done();
+                        self.done(output);
                         return ExecResult::Done;
                     }
                 }
@@ -372,7 +385,7 @@ impl Runner {
     }
 
     /// Extend the retry time to wait for the next retry.
-    async fn wait_on_err(&self, d: Duration, i: u64) {
+    async fn wait_on_err(&mut self, d: Duration, i: u64) {
         logging::info!(
             "Procedure {}-{} retry for the {} times after {} millis",
             self.procedure.type_name(),
@@ -383,7 +396,7 @@ impl Runner {
         time::sleep(d).await;
     }
 
-    async fn on_suspended(&self, subprocedures: Vec<ProcedureWithId>) {
+    async fn on_suspended(&mut self, subprocedures: Vec<ProcedureWithId>) {
         let has_child = !subprocedures.is_empty();
         for subprocedure in subprocedures {
             logging::info!(
@@ -416,11 +429,15 @@ impl Runner {
     }
 
     async fn persist_procedure(&mut self) -> Result<()> {
+        let type_name = self.procedure.type_name().to_string();
+        let data = self.procedure.dump()?;
+
         self.store
             .store_procedure(
                 self.meta.id,
                 self.step,
-                &self.procedure,
+                type_name,
+                data,
                 self.meta.parent_id,
             )
             .await
@@ -468,7 +485,7 @@ impl Runner {
         Ok(())
     }
 
-    fn done(&self) {
+    fn done(&self, output: Option<Output>) {
         // TODO(yingwen): Add files to remove list.
         logging::info!(
             "Procedure {}-{} done",
@@ -477,7 +494,7 @@ impl Runner {
         );
 
         // Mark the state of this procedure to done.
-        self.meta.set_state(ProcedureState::Done);
+        self.meta.set_state(ProcedureState::Done { output });
     }
 }
 
@@ -597,14 +614,14 @@ mod tests {
                 if times == 1 {
                     Ok(Status::Executing { persist })
                 } else {
-                    Ok(Status::Done)
+                    Ok(Status::done())
                 }
             }
             .boxed()
         };
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -665,7 +682,7 @@ mod tests {
         };
         let suspend = ProcedureAdapter {
             data: "suspend".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -690,14 +707,14 @@ mod tests {
                     time::sleep(Duration::from_millis(200)).await;
                     Ok(Status::Executing { persist: true })
                 } else {
-                    Ok(Status::Done)
+                    Ok(Status::done())
                 }
             }
             .boxed()
         };
         let child = ProcedureAdapter {
             data: "child".to_string(),
-            lock_key: LockKey::new(keys.iter().map(|k| k.to_string())),
+            lock_key: LockKey::new_exclusive(keys.iter().map(|k| k.to_string())),
             exec_fn,
         };
 
@@ -751,7 +768,7 @@ mod tests {
                         }
                     }
                     if all_child_done {
-                        Ok(Status::Done)
+                        Ok(Status::done())
                     } else {
                         // Return suspended to wait for notify.
                         Ok(Status::Suspended {
@@ -765,7 +782,7 @@ mod tests {
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -784,6 +801,7 @@ mod tests {
         runner.manager_ctx = manager_ctx.clone();
 
         runner.run().await;
+        assert!(manager_ctx.key_lock.is_empty());
 
         // Check child procedures.
         for child_id in children_ids {
@@ -810,7 +828,7 @@ mod tests {
         let exec_fn = move |_| async move { Ok(Status::Executing { persist: true }) }.boxed();
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -851,7 +869,7 @@ mod tests {
             |_| async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }.boxed();
         let normal = ProcedureAdapter {
             data: "fail".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -875,7 +893,7 @@ mod tests {
             |_| async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }.boxed();
         let fail = ProcedureAdapter {
             data: "fail".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -909,7 +927,7 @@ mod tests {
                 if times == 1 {
                     Err(Error::retry_later(MockError::new(StatusCode::Unexpected)))
                 } else {
-                    Ok(Status::Done)
+                    Ok(Status::done())
                 }
             }
             .boxed()
@@ -917,7 +935,7 @@ mod tests {
 
         let retry_later = ProcedureAdapter {
             data: "retry_later".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -952,7 +970,7 @@ mod tests {
 
         let exceed_max_retry_later = ProcedureAdapter {
             data: "exceed_max_retry_later".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -993,7 +1011,7 @@ mod tests {
                     };
                     let fail = ProcedureAdapter {
                         data: "fail".to_string(),
-                        lock_key: LockKey::single("catalog.schema.table.region-0"),
+                        lock_key: LockKey::single_exclusive("catalog.schema.table.region-0"),
                         exec_fn,
                     };
 
@@ -1027,7 +1045,7 @@ mod tests {
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -1042,10 +1060,11 @@ mod tests {
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta.clone()));
         // Replace the manager ctx.
-        runner.manager_ctx = manager_ctx;
+        runner.manager_ctx = manager_ctx.clone();
 
         // Run the runner and execute the procedure.
         runner.run().await;
+        assert!(manager_ctx.key_lock.is_empty());
         let err = meta.state().error().unwrap().output_msg();
         assert!(err.contains("subprocedure failed"), "{err}");
     }

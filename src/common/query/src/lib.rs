@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 use api::greptime_proto::v1::add_column_location::LocationType;
 use api::greptime_proto::v1::AddColumnLocation as Location;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use physical_plan::PhysicalPlan;
 use serde::{Deserialize, Serialize};
 
 pub mod columnar_value;
@@ -28,22 +30,91 @@ pub mod prelude;
 mod signature;
 use sqlparser_derive::{Visit, VisitMut};
 
-// sql output
-pub enum Output {
-    AffectedRows(usize),
+/// new Output struct with output data(previously Output) and output meta
+#[derive(Debug)]
+pub struct Output {
+    pub data: OutputData,
+    pub meta: OutputMeta,
+}
+
+/// Original Output struct
+/// carrying result data to response/client/user interface
+pub enum OutputData {
+    AffectedRows(OutputRows),
     RecordBatches(RecordBatches),
     Stream(SendableRecordBatchStream),
 }
 
-impl Debug for Output {
+/// OutputMeta stores meta information produced/generated during the execution
+#[derive(Debug, Default)]
+pub struct OutputMeta {
+    /// May exist for query output. One can retrieve execution metrics from this plan.
+    pub plan: Option<Arc<dyn PhysicalPlan>>,
+    pub cost: OutputCost,
+}
+
+impl Output {
+    pub fn new_with_affected_rows(affected_rows: OutputRows) -> Self {
+        Self {
+            data: OutputData::AffectedRows(affected_rows),
+            meta: Default::default(),
+        }
+    }
+
+    pub fn new_with_record_batches(recordbatches: RecordBatches) -> Self {
+        Self {
+            data: OutputData::RecordBatches(recordbatches),
+            meta: Default::default(),
+        }
+    }
+
+    pub fn new_with_stream(stream: SendableRecordBatchStream) -> Self {
+        Self {
+            data: OutputData::Stream(stream),
+            meta: Default::default(),
+        }
+    }
+
+    pub fn new(data: OutputData, meta: OutputMeta) -> Self {
+        Self { data, meta }
+    }
+
+    pub fn extract_rows_and_cost(&self) -> (OutputRows, OutputCost) {
+        match self.data {
+            OutputData::AffectedRows(rows) => (rows, self.meta.cost),
+            _ => (0, self.meta.cost),
+        }
+    }
+}
+
+impl Debug for OutputData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Output::AffectedRows(rows) => write!(f, "Output::AffectedRows({rows})"),
-            Output::RecordBatches(recordbatches) => {
-                write!(f, "Output::RecordBatches({recordbatches:?})")
+            OutputData::AffectedRows(rows) => write!(f, "OutputData::AffectedRows({rows})"),
+            OutputData::RecordBatches(recordbatches) => {
+                write!(f, "OutputData::RecordBatches({recordbatches:?})")
             }
-            Output::Stream(_) => write!(f, "Output::Stream(<stream>)"),
+            OutputData::Stream(_) => {
+                write!(f, "OutputData::Stream(<stream>)")
+            }
         }
+    }
+}
+
+impl OutputMeta {
+    pub fn new(plan: Option<Arc<dyn PhysicalPlan>>, cost: usize) -> Self {
+        Self { plan, cost }
+    }
+
+    pub fn new_with_plan(plan: Arc<dyn PhysicalPlan>) -> Self {
+        Self {
+            plan: Some(plan),
+            cost: 0,
+        }
+    }
+
+    pub fn new_with_cost(cost: usize) -> Self {
+        Self { plan: None, cost }
     }
 }
 
@@ -60,7 +131,7 @@ impl From<&AddColumnLocation> for Location {
         match value {
             AddColumnLocation::First => Location {
                 location_type: LocationType::First.into(),
-                after_column_name: "".to_string(),
+                after_column_name: String::default(),
             },
             AddColumnLocation::After { column_name } => Location {
                 location_type: LocationType::After.into(),
@@ -69,3 +140,6 @@ impl From<&AddColumnLocation> for Location {
         }
     }
 }
+
+pub type OutputRows = usize;
+pub type OutputCost = usize;

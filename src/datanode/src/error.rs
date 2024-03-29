@@ -13,12 +13,11 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_procedure::ProcedureId;
-use serde_json::error::Error as JsonError;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -29,6 +28,19 @@ use table::error::Error as TableError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to execute async task"))]
+    AsyncTaskExecute {
+        location: Location,
+        source: Arc<Error>,
+    },
+
+    #[snafu(display("Failed to watch change"))]
+    WatchAsyncTaskChange {
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::watch::error::RecvError,
+    },
+
     #[snafu(display("Failed to handle heartbeat response"))]
     HandleHeartbeatResponse {
         location: Location,
@@ -39,24 +51,6 @@ pub enum Error {
     GetMetadata {
         location: Location,
         source: common_meta::error::Error,
-    },
-
-    #[snafu(display("Failed to execute sql"))]
-    ExecuteSql {
-        location: Location,
-        source: query::error::Error,
-    },
-
-    #[snafu(display("Failed to plan statement"))]
-    PlanStatement {
-        location: Location,
-        source: query::error::Error,
-    },
-
-    #[snafu(display("Failed to execute statement"))]
-    ExecuteStatement {
-        location: Location,
-        source: query::error::Error,
     },
 
     #[snafu(display("Failed to execute logical plan"))]
@@ -80,46 +74,6 @@ pub enum Error {
     #[snafu(display("Schema not found: {}", name))]
     SchemaNotFound { name: String, location: Location },
 
-    #[snafu(display("Failed to create table: {}", table_name))]
-    CreateTable {
-        table_name: String,
-        location: Location,
-        source: TableError,
-    },
-
-    #[snafu(display("Failed to drop table {}", table_name))]
-    DropTable {
-        table_name: String,
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Table engine not found: {}", engine_name))]
-    TableEngineNotFound {
-        engine_name: String,
-        location: Location,
-        source: table::error::Error,
-    },
-
-    #[snafu(display("Table engine procedure not found: {}", engine_name))]
-    EngineProcedureNotFound {
-        engine_name: String,
-        location: Location,
-        source: table::error::Error,
-    },
-
-    #[snafu(display("Table not found: {}", table_name))]
-    TableNotFound {
-        table_name: String,
-        location: Location,
-    },
-
-    #[snafu(display("Column {} not found in table {}", column_name, table_name))]
-    ColumnNotFound {
-        column_name: String,
-        table_name: String,
-    },
-
     #[snafu(display("Missing timestamp column in request"))]
     MissingTimestampColumn { location: Location },
 
@@ -130,28 +84,8 @@ pub enum Error {
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
 
-    #[snafu(display("Missing insert body"))]
-    MissingInsertBody {
-        source: sql::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to insert value to table: {}", table_name))]
-    Insert {
-        table_name: String,
-        location: Location,
-        source: TableError,
-    },
-
     #[snafu(display("Failed to delete value from table: {}", table_name))]
     Delete {
-        table_name: String,
-        location: Location,
-        source: TableError,
-    },
-
-    #[snafu(display("Failed to flush table: {}", table_name))]
-    FlushTable {
         table_name: String,
         location: Location,
         source: TableError,
@@ -161,12 +95,6 @@ pub enum Error {
     StartServer {
         location: Location,
         source: servers::error::Error,
-    },
-
-    #[snafu(display("Failed to wait for GRPC serving"))]
-    WaitForGrpcServing {
-        source: servers::error::Error,
-        location: Location,
     },
 
     #[snafu(display("Failed to parse address {}", addr))]
@@ -212,9 +140,6 @@ pub enum Error {
     #[snafu(display("Expect KvBackend but not found"))]
     MissingKvBackend { location: Location },
 
-    #[snafu(display("Expect MetaClient but not found"))]
-    MissingMetaClient { location: Location },
-
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
@@ -227,41 +152,8 @@ pub enum Error {
     #[snafu(display("Illegal primary keys definition: {}", msg))]
     IllegalPrimaryKeysDef { msg: String, location: Location },
 
-    #[snafu(display(
-        "Constraint in CREATE TABLE statement is not supported yet: {}",
-        constraint
-    ))]
-    ConstraintNotSupported {
-        constraint: String,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to register a new schema"))]
-    RegisterSchema {
-        location: Location,
-        source: catalog::error::Error,
-    },
-
     #[snafu(display("Schema {} already exists", name))]
     SchemaExists { name: String, location: Location },
-
-    #[snafu(display("Failed to convert delete expr to request"))]
-    DeleteExprToRequest {
-        location: Location,
-        source: common_grpc_expr::error::Error,
-    },
-
-    #[snafu(display("Failed to parse SQL"))]
-    ParseSql {
-        location: Location,
-        source: sql::error::Error,
-    },
-
-    #[snafu(display("Failed to prepare immutable table"))]
-    PrepareImmutableTable {
-        location: Location,
-        source: query::error::Error,
-    },
 
     #[snafu(display("Failed to access catalog"))]
     Catalog {
@@ -275,28 +167,13 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to insert data"))]
-    InsertData {
-        location: Location,
-        source: common_grpc_expr::error::Error,
-    },
-
     #[snafu(display(
         "Table id provider not found, cannot execute SQL directly on datanode in distributed mode"
     ))]
     TableIdProviderNotFound { location: Location },
 
-    #[snafu(display("Failed to bump table id"))]
-    BumpTableId {
-        location: Location,
-        source: table::error::Error,
-    },
-
     #[snafu(display("Missing node id in Datanode config"))]
     MissingNodeId { location: Location },
-
-    #[snafu(display("Missing node id option in distributed mode"))]
-    MissingMetasrvOpts { location: Location },
 
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, location: Location },
@@ -304,38 +181,11 @@ pub enum Error {
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
 
-    #[snafu(display("Failed to build default value, column: {}", column))]
-    ColumnDefaultValue {
-        column: String,
-        location: Location,
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display(
         "No valid default value can be built automatically, column: {}",
         column,
     ))]
     ColumnNoneDefaultValue { column: String, location: Location },
-
-    #[snafu(display("Unrecognized table option"))]
-    UnrecognizedTableOption {
-        location: Location,
-        source: table::error::Error,
-    },
-
-    #[snafu(display("Failed to submit procedure {}", procedure_id))]
-    SubmitProcedure {
-        procedure_id: ProcedureId,
-        location: Location,
-        source: common_procedure::error::Error,
-    },
-
-    #[snafu(display("Failed to wait procedure {} done", procedure_id))]
-    WaitProcedure {
-        procedure_id: ProcedureId,
-        location: Location,
-        source: common_procedure::error::Error,
-    },
 
     #[snafu(display("Failed to shutdown server"))]
     ShutdownServer {
@@ -349,31 +199,11 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to encode object into json"))]
-    EncodeJson {
-        location: Location,
-        #[snafu(source)]
-        error: JsonError,
-    },
-
     #[snafu(display("Payload not exist"))]
     PayloadNotExist { location: Location },
 
     #[snafu(display("Missing WAL dir config"))]
     MissingWalDirConfig { location: Location },
-
-    #[snafu(display("Failed to join task"))]
-    JoinTask {
-        #[snafu(source)]
-        error: common_runtime::JoinError,
-        location: Location,
-    },
-
-    #[snafu(display("Column datatype error"))]
-    ColumnDataType {
-        location: Location,
-        source: api::error::Error,
-    },
 
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
@@ -390,6 +220,18 @@ pub enum Error {
 
     #[snafu(display("RegionId {} not found", region_id))]
     RegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Region {} not ready", region_id))]
+    RegionNotReady {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Region {} is busy", region_id))]
+    RegionBusy {
         region_id: RegionId,
         location: Location,
     },
@@ -430,6 +272,22 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display(
+        "Failed to find logical regions in physical region {}",
+        physical_region_id
+    ))]
+    FindLogicalRegions {
+        physical_region_id: RegionId,
+        source: metric_engine::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build mito engine"))]
+    BuildMitoEngine {
+        source: mito2::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -438,10 +296,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            ExecuteSql { source, .. }
-            | PlanStatement { source, .. }
-            | ExecuteStatement { source, .. }
-            | ExecuteLogicalPlan { source, .. } => source.status_code(),
+            ExecuteLogicalPlan { source, .. } => source.status_code(),
 
             BuildRegionRequests { source, .. } => source.status_code(),
             HandleHeartbeatResponse { source, .. } | GetMetadata { source, .. } => {
@@ -449,21 +304,8 @@ impl ErrorExt for Error {
             }
 
             DecodeLogicalPlan { source, .. } => source.status_code(),
-            RegisterSchema { source, .. } => source.status_code(),
-            CreateTable { source, .. } => source.status_code(),
-            DropTable { source, .. } => source.status_code(),
-            FlushTable { source, .. } => source.status_code(),
 
-            Insert { source, .. } => source.status_code(),
             Delete { source, .. } => source.status_code(),
-            TableEngineNotFound { source, .. } | EngineProcedureNotFound { source, .. } => {
-                source.status_code()
-            }
-            TableNotFound { .. } => StatusCode::TableNotFound,
-            ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
-
-            ParseSql { source, .. } => source.status_code(),
-            DeleteExprToRequest { source, .. } | InsertData { source, .. } => source.status_code(),
 
             ColumnValuesNumberMismatch { .. }
             | InvalidSql { .. }
@@ -473,21 +315,18 @@ impl ErrorExt for Error {
             | MissingTimestampColumn { .. }
             | CatalogNotFound { .. }
             | SchemaNotFound { .. }
-            | ConstraintNotSupported { .. }
             | SchemaExists { .. }
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
-            | MissingMetasrvOpts { .. }
             | ColumnNoneDefaultValue { .. }
             | MissingWalDirConfig { .. }
-            | PrepareImmutableTable { .. }
-            | ColumnDataType { .. }
-            | MissingKvBackend { .. }
-            | MissingMetaClient { .. } => StatusCode::InvalidArguments,
+            | MissingKvBackend { .. } => StatusCode::InvalidArguments,
 
-            EncodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
+            PayloadNotExist { .. } | Unexpected { .. } | WatchAsyncTaskChange { .. } => {
                 StatusCode::Unexpected
             }
+
+            AsyncTaskExecute { source, .. } => source.status_code(),
 
             // TODO(yingwen): Further categorize http error.
             ParseAddr { .. }
@@ -496,18 +335,16 @@ impl ErrorExt for Error {
             | Catalog { .. }
             | MissingRequiredField { .. }
             | IncorrectInternalState { .. }
-            | MissingInsertBody { .. }
             | ShutdownInstance { .. }
-            | JoinTask { .. }
             | RegionEngineNotFound { .. }
             | UnsupportedOutput { .. }
             | GetRegionMetadata { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
+            RegionNotReady { .. } => StatusCode::RegionNotReady,
+            RegionBusy { .. } => StatusCode::RegionBusy,
 
-            StartServer { source, .. }
-            | ShutdownServer { source, .. }
-            | WaitForGrpcServing { source, .. } => source.status_code(),
+            StartServer { source, .. } | ShutdownServer { source, .. } => source.status_code(),
 
             InitBackend { .. } => StatusCode::StorageUnavailable,
 
@@ -517,13 +354,11 @@ impl ErrorExt for Error {
             TableIdProviderNotFound { .. } | UnsupportedGrpcRequest { .. } => {
                 StatusCode::Unsupported
             }
-            BumpTableId { source, .. } => source.status_code(),
-            ColumnDefaultValue { source, .. } => source.status_code(),
-            UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
-            SubmitProcedure { source, .. } => source.status_code(),
-            WaitProcedure { source, .. } => source.status_code(),
             HandleRegionRequest { source, .. } => source.status_code(),
             StopRegionEngine { source, .. } => source.status_code(),
+
+            FindLogicalRegions { source, .. } => source.status_code(),
+            BuildMitoEngine { source, .. } => source.status_code(),
         }
     }
 

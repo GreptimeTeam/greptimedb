@@ -21,31 +21,33 @@ use api::v1::region::{
 };
 use api::v1::{AlterExpr, RenameTable};
 use async_trait::async_trait;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_grpc_expr::alter_expr_to_request;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
 };
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, info};
 use futures::future;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnId, RegionId};
 use strum::AsRefStr;
-use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::requests::AlterKind;
+use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::handle_operate_region_error;
+use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
-use crate::error::{
-    self, ConvertAlterTableRequestSnafu, InvalidProtoMsgSnafu, Result, TableRouteNotFoundSnafu,
-};
+use crate::error::{self, ConvertAlterTableRequestSnafu, Error, InvalidProtoMsgSnafu, Result};
+use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::table_route::TableRouteValue;
 use crate::key::DeserializedValueWithBytes;
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders};
@@ -65,6 +67,7 @@ impl AlterTableProcedure {
         cluster_id: u64,
         task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        physical_table_info: Option<(TableId, TableName)>,
         context: DdlContext,
     ) -> Result<Self> {
         let alter_kind = task
@@ -84,7 +87,13 @@ impl AlterTableProcedure {
 
         Ok(Self {
             context,
-            data: AlterTableData::new(task, table_info_value, cluster_id, next_column_id),
+            data: AlterTableData::new(
+                task,
+                table_info_value,
+                physical_table_info,
+                cluster_id,
+                next_column_id,
+            ),
             kind,
         })
     }
@@ -182,32 +191,26 @@ impl AlterTableProcedure {
 
     pub async fn submit_alter_region_requests(&mut self) -> Result<Status> {
         let table_id = self.data.table_id();
-        let table_ref = self.data.table_ref();
-
-        let TableRouteValue { region_routes, .. } = self
+        let (_, physical_table_route) = self
             .context
             .table_metadata_manager
             .table_route_manager()
-            .get(table_id)
-            .await?
-            .with_context(|| TableRouteNotFoundSnafu {
-                table_name: table_ref.to_string(),
-            })?
-            .into_inner();
+            .get_physical_table_route(table_id)
+            .await?;
 
-        let leaders = find_leaders(&region_routes);
+        let leaders = find_leaders(&physical_table_route.region_routes);
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
             let requester = self.context.datanode_manager.datanode(&datanode).await;
-            let regions = find_leader_regions(&region_routes, &datanode);
+            let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
 
             for region in regions {
                 let region_id = RegionId::new(table_id, region);
                 let request = self.create_alter_region_request(region_id)?;
                 let request = RegionRequest {
                     header: Some(RegionRequestHeader {
-                        trace_id: common_telemetry::trace_id().unwrap_or_default(),
+                        tracing_context: TracingContext::from_current_span().to_w3c(),
                         ..Default::default()
                     }),
                     body: Some(region_request::Body::Alter(request)),
@@ -218,8 +221,14 @@ impl AlterTableProcedure {
                 let requester = requester.clone();
 
                 alter_region_tasks.push(async move {
-                    if let Err(e) = requester.handle(request).await {
-                        return Err(handle_operate_region_error(datanode)(e));
+                    if let Err(err) = requester.handle(request).await {
+                        if err.status_code() != StatusCode::RequestOutdated {
+                            // Treat request outdated as success.
+                            // The engine will throw this code when the schema version not match.
+                            // As this procedure has locked the table, the only reason for this error
+                            // is procedure is succeeded before and is retrying.
+                            return Err(add_peer_context_if_needed(datanode)(err));
+                        }
                     }
                     Ok(())
                 });
@@ -272,7 +281,7 @@ impl AlterTableProcedure {
 
         let new_meta = table_info
             .meta
-            .builder_with_alter_kind(table_ref.table, &request.alter_kind)
+            .builder_with_alter_kind(table_ref.table, &request.alter_kind, false)
             .context(error::TableSnafu)?
             .build()
             .with_context(|_| error::BuildTableMetaSnafu {
@@ -322,35 +331,48 @@ impl AlterTableProcedure {
     async fn on_broadcast(&mut self) -> Result<Status> {
         let alter_kind = self.alter_kind()?;
         let cache_invalidator = &self.context.cache_invalidator;
-
-        if matches!(alter_kind, Kind::RenameTable { .. }) {
-            cache_invalidator
-                .invalidate_table_name(&Context::default(), self.data.table_ref().into())
-                .await?;
+        let cache_keys = if matches!(alter_kind, Kind::RenameTable { .. }) {
+            vec![CacheIdent::TableName(self.data.table_ref().into())]
         } else {
-            cache_invalidator
-                .invalidate_table_id(&Context::default(), self.data.table_id())
-                .await?;
+            vec![
+                CacheIdent::TableId(self.data.table_id()),
+                CacheIdent::TableName(self.data.table_ref().into()),
+            ]
         };
 
-        Ok(Status::Done)
+        cache_invalidator
+            .invalidate(&Context::default(), cache_keys)
+            .await?;
+
+        Ok(Status::done())
     }
 
-    fn lock_key_inner(&self) -> Vec<String> {
+    fn lock_key_inner(&self) -> Vec<StringKey> {
+        let mut lock_key = vec![];
+
+        if let Some((physical_table_id, physical_table_name)) = self.data.physical_table_info() {
+            lock_key.push(CatalogLock::Read(&physical_table_name.catalog_name).into());
+            lock_key.push(
+                SchemaLock::read(
+                    &physical_table_name.catalog_name,
+                    &physical_table_name.schema_name,
+                )
+                .into(),
+            );
+            // We must acquire the write lock since this may update the physical table schema
+            lock_key.push(TableLock::Write(*physical_table_id).into())
+        }
+
         let table_ref = self.data.table_ref();
-        let table_key = common_catalog::format_full_table_name(
-            table_ref.catalog,
-            table_ref.schema,
-            table_ref.table,
-        );
-        let mut lock_key = vec![table_key];
+        let table_id = self.data.table_id();
+        lock_key.push(CatalogLock::Read(table_ref.catalog).into());
+        lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());
+        lock_key.push(TableLock::Write(table_id).into());
 
         if let Ok(Kind::RenameTable(RenameTable { new_table_name })) = self.alter_kind() {
-            lock_key.push(common_catalog::format_full_table_name(
-                table_ref.catalog,
-                table_ref.schema,
-                new_table_name,
-            ))
+            lock_key.push(
+                TableNameLock::new(table_ref.catalog, table_ref.schema, new_table_name).into(),
+            )
         }
 
         lock_key
@@ -364,8 +386,8 @@ impl Procedure for AlterTableProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let error_handler = |e| {
-            if matches!(e, error::Error::RetryLater { .. }) {
+        let error_handler = |e: Error| {
+            if e.is_retry_later() {
                 ProcedureError::retry_later(e)
             } else {
                 ProcedureError::external(e)
@@ -413,11 +435,13 @@ enum AlterTableState {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlterTableData {
+    cluster_id: u64,
     state: AlterTableState,
     task: AlterTableTask,
     /// Table info value before alteration.
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-    cluster_id: u64,
+    /// Physical table name, if the table to alter is a logical table.
+    physical_table_info: Option<(TableId, TableName)>,
     /// Next column id of the table if the task adds columns to the table.
     next_column_id: Option<ColumnId>,
 }
@@ -426,6 +450,7 @@ impl AlterTableData {
     pub fn new(
         task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        physical_table_info: Option<(TableId, TableName)>,
         cluster_id: u64,
         next_column_id: Option<ColumnId>,
     ) -> Self {
@@ -433,6 +458,7 @@ impl AlterTableData {
             state: AlterTableState::Prepare,
             task,
             table_info_value,
+            physical_table_info,
             cluster_id,
             next_column_id,
         }
@@ -448,6 +474,10 @@ impl AlterTableData {
 
     fn table_info(&self) -> &RawTableInfo {
         &self.table_info_value.table_info
+    }
+
+    fn physical_table_info(&self) -> Option<&(TableId, TableName)> {
+        self.physical_table_info.as_ref()
     }
 }
 

@@ -17,7 +17,7 @@ use api::v1::greptime_response::Response as RawResponse;
 use api::v1::{AffectedRows, GreptimeRequest, GreptimeResponse, ResponseHeader};
 use async_trait::async_trait;
 use common_error::status_code::StatusCode;
-use common_query::Output;
+use common_query::OutputData;
 use futures::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -42,8 +42,8 @@ impl GreptimeDatabase for DatabaseService {
     ) -> TonicResult<Response<GreptimeResponse>> {
         let request = request.into_inner();
         let output = self.handler.handle_request(request).await?;
-        let message = match output {
-            Output::AffectedRows(rows) => GreptimeResponse {
+        let message = match output.data {
+            OutputData::AffectedRows(rows) => GreptimeResponse {
                 header: Some(ResponseHeader {
                     status: Some(api::v1::Status {
                         status_code: StatusCode::Success as _,
@@ -52,7 +52,7 @@ impl GreptimeDatabase for DatabaseService {
                 }),
                 response: Some(RawResponse::AffectedRows(AffectedRows { value: rows as _ })),
             },
-            Output::Stream(_) | Output::RecordBatches(_) => {
+            OutputData::Stream(_) | OutputData::RecordBatches(_) => {
                 return Err(Status::unimplemented("GreptimeDatabase::Handle for query"));
             }
         };
@@ -69,9 +69,9 @@ impl GreptimeDatabase for DatabaseService {
         while let Some(request) = stream.next().await {
             let request = request?;
             let output = self.handler.handle_request(request).await?;
-            match output {
-                Output::AffectedRows(rows) => affected_rows += rows,
-                Output::Stream(_) | Output::RecordBatches(_) => {
+            match output.data {
+                OutputData::AffectedRows(rows) => affected_rows += rows,
+                OutputData::Stream(_) | OutputData::RecordBatches(_) => {
                     return Err(Status::unimplemented(
                         "GreptimeDatabase::HandleRequests for query",
                     ));

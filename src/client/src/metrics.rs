@@ -17,27 +17,30 @@ use prometheus::*;
 
 lazy_static! {
     pub static ref METRIC_GRPC_CREATE_TABLE: Histogram =
-        register_histogram!("grpc_create_table", "grpc create table").unwrap();
-    pub static ref METRIC_GRPC_PROMQL_RANGE_QUERY: Histogram =
-        register_histogram!("grpc_promql_range_query", "grpc promql range query").unwrap();
+        register_histogram!("greptime_grpc_create_table", "grpc create table").unwrap();
+    pub static ref METRIC_GRPC_PROMQL_RANGE_QUERY: Histogram = register_histogram!(
+        "greptime_grpc_promql_range_query",
+        "grpc promql range query"
+    )
+    .unwrap();
     pub static ref METRIC_GRPC_INSERT: Histogram =
-        register_histogram!("grpc_insert", "grpc insert").unwrap();
+        register_histogram!("greptime_grpc_insert", "grpc insert").unwrap();
     pub static ref METRIC_GRPC_DELETE: Histogram =
-        register_histogram!("grpc_delete", "grpc delete").unwrap();
+        register_histogram!("greptime_grpc_delete", "grpc delete").unwrap();
     pub static ref METRIC_GRPC_SQL: Histogram =
-        register_histogram!("grpc_sql", "grpc sql").unwrap();
+        register_histogram!("greptime_grpc_sql", "grpc sql").unwrap();
     pub static ref METRIC_GRPC_LOGICAL_PLAN: Histogram =
-        register_histogram!("grpc_logical_plan", "grpc logical plan").unwrap();
+        register_histogram!("greptime_grpc_logical_plan", "grpc logical plan").unwrap();
     pub static ref METRIC_GRPC_ALTER: Histogram =
-        register_histogram!("grpc_alter", "grpc alter").unwrap();
+        register_histogram!("greptime_grpc_alter", "grpc alter").unwrap();
     pub static ref METRIC_GRPC_DROP_TABLE: Histogram =
-        register_histogram!("grpc_drop_table", "grpc drop table").unwrap();
+        register_histogram!("greptime_grpc_drop_table", "grpc drop table").unwrap();
     pub static ref METRIC_GRPC_TRUNCATE_TABLE: Histogram =
-        register_histogram!("grpc_truncate_table", "grpc truncate table").unwrap();
+        register_histogram!("greptime_grpc_truncate_table", "grpc truncate table").unwrap();
     pub static ref METRIC_GRPC_DO_GET: Histogram =
-        register_histogram!("grpc_do_get", "grpc do get").unwrap();
+        register_histogram!("greptime_grpc_do_get", "grpc do get").unwrap();
     pub static ref METRIC_REGION_REQUEST_GRPC: HistogramVec = register_histogram_vec!(
-        "grpc_region_request",
+        "greptime_grpc_region_request",
         "grpc region request",
         &["request_type"]
     )

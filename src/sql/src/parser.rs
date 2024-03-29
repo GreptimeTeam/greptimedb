@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use snafu::ResultExt;
+use sqlparser::ast::Ident;
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::parser::{Parser, ParserError};
+use sqlparser::parser::{Parser, ParserError, ParserOptions};
 use sqlparser::tokenizer::{Token, TokenWithLocation};
 
 use crate::ast::{Expr, ObjectName};
@@ -23,6 +24,10 @@ use crate::error::{self, Result, SyntaxSnafu};
 use crate::parsers::tql_parser;
 use crate::statements::statement::Statement;
 use crate::statements::transform_statements;
+
+/// SQL Parser options.
+#[derive(Clone, Debug, Default)]
+pub struct ParseOptions {}
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
@@ -32,10 +37,15 @@ pub struct ParserContext<'a> {
 
 impl<'a> ParserContext<'a> {
     /// Parses SQL with given dialect
-    pub fn create_with_dialect(sql: &'a str, dialect: &dyn Dialect) -> Result<Vec<Statement>> {
+    pub fn create_with_dialect(
+        sql: &'a str,
+        dialect: &dyn Dialect,
+        _opts: ParseOptions,
+    ) -> Result<Vec<Statement>> {
         let mut stmts: Vec<Statement> = Vec::new();
 
         let parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
         let mut parser_ctx = ParserContext { sql, parser };
@@ -64,8 +74,29 @@ impl<'a> ParserContext<'a> {
         Ok(stmts)
     }
 
+    pub fn parse_table_name(sql: &'a str, dialect: &dyn Dialect) -> Result<ObjectName> {
+        let parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
+            .try_with_sql(sql)
+            .context(SyntaxSnafu)?;
+        ParserContext { parser, sql }.intern_parse_table_name()
+    }
+
+    pub(crate) fn intern_parse_table_name(&mut self) -> Result<ObjectName> {
+        let raw_table_name = self
+            .parser
+            .parse_object_name()
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a table name",
+                actual: self.parser.peek_token().to_string(),
+            })?;
+        Ok(Self::canonicalize_object_name(raw_table_name))
+    }
+
     pub fn parse_function(sql: &'a str, dialect: &dyn Dialect) -> Result<Expr> {
         let mut parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
@@ -113,6 +144,8 @@ impl<'a> ParserContext<'a> {
                     Keyword::COPY => self.parse_copy(),
 
                     Keyword::TRUNCATE => self.parse_truncate(),
+
+                    Keyword::SET => self.parse_set_variables(),
 
                     Keyword::NoKeyword
                         if w.value.to_uppercase() == tql_parser::TQL && w.quote_style.is_none() =>
@@ -166,6 +199,29 @@ impl<'a> ParserContext<'a> {
     pub(crate) fn peek_token_as_string(&self) -> String {
         self.parser.peek_token().to_string()
     }
+
+    /// Canonicalize the identifier to lowercase if it's not quoted.
+    pub fn canonicalize_identifier(ident: Ident) -> Ident {
+        if ident.quote_style.is_some() {
+            ident
+        } else {
+            Ident {
+                value: ident.value.to_lowercase(),
+                quote_style: None,
+            }
+        }
+    }
+
+    /// Like [canonicalize_identifier] but for [ObjectName].
+    pub fn canonicalize_object_name(object_name: ObjectName) -> ObjectName {
+        ObjectName(
+            object_name
+                .0
+                .into_iter()
+                .map(Self::canonicalize_identifier)
+                .collect(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -179,13 +235,17 @@ mod tests {
     use crate::statements::sql_data_type_to_concrete_data_type;
 
     fn test_timestamp_precision(sql: &str, expected_type: ConcreteDataType) {
-        match ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .pop()
-            .unwrap()
+        match ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
         {
             Statement::CreateTable(CreateTable { columns, .. }) => {
-                let ts_col = columns.get(0).unwrap();
+                let ts_col = columns.first().unwrap();
                 assert_eq!(
                     expected_type,
                     sql_data_type_to_concrete_data_type(&ts_col.data_type).unwrap()
@@ -226,5 +286,40 @@ mod tests {
             "create table demo (ts timestamp(1) time index, cnt int);",
             ConcreteDataType::timestamp_millisecond_datatype(),
         );
+    }
+
+    #[test]
+    pub fn test_parse_table_name() {
+        let table_name = "a.b.c";
+
+        let object_name =
+            ParserContext::parse_table_name(table_name, &GreptimeDbDialect {}).unwrap();
+
+        assert_eq!(object_name.0.len(), 3);
+        assert_eq!(object_name.to_string(), table_name);
+
+        let table_name = "a.b";
+
+        let object_name =
+            ParserContext::parse_table_name(table_name, &GreptimeDbDialect {}).unwrap();
+
+        assert_eq!(object_name.0.len(), 2);
+        assert_eq!(object_name.to_string(), table_name);
+
+        let table_name = "Test.\"public-test\"";
+
+        let object_name =
+            ParserContext::parse_table_name(table_name, &GreptimeDbDialect {}).unwrap();
+
+        assert_eq!(object_name.0.len(), 2);
+        assert_eq!(object_name.to_string(), table_name.to_ascii_lowercase());
+
+        let table_name = "HelloWorld";
+
+        let object_name =
+            ParserContext::parse_table_name(table_name, &GreptimeDbDialect {}).unwrap();
+
+        assert_eq!(object_name.0.len(), 1);
+        assert_eq!(object_name.to_string(), table_name.to_ascii_lowercase());
     }
 }

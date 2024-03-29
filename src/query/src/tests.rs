@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use catalog::memory::MemoryCatalogManager;
-use common_query::Output;
+use common_query::OutputData;
 use common_recordbatch::{util, RecordBatch};
 use session::context::QueryContext;
 use table::TableRef;
@@ -36,13 +36,14 @@ mod function;
 mod pow;
 
 async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
-    let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+    let query_ctx = QueryContext::arc();
+    let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
     let plan = engine
         .planner()
-        .plan(stmt, QueryContext::arc())
+        .plan(stmt, query_ctx.clone())
         .await
         .unwrap();
-    let Output::Stream(stream) = engine.execute(plan, QueryContext::arc()).await.unwrap() else {
+    let OutputData::Stream(stream) = engine.execute(plan, query_ctx).await.unwrap().data else {
         unreachable!()
     };
     util::collect(stream).await.unwrap()
@@ -51,5 +52,5 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
 pub fn new_query_engine_with_table(table: TableRef) -> QueryEngineRef {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
 
-    QueryEngineFactory::new(catalog_manager, None, None, false).query_engine()
+    QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine()
 }

@@ -24,11 +24,12 @@ use snafu::{Location, Snafu};
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value as SqlValue};
+use crate::parsers::error::TQLError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// SQL parser errors.
-// Now the error in parser does not contains backtrace to avoid generating backtrace
+// Now the error in parser does not contain backtrace to avoid generating backtrace
 // every time the parser parses an invalid SQL.
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -63,6 +64,15 @@ pub enum Error {
     Syntax {
         #[snafu(source)]
         error: ParserError,
+        location: Location,
+    },
+
+    // Syntax error from tql parser.
+    #[snafu(display(""))]
+    TQLSyntax {
+        #[snafu(source)]
+        error: TQLError,
+        location: Location,
     },
 
     #[snafu(display("Missing time index constraint"))]
@@ -116,7 +126,7 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Invalid table option key: {}", key))]
+    #[snafu(display("Unrecognized table option key: {}", key))]
     InvalidTableOption { key: String, location: Location },
 
     #[snafu(display("Failed to serialize column default constraint"))]
@@ -169,6 +179,7 @@ impl ErrorExt for Error {
             UnsupportedDefaultValue { .. } | Unsupported { .. } => StatusCode::Unsupported,
             Unexpected { .. }
             | Syntax { .. }
+            | TQLSyntax { .. }
             | MissingTimeIndex { .. }
             | InvalidTimeIndex { .. }
             | InvalidSql { .. }

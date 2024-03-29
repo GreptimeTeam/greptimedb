@@ -82,17 +82,17 @@ insert into test8 values (3, 'aba', 1), (1, 'ccbcc', 2), (NULL, 'dbdbd', 3), (2,
 
 select i, split_part(s, 'b', 1) from test8 order by i;
 
-CREATE TABLE DirectReports
+CREATE TABLE "DirectReports"
 (
-    EmployeeID smallint,
+    "EmployeeID" smallint,
     "Name" varchar NOT NULL,
-    Title varchar NOT NULL,
-    EmployeeLevel int NOT NULL,
+    "Title" varchar NOT NULL,
+    "EmployeeLevel" int NOT NULL,
     "Sort" varchar NOT NULL,
     "Timestamp" TIMESTAMP TIME INDEX,
 );
 
-INSERT INTO DirectReports VALUES
+INSERT INTO "DirectReports" VALUES
 (1, 'Ken Sánchez', 'Chief Executive Officer', 1, 'Ken Sánchez', 1),
 (273, '>Brian Welcker', 'Vice President of Sales', 2, 'Ken Sánchez>Brian Welcker', 2),
 (274, '>>Stephen Jiang', 'North American Sales Manager', 3, 'Ken Sánchez>Brian Welcker>Stephen Jiang', 3),
@@ -125,4 +125,4 @@ DROP table test7;
 
 DROP table test8;
 
-DROP TABLE DirectReports;
+DROP TABLE "DirectReports";

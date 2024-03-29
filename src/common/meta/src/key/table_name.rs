@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,22 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
 
-use super::{TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
+use super::{TableMetaValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
 use crate::error::{Error, InvalidTableMetadataSnafu, Result};
-use crate::key::{to_removed_key, TableMetaKey};
+use crate::key::TableMetaKey;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::RangeRequest;
+use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
+use crate::rpc::store::{BatchGetRequest, RangeRequest};
+use crate::rpc::KeyValue;
 use crate::table_name::TableName;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableNameKey<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,
@@ -77,6 +81,14 @@ impl TableMetaKey for TableNameKey<'_> {
         )
         .into_bytes()
     }
+}
+
+/// Decodes `KeyValue` to ({table_name}, TableNameValue)
+pub fn table_decoder(kv: KeyValue) -> Result<(String, TableNameValue)> {
+    let table_name = TableNameKey::strip_table_name(kv.key())?;
+    let table_name_value = TableNameValue::try_from_raw_value(&kv.value)?;
+
+    Ok((table_name, table_name_value))
 }
 
 impl<'a> From<&'a TableName> for TableNameKey<'a> {
@@ -132,6 +144,7 @@ impl TableNameValue {
     }
 }
 
+#[derive(Clone)]
 pub struct TableNameManager {
     kv_backend: KvBackendRef,
 }
@@ -182,20 +195,9 @@ impl TableNameManager {
     }
 
     /// Builds a delete table name transaction. It only executes while the primary keys comparing successes.
-    pub(crate) fn build_delete_txn(
-        &self,
-        key: &TableNameKey<'_>,
-        table_id: TableId,
-    ) -> Result<Txn> {
+    pub(crate) fn build_delete_txn(&self, key: &TableNameKey<'_>) -> Result<Txn> {
         let raw_key = key.as_raw_key();
-        let value = TableNameValue::new(table_id);
-        let raw_value = value.try_as_raw_value()?;
-        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
-
-        let txn = Txn::new().and_then(vec![
-            TxnOp::Delete(raw_key),
-            TxnOp::Put(removed_key.into_bytes(), raw_value),
-        ]);
+        let txn = Txn::new().and_then(vec![TxnOp::Delete(raw_key)]);
 
         Ok(txn)
     }
@@ -209,28 +211,52 @@ impl TableNameManager {
             .transpose()
     }
 
+    pub async fn batch_get(
+        &self,
+        keys: Vec<TableNameKey<'_>>,
+    ) -> Result<Vec<Option<TableNameValue>>> {
+        let raw_keys = keys
+            .into_iter()
+            .map(|key| key.as_raw_key())
+            .collect::<Vec<_>>();
+        let req = BatchGetRequest::new().with_keys(raw_keys.clone());
+        let res = self.kv_backend.batch_get(req).await?;
+        let kvs = res
+            .kvs
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<HashMap<_, _>>();
+        let mut array = vec![None; raw_keys.len()];
+        for (i, key) in raw_keys.into_iter().enumerate() {
+            let v = kvs.get(&key);
+            array[i] = v
+                .map(|v| TableNameValue::try_from_raw_value(v))
+                .transpose()?;
+        }
+        Ok(array)
+    }
+
     pub async fn exists(&self, key: TableNameKey<'_>) -> Result<bool> {
         let raw_key = key.as_raw_key();
         self.kv_backend.exists(&raw_key).await
     }
 
-    pub async fn tables(
+    pub fn tables(
         &self,
         catalog: &str,
         schema: &str,
-    ) -> Result<Vec<(String, TableNameValue)>> {
+    ) -> BoxStream<'static, Result<(String, TableNameValue)>> {
         let key = TableNameKey::prefix_to_table(catalog, schema).into_bytes();
         let req = RangeRequest::new().with_prefix(key);
-        let resp = self.kv_backend.range(req).await?;
 
-        let mut res = Vec::with_capacity(resp.kvs.len());
-        for kv in resp.kvs {
-            res.push((
-                TableNameKey::strip_table_name(kv.key())?,
-                TableNameValue::try_from_raw_value(&kv.value)?,
-            ))
-        }
-        Ok(res)
+        let stream = PaginationStream::new(
+            self.kv_backend.clone(),
+            req,
+            DEFAULT_PAGE_SIZE,
+            Arc::new(table_decoder),
+        );
+
+        Box::pin(stream)
     }
 }
 

@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use proc_macro::TokenStream;
-use proc_macro2::Span;
 use quote::quote;
-use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::token::Comma;
 use syn::{
-    parse_macro_input, Attribute, AttributeArgs, FnArg, Ident, ItemFn, Meta, MetaNameValue,
-    NestedMeta, Signature, Type, TypeReference, Visibility,
+    parse_macro_input, Attribute, AttributeArgs, Ident, ItemFn, Signature, Type, TypeReference,
+    Visibility,
 };
 
-/// Internal util macro to early return on error.
+use crate::utils::{extract_arg_map, extract_input_types, get_ident};
+
 macro_rules! ok {
     ($item:expr) => {
         match $item {
@@ -60,6 +56,18 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     } = &sig;
     let arg_types = ok!(extract_input_types(inputs));
 
+    // with format like Float64Array
+    let array_types = arg_types
+        .iter()
+        .map(|ty| {
+            if let Type::Reference(TypeReference { elem, .. }) = ty {
+                elem.as_ref().clone()
+            } else {
+                ty.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+
     // build the struct and its impl block
     // only do this when `display_name` is specified
     if let Ok(display_name) = get_ident(&arg_map, "display_name", arg_span) {
@@ -68,6 +76,8 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
             vis,
             ok!(get_ident(&arg_map, "name", arg_span)),
             display_name,
+            array_types,
+            ok!(get_ident(&arg_map, "ret", arg_span)),
         );
         result.extend(struct_code);
     }
@@ -89,53 +99,13 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     result
 }
 
-/// Extract a String <-> Ident map from the attribute args.
-fn extract_arg_map(args: Vec<NestedMeta>) -> Result<HashMap<String, Ident>, syn::Error> {
-    args.into_iter()
-        .map(|meta| {
-            if let NestedMeta::Meta(Meta::NameValue(MetaNameValue { path, lit, .. })) = meta {
-                let name = path.get_ident().unwrap().to_string();
-                let ident = match lit {
-                    syn::Lit::Str(lit_str) => lit_str.parse::<Ident>(),
-                    _ => Err(syn::Error::new(
-                        lit.span(),
-                        "Unexpected attribute format. Expected `name = \"value\"`",
-                    )),
-                }?;
-                Ok((name, ident))
-            } else {
-                Err(syn::Error::new(
-                    meta.span(),
-                    "Unexpected attribute format. Expected `name = \"value\"`",
-                ))
-            }
-        })
-        .collect::<Result<HashMap<String, Ident>, syn::Error>>()
-}
-
-/// Helper function to get an Ident from the previous arg map.
-fn get_ident(map: &HashMap<String, Ident>, key: &str, span: Span) -> Result<Ident, syn::Error> {
-    map.get(key)
-        .cloned()
-        .ok_or_else(|| syn::Error::new(span, format!("Expect attribute {key} but not found")))
-}
-
-/// Extract the argument list from the annotated function.
-fn extract_input_types(inputs: &Punctuated<FnArg, Comma>) -> Result<Vec<Type>, syn::Error> {
-    inputs
-        .iter()
-        .map(|arg| match arg {
-            FnArg::Receiver(receiver) => Err(syn::Error::new(receiver.span(), "expected bool")),
-            FnArg::Typed(pat_type) => Ok(*pat_type.ty.clone()),
-        })
-        .collect()
-}
-
 fn build_struct(
     attrs: Vec<Attribute>,
     vis: Visibility,
     name: Ident,
     display_name_ident: Ident,
+    array_types: Vec<Type>,
+    return_array_type: Ident,
 ) -> TokenStream {
     let display_name = display_name_ident.to_string();
     quote! {
@@ -160,18 +130,12 @@ fn build_struct(
                 }
             }
 
-            // TODO(ruihang): this should be parameterized
-            // time index column and value column
             fn input_type() -> Vec<DataType> {
-                vec![
-                    RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
-                    RangeArray::convert_data_type(DataType::Float64),
-                ]
+                vec![#( RangeArray::convert_data_type(#array_types::new_null(0).data_type().clone()), )*]
             }
 
-            // TODO(ruihang): this should be parameterized
             fn return_type() -> DataType {
-                DataType::Float64
+                #return_array_type::new_null(0).data_type().clone()
             }
         }
     }
@@ -206,6 +170,7 @@ fn build_calc_fn(
         .map(|name| Ident::new(&format!("{}_range_array", name), name.span()))
         .collect::<Vec<_>>();
     let first_range_array_name = range_array_names.first().unwrap().clone();
+    let first_param_name = param_names.first().unwrap().clone();
 
     quote! {
         impl #name {
@@ -214,13 +179,29 @@ fn build_calc_fn(
 
                 #( let #range_array_names = RangeArray::try_new(extract_array(&input[#param_numbers])?.to_data().into())?; )*
 
-                // TODO(ruihang): add ensure!() 
+                // check arrays len
+                {
+                    let len_first = #first_range_array_name.len();
+                    #(
+                        if len_first != #range_array_names.len() {
+                            return Err(DataFusionError::Execution(format!("RangeArray have different lengths in PromQL function {}: array1={}, array2={}", #name::name(), len_first, #range_array_names.len())));
+                        }
+                    )*
+                }
 
                 let mut result_array = Vec::new();
                 for index in 0..#first_range_array_name.len(){
                     #( let #param_names = #range_array_names.get(index).unwrap().as_any().downcast_ref::<#unref_param_types>().unwrap().clone(); )*
 
-                    // TODO(ruihang): add ensure!() to check length
+                    // check element len
+                    {
+                        let len_first = #first_param_name.len();
+                        #(
+                            if len_first != #param_names.len() {
+                                return Err(DataFusionError::Execution(format!("RangeArray's element {} have different lengths in PromQL function {}: array1={}, array2={}", index, #name::name(), len_first, #param_names.len())));
+                            }
+                        )*
+                    }
 
                     let result = #fn_name(#( &#param_names, )*);
                     result_array.push(result);

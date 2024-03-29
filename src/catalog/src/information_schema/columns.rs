@@ -16,8 +16,8 @@ use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::{
-    INFORMATION_SCHEMA_COLUMNS_TABLE_ID, INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD,
-    SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
+    INFORMATION_SCHEMA_COLUMNS_TABLE_ID, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY,
+    SEMANTIC_TYPE_TIME_INDEX,
 };
 use common_error::ext::BoxedError;
 use common_query::physical_plan::TaskContext;
@@ -29,15 +29,17 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
+use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::TableId;
+use store_api::storage::{ScanRequest, TableId};
 
-use super::tables::InformationSchemaTables;
-use super::{InformationTable, COLUMNS, TABLES};
+use super::{InformationTable, COLUMNS};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
+use crate::information_schema::Predicates;
 use crate::CatalogManager;
 
 pub(super) struct InformationSchemaColumns {
@@ -52,6 +54,11 @@ const TABLE_NAME: &str = "table_name";
 const COLUMN_NAME: &str = "column_name";
 const DATA_TYPE: &str = "data_type";
 const SEMANTIC_TYPE: &str = "semantic_type";
+const COLUMN_DEFAULT: &str = "column_default";
+const IS_NULLABLE: &str = "is_nullable";
+const COLUMN_TYPE: &str = "column_type";
+const COLUMN_COMMENT: &str = "column_comment";
+const INIT_CAPACITY: usize = 42;
 
 impl InformationSchemaColumns {
     pub(super) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
@@ -70,6 +77,10 @@ impl InformationSchemaColumns {
             ColumnSchema::new(COLUMN_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(DATA_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(SEMANTIC_TYPE, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(COLUMN_DEFAULT, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(IS_NULLABLE, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(COLUMN_TYPE, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(COLUMN_COMMENT, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
@@ -95,14 +106,14 @@ impl InformationTable for InformationSchemaColumns {
         self.schema.clone()
     }
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_tables()
+                    .make_columns(Some(request))
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)
@@ -127,6 +138,11 @@ struct InformationSchemaColumnsBuilder {
     column_names: StringVectorBuilder,
     data_types: StringVectorBuilder,
     semantic_types: StringVectorBuilder,
+
+    column_defaults: StringVectorBuilder,
+    is_nullables: StringVectorBuilder,
+    column_types: StringVectorBuilder,
+    column_comments: StringVectorBuilder,
 }
 
 impl InformationSchemaColumnsBuilder {
@@ -139,55 +155,34 @@ impl InformationSchemaColumnsBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            catalog_names: StringVectorBuilder::with_capacity(42),
-            schema_names: StringVectorBuilder::with_capacity(42),
-            table_names: StringVectorBuilder::with_capacity(42),
-            column_names: StringVectorBuilder::with_capacity(42),
-            data_types: StringVectorBuilder::with_capacity(42),
-            semantic_types: StringVectorBuilder::with_capacity(42),
+            catalog_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            schema_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            data_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            semantic_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_defaults: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            is_nullables: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_comments: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
-    /// Construct the `information_schema.tables` virtual table
-    async fn make_tables(&mut self) -> Result<RecordBatch> {
+    /// Construct the `information_schema.columns` virtual table
+    async fn make_columns(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            if !catalog_manager
-                .schema_exists(&catalog_name, &schema_name)
-                .await?
-            {
-                continue;
-            }
-            for table_name in catalog_manager
-                .table_names(&catalog_name, &schema_name)
-                .await?
-            {
-                let (keys, schema) = if let Some(table) = catalog_manager
-                    .table(&catalog_name, &schema_name, &table_name)
-                    .await?
-                {
-                    let keys = &table.table_info().meta.primary_key_indices;
-                    let schema = table.schema();
-                    (keys.clone(), schema)
-                } else {
-                    // TODO: this specific branch is only a workaround for FrontendCatalogManager.
-                    if schema_name == INFORMATION_SCHEMA_NAME {
-                        if table_name == COLUMNS {
-                            (vec![], InformationSchemaColumns::schema())
-                        } else if table_name == TABLES {
-                            (vec![], InformationSchemaTables::schema())
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                };
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name).await;
+
+            while let Some(table) = stream.try_next().await? {
+                let keys = &table.table_info().meta.primary_key_indices;
+                let schema = table.schema();
 
                 for (idx, column) in schema.column_schemas().iter().enumerate() {
                     let semantic_type = if column.is_time_index() {
@@ -197,13 +192,14 @@ impl InformationSchemaColumnsBuilder {
                     } else {
                         SEMANTIC_TYPE_FIELD
                     };
+
                     self.add_column(
+                        &predicates,
                         &catalog_name,
                         &schema_name,
-                        &table_name,
-                        &column.name,
-                        column.data_type.name(),
+                        &table.table_info().name,
                         semantic_type,
+                        column,
                     );
                 }
             }
@@ -214,19 +210,48 @@ impl InformationSchemaColumnsBuilder {
 
     fn add_column(
         &mut self,
+        predicates: &Predicates,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        column_name: &str,
-        data_type: &str,
         semantic_type: &str,
+        column_schema: &ColumnSchema,
     ) {
+        let data_type = &column_schema.data_type.name();
+
+        let row = [
+            (TABLE_CATALOG, &Value::from(catalog_name)),
+            (TABLE_SCHEMA, &Value::from(schema_name)),
+            (TABLE_NAME, &Value::from(table_name)),
+            (COLUMN_NAME, &Value::from(column_schema.name.as_str())),
+            (DATA_TYPE, &Value::from(data_type.as_str())),
+            (SEMANTIC_TYPE, &Value::from(semantic_type)),
+        ];
+
+        if !predicates.eval(&row) {
+            return;
+        }
+
         self.catalog_names.push(Some(catalog_name));
         self.schema_names.push(Some(schema_name));
         self.table_names.push(Some(table_name));
-        self.column_names.push(Some(column_name));
+        self.column_names.push(Some(&column_schema.name));
         self.data_types.push(Some(data_type));
         self.semantic_types.push(Some(semantic_type));
+        self.column_defaults.push(
+            column_schema
+                .default_constraint()
+                .map(|s| format!("{}", s))
+                .as_deref(),
+        );
+        if column_schema.is_nullable() {
+            self.is_nullables.push(Some("Yes"));
+        } else {
+            self.is_nullables.push(Some("No"));
+        }
+        self.column_types.push(Some(data_type));
+        self.column_comments
+            .push(column_schema.column_comment().map(|x| x.as_ref()));
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -237,7 +262,12 @@ impl InformationSchemaColumnsBuilder {
             Arc::new(self.column_names.finish()),
             Arc::new(self.data_types.finish()),
             Arc::new(self.semantic_types.finish()),
+            Arc::new(self.column_defaults.finish()),
+            Arc::new(self.is_nullables.finish()),
+            Arc::new(self.column_types.finish()),
+            Arc::new(self.column_comments.finish()),
         ];
+
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
 }
@@ -254,7 +284,7 @@ impl DfPartitionStream for InformationSchemaColumns {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_tables()
+                    .make_columns(None)
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)

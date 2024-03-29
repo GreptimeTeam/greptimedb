@@ -184,7 +184,7 @@ impl StartupHandler for PostgresServerHandler {
                 let login_info = LoginInfo::from_client_info(client);
 
                 // do authenticate
-                let auth_result = self.login_verifier.auth(&login_info, pwd.password()).await;
+                let auth_result = self.login_verifier.auth(&login_info, &pwd.password).await;
 
                 if let Ok(Some(user_info)) = auth_result {
                     self.session.set_user_info(user_info);
@@ -237,14 +237,11 @@ where
     if let Some(db) = db_ref {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         if query_handler
-            .is_valid_schema(catalog, schema)
+            .is_valid_schema(&catalog, &schema)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {
-            Ok(DbResolution::Resolved(
-                catalog.to_owned(),
-                schema.to_owned(),
-            ))
+            Ok(DbResolution::Resolved(catalog, schema))
         } else {
             Ok(DbResolution::NotFound(format!("Database not found: {db}")))
         }

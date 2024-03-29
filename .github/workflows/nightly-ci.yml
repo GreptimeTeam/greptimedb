@@ -12,19 +12,20 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-08-07
+  RUST_TOOLCHAIN: nightly-2023-12-19
 
 jobs:
   sqlness:
     name: Sqlness Test
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ windows-latest-8-cores ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4.1.0
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
@@ -44,19 +45,20 @@ jobs:
             {"text": "Nightly CI failed for sqlness tests"}
       - name: Upload sqlness logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
-          path: ${{ runner.temp }}/greptime-*.log
+          path: /tmp/greptime-*.log
           retention-days: 3
 
   test-on-windows:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: windows-latest-8-cores
     timeout-minutes: 60
     steps:
       - run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4.1.0
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install Rust toolchain
@@ -69,7 +71,7 @@ jobs:
       - name: Install Cargo Nextest
         uses: taiki-e/install-action@nextest
       - name: Install Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       - name: Install PyArrow Package

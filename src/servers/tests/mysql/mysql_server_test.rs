@@ -30,7 +30,7 @@ use rand::Rng;
 use servers::error::Result;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::server::Server;
-use servers::tls::TlsOption;
+use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::test_util::MemTable;
 use table::TableRef;
 
@@ -59,12 +59,17 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
         provider.set_authorization_info(auth_info);
     }
 
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(opts.tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
     Ok(MysqlServer::create_server(
         io_runtime,
         Arc::new(MysqlSpawnRef::new(query_handler, Some(Arc::new(provider)))),
         Arc::new(MysqlSpawnConfig::new(
             opts.tls.should_force_tls(),
-            opts.tls.setup()?.map(Arc::new),
+            tls_server_config,
             opts.reject_no_database,
         )),
     ))
@@ -250,6 +255,7 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server-rsa.key".to_owned(),
+        watch: false,
     };
 
     let client_tls = false;
@@ -287,6 +293,7 @@ async fn test_server_required_secure_client_plain_with_pkcs8_priv_key() -> Resul
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server-pkcs8.key".to_owned(),
+        watch: false,
     };
 
     let client_tls = false;
@@ -389,7 +396,7 @@ async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) ->
     assert_eq!(column_schemas.len(), columns.len());
 
     for (i, column) in columns.iter().enumerate() {
-        assert_eq!(mysql_columns_def[i], column.column_type());
+        assert_eq!(mysql_columns_def[i] as u8, column.column_type() as u8);
         assert_eq!(column_schemas[i].name, column.name_str());
     }
 
@@ -451,7 +458,6 @@ async fn test_query_concurrently() -> Result<()> {
     Ok(())
 }
 
-#[ignore = "https://github.com/GreptimeTeam/greptimedb/issues/1385"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_query_prepared() -> Result<()> {
     common_telemetry::init_default_ut_logging();
@@ -588,6 +594,7 @@ async fn do_test_query_all_datatypes_with_secure_server(
                 "tests/ssl/server-rsa.key".to_owned()
             }
         },
+        watch: false,
     };
 
     do_test_query_all_datatypes(server_tls, client_tls).await

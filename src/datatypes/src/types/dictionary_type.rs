@@ -62,8 +62,12 @@ impl DictionaryType {
 }
 
 impl DataType for DictionaryType {
-    fn name(&self) -> &str {
-        "Dictionary"
+    fn name(&self) -> String {
+        format!(
+            "Dictionary<{}, {}>",
+            self.key_type.name(),
+            self.value_type.name()
+        )
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

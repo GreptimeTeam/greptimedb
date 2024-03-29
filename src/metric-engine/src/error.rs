@@ -17,7 +17,10 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
+use store_api::region_request::RegionRequest;
+use store_api::storage::RegionId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -33,9 +36,23 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table `{}` already exists", table_name))]
-    TableAlreadyExists {
-        table_name: String,
+    #[snafu(display("Failed to open mito region, region type: {}", region_type))]
+    OpenMitoRegion {
+        region_type: String,
+        source: BoxedError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to close mito region, region id: {}", region_id))]
+    CloseMitoRegion {
+        region_id: RegionId,
+        source: BoxedError,
+        location: Location,
+    },
+
+    #[snafu(display("Region `{}` already exists", region_id))]
+    RegionAlreadyExists {
+        region_id: RegionId,
         location: Location,
     },
 
@@ -47,10 +64,33 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to deserialize column metadata from {}", raw))]
+    DeserializeColumnMetadata {
+        raw: String,
+        #[snafu(source)]
+        error: serde_json::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to serialize column metadata"))]
+    SerializeColumnMetadata {
+        #[snafu(source)]
+        error: serde_json::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode base64 column value"))]
     DecodeColumnValue {
         #[snafu(source)]
         error: base64::DecodeError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse region id from {}", raw))]
+    ParseRegionId {
+        raw: String,
+        #[snafu(source)]
+        error: <u64 as std::str::FromStr>::Err,
         location: Location,
     },
 
@@ -74,6 +114,61 @@ pub enum Error {
 
     #[snafu(display("Internal column {} is reserved", column))]
     InternalColumnOccupied { column: String, location: Location },
+
+    #[snafu(display("Required table option is missing"))]
+    MissingRegionOption { location: Location },
+
+    #[snafu(display("Region options are conflicted"))]
+    ConflictRegionOption { location: Location },
+
+    #[snafu(display("Physical region {} not found", region_id))]
+    PhysicalRegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Logical region {} not found", region_id))]
+    LogicalRegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Column type mismatch. Expect string, got {:?}", column_type))]
+    ColumnTypeMismatch {
+        column_type: ConcreteDataType,
+        location: Location,
+    },
+
+    #[snafu(display("Column {} not found in logical region {}", name, region_id))]
+    ColumnNotFound {
+        name: String,
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Alter request to physical region is forbidden"))]
+    ForbiddenPhysicalAlter { location: Location },
+
+    #[snafu(display("Invalid region metadata"))]
+    InvalidMetadata {
+        source: store_api::metadata::MetadataError,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Physical region {} is busy, there are still some logical regions using it",
+        region_id
+    ))]
+    PhysicalRegionBusy {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported region request: {}", request))]
+    UnsupportedRegionRequest {
+        request: RegionRequest,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -83,19 +178,39 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            InternalColumnOccupied { .. } => StatusCode::InvalidArguments,
+            InternalColumnOccupied { .. }
+            | MissingRegionOption { .. }
+            | ConflictRegionOption { .. }
+            | ColumnTypeMismatch { .. }
+            | PhysicalRegionBusy { .. } => StatusCode::InvalidArguments,
+
+            ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
+                StatusCode::Unsupported
+            }
 
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
-            | DecodeColumnValue { .. } => StatusCode::Unexpected,
+            | DeserializeColumnMetadata { .. }
+            | SerializeColumnMetadata { .. }
+            | DecodeColumnValue { .. }
+            | ParseRegionId { .. }
+            | InvalidMetadata { .. } => StatusCode::Unexpected,
+
+            PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
+                StatusCode::RegionNotFound
+            }
+
+            ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
             CreateMitoRegion { source, .. }
+            | OpenMitoRegion { source, .. }
+            | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
 
-            TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
+            RegionAlreadyExists { .. } => StatusCode::RegionAlreadyExists,
         }
     }
 

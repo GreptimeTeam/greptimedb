@@ -250,6 +250,7 @@ async fn test_engine_truncate_reopen() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -304,7 +305,7 @@ async fn test_engine_truncate_during_flush() {
     let entry_id = version_data.last_entry_id;
     let sequence = version_data.committed_sequence;
 
-    // Flush reigon.
+    // Flush region.
     let engine_cloned = engine.clone();
     let flush_task = tokio::spawn(async move {
         info!("do flush task!!!!");
@@ -353,6 +354,7 @@ async fn test_engine_truncate_during_flush() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await

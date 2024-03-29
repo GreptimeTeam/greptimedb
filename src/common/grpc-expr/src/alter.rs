@@ -145,8 +145,8 @@ mod tests {
     #[test]
     fn test_alter_expr_to_request() {
         let expr = AlterExpr {
-            catalog_name: "".to_string(),
-            schema_name: "".to_string(),
+            catalog_name: String::default(),
+            schema_name: String::default(),
             table_name: "monitor".to_string(),
 
             kind: Some(Kind::AddColumns(AddColumns {
@@ -158,6 +158,7 @@ mod tests {
                         default_constraint: vec![],
                         semantic_type: SemanticType::Field as i32,
                         comment: String::new(),
+                        ..Default::default()
                     }),
                     location: None,
                 }],
@@ -185,8 +186,8 @@ mod tests {
     #[test]
     fn test_alter_expr_with_location_to_request() {
         let expr = AlterExpr {
-            catalog_name: "".to_string(),
-            schema_name: "".to_string(),
+            catalog_name: String::default(),
+            schema_name: String::default(),
             table_name: "monitor".to_string(),
 
             kind: Some(Kind::AddColumns(AddColumns {
@@ -199,10 +200,11 @@ mod tests {
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
                             comment: String::new(),
+                            ..Default::default()
                         }),
                         location: Some(Location {
                             location_type: LocationType::First.into(),
-                            after_column_name: "".to_string(),
+                            after_column_name: String::default(),
                         }),
                     },
                     AddColumn {
@@ -213,6 +215,7 @@ mod tests {
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
                             comment: String::new(),
+                            ..Default::default()
                         }),
                         location: Some(Location {
                             location_type: LocationType::After.into(),

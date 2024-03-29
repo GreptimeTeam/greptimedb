@@ -26,18 +26,21 @@ use std::{env, path};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging::info;
-use object_store::layers::{LoggingLayer, LruCacheLayer, RetryLayer, TracingLayer};
-use object_store::services::Fs as FsBuilder;
-use object_store::util::normalize_dir;
-use object_store::{util, HttpClient, ObjectStore, ObjectStoreBuilder};
+use object_store::layers::{LruCacheLayer, RetryLayer};
+use object_store::services::Fs;
+use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
+use object_store::{HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
-use crate::config::{DatanodeOptions, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
+use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
 use crate::error::{self, Result};
 
-pub(crate) async fn new_object_store(opts: &DatanodeOptions) -> Result<ObjectStore> {
-    let data_home = normalize_dir(&opts.storage.data_home);
-    let object_store = match &opts.storage.store {
+pub(crate) async fn new_object_store(
+    store: ObjectStoreConfig,
+    data_home: &str,
+) -> Result<ObjectStore> {
+    let data_home = normalize_dir(data_home);
+    let object_store = match &store {
         ObjectStoreConfig::File(file_config) => {
             fs::new_fs_object_store(&data_home, file_config).await
         }
@@ -50,39 +53,15 @@ pub(crate) async fn new_object_store(opts: &DatanodeOptions) -> Result<ObjectSto
     }?;
 
     // Enable retry layer and cache layer for non-fs object storages
-    let object_store = if !matches!(opts.storage.store, ObjectStoreConfig::File(..)) {
-        let object_store =
-            create_object_store_with_cache(object_store, &opts.storage.store).await?;
+    let object_store = if !matches!(store, ObjectStoreConfig::File(..)) {
+        let object_store = create_object_store_with_cache(object_store, &store).await?;
         object_store.layer(RetryLayer::new().with_jitter())
     } else {
         object_store
     };
 
-    let store = object_store
-        .layer(
-            LoggingLayer::default()
-                // Print the expected error only in DEBUG level.
-                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
-                .with_error_level(Some("debug"))
-                .expect("input error level must be valid"),
-        )
-        .layer(TracingLayer);
-
-    // In the test environment, multiple datanodes will be started in the same process.
-    // If each datanode registers Prometheus metric when it starts, it will cause the program to crash. (Because the same metric is registered repeatedly.)
-    // So the Prometheus metric layer is disabled in the test environment.
-    #[cfg(feature = "testing")]
-    return Ok(store);
-
-    #[cfg(not(feature = "testing"))]
-    {
-        let registry = prometheus::default_registry();
-        Ok(
-            store.layer(object_store::layers::PrometheusLayer::with_registry(
-                registry.clone(),
-            )),
-        )
-    }
+    let store = with_instrument_layers(object_store);
+    Ok(store)
 }
 
 async fn create_object_store_with_cache(
@@ -126,11 +105,10 @@ async fn create_object_store_with_cache(
     };
 
     if let Some(path) = cache_path {
-        let path = util::normalize_dir(path);
-        let atomic_temp_dir = format!("{path}.tmp/");
+        let atomic_temp_dir = join_dir(path, ".tmp/");
         clean_temp_dir(&atomic_temp_dir)?;
-        let cache_store = FsBuilder::default()
-            .root(&path)
+        let cache_store = Fs::default()
+            .root(path)
             .atomic_write_dir(&atomic_temp_dir)
             .build()
             .context(error::InitBackendSnafu)?;

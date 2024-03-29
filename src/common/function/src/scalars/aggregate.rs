@@ -33,7 +33,7 @@ pub use polyval::PolyvalAccumulatorCreator;
 pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
 pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
 
-use crate::scalars::FunctionRegistry;
+use crate::function_registry::FunctionRegistry;
 
 /// A function creates `AggregateFunctionCreator`.
 /// "Aggregator" *is* AggregatorFunction. Since the later one is long, we named an short alias for it.

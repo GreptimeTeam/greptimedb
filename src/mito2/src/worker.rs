@@ -15,6 +15,7 @@
 //! Structs and utilities for writing regions.
 
 mod handle_alter;
+mod handle_catchup;
 mod handle_close;
 mod handle_compaction;
 mod handle_create;
@@ -24,8 +25,6 @@ mod handle_open;
 mod handle_truncate;
 mod handle_write;
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,30 +33,40 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
+use rand::{thread_rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
+use store_api::region_engine::SetReadonlyResponse;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{InvalidRequestSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
-use crate::memtable::time_series::TimeSeriesMemtableBuilder;
-use crate::memtable::MemtableBuilderRef;
+use crate::manifest::action::RegionEdit;
+use crate::memtable::MemtableBuilderProvider;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
 
 /// Identifier for a worker.
 pub(crate) type WorkerId = u32;
 
 pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
+
+/// Interval to check whether regions should flush.
+pub(crate) const CHECK_REGION_INTERVAL: Duration = Duration::from_secs(60);
+/// Max delay to check region periodical tasks.
+pub(crate) const MAX_INITIAL_CHECK_DELAY_SECS: u64 = 60 * 3;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
@@ -109,21 +118,34 @@ impl WorkerGroup {
     /// Starts a worker group.
     ///
     /// The number of workers should be power of two.
-    pub(crate) fn start<S: LogStore>(
-        config: MitoConfig,
+    pub(crate) async fn start<S: LogStore>(
+        config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-    ) -> WorkerGroup {
-        assert!(config.num_workers.is_power_of_two());
-        let config = Arc::new(config);
+    ) -> Result<WorkerGroup> {
         let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
             config.global_write_buffer_size.as_bytes() as usize,
         ));
+        let intermediate_manager =
+            IntermediateManager::init_fs(&config.inverted_index.intermediate_path)
+                .await?
+                .with_buffer_size(Some(config.inverted_index.write_buffer_size.as_bytes() as _));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = Arc::new(CacheManager::new(
-            config.sst_meta_cache_size.as_bytes(),
-            config.vector_cache_size.as_bytes(),
-        ));
+        let write_cache = write_cache_from_config(
+            &config,
+            object_store_manager.clone(),
+            intermediate_manager.clone(),
+        )
+        .await?;
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .vector_cache_size(config.vector_cache_size.as_bytes())
+                .page_cache_size(config.page_cache_size.as_bytes())
+                .write_cache(write_cache)
+                .build(),
+        );
+        let time_provider = Arc::new(StdTimeProvider);
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -136,16 +158,18 @@ impl WorkerGroup {
                     scheduler: scheduler.clone(),
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
+                    intermediate_manager: intermediate_manager.clone(),
+                    time_provider: time_provider.clone(),
                 }
                 .start()
             })
             .collect();
 
-        WorkerGroup {
+        Ok(WorkerGroup {
             workers,
             scheduler,
             cache_manager,
-        }
+        })
     }
 
     /// Stops the worker group.
@@ -188,10 +212,7 @@ impl WorkerGroup {
 
     /// Get worker for specific `region_id`.
     fn worker(&self, region_id: RegionId) -> &RegionWorker {
-        let mut hasher = DefaultHasher::new();
-        region_id.hash(&mut hasher);
-        let value = hasher.finish() as usize;
-        let index = value_to_index(value, self.workers.len());
+        let index = region_id_to_index(region_id, self.workers.len());
 
         &self.workers[index]
     }
@@ -203,26 +224,38 @@ impl WorkerGroup {
     /// Starts a worker group with `write_buffer_manager` and `listener` for tests.
     ///
     /// The number of workers should be power of two.
-    pub(crate) fn start_for_test<S: LogStore>(
-        config: MitoConfig,
+    pub(crate) async fn start_for_test<S: LogStore>(
+        config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
-    ) -> WorkerGroup {
-        assert!(config.num_workers.is_power_of_two());
-        let config = Arc::new(config);
+        time_provider: TimeProviderRef,
+    ) -> Result<WorkerGroup> {
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
             Arc::new(WriteBufferManagerImpl::new(
                 config.global_write_buffer_size.as_bytes() as usize,
             ))
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = Arc::new(CacheManager::new(
-            config.sst_meta_cache_size.as_bytes(),
-            config.vector_cache_size.as_bytes(),
-        ));
-
+        let intermediate_manager =
+            IntermediateManager::init_fs(&config.inverted_index.intermediate_path)
+                .await?
+                .with_buffer_size(Some(config.inverted_index.write_buffer_size.as_bytes() as _));
+        let write_cache = write_cache_from_config(
+            &config,
+            object_store_manager.clone(),
+            intermediate_manager.clone(),
+        )
+        .await?;
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
+                .vector_cache_size(config.vector_cache_size.as_bytes())
+                .page_cache_size(config.page_cache_size.as_bytes())
+                .write_cache(write_cache)
+                .build(),
+        );
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -234,21 +267,52 @@ impl WorkerGroup {
                     scheduler: scheduler.clone(),
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
+                    intermediate_manager: intermediate_manager.clone(),
+                    time_provider: time_provider.clone(),
                 }
                 .start()
             })
             .collect();
 
-        WorkerGroup {
+        Ok(WorkerGroup {
             workers,
             scheduler,
             cache_manager,
-        }
+        })
     }
 }
 
-fn value_to_index(value: usize, num_workers: usize) -> usize {
-    value & (num_workers - 1)
+fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
+    ((id.table_id() as usize % num_workers) + (id.region_number() as usize % num_workers))
+        % num_workers
+}
+
+async fn write_cache_from_config(
+    config: &MitoConfig,
+    object_store_manager: ObjectStoreManagerRef,
+    intermediate_manager: IntermediateManager,
+) -> Result<Option<WriteCacheRef>> {
+    if !config.enable_experimental_write_cache {
+        return Ok(None);
+    }
+
+    // TODO(yingwen): Remove this and document the config once the write cache is ready.
+    warn!("Write cache is an experimental feature");
+
+    let cache = WriteCache::new_fs(
+        &config.experimental_write_cache_path,
+        object_store_manager,
+        config.experimental_write_cache_size,
+        intermediate_manager,
+    )
+    .await?;
+    Ok(Some(Arc::new(cache)))
+}
+
+/// Computes a initial check delay for a worker.
+pub(crate) fn worker_init_check_delay() -> Duration {
+    let init_check_delay = thread_rng().gen_range(0..MAX_INITIAL_CHECK_DELAY_SECS);
+    Duration::from_secs(init_check_delay)
 }
 
 /// Worker start config.
@@ -261,6 +325,8 @@ struct WorkerStarter<S> {
     scheduler: SchedulerRef,
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
+    intermediate_manager: IntermediateManager,
+    time_provider: TimeProviderRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -270,9 +336,10 @@ impl<S: LogStore> WorkerStarter<S> {
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
+        let now = self.time_provider.current_time_millis();
         let mut worker_thread = RegionWorkerLoop {
             id: self.id,
-            config: self.config,
+            config: self.config.clone(),
             regions: regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
             sender: sender.clone(),
@@ -280,16 +347,24 @@ impl<S: LogStore> WorkerStarter<S> {
             wal: Wal::new(self.log_store),
             object_store_manager: self.object_store_manager.clone(),
             running: running.clone(),
-            memtable_builder: Arc::new(TimeSeriesMemtableBuilder::new(Some(
-                self.write_buffer_manager.clone(),
-            ))),
+            memtable_builder_provider: MemtableBuilderProvider::new(
+                Some(self.write_buffer_manager.clone()),
+                self.config,
+            ),
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
-            compaction_scheduler: CompactionScheduler::new(self.scheduler, sender.clone()),
+            compaction_scheduler: CompactionScheduler::new(
+                self.scheduler,
+                sender.clone(),
+                self.cache_manager.clone(),
+            ),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
             cache_manager: self.cache_manager,
+            intermediate_manager: self.intermediate_manager,
+            time_provider: self.time_provider,
+            last_periodical_check_millis: now,
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -430,8 +505,8 @@ struct RegionWorkerLoop<S> {
     object_store_manager: ObjectStoreManagerRef,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
-    /// Memtable builder for each region.
-    memtable_builder: MemtableBuilderRef,
+    /// Memtable builder provider for each region.
+    memtable_builder_provider: MemtableBuilderProvider,
     /// Background job scheduler.
     scheduler: SchedulerRef,
     /// Engine write buffer manager.
@@ -446,12 +521,23 @@ struct RegionWorkerLoop<S> {
     listener: WorkerListener,
     /// Cache.
     cache_manager: CacheManagerRef,
+    /// Intermediate manager for inverted index.
+    intermediate_manager: IntermediateManager,
+    /// Provider to get current time.
+    time_provider: TimeProviderRef,
+    /// Last time to check regions periodically.
+    last_periodical_check_millis: i64,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Starts the worker loop.
     async fn run(&mut self) {
-        info!("Start region worker thread {}", self.id);
+        let init_check_delay = worker_init_check_delay();
+        info!(
+            "Start region worker thread {}, init_check_delay: {:?}",
+            self.id, init_check_delay
+        );
+        self.last_periodical_check_millis += init_check_delay.as_millis() as i64;
 
         // Buffer to retrieve requests from receiver.
         let mut buffer = RequestBuffer::with_capacity(self.config.worker_request_batch_size);
@@ -460,9 +546,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // Clear the buffer before handling next batch of requests.
             buffer.clear();
 
-            match self.receiver.recv().await {
-                Some(request) => buffer.push(request),
-                None => break,
+            let max_wait_time = self.time_provider.wait_duration(CHECK_REGION_INTERVAL);
+            match tokio::time::timeout(max_wait_time, self.receiver.recv()).await {
+                Ok(Some(request)) => buffer.push(request),
+                // The channel is disconnected.
+                Ok(None) => break,
+                Err(_) => {
+                    // Timeout. Checks periodical tasks.
+                    self.handle_periodical_tasks();
+                    continue;
+                }
             }
 
             // Try to recv more requests from the channel.
@@ -476,6 +569,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
 
             self.handle_requests(&mut buffer).await;
+
+            self.handle_periodical_tasks();
         }
 
         self.clean().await;
@@ -500,6 +595,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::Background { region_id, notify } => {
                     // For background notify, we handle it directly.
                     self.handle_background_notify(region_id, notify).await;
+                }
+                WorkerRequest::SetReadonlyGracefully { region_id, sender } => {
+                    self.set_readonly_gracefully(region_id, sender).await;
+                }
+                WorkerRequest::EditRegion {
+                    region_id,
+                    edit,
+                    tx,
+                } => {
+                    let result = self.edit_region(region_id, edit).await;
+                    if let Err(Err(e)) = tx.send(result) {
+                        warn!("Failed to send edit region error to caller, error: {e:?}");
+                    }
                 }
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
@@ -544,9 +652,28 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Truncate(_) => self.handle_truncate_request(ddl.region_id).await,
+                DdlRequest::Catchup(req) => self.handle_catchup_request(ddl.region_id, req).await,
             };
 
             ddl.sender.send(res);
+        }
+    }
+
+    /// Handle periodical tasks such as region auto flush.
+    fn handle_periodical_tasks(&mut self) {
+        let interval = CHECK_REGION_INTERVAL.as_millis() as i64;
+        if self
+            .time_provider
+            .elapsed_since(self.last_periodical_check_millis)
+            < interval
+        {
+            return;
+        }
+
+        self.last_periodical_check_millis = self.time_provider.current_time_millis();
+
+        if let Err(e) = self.flush_periodically() {
+            error!(e; "Failed to flush regions periodically");
         }
     }
 
@@ -562,6 +689,43 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
         }
+    }
+
+    /// Handles `set_readonly_gracefully`.
+    async fn set_readonly_gracefully(
+        &mut self,
+        region_id: RegionId,
+        sender: oneshot::Sender<SetReadonlyResponse>,
+    ) {
+        if let Some(region) = self.regions.get_region(region_id) {
+            region.set_writable(false);
+
+            let last_entry_id = region.version_control.current().last_entry_id;
+            let _ = sender.send(SetReadonlyResponse::success(Some(last_entry_id)));
+        } else {
+            let _ = sender.send(SetReadonlyResponse::NotFound);
+        }
+    }
+
+    async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        let region = self.regions.writable_region(region_id)?;
+
+        for file_meta in &edit.files_to_add {
+            let is_exist = region.access_layer.is_exist(file_meta).await?;
+            ensure!(
+                is_exist,
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: format!(
+                        "trying to add a not exist file '{}' when editing region",
+                        file_meta.file_id
+                    )
+                }
+            );
+        }
+
+        // Applying region edit directly has nothing to do with memtables (at least for now).
+        region.apply_edit(edit, &[]).await
     }
 }
 
@@ -650,16 +814,16 @@ mod tests {
     use crate::test_util::TestEnv;
 
     #[test]
-    fn test_value_to_index() {
-        let num_workers = 1;
-        for i in 0..10 {
-            assert_eq!(0, value_to_index(i, num_workers));
-        }
-
+    fn test_region_id_to_index() {
         let num_workers = 4;
-        for i in 0..10 {
-            assert_eq!(i % 4, value_to_index(i, num_workers));
-        }
+
+        let region_id = RegionId::new(1, 2);
+        let index = region_id_to_index(region_id, num_workers);
+        assert_eq!(index, 3);
+
+        let region_id = RegionId::new(2, 3);
+        let index = region_id_to_index(region_id, num_workers);
+        assert_eq!(index, 1);
     }
 
     #[tokio::test]

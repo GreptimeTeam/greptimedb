@@ -20,8 +20,8 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::VectorRef;
 use datatypes::schema::SchemaRef;
 use snafu::{ensure, ResultExt};
-use table::engine::TableReference;
 use table::metadata::TableId;
+use table::table_reference::TableReference;
 
 use crate::error::{CreateVectorSnafu, Result, UnexpectedValuesLengthSnafu};
 use crate::util;
@@ -98,7 +98,11 @@ mod tests {
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::column::Values;
-    use api::v1::{Column, ColumnDataType, IntervalMonthDayNano, SemanticType};
+    use api::v1::column_data_type_extension::TypeExt;
+    use api::v1::{
+        Column, ColumnDataType, ColumnDataTypeExtension, Decimal128, DecimalTypeExtension,
+        IntervalMonthDayNano, SemanticType,
+    };
     use common_base::BitVec;
     use common_catalog::consts::MITO_ENGINE;
     use common_time::interval::IntervalUnit;
@@ -119,7 +123,7 @@ mod tests {
         nullable: bool,
     ) -> error::Result<ColumnSchema> {
         let datatype_wrapper =
-            ColumnDataTypeWrapper::try_new(datatype).context(ColumnDataTypeSnafu)?;
+            ColumnDataTypeWrapper::try_new(datatype, None).context(ColumnDataTypeSnafu)?;
 
         Ok(ColumnSchema::new(
             column_name,
@@ -160,7 +164,7 @@ mod tests {
 
         let column_defs = create_expr.column_defs;
         assert_eq!(column_defs[6].name, create_expr.time_index);
-        assert_eq!(7, column_defs.len());
+        assert_eq!(8, column_defs.len());
 
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -170,7 +174,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "host")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -184,7 +189,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "cpu")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -198,7 +204,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "memory")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -212,7 +219,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "time")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -226,7 +234,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "interval")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -240,7 +249,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "duration")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -254,7 +264,20 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "ts")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
+                )
+                .unwrap()
+            )
+        );
+
+        let decimal_column = column_defs.iter().find(|c| c.name == "decimals").unwrap();
+        assert_eq!(
+            ConcreteDataType::decimal128_datatype(38, 10),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    decimal_column.data_type,
+                    decimal_column.datatype_extension.clone(),
                 )
                 .unwrap()
             )
@@ -279,13 +302,16 @@ mod tests {
 
         let add_columns = find_new_columns(&schema, &insert_batch.0).unwrap().unwrap();
 
-        assert_eq!(5, add_columns.add_columns.len());
+        assert_eq!(6, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];
         assert_eq!(
             ConcreteDataType::string_datatype(),
             ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(host_column.column_def.as_ref().unwrap().data_type)
-                    .unwrap()
+                ColumnDataTypeWrapper::try_new(
+                    host_column.column_def.as_ref().unwrap().data_type,
+                    None
+                )
+                .unwrap()
             )
         );
 
@@ -294,7 +320,8 @@ mod tests {
             ConcreteDataType::float64_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
-                    memory_column.column_def.as_ref().unwrap().data_type
+                    memory_column.column_def.as_ref().unwrap().data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -304,8 +331,11 @@ mod tests {
         assert_eq!(
             ConcreteDataType::time_datatype(TimeUnit::Millisecond),
             ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(time_column.column_def.as_ref().unwrap().data_type)
-                    .unwrap()
+                ColumnDataTypeWrapper::try_new(
+                    time_column.column_def.as_ref().unwrap().data_type,
+                    None
+                )
+                .unwrap()
             )
         );
 
@@ -314,7 +344,8 @@ mod tests {
             ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
-                    interval_column.column_def.as_ref().unwrap().data_type
+                    interval_column.column_def.as_ref().unwrap().data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -326,7 +357,25 @@ mod tests {
             ConcreteDataType::duration_millisecond_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
-                    duration_column.column_def.as_ref().unwrap().data_type
+                    duration_column.column_def.as_ref().unwrap().data_type,
+                    None
+                )
+                .unwrap()
+            )
+        );
+
+        let decimal_column = &add_columns.add_columns[5];
+        assert_eq!(
+            ConcreteDataType::decimal128_datatype(38, 10),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    decimal_column.column_def.as_ref().unwrap().data_type,
+                    decimal_column
+                        .column_def
+                        .as_ref()
+                        .unwrap()
+                        .datatype_extension
+                        .clone()
                 )
                 .unwrap()
             )
@@ -360,6 +409,7 @@ mod tests {
             values: Some(host_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::String as i32,
+            ..Default::default()
         };
 
         let cpu_vals = Values {
@@ -372,6 +422,7 @@ mod tests {
             values: Some(cpu_vals),
             null_mask: vec![2],
             datatype: ColumnDataType::Float64 as i32,
+            ..Default::default()
         };
 
         let mem_vals = Values {
@@ -384,6 +435,7 @@ mod tests {
             values: Some(mem_vals),
             null_mask: vec![1],
             datatype: ColumnDataType::Float64 as i32,
+            ..Default::default()
         };
 
         let time_vals = Values {
@@ -396,6 +448,7 @@ mod tests {
             values: Some(time_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::TimeMillisecond as i32,
+            ..Default::default()
         };
 
         let interval1 = IntervalMonthDayNano {
@@ -418,6 +471,7 @@ mod tests {
             values: Some(interval_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::IntervalMonthDayNano as i32,
+            ..Default::default()
         };
 
         let duration_vals = Values {
@@ -430,6 +484,7 @@ mod tests {
             values: Some(duration_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::DurationMillisecond as i32,
+            ..Default::default()
         };
 
         let ts_vals = Values {
@@ -442,6 +497,24 @@ mod tests {
             values: Some(ts_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::TimestampMillisecond as i32,
+            ..Default::default()
+        };
+        let decimal_vals = Values {
+            decimal128_values: vec![Decimal128 { hi: 0, lo: 123 }, Decimal128 { hi: 0, lo: 456 }],
+            ..Default::default()
+        };
+        let decimal_column = Column {
+            column_name: "decimals".to_string(),
+            semantic_type: SemanticType::Field as i32,
+            values: Some(decimal_vals),
+            null_mask: vec![0],
+            datatype: ColumnDataType::Decimal128 as i32,
+            datatype_extension: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::DecimalType(DecimalTypeExtension {
+                    precision: 38,
+                    scale: 10,
+                })),
+            }),
         };
 
         (
@@ -453,6 +526,7 @@ mod tests {
                 interval_column,
                 duration_column,
                 ts_column,
+                decimal_column,
             ],
             row_count,
         )

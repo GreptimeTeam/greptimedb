@@ -12,116 +12,127 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::marker::PhantomData;
+use std::sync::Arc;
 
 use ::auth::UserProviderRef;
+use axum::extract::State;
 use axum::http::{self, Request, StatusCode};
-use axum::response::Response;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_telemetry::warn;
-use futures::future::BoxFuture;
+use common_time::timezone::parse_timezone;
+use common_time::Timezone;
 use headers::Header;
-use http_body::Body;
 use secrecy::SecretString;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
-use tower_http::auth::AsyncAuthorizeRequest;
 
-use super::header::GreptimeDbName;
+use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
 use super::PUBLIC_APIS;
 use crate::error::{
-    self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
-    NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu,
+    self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
+    NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
+use crate::http::error_result::ErrorResponse;
 use crate::http::HTTP_API_PREFIX;
+use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
 
-pub struct HttpAuth<RespBody> {
+/// AuthState is a holder state for [`UserProviderRef`]
+/// during [`check_http_auth`] function in axum's middleware
+#[derive(Clone)]
+pub struct AuthState {
     user_provider: Option<UserProviderRef>,
-    _ty: PhantomData<RespBody>,
 }
 
-impl<RespBody> HttpAuth<RespBody> {
+impl AuthState {
     pub fn new(user_provider: Option<UserProviderRef>) -> Self {
-        Self {
-            user_provider,
-            _ty: PhantomData,
+        Self { user_provider }
+    }
+}
+
+pub async fn inner_auth<B>(
+    user_provider: Option<UserProviderRef>,
+    mut req: Request<B>,
+) -> std::result::Result<Request<B>, Response> {
+    // 1. prepare
+    let (catalog, schema) = extract_catalog_and_schema(&req);
+    // TODO(ruihang): move this out of auth module
+    let timezone = Arc::new(extract_timezone(&req));
+    let query_ctx_builder = QueryContextBuilder::default()
+        .current_catalog(catalog.clone())
+        .current_schema(schema.clone())
+        .timezone(timezone);
+
+    let query_ctx = query_ctx_builder.build();
+    let need_auth = need_auth(&req);
+
+    // 2. check if auth is needed
+    let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
+        user_provider
+    } else {
+        query_ctx.set_current_user(Some(auth::userinfo_by_name(None)));
+        let _ = req.extensions_mut().insert(query_ctx);
+        return Ok(req);
+    };
+
+    // 3. get username and pwd
+    let (username, password) = match extract_username_and_password(&req) {
+        Ok((username, password)) => (username, password),
+        Err(e) => {
+            warn!("extract username and password failed: {}", e);
+            crate::metrics::METRIC_AUTH_FAILURE
+                .with_label_values(&[e.status_code().as_ref()])
+                .inc();
+            return Err(err_response(e));
+        }
+    };
+
+    // 4. auth
+    match user_provider
+        .auth(
+            auth::Identity::UserId(&username, None),
+            auth::Password::PlainText(password),
+            &catalog,
+            &schema,
+        )
+        .await
+    {
+        Ok(userinfo) => {
+            query_ctx.set_current_user(Some(userinfo));
+            let _ = req.extensions_mut().insert(query_ctx);
+            Ok(req)
+        }
+        Err(e) => {
+            warn!("authenticate failed: {}", e);
+            crate::metrics::METRIC_AUTH_FAILURE
+                .with_label_values(&[e.status_code().as_ref()])
+                .inc();
+            Err(err_response(e))
         }
     }
 }
 
-impl<RespBody> Clone for HttpAuth<RespBody> {
-    fn clone(&self) -> Self {
-        Self {
-            user_provider: self.user_provider.clone(),
-            _ty: PhantomData,
-        }
+pub async fn check_http_auth<B>(
+    State(auth_state): State<AuthState>,
+    req: Request<B>,
+    next: Next<B>,
+) -> Response {
+    match inner_auth(auth_state.user_provider, req).await {
+        Ok(req) => next.run(req).await,
+        Err(resp) => resp,
     }
 }
 
-impl<B, RespBody> AsyncAuthorizeRequest<B> for HttpAuth<RespBody>
-where
-    B: Send + Sync + 'static,
-    RespBody: Body + Default,
-{
-    type RequestBody = B;
-    type ResponseBody = RespBody;
-    type Future = BoxFuture<'static, std::result::Result<Request<B>, Response<Self::ResponseBody>>>;
-
-    fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
-        let user_provider = self.user_provider.clone();
-        Box::pin(async move {
-            let (catalog, schema) = extract_catalog_and_schema(&request);
-            let query_ctx = QueryContext::with(catalog, schema);
-            let need_auth = need_auth(&request);
-
-            let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
-                user_provider
-            } else {
-                query_ctx.set_current_user(Some(auth::userinfo_by_name(None)));
-                let _ = request.extensions_mut().insert(query_ctx);
-                return Ok(request);
-            };
-
-            let (username, password) = match extract_username_and_password(&request) {
-                Ok((username, password)) => (username, password),
-                Err(e) => {
-                    warn!("extract username and password failed: {}", e);
-                    crate::metrics::METRIC_AUTH_FAILURE
-                        .with_label_values(&[e.status_code().as_ref()])
-                        .inc();
-                    return Err(unauthorized_resp());
-                }
-            };
-
-            match user_provider
-                .auth(
-                    ::auth::Identity::UserId(username.as_str(), None),
-                    ::auth::Password::PlainText(password),
-                    catalog,
-                    schema,
-                )
-                .await
-            {
-                Ok(userinfo) => {
-                    query_ctx.set_current_user(Some(userinfo));
-                    let _ = request.extensions_mut().insert(query_ctx);
-                    Ok(request)
-                }
-                Err(e) => {
-                    warn!("authenticate failed: {}", e);
-                    crate::metrics::METRIC_AUTH_FAILURE
-                        .with_label_values(&[e.status_code().as_ref()])
-                        .inc();
-                    Err(unauthorized_resp())
-                }
-            }
-        })
-    }
+fn err_response(err: impl ErrorExt) -> Response {
+    (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(err)).into_response()
 }
 
-fn extract_catalog_and_schema<B: Send + Sync + 'static>(request: &Request<B>) -> (&str, &str) {
+pub fn extract_catalog_and_schema<B>(request: &Request<B>) -> (String, String) {
     // parse database from header
     let dbname = request
         .headers()
@@ -130,41 +141,57 @@ fn extract_catalog_and_schema<B: Send + Sync + 'static>(request: &Request<B>) ->
         .and_then(|header| header.to_str().ok())
         .or_else(|| {
             let query = request.uri().query().unwrap_or_default();
-            extract_db_from_query(query)
+            if is_influxdb_v2_request(request) {
+                extract_db_from_query(query).or_else(|| extract_bucket_from_query(query))
+            } else {
+                extract_db_from_query(query)
+            }
         })
         .unwrap_or(DEFAULT_SCHEMA_NAME);
 
     parse_catalog_and_schema_from_db_string(dbname)
 }
 
-fn get_influxdb_credentials<B: Send + Sync + 'static>(
-    request: &Request<B>,
-) -> Result<Option<(Username, Password)>> {
+fn extract_timezone<B>(request: &Request<B>) -> Timezone {
+    // parse timezone from header
+    let timezone = request
+        .headers()
+        .get(&GREPTIME_TIMEZONE_HEADER_NAME)
+        // eat this invalid ascii error and give user the final IllegalParam error
+        .and_then(|header| header.to_str().ok())
+        .unwrap_or("");
+    parse_timezone(Some(timezone))
+}
+
+fn get_influxdb_credentials<B>(request: &Request<B>) -> Result<Option<(Username, Password)>> {
     // compat with influxdb v2 and v1
     if let Some(header) = request.headers().get(http::header::AUTHORIZATION) {
-        // try v2 first
+        // try header
         let (auth_scheme, credential) = header
             .to_str()
-            .context(InvisibleASCIISnafu)?
+            .context(InvalidAuthHeaderInvisibleASCIISnafu)?
             .split_once(' ')
-            .context(InvalidAuthorizationHeaderSnafu)?;
-        ensure!(
-            auth_scheme.to_lowercase() == "token",
-            UnsupportedAuthSchemeSnafu { name: auth_scheme }
-        );
+            .context(InvalidAuthHeaderSnafu)?;
 
-        let (username, password) = credential
-            .split_once(':')
-            .context(InvalidAuthorizationHeaderSnafu)?;
+        let (username, password) = match auth_scheme.to_lowercase().as_str() {
+            "token" => {
+                let (u, p) = credential.split_once(':').context(InvalidAuthHeaderSnafu)?;
+                (u.to_string(), p.to_string().into())
+            }
+            "basic" => decode_basic(credential)?,
+            _ => UnsupportedAuthSchemeSnafu { name: auth_scheme }.fail()?,
+        };
 
-        Ok(Some((username.to_string(), password.to_string().into())))
+        Ok(Some((username, password)))
     } else {
-        // try v1
+        // try u and p in query
         let Some(query_str) = request.uri().query() else {
             return Ok(None);
         };
 
-        match extract_influxdb_user_from_query(query_str) {
+        let query_str = urlencoding::decode(query_str).context(UrlDecodeSnafu)?;
+
+        match extract_influxdb_user_from_query(&query_str) {
             (None, None) => Ok(None),
             (Some(username), Some(password)) => {
                 Ok(Some((username.to_string(), password.to_string().into())))
@@ -178,10 +205,8 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
     }
 }
 
-fn extract_username_and_password<B: Send + Sync + 'static>(
-    request: &Request<B>,
-) -> Result<(Username, Password)> {
-    Ok(if request.uri().path().contains("influxdb") {
+pub fn extract_username_and_password<B>(request: &Request<B>) -> Result<(Username, Password)> {
+    Ok(if is_influxdb_request(request) {
         // compatible with influxdb auth
         get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
     } else {
@@ -191,15 +216,6 @@ fn extract_username_and_password<B: Send + Sync + 'static>(
             AuthScheme::Basic(username, password) => (username, password),
         }
     })
-}
-
-fn unauthorized_resp<RespBody>() -> Response<RespBody>
-where
-    RespBody: Body + Default,
-{
-    let mut res = Response::new(RespBody::default());
-    *res.status_mut() = StatusCode::UNAUTHORIZED;
-    res
 }
 
 #[derive(Debug)]
@@ -214,13 +230,10 @@ impl TryFrom<&str> for AuthScheme {
     type Error = error::Error;
 
     fn try_from(value: &str) -> Result<Self> {
-        let (scheme, encoded_credentials) = value
-            .split_once(' ')
-            .context(InvalidAuthorizationHeaderSnafu)?;
-        ensure!(
-            !encoded_credentials.contains(' '),
-            InvalidAuthorizationHeaderSnafu
-        );
+        let (scheme, encoded_credentials) =
+            value.split_once(' ').context(InvalidAuthHeaderSnafu)?;
+
+        ensure!(!encoded_credentials.contains(' '), InvalidAuthHeaderSnafu);
 
         match scheme.to_lowercase().as_str() {
             "basic" => decode_basic(encoded_credentials)
@@ -238,20 +251,23 @@ fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
         .get(http::header::AUTHORIZATION)
         .context(error::NotFoundAuthHeaderSnafu)?
         .to_str()
-        .context(InvisibleASCIISnafu)?;
+        .context(InvalidAuthHeaderInvisibleASCIISnafu)?;
 
     auth_header.try_into()
 }
 
 fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
-    let decoded = base64::decode(credential).context(error::InvalidBase64ValueSnafu)?;
-    let as_utf8 = String::from_utf8(decoded).context(error::InvalidUtf8ValueSnafu)?;
+    let decoded = BASE64_STANDARD
+        .decode(credential)
+        .context(error::InvalidBase64ValueSnafu)?;
+    let as_utf8 =
+        String::from_utf8(decoded).context(error::InvalidAuthHeaderInvalidUtf8ValueSnafu)?;
 
     if let Some((user_id, password)) = as_utf8.split_once(':') {
         return Ok((user_id.to_string(), password.to_string().into()));
     }
 
-    InvalidAuthorizationHeaderSnafu {}.fail()
+    InvalidAuthHeaderSnafu {}.fail()
 }
 
 fn need_auth<B>(req: &Request<B>) -> bool {
@@ -266,13 +282,24 @@ fn need_auth<B>(req: &Request<B>) -> bool {
     path.starts_with(HTTP_API_PREFIX)
 }
 
-fn extract_db_from_query(query: &str) -> Option<&str> {
+fn extract_param_from_query<'a>(query: &'a str, param: &'a str) -> Option<&'a str> {
+    let prefix = format!("{}=", param);
     for pair in query.split('&') {
-        if let Some(db) = pair.strip_prefix("db=") {
-            return if db.is_empty() { None } else { Some(db) };
+        if let Some(param) = pair.strip_prefix(&prefix) {
+            return if param.is_empty() { None } else { Some(param) };
         }
     }
     None
+}
+
+fn extract_db_from_query(query: &str) -> Option<&str> {
+    extract_param_from_query(query, "db")
+}
+
+/// InfluxDB v2 uses "bucket" instead of "db"
+/// https://docs.influxdata.com/influxdb/v1/tools/api/#apiv2write-http-endpoint
+fn extract_bucket_from_query(query: &str) -> Option<&str> {
+    extract_param_from_query(query, "bucket")
 }
 
 fn extract_influxdb_user_from_query(query: &str) -> (Option<&str>, Option<&str>) {
@@ -359,10 +386,7 @@ mod tests {
 
         let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6 cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);
-        assert_matches!(
-            res.err(),
-            Some(error::Error::InvalidAuthorizationHeader { .. })
-        );
+        assert_matches!(res.err(), Some(error::Error::InvalidAuthHeader { .. }));
 
         let wrong_req = mock_http_request(Some("Digest dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);
@@ -390,7 +414,7 @@ mod tests {
             .unwrap();
 
         let db = extract_catalog_and_schema(&req);
-        assert_eq!(db, ("greptime", "tomcat"));
+        assert_eq!(db, ("greptime".to_string(), "tomcat".to_string()));
     }
 
     #[test]
@@ -398,10 +422,14 @@ mod tests {
         assert_matches!(extract_db_from_query(""), None);
         assert_matches!(extract_db_from_query("&"), None);
         assert_matches!(extract_db_from_query("db="), None);
+        assert_matches!(extract_bucket_from_query("bucket="), None);
+        assert_matches!(extract_bucket_from_query("db=foo"), None);
         assert_matches!(extract_db_from_query("db=foo"), Some("foo"));
+        assert_matches!(extract_bucket_from_query("bucket=foo"), Some("foo"));
         assert_matches!(extract_db_from_query("name=bar"), None);
         assert_matches!(extract_db_from_query("db=&name=bar"), None);
         assert_matches!(extract_db_from_query("db=foo&name=bar"), Some("foo"));
+        assert_matches!(extract_bucket_from_query("db=foo&bucket=bar"), Some("bar"));
         assert_matches!(extract_db_from_query("name=bar&db="), None);
         assert_matches!(extract_db_from_query("name=bar&db=foo"), Some("foo"));
         assert_matches!(extract_db_from_query("name=bar&db=&name=bar"), None);

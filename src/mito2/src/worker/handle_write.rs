@@ -17,11 +17,13 @@
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
+use api::v1::OpType;
+use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
-use crate::error::{RejectWriteSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RejectWriteSnafu, Result};
 use crate::metrics::{
     WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
 };
@@ -60,7 +62,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        let mut region_ctxs = self.prepare_region_write_ctx(write_requests);
+        // Prepare write context.
+        let mut region_ctxs = {
+            let _timer = WRITE_STAGE_ELAPSED
+                .with_label_values(&["prepare_ctx"])
+                .start_timer();
+            self.prepare_region_write_ctx(write_requests)
+        };
 
         // Write to WAL.
         {
@@ -73,12 +81,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_ctx.set_error(e);
                 }
             }
-            if let Err(e) = wal_writer.write_to_wal().await.map_err(Arc::new) {
-                // Failed to write wal.
-                for mut region_ctx in region_ctxs.into_values() {
-                    region_ctx.set_error(e.clone());
+            match wal_writer.write_to_wal().await.map_err(Arc::new) {
+                Ok(response) => {
+                    for (region_id, region_ctx) in region_ctxs.iter_mut() {
+                        // Safety: the log store implementation ensures that either the `write_to_wal` fails and no
+                        // response is returned or the last entry ids for each region do exist.
+                        let last_entry_id =
+                            response.last_entry_ids.get(&region_id.as_u64()).unwrap();
+                        region_ctx.set_next_entry_id(last_entry_id + 1);
+                    }
                 }
-                return;
+                Err(e) => {
+                    // Failed to write wal.
+                    for mut region_ctx in region_ctxs.into_values() {
+                        region_ctx.set_error(e.clone());
+                    }
+                    return;
+                }
             }
         }
 
@@ -133,13 +152,27 @@ impl<S> RegionWorkerLoop<S> {
                     continue;
                 };
 
-                let region_ctx = RegionWriteCtx::new(region.region_id, &region.version_control);
+                let region_ctx = RegionWriteCtx::new(
+                    region.region_id,
+                    &region.version_control,
+                    region.wal_options.clone(),
+                );
 
                 e.insert(region_ctx);
             }
 
             // Safety: Now we ensure the region exists.
             let region_ctx = region_ctxs.get_mut(&region_id).unwrap();
+
+            if let Err(e) = check_op_type(
+                region_ctx.version().options.append_mode,
+                &sender_req.request,
+            ) {
+                // Do not allow non-put op under append mode.
+                sender_req.sender.send(Err(e));
+
+                continue;
+            }
 
             // Checks whether request schema is compatible with region schema.
             if let Err(e) =
@@ -194,6 +227,21 @@ fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetad
         } else {
             return Err(e);
         }
+    }
+
+    Ok(())
+}
+
+/// Rejects delete request under append mode.
+fn check_op_type(append_mode: bool, request: &WriteRequest) -> Result<()> {
+    if append_mode {
+        ensure!(
+            request.op_type == OpType::Put,
+            InvalidRequestSnafu {
+                region_id: request.region_id,
+                reason: "Only put is allowed under append mode",
+            }
+        );
     }
 
     Ok(())

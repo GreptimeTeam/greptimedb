@@ -1,0 +1,30 @@
+[package]
+name = "flow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+api.workspace = true
+common-decimal.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
+datatypes.workspace = true
+enum_dispatch = "0.3"
+hydroflow = "0.5.0"
+itertools.workspace = true
+num-traits = "0.2"
+serde.workspace = true
+servers.workspace = true
+smallvec.workspace = true
+snafu.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+
+[dev-dependencies]
+serde_json = "1.0"

@@ -16,20 +16,17 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
-use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::FileId;
+use crate::sst::file::FileMeta;
 
 /// Request to remove a file.
 #[derive(Debug)]
 pub struct PurgeRequest {
-    /// Region id of the file.
-    pub region_id: RegionId,
-    /// Id of the file.
-    pub file_id: FileId,
+    /// File meta.
+    pub file_meta: FileMeta,
 }
 
 /// A worker to delete files in background.
@@ -72,24 +69,22 @@ impl LocalFilePurger {
 
 impl FilePurger for LocalFilePurger {
     fn send_request(&self, request: PurgeRequest) {
-        let file_id = request.file_id;
-        let region_id = request.region_id;
+        let file_meta = request.file_meta;
         let sst_layer = self.sst_layer.clone();
 
         // Remove meta of the file from cache.
         if let Some(cache) = &self.cache_manager {
-            cache.remove_parquet_meta_data(region_id, file_id);
+            cache.remove_parquet_meta_data(file_meta.region_id, file_meta.file_id);
         }
 
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
-            if let Err(e) = sst_layer.delete_sst(file_id).await {
-                error!(e; "Failed to delete SST file, file: {}, region: {}", 
-                    file_id.as_parquet(), region_id);
+            if let Err(e) = sst_layer.delete_sst(&file_meta).await {
+                error!(e; "Failed to delete SST file, file_id: {}, region: {}", 
+                    file_meta.file_id, file_meta.region_id);
             } else {
                 info!(
-                    "Successfully deleted SST file: {}, region: {}",
-                    file_id.as_parquet(),
-                    region_id
+                    "Successfully deleted SST file, file_id: {}, region: {}",
+                    file_meta.file_id, file_meta.region_id
                 );
             }
         })) {
@@ -102,29 +97,37 @@ impl FilePurger for LocalFilePurger {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
-    use object_store::{util, ObjectStore};
+    use object_store::util::join_dir;
+    use object_store::ObjectStore;
+    use smallvec::SmallVec;
 
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
-    use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange};
+    use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType};
+    use crate::sst::index::intermediate::IntermediateManager;
+    use crate::sst::location;
 
     #[tokio::test]
     async fn test_file_purge() {
         common_telemetry::init_default_ut_logging();
 
         let dir = create_temp_dir("file-purge");
+        let dir_path = dir.path().display().to_string();
         let mut builder = Fs::default();
-        builder.root(dir.path().to_str().unwrap());
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        builder.root(&dir_path);
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
-        let path = util::join_path(sst_dir, &sst_file_id.as_parquet());
+        let path = location::sst_file_path(sst_dir, sst_file_id);
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&dir_path, "intm"))
+            .await
+            .unwrap();
 
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
         let scheduler = Arc::new(LocalScheduler::new(3));
-        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone()));
+        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone(), intm_mgr));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 
@@ -136,6 +139,8 @@ mod tests {
                     time_range: FileTimeRange::default(),
                     level: 0,
                     file_size: 4096,
+                    available_indexes: Default::default(),
+                    index_file_size: 0,
                 },
                 file_purger,
             );
@@ -145,9 +150,58 @@ mod tests {
 
         scheduler.stop(true).await.unwrap();
 
-        assert!(!object_store
-            .is_exist(&format!("{}/{}", sst_dir, sst_file_id.as_parquet()))
+        assert!(!object_store.is_exist(&path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_file_purge_with_index() {
+        common_telemetry::init_default_ut_logging();
+
+        let dir = create_temp_dir("file-purge");
+        let dir_path = dir.path().display().to_string();
+        let mut builder = Fs::default();
+        builder.root(&dir_path);
+        let sst_file_id = FileId::random();
+        let sst_dir = "table1";
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&dir_path, "intm"))
             .await
-            .unwrap());
+            .unwrap();
+        let path = location::sst_file_path(sst_dir, sst_file_id);
+
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        object_store.write(&path, vec![0; 4096]).await.unwrap();
+
+        let index_path = location::index_file_path(sst_dir, sst_file_id);
+        object_store
+            .write(&index_path, vec![0; 4096])
+            .await
+            .unwrap();
+
+        let scheduler = Arc::new(LocalScheduler::new(3));
+        let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone(), intm_mgr));
+
+        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
+
+        {
+            let handle = FileHandle::new(
+                FileMeta {
+                    region_id: 0.into(),
+                    file_id: sst_file_id,
+                    time_range: FileTimeRange::default(),
+                    level: 0,
+                    file_size: 4096,
+                    available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                    index_file_size: 4096,
+                },
+                file_purger,
+            );
+            // mark file as deleted and drop the handle, we expect the sst file and the index file are deleted.
+            handle.mark_deleted();
+        }
+
+        scheduler.stop(true).await.unwrap();
+
+        assert!(!object_store.is_exist(&path).await.unwrap());
+        assert!(!object_store.is_exist(&index_path).await.unwrap());
     }
 }

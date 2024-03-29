@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +28,7 @@ use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use rand::Rng;
+use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
 
 use self::metadata::TableMetadataBencher;
@@ -61,7 +62,9 @@ pub struct BenchTableMetadataCommand {
 
 impl BenchTableMetadataCommand {
     pub async fn build(&self) -> Result<Instance> {
-        let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr]).await.unwrap();
+        let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr], 128)
+            .await
+            .unwrap();
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(etcd_store));
 
@@ -69,7 +72,7 @@ impl BenchTableMetadataCommand {
             table_metadata_manager,
             count: self.count,
         };
-        Ok(Instance::Tool(Box::new(tool)))
+        Ok(Instance::new(Box::new(tool)))
     }
 }
 
@@ -137,12 +140,12 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
     }
 }
 
-fn create_region_routes() -> Vec<RegionRoute> {
-    let mut regions = Vec::with_capacity(100);
+fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
+    let mut region_routes = Vec::with_capacity(100);
     let mut rng = rand::thread_rng();
 
-    for region_id in 0..64u64 {
-        regions.push(RegionRoute {
+    for region_id in regions.into_iter().map(u64::from) {
+        region_routes.push(RegionRoute {
             region: Region {
                 id: region_id.into(),
                 name: String::new(),
@@ -155,8 +158,15 @@ fn create_region_routes() -> Vec<RegionRoute> {
             }),
             follower_peers: vec![],
             leader_status: None,
+            leader_down_since: None,
         });
     }
 
-    regions
+    region_routes
+}
+
+fn create_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, String> {
+    // TODO(niebayes): construct region wal options for benchmark.
+    let _ = regions;
+    HashMap::default()
 }

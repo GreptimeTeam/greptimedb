@@ -13,29 +13,32 @@
 // limitations under the License.
 
 mod ask_leader;
-mod ddl;
 mod heartbeat;
 mod load_balance;
 mod lock;
+mod procedure;
 
 mod store;
 
 use api::v1::meta::Role;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::ddl::{DdlTaskExecutor, ExecutorContext};
+use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
+use common_meta::rpc::procedure::{
+    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_telemetry::info;
-use ddl::Client as DdlClient;
 use heartbeat::Client as HeartbeatClient;
 use lock::Client as LockClient;
+use procedure::Client as ProcedureClient;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
 
@@ -56,7 +59,7 @@ pub struct MetaClientBuilder {
     enable_router: bool,
     enable_store: bool,
     enable_lock: bool,
-    enable_ddl: bool,
+    enable_procedure: bool,
     channel_manager: Option<ChannelManager>,
     ddl_channel_manager: Option<ChannelManager>,
     heartbeat_channel_manager: Option<ChannelManager>,
@@ -99,9 +102,9 @@ impl MetaClientBuilder {
         }
     }
 
-    pub fn enable_ddl(self) -> Self {
+    pub fn enable_procedure(self) -> Self {
         Self {
-            enable_ddl: true,
+            enable_procedure: true,
             ..self
         }
     }
@@ -155,9 +158,9 @@ impl MetaClientBuilder {
         if self.enable_lock {
             client.lock = Some(LockClient::new(self.id, self.role, mgr.clone()));
         }
-        if self.enable_ddl {
+        if self.enable_procedure {
             let mgr = self.ddl_channel_manager.unwrap_or(mgr);
-            client.ddl = Some(DdlClient::new(
+            client.procedure = Some(ProcedureClient::new(
                 self.id,
                 self.role,
                 mgr,
@@ -176,17 +179,39 @@ pub struct MetaClient {
     heartbeat: Option<HeartbeatClient>,
     store: Option<StoreClient>,
     lock: Option<LockClient>,
-    ddl: Option<DdlClient>,
+    procedure: Option<ProcedureClient>,
 }
 
 #[async_trait::async_trait]
-impl DdlTaskExecutor for MetaClient {
+impl ProcedureExecutor for MetaClient {
     async fn submit_ddl_task(
         &self,
         _ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> MetaResult<SubmitDdlTaskResponse> {
         self.submit_ddl_task(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
+    async fn migrate_region(
+        &self,
+        _ctx: &ExecutorContext,
+        request: MigrateRegionRequest,
+    ) -> MetaResult<MigrateRegionResponse> {
+        self.migrate_region(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
+    async fn query_procedure_state(
+        &self,
+        _ctx: &ExecutorContext,
+        pid: &str,
+    ) -> MetaResult<ProcedureStateResponse> {
+        self.query_procedure_state(pid)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -228,7 +253,7 @@ impl MetaClient {
             client.start(urls.clone()).await?;
             info!("Lock client started");
         }
-        if let Some(client) = &mut self.ddl {
+        if let Some(client) = &mut self.procedure {
             client.start(urls).await?;
             info!("DDL client started");
         }
@@ -328,12 +353,33 @@ impl MetaClient {
         Ok(())
     }
 
+    /// Query the procedure state by its id.
+    pub async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
+        self.procedure_client()?.query_procedure_state(pid).await
+    }
+
+    /// Submit a region migration task.
+    pub async fn migrate_region(
+        &self,
+        request: MigrateRegionRequest,
+    ) -> Result<MigrateRegionResponse> {
+        self.procedure_client()?
+            .migrate_region(
+                request.region_id,
+                request.from_peer,
+                request.to_peer,
+                request.replay_timeout,
+            )
+            .await
+    }
+
+    /// Submit a DDL task
     pub async fn submit_ddl_task(
         &self,
         req: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
         let res = self
-            .ddl_client()?
+            .procedure_client()?
             .submit_ddl_task(req.try_into().context(error::ConvertMetaRequestSnafu)?)
             .await?
             .try_into()
@@ -364,8 +410,8 @@ impl MetaClient {
     }
 
     #[inline]
-    pub fn ddl_client(&self) -> Result<DdlClient> {
-        self.ddl
+    pub fn procedure_client(&self) -> Result<ProcedureClient> {
+        self.procedure
             .clone()
             .context(error::NotStartedSnafu { name: "ddl_client" })
     }
@@ -385,7 +431,7 @@ impl MetaClient {
 mod tests {
     use api::v1::meta::{HeartbeatRequest, Peer};
     use meta_srv::metasrv::SelectorContext;
-    use meta_srv::selector::{Namespace, Selector};
+    use meta_srv::selector::{Namespace, Selector, SelectorOptions};
     use meta_srv::Result as MetaResult;
 
     use super::*;
@@ -547,7 +593,12 @@ mod tests {
         type Context = SelectorContext;
         type Output = Vec<Peer>;
 
-        async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> MetaResult<Self::Output> {
+        async fn select(
+            &self,
+            _ns: Namespace,
+            _ctx: &Self::Context,
+            _opts: SelectorOptions,
+        ) -> MetaResult<Self::Output> {
             Ok(vec![
                 Peer {
                     id: 0,

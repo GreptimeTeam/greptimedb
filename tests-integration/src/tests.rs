@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod instance_kafka_wal_test;
 mod instance_test;
 mod promql_test;
 mod test_util;
@@ -42,6 +43,7 @@ impl MockDistributedInstance {
 }
 
 pub async fn create_distributed_instance(test_name: &str) -> MockDistributedInstance {
-    let cluster = GreptimeDbClusterBuilder::new(test_name).build().await;
+    let builder = GreptimeDbClusterBuilder::new(test_name).await;
+    let cluster = builder.build().await;
     MockDistributedInstance(cluster)
 }

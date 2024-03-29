@@ -14,18 +14,18 @@
 
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
-use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use common_base::bytes::{Bytes, StringBytes};
+use common_decimal::Decimal128;
 use common_telemetry::logging;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::interval::IntervalUnit;
 use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
-use common_time::{Duration, Interval};
+use common_time::{Duration, Interval, Timezone};
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,9 @@ pub enum Value {
     Int64(i64),
     Float32(OrderedF32),
     Float64(OrderedF64),
+
+    // Decimal type:
+    Decimal128(Decimal128),
 
     // String types:
     String(StringBytes),
@@ -116,40 +119,50 @@ impl Display for Value {
                     .join(", ");
                 write!(f, "{}[{}]", v.datatype.name(), items)
             }
+            Value::Decimal128(v) => write!(f, "{}", v),
         }
     }
 }
 
-impl Value {
-    /// Returns data type of the value.
-    ///
-    /// # Panics
-    /// Panics if the data type is not supported.
-    pub fn data_type(&self) -> ConcreteDataType {
-        match self {
-            Value::Null => ConcreteDataType::null_datatype(),
-            Value::Boolean(_) => ConcreteDataType::boolean_datatype(),
-            Value::UInt8(_) => ConcreteDataType::uint8_datatype(),
-            Value::UInt16(_) => ConcreteDataType::uint16_datatype(),
-            Value::UInt32(_) => ConcreteDataType::uint32_datatype(),
-            Value::UInt64(_) => ConcreteDataType::uint64_datatype(),
-            Value::Int8(_) => ConcreteDataType::int8_datatype(),
-            Value::Int16(_) => ConcreteDataType::int16_datatype(),
-            Value::Int32(_) => ConcreteDataType::int32_datatype(),
-            Value::Int64(_) => ConcreteDataType::int64_datatype(),
-            Value::Float32(_) => ConcreteDataType::float32_datatype(),
-            Value::Float64(_) => ConcreteDataType::float64_datatype(),
-            Value::String(_) => ConcreteDataType::string_datatype(),
-            Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            Value::Date(_) => ConcreteDataType::date_datatype(),
-            Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
-            Value::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
-            Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-            Value::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
-            Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
-            Value::Duration(d) => ConcreteDataType::duration_datatype(d.unit()),
+macro_rules! define_data_type_func {
+    ($struct: ident) => {
+        /// Returns data type of the value.
+        ///
+        /// # Panics
+        /// Panics if the data type is not supported.
+        pub fn data_type(&self) -> ConcreteDataType {
+            match self {
+                $struct::Null => ConcreteDataType::null_datatype(),
+                $struct::Boolean(_) => ConcreteDataType::boolean_datatype(),
+                $struct::UInt8(_) => ConcreteDataType::uint8_datatype(),
+                $struct::UInt16(_) => ConcreteDataType::uint16_datatype(),
+                $struct::UInt32(_) => ConcreteDataType::uint32_datatype(),
+                $struct::UInt64(_) => ConcreteDataType::uint64_datatype(),
+                $struct::Int8(_) => ConcreteDataType::int8_datatype(),
+                $struct::Int16(_) => ConcreteDataType::int16_datatype(),
+                $struct::Int32(_) => ConcreteDataType::int32_datatype(),
+                $struct::Int64(_) => ConcreteDataType::int64_datatype(),
+                $struct::Float32(_) => ConcreteDataType::float32_datatype(),
+                $struct::Float64(_) => ConcreteDataType::float64_datatype(),
+                $struct::String(_) => ConcreteDataType::string_datatype(),
+                $struct::Binary(_) => ConcreteDataType::binary_datatype(),
+                $struct::Date(_) => ConcreteDataType::date_datatype(),
+                $struct::DateTime(_) => ConcreteDataType::datetime_datatype(),
+                $struct::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
+                $struct::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+                $struct::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
+                $struct::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
+                $struct::Duration(d) => ConcreteDataType::duration_datatype(d.unit()),
+                $struct::Decimal128(d) => {
+                    ConcreteDataType::decimal128_datatype(d.precision(), d.scale())
+                }
+            }
         }
-    }
+    };
+}
+
+impl Value {
+    define_data_type_func!(Value);
 
     /// Returns true if this is a null value.
     pub fn is_null(&self) -> bool {
@@ -192,6 +205,7 @@ impl Value {
             Value::Time(v) => ValueRef::Time(*v),
             Value::Interval(v) => ValueRef::Interval(*v),
             Value::Duration(v) => ValueRef::Duration(*v),
+            Value::Decimal128(v) => ValueRef::Decimal128(*v),
         }
     }
 
@@ -199,6 +213,22 @@ impl Value {
     pub fn as_timestamp(&self) -> Option<Timestamp> {
         match self {
             Value::Timestamp(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to Interval. Return None if value is not a valid interval data type.
+    pub fn as_interval(&self) -> Option<Interval> {
+        match self {
+            Value::Interval(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to utf8 String. Return None if value is not a valid string data type.
+    pub fn as_string(&self) -> Option<String> {
+        match self {
+            Value::String(bytes) => Some(bytes.as_utf8().to_string()),
             _ => None,
         }
     }
@@ -224,6 +254,17 @@ impl Value {
         match self {
             Value::Int64(v) => Some(Time::new_millisecond(*v)),
             Value::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to u64. Return None if value is not a valid uint64 data type.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            Value::UInt64(v) => Some(*v),
             _ => None,
         }
     }
@@ -271,6 +312,7 @@ impl Value {
                 TimeUnit::Microsecond => LogicalTypeId::DurationMicrosecond,
                 TimeUnit::Nanosecond => LogicalTypeId::DurationNanosecond,
             },
+            Value::Decimal128(_) => LogicalTypeId::Decimal128,
         }
     }
 
@@ -318,11 +360,45 @@ impl Value {
                 IntervalUnit::MonthDayNano => ScalarValue::IntervalMonthDayNano(Some(v.to_i128())),
             },
             Value::Duration(d) => duration_to_scalar_value(d.unit(), Some(d.value())),
+            Value::Decimal128(d) => {
+                let (v, p, s) = d.to_scalar_value();
+                ScalarValue::Decimal128(v, p, s)
+            }
         };
 
         Ok(scalar_value)
     }
 }
+
+pub trait TryAsPrimitive<T: LogicalPrimitiveType> {
+    fn try_as_primitive(&self) -> Option<T::Native>;
+}
+
+macro_rules! impl_try_as_primitive {
+    ($Type: ident, $Variant: ident) => {
+        impl TryAsPrimitive<crate::types::$Type> for Value {
+            fn try_as_primitive(
+                &self,
+            ) -> Option<<crate::types::$Type as crate::types::LogicalPrimitiveType>::Native> {
+                match self {
+                    Value::$Variant(v) => Some((*v).into()),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+impl_try_as_primitive!(Int8Type, Int8);
+impl_try_as_primitive!(Int16Type, Int16);
+impl_try_as_primitive!(Int32Type, Int32);
+impl_try_as_primitive!(Int64Type, Int64);
+impl_try_as_primitive!(UInt8Type, UInt8);
+impl_try_as_primitive!(UInt16Type, UInt16);
+impl_try_as_primitive!(UInt32Type, UInt32);
+impl_try_as_primitive!(UInt64Type, UInt64);
+impl_try_as_primitive!(Float32Type, Float32);
+impl_try_as_primitive!(Float64Type, Float64);
 
 pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValue> {
     Ok(match output_type {
@@ -357,6 +433,7 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ),
         ConcreteDataType::Time(t) => time_to_scalar_value(t.unit(), None)?,
         ConcreteDataType::Duration(d) => duration_to_scalar_value(d.unit(), None),
+        ConcreteDataType::Decimal128(d) => ScalarValue::Decimal128(None, d.precision(), d.scale()),
     })
 }
 
@@ -399,11 +476,15 @@ pub fn duration_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue
     }
 }
 
-/// Convert [ScalarValue] to [Timestamp].
+/// Convert [`ScalarValue`] to [`Timestamp`].
+/// If it's `ScalarValue::Utf8`, try to parse it with the given timezone.
 /// Return `None` if given scalar value cannot be converted to a valid timestamp.
-pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
+pub fn scalar_value_to_timestamp(
+    scalar: &ScalarValue,
+    timezone: Option<&Timezone>,
+) -> Option<Timestamp> {
     match scalar {
-        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s) {
+        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s, timezone) {
             Ok(t) => Some(t),
             Err(e) => {
                 logging::error!(e;"Failed to convert string literal {s} to timestamp");
@@ -533,6 +614,8 @@ impl_try_from_value!(Time, Time);
 impl_try_from_value!(DateTime, DateTime);
 impl_try_from_value!(Timestamp, Timestamp);
 impl_try_from_value!(Interval, Interval);
+impl_try_from_value!(Duration, Duration);
+impl_try_from_value!(Decimal128, Decimal128);
 
 macro_rules! impl_value_from {
     ($Variant: ident, $Type: ident) => {
@@ -575,6 +658,7 @@ impl_value_from!(Timestamp, Timestamp);
 impl_value_from!(Interval, Interval);
 impl_value_from!(Duration, Duration);
 impl_value_from!(String, String);
+impl_value_from!(Decimal128, Decimal128);
 
 impl From<&str> for Value {
     fn from(string: &str) -> Value {
@@ -620,6 +704,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Time(v) => serde_json::to_value(v.value())?,
             Value::Interval(v) => serde_json::to_value(v.to_i128())?,
             Value::Duration(v) => serde_json::to_value(v.value())?,
+            Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
         };
 
         Ok(json_value)
@@ -802,8 +887,10 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::DurationNanosecond(d) => d
                 .map(|x| Value::Duration(Duration::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
-            ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::Decimal256(_, _, _)
+            ScalarValue::Decimal128(v, p, s) => v
+                .map(|v| Value::Decimal128(Decimal128::new(v, p, s)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Decimal256(_, _, _)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
@@ -840,6 +927,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Interval(v) => Value::Interval(v),
             ValueRef::Duration(v) => Value::Duration(v),
             ValueRef::List(v) => v.to_value(),
+            ValueRef::Decimal128(v) => Value::Decimal128(v),
         }
     }
 }
@@ -861,6 +949,9 @@ pub enum ValueRef<'a> {
     Int64(i64),
     Float32(OrderedF32),
     Float64(OrderedF64),
+
+    // Decimal type:
+    Decimal128(Decimal128),
 
     // String types:
     String(&'a str),
@@ -896,6 +987,8 @@ macro_rules! impl_as_for_value_ref {
 }
 
 impl<'a> ValueRef<'a> {
+    define_data_type_func!(ValueRef);
+
     /// Returns true if this is null.
     pub fn is_null(&self) -> bool {
         matches!(self, ValueRef::Null)
@@ -1003,6 +1096,11 @@ impl<'a> ValueRef<'a> {
     pub fn as_list(&self) -> Result<Option<ListValueRef>> {
         impl_as_for_value_ref!(self, List)
     }
+
+    /// Cast itself to [Decimal128].
+    pub fn as_decimal128(&self) -> Result<Option<Decimal128>> {
+        impl_as_for_value_ref!(self, Decimal128)
+    }
 }
 
 impl<'a> PartialOrd for ValueRef<'a> {
@@ -1053,6 +1151,7 @@ impl_value_ref_from!(Timestamp, Timestamp);
 impl_value_ref_from!(Time, Time);
 impl_value_ref_from!(Interval, Interval);
 impl_value_ref_from!(Duration, Duration);
+impl_value_ref_from!(Decimal128, Decimal128);
 
 impl<'a> From<&'a str> for ValueRef<'a> {
     fn from(string: &'a str) -> ValueRef<'a> {
@@ -1093,6 +1192,14 @@ impl<'a> ListValueRef<'a> {
         match self {
             ListValueRef::Indexed { vector, idx } => vector.get(idx),
             ListValueRef::Ref { val } => Value::List(val.clone()),
+        }
+    }
+
+    /// Returns the inner element's data type.
+    fn datatype(&self) -> ConcreteDataType {
+        match self {
+            ListValueRef::Indexed { vector, .. } => vector.data_type(),
+            ListValueRef::Ref { val } => val.datatype().clone(),
         }
     }
 }
@@ -1143,6 +1250,7 @@ impl<'a> ValueRef<'a> {
             ValueRef::Time(_) => 16,
             ValueRef::Duration(_) => 16,
             ValueRef::Interval(_) => 24,
+            ValueRef::Decimal128(_) => 32,
             ValueRef::List(v) => match v {
                 ListValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
                 ListValueRef::Ref { val } => val.estimated_size(),
@@ -1154,6 +1262,7 @@ impl<'a> ValueRef<'a> {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
+    use common_time::timezone::set_default_timezone;
     use num_traits::Float;
 
     use super::*;
@@ -1438,11 +1547,14 @@ mod tests {
             ScalarValue::DurationNanosecond(None).try_into().unwrap()
         );
 
-        let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unsupported arrow data type, type: Decimal128(0, 0)"));
+        assert_eq!(
+            Value::Decimal128(Decimal128::new(1, 38, 10)),
+            ScalarValue::Decimal128(Some(1), 38, 10).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Decimal128(None, 0, 0).try_into().unwrap()
+        );
     }
 
     #[test]
@@ -1839,7 +1951,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
         assert_eq!(Value::UInt16(16).to_string(), "16");
@@ -2227,8 +2339,6 @@ mod tests {
 
     #[test]
     fn test_value_ref_estimated_size() {
-        assert_eq!(std::mem::size_of::<ValueRef>(), 24);
-
         check_value_ref_size_eq(&ValueRef::Boolean(true), 1);
         check_value_ref_size_eq(&ValueRef::UInt8(1), 1);
         check_value_ref_size_eq(&ValueRef::UInt16(1), 2);
@@ -2304,6 +2414,15 @@ mod tests {
                 idx: 2,
             }),
             85,
-        )
+        );
+        check_value_ref_size_eq(&ValueRef::Decimal128(Decimal128::new(1234, 3, 1)), 32)
+    }
+
+    #[test]
+    fn test_incorrect_default_value_issue_3479() {
+        let value = OrderedF64::from(0.047318541668048164);
+        let serialized = serde_json::to_string(&value).unwrap();
+        let deserialized: OrderedF64 = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value, deserialized);
     }
 }

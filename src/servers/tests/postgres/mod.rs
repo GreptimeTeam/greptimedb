@@ -14,7 +14,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use auth::UserProviderRef;
@@ -23,12 +23,13 @@ use common_runtime::Builder as RuntimeBuilder;
 use pgwire::api::Type;
 use rand::rngs::StdRng;
 use rand::Rng;
-use rustls::client::{ServerCertVerified, ServerCertVerifier};
-use rustls::{Certificate, Error, ServerName};
+use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use rustls::{Error, SignatureScheme};
+use rustls_pki_types::{CertificateDer, ServerName};
 use servers::error::Result;
 use servers::postgres::PostgresServer;
 use servers::server::Server;
-use servers::tls::TlsOption;
+use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::test_util::MemTable;
 use table::TableRef;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
@@ -59,9 +60,15 @@ fn create_postgres_server(
         None
     };
 
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
     Ok(Box::new(PostgresServer::new(
         instance,
-        tls,
+        tls.should_force_tls(),
+        tls_server_config,
         io_runtime,
         user_provider,
     )))
@@ -266,6 +273,7 @@ async fn test_server_secure_require_client_plain() -> Result<()> {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server-rsa.key".to_owned(),
+        watch: false,
     };
     let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
@@ -281,6 +289,7 @@ async fn test_server_secure_require_client_plain_with_pkcs8_priv_key() -> Result
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server-pkcs8.key".to_owned(),
+        watch: false,
     };
     let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
@@ -386,7 +395,6 @@ async fn create_secure_connection(
     };
 
     let mut config = rustls::ClientConfig::builder()
-        .with_safe_defaults()
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
     config
@@ -455,16 +463,45 @@ fn unwrap_results(resp: &[SimpleQueryMessage]) -> Vec<&str> {
     resp.iter().filter_map(|m| resolve_result(m, 0)).collect()
 }
 
+#[derive(Debug)]
 struct AcceptAllVerifier {}
 impl ServerCertVerifier for AcceptAllVerifier {
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::ED25519,
+        ]
+    }
+
     fn verify_server_cert(
         &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: SystemTime,
+        _now: rustls_pki_types::UnixTime,
     ) -> std::result::Result<ServerCertVerified, Error> {
         Ok(ServerCertVerified::assertion())
     }
@@ -485,6 +522,7 @@ async fn do_simple_query_with_secure_server(
                 "tests/ssl/server-rsa.key".to_owned()
             }
         },
+        watch: false,
     };
 
     do_simple_query(server_tls, client_tls).await

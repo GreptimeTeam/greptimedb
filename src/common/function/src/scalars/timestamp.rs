@@ -11,19 +11,23 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use std::sync::Arc;
 mod greatest;
+mod to_timezone;
 mod to_unixtime;
 
 use greatest::GreatestFunction;
+use to_timezone::ToTimezoneFunction;
 use to_unixtime::ToUnixtimeFunction;
 
-use crate::scalars::function_registry::FunctionRegistry;
+use crate::function_registry::FunctionRegistry;
 
 pub(crate) struct TimestampFunction;
 
 impl TimestampFunction {
     pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(ToTimezoneFunction));
         registry.register(Arc::new(ToUnixtimeFunction));
         registry.register(Arc::new(GreatestFunction));
     }

@@ -18,3 +18,12 @@ pub use crate::columnar_value::ColumnarValue;
 pub use crate::function::*;
 pub use crate::logical_plan::{create_udf, AggregateFunction, Expr, ScalarUdf};
 pub use crate::signature::{Signature, TypeSignature, Volatility};
+
+/// Default timestamp column name for Prometheus metrics.
+pub const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
+/// Default value column name for Prometheus metrics.
+pub const GREPTIME_VALUE: &str = "greptime_value";
+/// Default counter column name for OTLP metrics.
+pub const GREPTIME_COUNT: &str = "greptime_count";
+/// Default physical table name
+pub const GREPTIME_PHYSICAL_TABLE: &str = "greptime_physical_table";

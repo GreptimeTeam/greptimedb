@@ -1,11 +1,12 @@
 show databases;
 
 +-----------------------+
-| Schemas               |
+| Database              |
 +-----------------------+
+| greptime_private      |
+| illegal-database      |
 | information_schema    |
 | public                |
-| test_public_schema    |
 | upper_case_table_name |
 +-----------------------+
 
@@ -15,10 +16,35 @@ Affected Rows: 0
 
 show tables;
 
-+---------+
-| Tables  |
-+---------+
-| columns |
-| tables  |
-+---------+
++---------------------------------------+
+| Tables                                |
++---------------------------------------+
+| build_info                            |
+| character_sets                        |
+| check_constraints                     |
+| collation_character_set_applicability |
+| collations                            |
+| column_privileges                     |
+| column_statistics                     |
+| columns                               |
+| engines                               |
+| events                                |
+| files                                 |
+| global_status                         |
+| greptime_region_peers                 |
+| key_column_usage                      |
+| optimizer_trace                       |
+| parameters                            |
+| partitions                            |
+| profiling                             |
+| referential_constraints               |
+| routines                              |
+| runtime_metrics                       |
+| schema_privileges                     |
+| schemata                              |
+| session_status                        |
+| table_privileges                      |
+| tables                                |
+| triggers                              |
++---------------------------------------+
 

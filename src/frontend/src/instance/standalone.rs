@@ -14,28 +14,21 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::Partition;
 use api::v1::region::{QueryRequest, RegionRequest, RegionResponse};
 use async_trait::async_trait;
 use client::region::check_response_header;
 use common_error::ext::BoxedError;
-use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
-use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+use common_meta::datanode_manager::{Datanode, DatanodeManager, DatanodeRef, HandleResponse};
 use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{Region, RegionRoute};
-use common_meta::sequence::{Sequence, SequenceRef};
 use common_recordbatch::SendableRecordBatchStream;
+use common_telemetry::tracing;
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::{RegionId, TableId};
-use table::metadata::RawTableInfo;
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
-
-const TABLE_ID_SEQ: &str = "table_id";
 
 pub struct StandaloneDatanodeManager(pub RegionServer);
 
@@ -47,7 +40,7 @@ impl DatanodeManager for StandaloneDatanodeManager {
 }
 
 /// Relative to [client::region::RegionRequester]
-struct RegionInvoker {
+pub struct RegionInvoker {
     region_server: RegionServer,
 }
 
@@ -70,69 +63,37 @@ impl RegionInvoker {
 
 #[async_trait]
 impl Datanode for RegionInvoker {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<HandleResponse> {
+        let span = request
+            .header
+            .as_ref()
+            .map(|h| TracingContext::from_w3c(&h.tracing_context))
+            .unwrap_or_default()
+            .attach(tracing::info_span!("RegionInvoker::handle_region_request"));
         let response = self
             .handle_inner(request)
+            .trace(span)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        check_response_header(response.header)
+        check_response_header(&response.header)
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        Ok(response.affected_rows)
+        Ok(HandleResponse::from_region_response(response))
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+        let span = request
+            .header
+            .as_ref()
+            .map(|h| TracingContext::from_w3c(&h.tracing_context))
+            .unwrap_or_default()
+            .attach(tracing::info_span!("RegionInvoker::handle_query"));
         self.region_server
             .handle_read(request)
+            .trace(span)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
-    }
-}
-
-pub(crate) struct StandaloneTableMetadataCreator {
-    table_id_sequence: SequenceRef,
-}
-
-impl StandaloneTableMetadataCreator {
-    pub fn new(kv_backend: KvBackendRef) -> Self {
-        Self {
-            table_id_sequence: Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend)),
-        }
-    }
-}
-
-#[async_trait]
-impl TableMetadataAllocator for StandaloneTableMetadataCreator {
-    async fn create(
-        &self,
-        _ctx: &TableMetadataAllocatorContext,
-        raw_table_info: &mut RawTableInfo,
-        partitions: &[Partition],
-    ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
-        let table_id = self.table_id_sequence.next().await? as u32;
-        raw_table_info.ident.table_id = table_id;
-        let region_routes = partitions
-            .iter()
-            .enumerate()
-            .map(|(i, partition)| {
-                let region = Region {
-                    id: RegionId::new(table_id, i as u32),
-                    partition: Some(partition.clone().into()),
-                    ..Default::default()
-                };
-                // It's only a placeholder.
-                let peer = Peer::default();
-                RegionRoute {
-                    region,
-                    leader_peer: Some(peer),
-                    follower_peers: vec![],
-                    leader_status: None,
-                }
-            })
-            .collect::<Vec<_>>();
-
-        Ok((table_id, region_routes))
     }
 }

@@ -12,25 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::helper::value_to_grpc_value;
+use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
 use catalog::CatalogManager;
+use common_time::Timezone;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use partition::manager::PartitionRuleManager;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements;
 use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
 use table::TableRef;
 
-use super::{data_type, semantic_type};
 use crate::error::{
-    CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
-    InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
+    ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::req_convert::common::partitioner::Partitioner;
+use crate::req_convert::insert::semantic_type;
 
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
@@ -53,7 +55,11 @@ impl<'a> StatementToRegion<'a> {
         }
     }
 
-    pub async fn convert(&self, stmt: &Insert) -> Result<RegionInsertRequests> {
+    pub async fn convert(
+        &self,
+        stmt: &Insert,
+        query_ctx: &QueryContextRef,
+    ) -> Result<RegionInsertRequests> {
         let (catalog, schema, table_name) = self.get_full_name(stmt.table_name())?;
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
@@ -94,18 +100,26 @@ impl<'a> StatementToRegion<'a> {
                     msg: format!("Column {} not found in table {}", column_name, &table_name),
                 })?;
 
-            let datatype = data_type(column_schema.data_type.clone())?;
+            let (datatype, datatype_extension) =
+                ColumnDataTypeWrapper::try_from(column_schema.data_type.clone())
+                    .context(ColumnDataTypeSnafu)?
+                    .to_parts();
             let semantic_type = semantic_type(&table_info, column_name)?;
 
             let grpc_column_schema = GrpcColumnSchema {
                 column_name: column_name.clone(),
                 datatype: datatype.into(),
                 semantic_type: semantic_type.into(),
+                datatype_extension,
             };
             schema.push(grpc_column_schema);
 
             for (sql_row, grpc_row) in sql_rows.iter().zip(rows.iter_mut()) {
-                let value = sql_value_to_grpc_value(column_schema, &sql_row[i])?;
+                let value = sql_value_to_grpc_value(
+                    column_schema,
+                    &sql_row[i],
+                    Some(&query_ctx.timezone()),
+                )?;
                 grpc_row.values.push(value);
             }
         }
@@ -164,7 +178,11 @@ fn column_names<'a>(stmt: &'a Insert, table_schema: &'a SchemaRef) -> Vec<&'a St
     }
 }
 
-fn sql_value_to_grpc_value(column_schema: &ColumnSchema, sql_val: &SqlValue) -> Result<GrpcValue> {
+fn sql_value_to_grpc_value(
+    column_schema: &ColumnSchema,
+    sql_val: &SqlValue,
+    timezone: Option<&Timezone>,
+) -> Result<GrpcValue> {
     let column = &column_schema.name;
     let value = if replace_default(sql_val) {
         let default_value = column_schema
@@ -177,7 +195,7 @@ fn sql_value_to_grpc_value(column_schema: &ColumnSchema, sql_val: &SqlValue) -> 
             column: column.clone(),
         })?
     } else {
-        statements::sql_value_to_value(column, &column_schema.data_type, sql_val)
+        statements::sql_value_to_value(column, &column_schema.data_type, sql_val, timezone)
             .context(ParseSqlSnafu)?
     };
 

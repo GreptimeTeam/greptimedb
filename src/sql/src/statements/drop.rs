@@ -19,15 +19,50 @@ use sqlparser_derive::{Visit, VisitMut};
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct DropTable {
     table_name: ObjectName,
+    /// drop table if exists
+    drop_if_exists: bool,
 }
 
 impl DropTable {
     /// Creates a statement for `DROP TABLE`
-    pub fn new(table_name: ObjectName) -> Self {
-        Self { table_name }
+    pub fn new(table_name: ObjectName, if_exists: bool) -> Self {
+        Self {
+            table_name,
+            drop_if_exists: if_exists,
+        }
     }
 
     pub fn table_name(&self) -> &ObjectName {
         &self.table_name
+    }
+
+    pub fn drop_if_exists(&self) -> bool {
+        self.drop_if_exists
+    }
+}
+
+/// DROP DATABASE statement.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct DropDatabase {
+    name: ObjectName,
+    /// drop table if exists
+    drop_if_exists: bool,
+}
+
+impl DropDatabase {
+    /// Creates a statement for `DROP DATABASE`
+    pub fn new(name: ObjectName, if_exists: bool) -> Self {
+        Self {
+            name,
+            drop_if_exists: if_exists,
+        }
+    }
+
+    pub fn name(&self) -> &ObjectName {
+        &self.name
+    }
+
+    pub fn drop_if_exists(&self) -> bool {
+        self.drop_if_exists
     }
 }

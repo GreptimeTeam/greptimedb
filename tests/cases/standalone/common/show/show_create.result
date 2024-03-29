@@ -1,0 +1,100 @@
+CREATE TABLE system_metrics (
+  id INT UNSIGNED,
+  host STRING,
+  cpu DOUBLE,
+  disk FLOAT COMMENT 'comment',
+  ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
+  TIME INDEX (ts),
+  PRIMARY KEY (id, host)
+)
+PARTITION ON COLUMNS (id) (
+  id < 5,
+  id >= 5 AND id < 9,
+  id >= 9
+)
+ENGINE=mito
+WITH(
+  ttl = '7d',
+  write_buffer_size = 1024
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE system_metrics;
+
++----------------+-----------------------------------------------------------+
+| Table          | Create Table                                              |
++----------------+-----------------------------------------------------------+
+| system_metrics | CREATE TABLE IF NOT EXISTS "system_metrics" (             |
+|                |   "id" INT UNSIGNED NULL,                                 |
+|                |   "host" STRING NULL,                                     |
+|                |   "cpu" DOUBLE NULL,                                      |
+|                |   "disk" FLOAT NULL COMMENT 'comment',                    |
+|                |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                |   TIME INDEX ("ts"),                                      |
+|                |   PRIMARY KEY ("id", "host")                              |
+|                | )                                                         |
+|                | PARTITION ON COLUMNS ("id") (                             |
+|                |   id < 5,                                                 |
+|                |   id >= 9,                                                |
+|                |   id >= 5 AND id < 9                                      |
+|                | )                                                         |
+|                | ENGINE=mito                                               |
+|                | WITH(                                                     |
+|                |   regions = 3,                                            |
+|                |   ttl = '7days',                                          |
+|                |   write_buffer_size = '1.0KiB'                            |
+|                | )                                                         |
++----------------+-----------------------------------------------------------+
+
+DROP TABLE system_metrics;
+
+Affected Rows: 0
+
+create table table_without_partition (
+  ts TIMESTAMP TIME INDEX NOT NULL DEFAULT current_timestamp()
+);
+
+Affected Rows: 0
+
+show create table table_without_partition;
+
++-------------------------+-----------------------------------------------------------+
+| Table                   | Create Table                                              |
++-------------------------+-----------------------------------------------------------+
+| table_without_partition | CREATE TABLE IF NOT EXISTS "table_without_partition" (    |
+|                         |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                         |   TIME INDEX ("ts")                                       |
+|                         | )                                                         |
+|                         |                                                           |
+|                         | ENGINE=mito                                               |
+|                         | WITH(                                                     |
+|                         |   regions = 1                                             |
+|                         | )                                                         |
++-------------------------+-----------------------------------------------------------+
+
+drop table table_without_partition;
+
+Affected Rows: 0
+
+CREATE TABLE not_supported_table_storage_option (
+  id INT UNSIGNED,
+  host STRING,
+  cpu DOUBLE,
+  disk FLOAT,
+  ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
+  TIME INDEX (ts),
+  PRIMARY KEY (id, host)
+)
+PARTITION ON COLUMNS (id) (
+  id < 5,
+  id >= 5 AND id < 9,
+  id >= 9
+)
+ENGINE=mito
+WITH(
+  storage = 'S3'
+);
+
+Error: 1004(InvalidArguments), Object store not found: S3
+

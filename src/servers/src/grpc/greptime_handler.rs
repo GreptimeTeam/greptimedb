@@ -27,7 +27,9 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
-use common_telemetry::{logging, TRACE_ID};
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
+use common_telemetry::{logging, tracing};
+use common_time::timezone::parse_timezone;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
@@ -56,6 +58,7 @@ impl GreptimeRequestHandler {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(protocol = "grpc", request_type = get_request_type(&request)))]
     pub(crate) async fn handle_request(&self, request: GreptimeRequest) -> Result<Output> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
@@ -70,7 +73,6 @@ impl GreptimeRequestHandler {
         let request_type = request_type(&query).to_string();
         let db = query_ctx.get_db_string();
         let timer = RequestTimer::new(db.clone(), request_type);
-        let trace_id = query_ctx.trace_id();
 
         // Executes requests in another runtime to
         // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
@@ -79,23 +81,38 @@ impl GreptimeRequestHandler {
         //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
         //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
-        let handle = self.runtime.spawn(TRACE_ID.scope(trace_id, async move {
-            handler.do_query(query, query_ctx).await.map_err(|e| {
-                if e.status_code().should_log_error() {
-                    logging::error!(e; "Failed to handle request");
-                } else {
-                    // Currently, we still print a debug log.
-                    logging::debug!("Failed to handle request, err: {}", e);
-                }
-                e
-            })
-        }));
+        let tracing_context = TracingContext::from_current_span();
+        let handle = self.runtime.spawn(async move {
+            handler
+                .do_query(query, query_ctx)
+                .trace(tracing_context.attach(tracing::info_span!(
+                    "GreptimeRequestHandler::handle_request_runtime"
+                )))
+                .await
+                .map_err(|e| {
+                    if e.status_code().should_log_error() {
+                        logging::error!(e; "Failed to handle request");
+                    } else {
+                        // Currently, we still print a debug log.
+                        logging::debug!("Failed to handle request, err: {:?}", e);
+                    }
+                    e
+                })
+        });
 
         handle.await.context(JoinTaskSnafu).map_err(|e| {
             timer.record(e.status_code());
             e
         })?
     }
+}
+
+pub fn get_request_type(request: &GreptimeRequest) -> &'static str {
+    request
+        .request
+        .as_ref()
+        .map(request_type)
+        .unwrap_or_default()
 }
 
 pub(crate) async fn auth(
@@ -149,24 +166,29 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
             } else {
                 (
                     if !header.catalog.is_empty() {
-                        &header.catalog
+                        header.catalog.to_lowercase()
                     } else {
-                        DEFAULT_CATALOG_NAME
+                        DEFAULT_CATALOG_NAME.to_string()
                     },
                     if !header.schema.is_empty() {
-                        &header.schema
+                        header.schema.to_lowercase()
                     } else {
-                        DEFAULT_SCHEMA_NAME
+                        DEFAULT_SCHEMA_NAME.to_string()
                     },
                 )
             }
         })
-        .unwrap_or((DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME));
-
+        .unwrap_or_else(|| {
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+            )
+        });
+    let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
     QueryContextBuilder::default()
-        .current_catalog(catalog.to_string())
-        .current_schema(schema.to_string())
-        .try_trace_id(header.map(|h| h.trace_id))
+        .current_catalog(catalog)
+        .current_schema(schema)
+        .timezone(Arc::new(timezone))
         .build()
 }
 

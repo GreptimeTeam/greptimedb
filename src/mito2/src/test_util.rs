@@ -17,6 +17,7 @@
 pub mod memtable_util;
 pub mod meta_util;
 pub mod scheduler_util;
+pub mod sst_util;
 pub mod version_util;
 
 use std::collections::HashMap;
@@ -28,8 +29,8 @@ use api::greptime_proto::v1;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
+use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
-use common_query::Output;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;
@@ -38,6 +39,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
+use object_store::util::join_dir;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::RegionEngine;
@@ -47,14 +49,17 @@ use store_api::region_request::{
 };
 use store_api::storage::{ColumnId, RegionId};
 
+use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::config::MitoConfig;
 use crate::engine::listener::EventListenerRef;
-use crate::engine::MitoEngine;
+use crate::engine::{MitoEngine, MITO_ENGINE_NAME};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
 
 #[derive(Debug)]
@@ -136,7 +141,20 @@ impl TestEnv {
         let object_store_manager = Arc::new(object_store_manager);
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());
-        MitoEngine::new(config, logstore, object_store_manager)
+        let data_home = self.data_home().display().to_string();
+        MitoEngine::new(&data_home, config, logstore, object_store_manager)
+            .await
+            .unwrap()
+    }
+
+    /// Creates a new engine with specific config and existing logstore and object store manager.
+    pub async fn create_follower_engine(&mut self, config: MitoConfig) -> MitoEngine {
+        let logstore = self.logstore.as_ref().unwrap().clone();
+        let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
+        let data_home = self.data_home().display().to_string();
+        MitoEngine::new(&data_home, config, logstore, object_store_manager)
+            .await
+            .unwrap()
     }
 
     /// Creates a new engine with specific config and manager/listener under this env.
@@ -152,7 +170,20 @@ impl TestEnv {
         let object_store_manager = Arc::new(object_store_manager);
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());
-        MitoEngine::new_for_test(config, logstore, object_store_manager, manager, listener)
+
+        let data_home = self.data_home().display().to_string();
+
+        MitoEngine::new_for_test(
+            &data_home,
+            config,
+            logstore,
+            object_store_manager,
+            manager,
+            listener,
+            Arc::new(StdTimeProvider),
+        )
+        .await
+        .unwrap()
     }
 
     pub async fn create_engine_with_multiple_object_stores(
@@ -181,7 +212,49 @@ impl TestEnv {
         let object_store_manager = Arc::new(object_store_manager);
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());
-        MitoEngine::new_for_test(config, logstore, object_store_manager, manager, listener)
+        let data_home = self.data_home().display().to_string();
+
+        MitoEngine::new_for_test(
+            &data_home,
+            config,
+            logstore,
+            object_store_manager,
+            manager,
+            listener,
+            Arc::new(StdTimeProvider),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Creates a new engine with specific config and manager/listener/time provider under this env.
+    pub async fn create_engine_with_time(
+        &mut self,
+        config: MitoConfig,
+        manager: Option<WriteBufferManagerRef>,
+        listener: Option<EventListenerRef>,
+        time_provider: TimeProviderRef,
+    ) -> MitoEngine {
+        let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
+
+        let logstore = Arc::new(log_store);
+        let object_store_manager = Arc::new(object_store_manager);
+        self.logstore = Some(logstore.clone());
+        self.object_store_manager = Some(object_store_manager.clone());
+
+        let data_home = self.data_home().display().to_string();
+
+        MitoEngine::new_for_test(
+            &data_home,
+            config,
+            logstore,
+            object_store_manager,
+            manager,
+            listener,
+            time_provider.clone(),
+        )
+        .await
+        .unwrap()
     }
 
     /// Reopen the engine.
@@ -189,32 +262,67 @@ impl TestEnv {
         engine.stop().await.unwrap();
 
         MitoEngine::new(
+            &self.data_home().display().to_string(),
             config,
             self.logstore.clone().unwrap(),
             self.object_store_manager.clone().unwrap(),
         )
+        .await
+        .unwrap()
+    }
+
+    /// Open the engine.
+    pub async fn open_engine(&mut self, config: MitoConfig) -> MitoEngine {
+        MitoEngine::new(
+            &self.data_home().display().to_string(),
+            config,
+            self.logstore.clone().unwrap(),
+            self.object_store_manager.clone().unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Only initializes the object store manager, returns the default object store.
+    pub fn init_object_store_manager(&mut self) -> ObjectStore {
+        self.object_store_manager = Some(Arc::new(self.create_object_store_manager()));
+        self.get_object_store().unwrap()
     }
 
     /// Creates a new [WorkerGroup] with specific config under this env.
-    pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
+    pub(crate) async fn create_worker_group(&self, mut config: MitoConfig) -> WorkerGroup {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
-        WorkerGroup::start(config, Arc::new(log_store), Arc::new(object_store_manager))
+        let data_home = self.data_home().display().to_string();
+        config.sanitize(&data_home).unwrap();
+        WorkerGroup::start(
+            Arc::new(config),
+            Arc::new(log_store),
+            Arc::new(object_store_manager),
+        )
+        .await
+        .unwrap()
     }
 
+    /// Returns the log store and object store manager.
     async fn create_log_and_object_store_manager(
         &self,
     ) -> (RaftEngineLogStore, ObjectStoreManager) {
         let data_home = self.data_home.path();
         let wal_path = data_home.join("wal");
-        let data_path = data_home.join("data").as_path().display().to_string();
-
         let log_store = log_store_util::create_tmp_local_file_log_store(&wal_path).await;
+
+        let object_store_manager = self.create_object_store_manager();
+        (log_store, object_store_manager)
+    }
+
+    fn create_object_store_manager(&self) -> ObjectStoreManager {
+        let data_home = self.data_home.path();
+        let data_path = data_home.join("data").as_path().display().to_string();
         let mut builder = Fs::default();
         builder.root(&data_path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        let object_store_manager = ObjectStoreManager::new("default", object_store);
-        (log_store, object_store_manager)
+        ObjectStoreManager::new("default", object_store)
     }
 
     /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`
@@ -254,6 +362,26 @@ impl TestEnv {
             RegionManifestManager::open(manifest_opts).await
         }
     }
+
+    /// Creates a write cache with local store.
+    pub async fn create_write_cache(
+        &self,
+        local_store: ObjectStore,
+        capacity: ReadableSize,
+    ) -> WriteCacheRef {
+        let data_home = self.data_home().display().to_string();
+
+        let intm_mgr = IntermediateManager::init_fs(join_dir(&data_home, "intm"))
+            .await
+            .unwrap();
+
+        let object_store_manager = self.get_object_store_manager().unwrap();
+        let write_cache = WriteCache::new(local_store, object_store_manager, capacity, intm_mgr)
+            .await
+            .unwrap();
+
+        Arc::new(write_cache)
+    }
 }
 
 /// Builder to mock a [RegionCreateRequest].
@@ -265,6 +393,8 @@ pub struct CreateRequestBuilder {
     field_num: usize,
     options: HashMap<String, String>,
     primary_key: Option<Vec<ColumnId>>,
+    all_not_null: bool,
+    engine: String,
 }
 
 impl Default for CreateRequestBuilder {
@@ -275,6 +405,8 @@ impl Default for CreateRequestBuilder {
             field_num: 1,
             options: HashMap::new(),
             primary_key: None,
+            all_not_null: false,
+            engine: MITO_ENGINE_NAME.to_string(),
         }
     }
 }
@@ -309,8 +441,15 @@ impl CreateRequestBuilder {
         self
     }
 
+    #[must_use]
     pub fn insert_option(mut self, key: &str, value: &str) -> Self {
         self.options.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    #[must_use]
+    pub fn all_not_null(mut self, value: bool) -> Self {
+        self.all_not_null = value;
         self
     }
 
@@ -318,12 +457,13 @@ impl CreateRequestBuilder {
         let mut column_id = 0;
         let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
         let mut primary_key = Vec::with_capacity(self.tag_num);
+        let nullable = !self.all_not_null;
         for i in 0..self.tag_num {
             column_metadatas.push(ColumnMetadata {
                 column_schema: ColumnSchema::new(
                     format!("tag_{i}"),
                     ConcreteDataType::string_datatype(),
-                    true,
+                    nullable,
                 ),
                 semantic_type: SemanticType::Tag,
                 column_id,
@@ -336,7 +476,7 @@ impl CreateRequestBuilder {
                 column_schema: ColumnSchema::new(
                     format!("field_{i}"),
                     ConcreteDataType::float64_datatype(),
-                    true,
+                    nullable,
                 ),
                 semantic_type: SemanticType::Field,
                 column_id,
@@ -347,6 +487,7 @@ impl CreateRequestBuilder {
             column_schema: ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_millisecond_datatype(),
+                // Time index is always not null.
                 false,
             ),
             semantic_type: SemanticType::Timestamp,
@@ -354,8 +495,7 @@ impl CreateRequestBuilder {
         });
 
         RegionCreateRequest {
-            // We use empty engine name as we already locates the engine.
-            engine: String::new(),
+            engine: self.engine.to_string(),
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
             options: self.options.clone(),
@@ -414,6 +554,7 @@ pub fn new_batch_builder(
     timestamps: &[i64],
     sequences: &[u64],
     op_types: &[OpType],
+    field_column_id: ColumnId,
     field: &[u64],
 ) -> BatchBuilder {
     let mut builder = BatchBuilder::new(primary_key.to_vec());
@@ -431,13 +572,14 @@ pub fn new_batch_builder(
         )))
         .unwrap()
         .push_field_array(
-            1,
+            field_column_id,
             Arc::new(UInt64Array::from_iter_values(field.iter().copied())),
         )
         .unwrap();
     builder
 }
 
+/// Returns a new [Batch] whose field has column id 1.
 pub fn new_batch(
     primary_key: &[u8],
     timestamps: &[i64],
@@ -445,7 +587,7 @@ pub fn new_batch(
     op_types: &[OpType],
     field: &[u64],
 ) -> Batch {
-    new_batch_builder(primary_key, timestamps, sequences, op_types, field)
+    new_batch_builder(primary_key, timestamps, sequences, op_types, 1, field)
         .build()
         .unwrap()
 }
@@ -453,7 +595,8 @@ pub fn new_batch(
 /// Ensure the reader returns batch as `expect`.
 pub async fn check_reader_result<R: BatchReader>(reader: &mut R, expect: &[Batch]) {
     let mut result = Vec::new();
-    while let Some(batch) = reader.next_batch().await.unwrap() {
+    while let Some(mut batch) = reader.next_batch().await.unwrap() {
+        batch.remove_pk_values();
         result.push(batch);
     }
 
@@ -516,12 +659,15 @@ impl WriteBufferManager for MockWriteBufferManager {
 }
 
 pub(crate) fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api::v1::ColumnSchema {
+    let (datatype, datatype_extension) =
+        ColumnDataTypeWrapper::try_from(metadata.column_schema.data_type.clone())
+            .unwrap()
+            .to_parts();
     api::v1::ColumnSchema {
         column_name: metadata.column_schema.name.clone(),
-        datatype: ColumnDataTypeWrapper::try_from(metadata.column_schema.data_type.clone())
-            .unwrap()
-            .datatype() as i32,
+        datatype: datatype as i32,
         semantic_type: metadata.semantic_type as i32,
+        datatype_extension,
     }
 }
 
@@ -566,14 +712,11 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
 /// Put rows into the engine.
 pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
-    let output = engine
+    let result = engine
         .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
         .await
         .unwrap();
-    let Output::AffectedRows(rows_inserted) = output else {
-        unreachable!()
-    };
-    assert_eq!(num_rows, rows_inserted);
+    assert_eq!(num_rows, result.affected_rows);
 }
 
 /// Build rows to put for specific `key`.
@@ -615,32 +758,26 @@ pub fn build_delete_rows_for_key(key: &str, start: usize, end: usize) -> Vec<Row
 /// Delete rows from the engine.
 pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
-    let output = engine
+    let result = engine
         .handle_request(
             region_id,
             RegionRequest::Delete(RegionDeleteRequest { rows }),
         )
         .await
         .unwrap();
-    let Output::AffectedRows(rows_inserted) = output else {
-        unreachable!()
-    };
-    assert_eq!(num_rows, rows_inserted);
+    assert_eq!(num_rows, result.affected_rows);
 }
 
 /// Flush a region manually.
 pub async fn flush_region(engine: &MitoEngine, region_id: RegionId, row_group_size: Option<usize>) {
-    let Output::AffectedRows(rows) = engine
+    let result = engine
         .handle_request(
             region_id,
             RegionRequest::Flush(RegionFlushRequest { row_group_size }),
         )
         .await
-        .unwrap()
-    else {
-        unreachable!()
-    };
-    assert_eq!(0, rows);
+        .unwrap();
+    assert_eq!(0, result.affected_rows);
 }
 
 /// Reopen a region.
@@ -649,6 +786,7 @@ pub async fn reopen_region(
     region_id: RegionId,
     region_dir: String,
     writable: bool,
+    options: HashMap<String, String>,
 ) {
     // Close the region.
     engine
@@ -663,7 +801,8 @@ pub async fn reopen_region(
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
-                options: HashMap::default(),
+                options,
+                skip_wal_replay: false,
             }),
         )
         .await

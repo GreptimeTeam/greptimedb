@@ -34,8 +34,8 @@ impl BooleanType {
 }
 
 impl DataType for BooleanType {
-    fn name(&self) -> &str {
-        "Boolean"
+    fn name(&self) -> String {
+        "Boolean".to_string()
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

@@ -14,10 +14,15 @@
 
 //! LogStore APIs.
 
-use common_error::ext::ErrorExt;
+use std::collections::HashMap;
 
-use crate::logstore::entry::{Entry, Id};
+use common_error::ext::ErrorExt;
+use common_wal::options::WalOptions;
+
+use crate::logstore::entry::Entry;
+pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::entry_stream::SendableEntryStream;
+pub use crate::logstore::namespace::Id as NamespaceId;
 use crate::logstore::namespace::Namespace;
 
 pub mod entry;
@@ -31,47 +36,59 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type Namespace: Namespace;
     type Entry: Entry;
 
-    /// Stop components of logstore.
+    /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 
-    /// Append an `Entry` to WAL with given namespace and return append response containing
-    /// the entry id.
-    async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error>;
+    /// Appends an entry to the log store and returns a response containing the id of the append entry.
+    async fn append(&self, entry: Self::Entry) -> Result<AppendResponse, Self::Error>;
 
-    /// Append a batch of entries atomically and return the offset of first entry.
-    async fn append_batch(&self, e: Vec<Self::Entry>) -> Result<(), Self::Error>;
+    /// Appends a batch of entries and returns a response containing a map where the key is a region id
+    /// while the value is the id of the last successfully written entry of the region.
+    async fn append_batch(
+        &self,
+        entries: Vec<Self::Entry>,
+    ) -> Result<AppendBatchResponse, Self::Error>;
 
-    /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
+    /// Creates a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.
     async fn read(
         &self,
         ns: &Self::Namespace,
-        id: Id,
+        id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
 
-    /// Create a new `Namespace`.
+    /// Creates a new `Namespace` from the given ref.
     async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
-    /// Delete an existing `Namespace` with given ref.
+    /// Deletes an existing `Namespace` specified by the given ref.
     async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
-    /// List all existing namespaces.
+    /// Lists all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
 
-    /// Create an entry of the associate Entry type
-    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id, ns: Self::Namespace) -> Self::Entry;
+    /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
+    /// so that the log store can safely delete those entries. This method does not guarantee
+    /// that the obsolete entries are deleted immediately.
+    async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
 
-    /// Create a namespace of the associate Namespace type
-    // TODO(sunng87): confusion with `create_namespace`
-    fn namespace(&self, id: namespace::Id) -> Self::Namespace;
+    /// Makes an entry instance of the associated Entry type
+    fn entry<D: AsRef<[u8]>>(&self, data: D, entry_id: EntryId, ns: Self::Namespace)
+        -> Self::Entry;
 
-    /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
-    /// the log files if all entries inside are obsolete. This method may not delete log
-    /// files immediately.
-    async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error>;
+    /// Makes a namespace instance of the associated Namespace type
+    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace;
 }
 
-#[derive(Debug)]
+/// The response of an `append` operation.
+#[derive(Debug, Default)]
 pub struct AppendResponse {
-    pub entry_id: Id,
+    /// The id of the entry appended to the log store.
+    pub last_entry_id: EntryId,
+}
+
+/// The response of an `append_batch` operation.
+#[derive(Debug, Default)]
+pub struct AppendBatchResponse {
+    /// Key: region id (as u64). Value: the id of the last successfully written entry of the region.
+    pub last_entry_ids: HashMap<u64, EntryId>,
 }

@@ -18,14 +18,18 @@ use std::sync::Arc;
 use api::v1::alter_expr::Kind;
 use api::v1::region::{InsertRequests as RegionInsertRequests, RegionRequestHeader};
 use api::v1::{
-    AlterExpr, ColumnSchema, CreateTableExpr, InsertRequests, RowInsertRequest, RowInsertRequests,
+    AlterExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests, RowInsertRequest,
+    RowInsertRequests, SemanticType,
 };
 use catalog::CatalogManagerRef;
+use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
 use common_meta::peer::Peer;
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info};
 use datatypes::schema::Schema;
 use futures_util::future;
@@ -34,8 +38,11 @@ use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::statements::insert::Insert;
-use table::engine::TableReference;
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+};
 use table::requests::InsertRequest as TableInsertRequest;
+use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
@@ -94,7 +101,7 @@ impl Inserter {
         });
         validate_column_count_match(&requests)?;
 
-        self.create_or_alter_tables_on_demand(&requests, &ctx, statement_executor)
+        self.create_or_alter_tables_on_demand(&requests, &ctx, None, statement_executor)
             .await?;
         let inserts = RowToRegion::new(
             self.catalog_manager.as_ref(),
@@ -104,15 +111,51 @@ impl Inserter {
         .convert(requests)
         .await?;
 
-        let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+        self.do_request(inserts, &ctx).await
+    }
+
+    /// Handle row inserts request with metric engine.
+    pub async fn handle_metric_row_inserts(
+        &self,
+        mut requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
+        physical_table: String,
+    ) -> Result<Output> {
+        // remove empty requests
+        requests.inserts.retain(|req| {
+            req.rows
+                .as_ref()
+                .map(|r| !r.rows.is_empty())
+                .unwrap_or_default()
+        });
+        validate_column_count_match(&requests)?;
+
+        // check and create physical table
+        self.create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
+            .await?;
+
+        // check and create logical tables
+        self.create_or_alter_tables_on_demand(
+            &requests,
+            &ctx,
+            Some(physical_table.to_string()),
+            statement_executor,
+        )
+        .await?;
+        let inserts =
+            RowToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, &ctx)
+                .convert(requests)
+                .await?;
+
+        self.do_request(inserts, &ctx).await
     }
 
     pub async fn handle_table_insert(
         &self,
         request: TableInsertRequest,
         ctx: QueryContextRef,
-    ) -> Result<usize> {
+    ) -> Result<Output> {
         let catalog = request.catalog_name.as_str();
         let schema = request.schema_name.as_str();
         let table_name = request.table_name.as_str();
@@ -126,8 +169,7 @@ impl Inserter {
             .convert(request)
             .await?;
 
-        let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(affected_rows as _)
+        self.do_request(inserts, &ctx).await
     }
 
     pub async fn handle_statement_insert(
@@ -137,11 +179,10 @@ impl Inserter {
     ) -> Result<Output> {
         let inserts =
             StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
-                .convert(insert)
+                .convert(insert, ctx)
                 .await?;
 
-        let affected_rows = self.do_request(inserts, ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+        self.do_request(inserts, ctx).await
     }
 }
 
@@ -150,10 +191,12 @@ impl Inserter {
         &self,
         requests: RegionInsertRequests,
         ctx: &QueryContextRef,
-    ) -> Result<AffectedRows> {
-        write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
-        let header: RegionRequestHeader = ctx.as_ref().into();
-        let request_factory = RegionRequestFactory::new(header);
+    ) -> Result<Output> {
+        let write_cost = write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
+        let request_factory = RegionRequestFactory::new(RegionRequestHeader {
+            tracing_context: TracingContext::from_current_span().to_w3c(),
+            dbname: ctx.get_db_string(),
+        });
 
         let tasks = self
             .group_requests_by_peer(requests)
@@ -173,9 +216,15 @@ impl Inserter {
             });
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
-        let affected_rows = results.into_iter().sum::<Result<u64>>()?;
-        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(affected_rows);
-        Ok(affected_rows)
+        let affected_rows = results
+            .into_iter()
+            .map(|resp| resp.map(|r| r.affected_rows))
+            .sum::<Result<AffectedRows>>()?;
+        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(affected_rows as u64);
+        Ok(Output::new(
+            OutputData::AffectedRows(affected_rows),
+            OutputMeta::new_with_cost(write_cost as _),
+        ))
     }
 
     async fn group_requests_by_peer(
@@ -203,24 +252,117 @@ impl Inserter {
         &self,
         requests: &RowInsertRequests,
         ctx: &QueryContextRef,
+        on_physical_table: Option<String>,
         statement_executor: &StatementExecutor,
     ) -> Result<()> {
-        // TODO(jeremy): create and alter in batch?
+        let mut create_tables = vec![];
+        let mut alter_tables = vec![];
         for req in &requests.inserts {
             let catalog = ctx.current_catalog();
             let schema = ctx.current_schema();
             let table = self.get_table(catalog, schema, &req.table_name).await?;
             match table {
                 Some(table) => {
+                    // TODO(jeremy): alter in batch? (from `handle_metric_row_inserts`)
                     validate_request_with_table(req, &table)?;
-                    self.alter_table_on_demand(req, table, ctx, statement_executor)
-                        .await?
+                    let alter_expr = self.get_alter_table_expr_on_demand(req, table, ctx)?;
+                    if let Some(alter_expr) = alter_expr {
+                        alter_tables.push(alter_expr);
+                    }
                 }
-                None => self.create_table(req, ctx, statement_executor).await?,
+                None => {
+                    create_tables.push(req);
+                }
+            }
+        }
+
+        if let Some(on_physical_table) = on_physical_table {
+            if !create_tables.is_empty() {
+                // Creates logical tables in batch.
+                self.create_logical_tables(
+                    create_tables,
+                    ctx,
+                    &on_physical_table,
+                    statement_executor,
+                )
+                .await?;
+            }
+            if !alter_tables.is_empty() {
+                // Alter logical tables in batch.
+                statement_executor
+                    .alter_logical_tables(alter_tables)
+                    .await?;
+            }
+        } else {
+            for req in create_tables {
+                self.create_table(req, ctx, statement_executor).await?;
+            }
+            for alter_expr in alter_tables.into_iter() {
+                statement_executor.alter_table_inner(alter_expr).await?;
             }
         }
 
         Ok(())
+    }
+
+    async fn create_physical_table_on_demand(
+        &self,
+        ctx: &QueryContextRef,
+        physical_table: String,
+        statement_executor: &StatementExecutor,
+    ) -> Result<()> {
+        let catalog_name = ctx.current_catalog();
+        let schema_name = ctx.current_schema();
+
+        // check if exist
+        if self
+            .get_table(catalog_name, schema_name, &physical_table)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let table_reference = TableReference::full(catalog_name, schema_name, &physical_table);
+        info!("Physical metric table `{table_reference}` does not exist, try creating table");
+
+        // schema with timestamp and field column
+        let default_schema = vec![
+            ColumnSchema {
+                column_name: GREPTIME_TIMESTAMP.to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as _,
+                semantic_type: SemanticType::Timestamp as _,
+                datatype_extension: None,
+            },
+            ColumnSchema {
+                column_name: GREPTIME_VALUE.to_string(),
+                datatype: ColumnDataType::Float64 as _,
+                semantic_type: SemanticType::Field as _,
+                datatype_extension: None,
+            },
+        ];
+        let create_table_expr = &mut build_create_table_expr(&table_reference, &default_schema)?;
+
+        create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
+        create_table_expr
+            .table_options
+            .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+
+        // create physical table
+        let res = statement_executor
+            .create_table_inner(create_table_expr, None, ctx)
+            .await;
+
+        match res {
+            Ok(_) => {
+                info!("Successfully created table {table_reference}",);
+                Ok(())
+            }
+            Err(err) => {
+                error!("Failed to create table {table_reference}: {err}",);
+                Err(err)
+            }
+        }
     }
 
     async fn get_table(
@@ -235,13 +377,12 @@ impl Inserter {
             .context(CatalogSnafu)
     }
 
-    async fn alter_table_on_demand(
+    fn get_alter_table_expr_on_demand(
         &self,
         req: &RowInsertRequest,
         table: TableRef,
         ctx: &QueryContextRef,
-        statement_executor: &StatementExecutor,
-    ) -> Result<()> {
+    ) -> Result<Option<AlterExpr>> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
@@ -251,41 +392,20 @@ impl Inserter {
         let add_columns = extract_new_columns(&table.schema(), column_exprs)
             .context(FindNewColumnsOnInsertionSnafu)?;
         let Some(add_columns) = add_columns else {
-            return Ok(());
+            return Ok(None);
         };
 
-        info!(
-            "Adding new columns: {:?} to table: {}.{}.{}",
-            add_columns, catalog_name, schema_name, table_name
-        );
-
-        let alter_table_expr = AlterExpr {
+        Ok(Some(AlterExpr {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
             table_name: table_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
-        };
-
-        let res = statement_executor.alter_table_inner(alter_table_expr).await;
-
-        match res {
-            Ok(_) => {
-                info!(
-                    "Successfully added new columns to table: {}.{}.{}",
-                    catalog_name, schema_name, table_name
-                );
-                Ok(())
-            }
-            Err(err) => {
-                error!(
-                    "Failed to add new columns to table: {}.{}.{}: {}",
-                    catalog_name, schema_name, table_name, err
-                );
-                Err(err)
-            }
-        }
+        }))
     }
 
+    /// Create a table with schema from insert request.
+    ///
+    /// To create a metric engine logical table, specify the `on_physical_table` parameter.
     async fn create_table(
         &self,
         req: &RowInsertRequest,
@@ -298,14 +418,11 @@ impl Inserter {
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
 
-        info!(
-            "Table {}.{}.{} does not exist, try create table",
-            table_ref.catalog, table_ref.schema, table_ref.table,
-        );
+        info!("Table `{table_ref}` does not exist, try creating table");
 
         // TODO(weny): multiple regions table.
         let res = statement_executor
-            .create_table_inner(create_table_expr, None)
+            .create_table_inner(create_table_expr, None, ctx)
             .await;
 
         match res {
@@ -320,6 +437,63 @@ impl Inserter {
                 error!(
                     "Failed to create table {}.{}.{}: {}",
                     table_ref.catalog, table_ref.schema, table_ref.table, err
+                );
+                Err(err)
+            }
+        }
+    }
+
+    async fn create_logical_tables(
+        &self,
+        create_tables: Vec<&RowInsertRequest>,
+        ctx: &QueryContextRef,
+        physical_table: &str,
+        statement_executor: &StatementExecutor,
+    ) -> Result<()> {
+        let create_table_exprs = create_tables
+            .iter()
+            .map(|req| {
+                let table_ref = TableReference::full(
+                    ctx.current_catalog(),
+                    ctx.current_schema(),
+                    &req.table_name,
+                );
+
+                let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
+                let mut create_table_expr = build_create_table_expr(&table_ref, request_schema)?;
+
+                create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
+                create_table_expr.table_options.insert(
+                    LOGICAL_TABLE_METADATA_KEY.to_string(),
+                    physical_table.to_string(),
+                );
+
+                Ok(create_table_expr)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let res = statement_executor
+            .create_logical_tables(&create_table_exprs)
+            .await;
+
+        match res {
+            Ok(_) => {
+                info!("Successfully created logical tables");
+                Ok(())
+            }
+            Err(err) => {
+                let failed_tables = create_table_exprs
+                    .into_iter()
+                    .map(|expr| {
+                        format!(
+                            "{}.{}.{}",
+                            expr.catalog_name, expr.schema_name, expr.table_name
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                error!(
+                    "Failed to create logical tables {:?}: {}",
+                    failed_tables, err
                 );
                 Err(err)
             }

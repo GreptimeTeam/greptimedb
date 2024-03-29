@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use paste::paste;
@@ -121,11 +122,13 @@ define_timestamp_with_unit!(Nanosecond);
 
 #[cfg(test)]
 mod tests {
+    use common_time::timezone::set_default_timezone;
+
     use super::*;
 
     #[test]
     fn test_to_serde_json_value() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         let ts = TimestampSecond::new(123);
         let val = serde_json::Value::from(ts);
         match val {

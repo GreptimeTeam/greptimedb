@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,10 +17,8 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, Context};
 use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_meta::instruction::Instruction;
-use common_meta::table_name::TableName;
+use common_meta::instruction::{CacheIdent, Instruction};
 use snafu::ResultExt;
-use table::metadata::TableId;
 
 use crate::metasrv::MetasrvInfo;
 use crate::service::mailbox::{BroadcastChannel, MailboxRef};
@@ -65,13 +63,8 @@ impl MetasrvCacheInvalidator {
 
 #[async_trait]
 impl CacheInvalidator for MetasrvCacheInvalidator {
-    async fn invalidate_table_id(&self, ctx: &Context, table_id: TableId) -> MetaResult<()> {
-        let instruction = Instruction::InvalidateTableIdCache(table_id);
-        self.broadcast(ctx, instruction).await
-    }
-
-    async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> MetaResult<()> {
-        let instruction = Instruction::InvalidateTableNameCache(table_name);
+    async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> MetaResult<()> {
+        let instruction = Instruction::InvalidateCaches(caches);
         self.broadcast(ctx, instruction).await
     }
 }

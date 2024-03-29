@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-#![feature(result_option_inspect)]
 
 pub mod config;
 pub mod engine;
@@ -23,7 +22,7 @@ pub(crate) mod query;
 pub(crate) mod region;
 
 #[cfg(any(test, feature = "test"))]
-pub(crate) mod test_util;
+pub mod test_util;
 
 use datatypes::schema::ColumnSchema;
 use serde::{Deserialize, Serialize};

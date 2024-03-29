@@ -22,7 +22,9 @@ use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 
-use super::test_util::{check_unordered_output_stream, standalone, standalone_instance_case};
+use super::test_util::{
+    both_instances_cases, check_unordered_output_stream, distributed, standalone,
+};
 use crate::tests::test_util::MockInstance;
 
 #[allow(clippy::too_many_arguments)]
@@ -37,14 +39,27 @@ async fn create_insert_query_assert(
     lookback: Duration,
     expected: &str,
 ) {
-    let _ = instance.do_query(create, QueryContext::arc()).await;
-    let _ = instance.do_query(insert, QueryContext::arc()).await;
+    instance
+        .do_query(create, QueryContext::arc())
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
+    instance
+        .do_query(insert, QueryContext::arc())
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
 
     let query = PromQuery {
         query: promql.to_string(),
         ..PromQuery::default()
     };
-    let QueryStatement::Promql(mut eval_stmt) = QueryLanguageParser::parse_promql(&query).unwrap()
+    let QueryStatement::Promql(mut eval_stmt) =
+        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
     else {
         unreachable!()
     };
@@ -69,8 +84,20 @@ async fn create_insert_tql_assert(
     tql: &str,
     expected: &str,
 ) {
-    let _ = instance.do_query(create, QueryContext::arc()).await;
-    let _ = instance.do_query(insert, QueryContext::arc()).await;
+    instance
+        .do_query(create, QueryContext::arc())
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
+    instance
+        .do_query(insert, QueryContext::arc())
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
 
     let query_output = instance
         .do_query(tql, QueryContext::arc())
@@ -80,8 +107,7 @@ async fn create_insert_tql_assert(
     check_unordered_output_stream(query_output, expected).await;
 }
 
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn sql_insert_tql_query_ceil(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -128,8 +154,7 @@ async fn sql_insert_tql_query_ceil(instance: Arc<dyn MockInstance>) {
     .await;
 }
 
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn sql_insert_promql_query_ceil(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -181,7 +206,7 @@ const AGGREGATORS_CREATE_TABLE: &str = r#"create table http_requests (
     "group" string,
     "value" double,
     ts timestamp TIME INDEX,
-    PRIMARY KEY (job, instance, group),
+    PRIMARY KEY (job, instance, "group"),
 );"#;
 
 // load 5m
@@ -193,7 +218,7 @@ const AGGREGATORS_CREATE_TABLE: &str = r#"create table http_requests (
 // http_requests{job="app-server", instance="1", group="production"} 0+60x10
 // http_requests{job="app-server", instance="0", group="canary"}   0+70x10
 // http_requests{job="app-server", instance="1", group="canary"}   0+80x10
-const AGGREGATORS_INSERT_DATA: &str = r#"insert into http_requests(job, instance, group, value, ts) values
+const AGGREGATORS_INSERT_DATA: &str = r#"insert into http_requests(job, instance, "group", value, ts) values
     ('api-server', '0', 'production', 100, 0),
     ('api-server', '1', 'production', 200, 0),
     ('api-server', '0', 'canary', 300, 0),
@@ -211,8 +236,7 @@ fn unix_epoch_plus_100s() -> SystemTime {
 // eval instant at 50m SUM BY (group) (http_requests{job="api-server"})
 //   {group="canary"} 700
 //   {group="production"} 300
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_simple_sum(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -239,8 +263,7 @@ async fn aggregators_simple_sum(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m avg by (group) (http_requests{job="api-server"})
 //   {group="canary"} 350
 //   {group="production"} 150
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_simple_avg(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -267,8 +290,7 @@ async fn aggregators_simple_avg(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m count by (group) (http_requests{job="api-server"})
 //   {group="canary"} 2
 //   {group="production"} 2
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_simple_count(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -295,8 +317,7 @@ async fn aggregators_simple_count(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m sum without (instance) (http_requests{job="api-server"})
 //   {group="canary",job="api-server"} 700
 //   {group="production",job="api-server"} 300
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_simple_without(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -322,8 +343,7 @@ async fn aggregators_simple_without(instance: Arc<dyn MockInstance>) {
 // # Empty by.
 // eval instant at 50m sum by () (http_requests{job="api-server"})
 //   {} 1000
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_empty_by(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -348,8 +368,7 @@ async fn aggregators_empty_by(instance: Arc<dyn MockInstance>) {
 // # No by/without.
 // eval instant at 50m sum(http_requests{job="api-server"})
 //   {} 1000
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_no_by_without(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -375,8 +394,7 @@ async fn aggregators_no_by_without(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m sum without () (http_requests{job="api-server",group="production"})
 //   {group="production",job="api-server",instance="0"} 100
 //   {group="production",job="api-server",instance="1"} 200
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_empty_without(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -403,8 +421,7 @@ async fn aggregators_empty_without(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m sum(http_requests) by (job) + min(http_requests) by (job) + max(http_requests) by (job) + avg(http_requests) by (job)
 //   {job="app-server"} 4550
 //   {job="api-server"} 1750
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn aggregators_complex_combined_aggrs(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -417,19 +434,18 @@ async fn aggregators_complex_combined_aggrs(instance: Arc<dyn MockInstance>) {
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "+------------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+\
-                \n| job        | ts                  | http_requests.http_requests.http_requests.SUM(http_requests.value) + http_requests.MIN(http_requests.value) + http_requests.MAX(http_requests.value) + http_requests.AVG(http_requests.value) |\
-                \n+------------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+\
-                \n| api-server | 1970-01-01T00:00:00 | 1750.0                                                                                                                                                                                        |\
-                \n| app-server | 1970-01-01T00:00:00 | 4550.0                                                                                                                                                                                        |\
-                \n+------------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
+        "+------------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------+\
+        \n| job        | ts                  | lhs.lhs.lhs.SUM(http_requests.value) + rhs.MIN(http_requests.value) + http_requests.MAX(http_requests.value) + rhs.AVG(http_requests.value) |\
+        \n+------------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------+\
+        \n| api-server | 1970-01-01T00:00:00 | 1750.0                                                                                                                                      |\
+        \n| app-server | 1970-01-01T00:00:00 | 4550.0                                                                                                                                      |\
+        \n+------------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------+",
     )
     .await;
 }
 
 // This is not from prometheus test set. It's derived from `aggregators_complex_combined_aggrs()`
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn two_aggregators_combined_aggrs(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -442,12 +458,12 @@ async fn two_aggregators_combined_aggrs(instance: Arc<dyn MockInstance>) {
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "+------------+---------------------+---------------------------------------------------------------------------------+\
-        \n| job        | ts                  | http_requests.SUM(http_requests.value) + http_requests.MIN(http_requests.value) |\
-        \n+------------+---------------------+---------------------------------------------------------------------------------+\
-        \n| api-server | 1970-01-01T00:00:00 | 1100.0                                                                          |\
-        \n| app-server | 1970-01-01T00:00:00 | 3100.0                                                                          |\
-        \n+------------+---------------------+---------------------------------------------------------------------------------+",
+        "+------------+---------------------+-------------------------------------------------------------+\
+        \n| job        | ts                  | lhs.SUM(http_requests.value) + rhs.MIN(http_requests.value) |\
+        \n+------------+---------------------+-------------------------------------------------------------+\
+        \n| api-server | 1970-01-01T00:00:00 | 1100.0                                                      |\
+        \n| app-server | 1970-01-01T00:00:00 | 3100.0                                                      |\
+        \n+------------+---------------------+-------------------------------------------------------------+",
     )
     .await;
 }
@@ -455,8 +471,7 @@ async fn two_aggregators_combined_aggrs(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m stddev by (instance)(http_requests)
 //   {instance="0"} 223.60679774998
 //   {instance="1"} 223.60679774998
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 #[ignore = "TODO(ruihang): fix this case"]
 async fn stddev_by_label(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
@@ -481,8 +496,7 @@ async fn stddev_by_label(instance: Arc<dyn MockInstance>) {
 }
 
 // This is not derived from prometheus
-// should apply to both instances. tracked in #1296
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn binary_op_plain_columns(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -495,18 +509,18 @@ async fn binary_op_plain_columns(instance: Arc<dyn MockInstance>) {
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "+------------+----------+------------+---------------------+-------------------------------------------+\
-        \n| job        | instance | group      | ts                  | http_requests.value - http_requests.value |\
-        \n+------------+----------+------------+---------------------+-------------------------------------------+\
-        \n| api-server | 0        | canary     | 1970-01-01T00:00:00 | 0.0                                       |\
-        \n| api-server | 0        | production | 1970-01-01T00:00:00 | 0.0                                       |\
-        \n| api-server | 1        | canary     | 1970-01-01T00:00:00 | 0.0                                       |\
-        \n| api-server | 1        | production | 1970-01-01T00:00:00 | 0.0                                       |\
-        \n| app-server | 0        | canary     | 1970-01-01T00:00:00 | 0.0                                       |\
-        \n| app-server | 0        | production | 1970-01-01T00:00:00 | 0.0                                       |\
-        \n| app-server | 1        | canary     | 1970-01-01T00:00:00 | 0.0                                       |\
-        \n| app-server | 1        | production | 1970-01-01T00:00:00 | 0.0                                       |\
-        \n+------------+----------+------------+---------------------+-------------------------------------------+",
+        "+------------+----------+------------+---------------------+-----------------------+\
+        \n| job        | instance | group      | ts                  | lhs.value - rhs.value |\
+        \n+------------+----------+------------+---------------------+-----------------------+\
+        \n| api-server | 0        | canary     | 1970-01-01T00:00:00 | 0.0                   |\
+        \n| api-server | 0        | production | 1970-01-01T00:00:00 | 0.0                   |\
+        \n| api-server | 1        | canary     | 1970-01-01T00:00:00 | 0.0                   |\
+        \n| api-server | 1        | production | 1970-01-01T00:00:00 | 0.0                   |\
+        \n| app-server | 0        | canary     | 1970-01-01T00:00:00 | 0.0                   |\
+        \n| app-server | 0        | production | 1970-01-01T00:00:00 | 0.0                   |\
+        \n| app-server | 1        | canary     | 1970-01-01T00:00:00 | 0.0                   |\
+        \n| app-server | 1        | production | 1970-01-01T00:00:00 | 0.0                   |\
+        \n+------------+----------+------------+---------------------+-----------------------+",
     )
     .await;
 }

@@ -30,9 +30,20 @@ impl<'a> From<&'a AnyValue> for OtlpAnyValue<'a> {
     }
 }
 
+impl OtlpAnyValue<'_> {
+    pub fn none() -> Self {
+        Self(&AnyValue { value: None })
+    }
+}
+
+/// specialize Display when it's only a String
 impl Display for OtlpAnyValue<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string(self).unwrap_or_default())
+        if let Some(StringValue(v)) = &self.0.value {
+            write!(f, "{v}")
+        } else {
+            write!(f, "{}", serde_json::to_string(self).unwrap_or_default())
+        }
     }
 }
 
@@ -59,10 +70,7 @@ impl Serialize for OtlpAnyValue<'_> {
                     for kv in &v.values {
                         match &kv.value {
                             Some(val) => map.serialize_entry(&kv.key, &OtlpAnyValue::from(val))?,
-                            None => map.serialize_entry(
-                                &kv.key,
-                                &OtlpAnyValue::from(&AnyValue { value: None }),
-                            )?,
+                            None => map.serialize_entry(&kv.key, &OtlpAnyValue::none())?,
                         }
                     }
                     map.end()
@@ -92,9 +100,7 @@ impl Serialize for Attributes {
         for attr in &self.0 {
             match &attr.value {
                 Some(val) => map.serialize_entry(&attr.key, &OtlpAnyValue::from(val))?,
-                None => {
-                    map.serialize_entry(&attr.key, &OtlpAnyValue::from(&AnyValue { value: None }))?
-                }
+                None => map.serialize_entry(&attr.key, &OtlpAnyValue::none())?,
             }
         }
         map.end()
@@ -128,6 +134,26 @@ mod tests {
     fn test_null_value() {
         let otlp_value = OtlpAnyValue::from(&AnyValue { value: None });
         assert_eq!("null", serde_json::to_string(&otlp_value).unwrap())
+    }
+
+    #[test]
+    fn test_otlp_any_value_display() {
+        let values = vec![
+            (
+                "string value",
+                Value::StringValue(String::from("string value")),
+            ),
+            ("true", Value::BoolValue(true)),
+            ("1", Value::IntValue(1)),
+            ("1.1", Value::DoubleValue(1.1)),
+            ("[1,2,3]", Value::BytesValue(vec![1, 2, 3])),
+        ];
+
+        for (expect, val) in values {
+            let any_value = AnyValue { value: Some(val) };
+            let otlp_value = OtlpAnyValue::from(&any_value);
+            assert_eq!(expect, otlp_value.to_string());
+        }
     }
 
     #[test]

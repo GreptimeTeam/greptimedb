@@ -3,6 +3,7 @@ CARGO_PROFILE ?=
 FEATURES ?=
 TARGET_DIR ?=
 TARGET ?=
+BUILD_BIN ?= greptime
 CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
@@ -45,6 +46,10 @@ ifneq ($(strip $(TARGET)),)
 	CARGO_BUILD_OPTS += --target ${TARGET}
 endif
 
+ifneq ($(strip $(BUILD_BIN)),)
+	CARGO_BUILD_OPTS += --bin ${BUILD_BIN}
+endif
+
 ifneq ($(strip $(RELEASE)),)
 	CARGO_BUILD_OPTS += --release
 endif
@@ -65,7 +70,7 @@ endif
 build: ## Build debug version greptime.
 	cargo ${CARGO_EXTENSION} build ${CARGO_BUILD_OPTS}
 
-.POHNY: build-by-dev-builder
+.PHONY: build-by-dev-builder
 build-by-dev-builder: ## Build greptime by dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
@@ -144,11 +149,12 @@ multi-platform-buildx: ## Create buildx multi-platform builder.
 	docker buildx inspect ${BUILDX_BUILDER_NAME} || docker buildx create --name ${BUILDX_BUILDER_NAME} --driver docker-container --bootstrap --use
 
 ##@ Test
+.PHONY: test
 test: nextest ## Run unit and integration tests.
 	cargo nextest run ${NEXTEST_OPTS}
 
-.PHONY: nextest ## Install nextest tools.
-nextest:
+.PHONY: nextest
+nextest: ## Install nextest tools.
 	cargo --list | grep nextest || cargo install cargo-nextest --locked
 
 .PHONY: sqlness-test
@@ -157,11 +163,11 @@ sqlness-test: ## Run sqlness test.
 
 .PHONY: check
 check: ## Cargo check all the targets.
-	cargo check --workspace --all-targets
+	cargo check --workspace --all-targets --all-features
 
 .PHONY: clippy
 clippy: ## Check clippy rules.
-	cargo clippy --workspace --all-targets -F pyo3_backend -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 .PHONY: fmt-check
 fmt-check: ## Check code format.

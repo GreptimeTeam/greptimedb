@@ -17,6 +17,7 @@
 //! Mito is the a region engine to store timeseries data.
 
 #![feature(let_chains)]
+#![feature(assert_matches)]
 
 #[cfg(any(test, feature = "test"))]
 #[cfg_attr(feature = "test", allow(unused))]
@@ -36,9 +37,10 @@ pub mod read;
 pub mod region;
 mod region_write_ctx;
 pub mod request;
-mod row_converter;
+pub mod row_converter;
 pub(crate) mod schedule;
 pub mod sst;
+mod time_provider;
 pub mod wal;
 mod worker;
 

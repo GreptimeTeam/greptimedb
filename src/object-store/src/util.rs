@@ -13,20 +13,15 @@
 // limitations under the License.
 
 use futures::TryStreamExt;
+use opendal::layers::{LoggingLayer, TracingLayer};
 use opendal::{Entry, Lister};
 
+use crate::layers::PrometheusMetricsLayer;
+use crate::ObjectStore;
+
+/// Collect all entries from the [Lister].
 pub async fn collect(stream: Lister) -> Result<Vec<Entry>, opendal::Error> {
     stream.try_collect::<Vec<_>>().await
-}
-
-/// Normalize a directory path, ensure it is ends with '/'
-pub fn normalize_dir(dir: &str) -> String {
-    let mut dir = dir.to_string();
-    if !dir.ends_with('/') {
-        dir.push('/')
-    }
-
-    dir
 }
 
 /// Join two paths and normalize the output dir.
@@ -39,8 +34,42 @@ pub fn normalize_dir(dir: &str) -> String {
 pub fn join_dir(parent: &str, child: &str) -> String {
     // Always adds a `/` to the output path.
     let output = format!("{parent}/{child}/");
-    // We call opendal's normalize_root which keep the last `/`.
-    opendal::raw::normalize_root(&output)
+    normalize_dir(&output)
+}
+
+/// Modified from the `opendal::raw::normalize_root`
+///
+/// # The different
+///
+/// It doesn't always append `/` ahead of the path,
+/// It only keeps `/` ahead if the original path starts with `/`.
+///
+/// Make sure the directory is normalized to style like `abc/def/`.
+///
+/// # Normalize Rules
+///
+/// - All whitespace will be trimmed: ` abc/def ` => `abc/def`
+/// - All leading / will be trimmed: `///abc` => `abc`
+/// - Internal // will be replaced by /: `abc///def` => `abc/def`
+/// - Empty path will be `/`: `` => `/`
+/// - **(Removed❗️)** ~~Add leading `/` if not starts with: `abc/` => `/abc/`~~
+/// - Add trailing `/` if not ends with: `/abc` => `/abc/`
+///
+/// Finally, we will got path like `/path/to/root/`.
+pub fn normalize_dir(v: &str) -> String {
+    let has_root = v.starts_with('/');
+    let mut v = v
+        .split('/')
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<&str>>()
+        .join("/");
+    if has_root {
+        v.insert(0, '/');
+    }
+    if !v.ends_with('/') {
+        v.push('/')
+    }
+    v
 }
 
 /// Push `child` to `parent` dir and normalize the output path.
@@ -49,7 +78,63 @@ pub fn join_dir(parent: &str, child: &str) -> String {
 /// - Otherwise, it's a file path.
 pub fn join_path(parent: &str, child: &str) -> String {
     let output = format!("{parent}/{child}");
-    opendal::raw::normalize_path(&output)
+    normalize_path(&output)
+}
+
+/// Make sure all operation are constructed by normalized path:
+///
+/// - Path endswith `/` means it's a dir path.
+/// - Otherwise, it's a file path.
+///
+/// # Normalize Rules
+///
+/// - All whitespace will be trimmed: ` abc/def ` => `abc/def`
+/// - Repeated leading / will be trimmed: `///abc` => `/abc`
+/// - Internal // will be replaced by /: `abc///def` => `abc/def`
+/// - Empty path will be `/`: `` => `/`
+pub fn normalize_path(path: &str) -> String {
+    // - all whitespace has been trimmed.
+    let path = path.trim();
+
+    // Fast line for empty path.
+    if path.is_empty() {
+        return "/".to_string();
+    }
+
+    let has_leading = path.starts_with('/');
+    let has_trailing = path.ends_with('/');
+
+    let mut p = path
+        .split('/')
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    // If path is not starting with `/` but it should
+    if !p.starts_with('/') && has_leading {
+        p.insert(0, '/');
+    }
+
+    // If path is not ending with `/` but it should
+    if !p.ends_with('/') && has_trailing {
+        p.push('/');
+    }
+
+    p
+}
+
+/// Attaches instrument layers to the object store.
+pub fn with_instrument_layers(object_store: ObjectStore) -> ObjectStore {
+    object_store
+        .layer(
+            LoggingLayer::default()
+                // Print the expected error only in DEBUG level.
+                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
+                .with_error_level(Some("debug"))
+                .expect("input error level must be valid"),
+        )
+        .layer(TracingLayer)
+        .layer(PrometheusMetricsLayer)
 }
 
 #[cfg(test)]
@@ -70,7 +155,7 @@ mod tests {
         assert_eq!("/", join_dir("", "/"));
         assert_eq!("/", join_dir("/", "/"));
         assert_eq!("/a/", join_dir("/a", ""));
-        assert_eq!("/a/b/c/", join_dir("a/b", "c"));
+        assert_eq!("a/b/c/", join_dir("a/b", "c"));
         assert_eq!("/a/b/c/", join_dir("/a/b", "c"));
         assert_eq!("/a/b/c/", join_dir("/a/b", "c/"));
         assert_eq!("/a/b/c/", join_dir("/a/b", "/c/"));
@@ -84,10 +169,14 @@ mod tests {
         assert_eq!("/", join_path("", "/"));
         assert_eq!("/", join_path("/", "/"));
         assert_eq!("a/", join_path("a", ""));
+        assert_eq!("/a", join_path("/", "a"));
         assert_eq!("a/b/c.txt", join_path("a/b", "c.txt"));
-        assert_eq!("a/b/c.txt", join_path("/a/b", "c.txt"));
-        assert_eq!("a/b/c/", join_path("/a/b", "c/"));
-        assert_eq!("a/b/c/", join_path("/a/b", "/c/"));
-        assert_eq!("a/b/c.txt", join_path("/a/b", "//c.txt"));
+        assert_eq!("/a/b/c.txt", join_path("/a/b", "c.txt"));
+        assert_eq!("/a/b/c/", join_path("/a/b", "c/"));
+        assert_eq!("/a/b/c/", join_path("/a/b", "/c/"));
+        assert_eq!("/a/b/c.txt", join_path("/a/b", "//c.txt"));
+        assert_eq!("abc/def", join_path(" abc", "/def "));
+        assert_eq!("/abc", join_path("//", "/abc"));
+        assert_eq!("abc/def", join_path("abc/", "//def"));
     }
 }

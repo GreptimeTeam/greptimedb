@@ -14,6 +14,7 @@
 
 use std::any::Any;
 
+use common_decimal::Decimal128;
 use common_time::{Date, DateTime};
 
 use crate::types::{
@@ -22,8 +23,8 @@ use crate::types::{
 };
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, ListVector, MutableVector,
-    PrimitiveVector, StringVector, Vector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector, ListVector,
+    MutableVector, PrimitiveVector, StringVector, Vector,
 };
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
@@ -138,8 +139,11 @@ pub trait ScalarVectorBuilder: MutableVector {
     /// Push a value into the builder.
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>);
 
-    /// Finish build and return a new vector.
+    /// Build a new vector and reset `self`.
     fn finish(&mut self) -> Self::VectorType;
+
+    /// Build a new vector without resetting `self`.
+    fn finish_cloned(&self) -> Self::VectorType;
 }
 
 macro_rules! impl_scalar_for_native {
@@ -277,6 +281,27 @@ impl<'a> ScalarRef<'a> for Date {
     }
 }
 
+impl Scalar for Decimal128 {
+    type VectorType = Decimal128Vector;
+    type RefType<'a> = Decimal128;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        *self
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for Decimal128 {
+    type ScalarType = Decimal128;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        *self
+    }
+}
+
 impl Scalar for DateTime {
     type VectorType = DateTimeVector;
     type RefType<'a> = DateTime;
@@ -394,6 +419,13 @@ mod tests {
         let date = Date::new(1);
         assert_eq!(date, date.as_scalar_ref());
         assert_eq!(date, date.to_owned_scalar());
+    }
+
+    #[test]
+    fn test_decimal_scalar() {
+        let decimal = Decimal128::new(1, 1, 1);
+        assert_eq!(decimal, decimal.as_scalar_ref());
+        assert_eq!(decimal, decimal.to_owned_scalar());
     }
 
     #[test]

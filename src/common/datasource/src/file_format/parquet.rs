@@ -16,7 +16,7 @@ use std::result;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
-use arrow_schema::Schema;
+use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::datasource::physical_plan::{FileMeta, ParquetFileReaderFactory};
 use datafusion::error::Result as DatafusionResult;
@@ -26,11 +26,15 @@ use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
 use datafusion::parquet::file::metadata::ParquetMetaData;
 use datafusion::parquet::format::FileMetaData;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::future::BoxFuture;
-use object_store::{ObjectStore, Reader};
+use futures::StreamExt;
+use object_store::{ObjectStore, Reader, Writer};
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
 
-use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder};
+use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder, LazyBufferedWriter};
 use crate::error::{self, Result};
 use crate::file_format::FileFormat;
 use crate::share_buffer::SharedBuffer;
@@ -154,6 +158,108 @@ impl ArrowWriterCloser for ArrowWriter<SharedBuffer> {
     async fn close(self) -> Result<FileMetaData> {
         self.close().context(error::EncodeRecordBatchSnafu)
     }
+}
+
+/// Parquet writer that buffers row groups in memory and writes buffered data to an underlying
+/// storage by chunks to reduce memory consumption.
+pub struct BufferedWriter {
+    inner: InnerBufferedWriter,
+}
+
+type InnerBufferedWriter = LazyBufferedWriter<
+    object_store::Writer,
+    ArrowWriter<SharedBuffer>,
+    impl Fn(String) -> BoxFuture<'static, Result<Writer>>,
+>;
+
+impl BufferedWriter {
+    fn make_write_factory(
+        store: ObjectStore,
+        concurrency: usize,
+    ) -> impl Fn(String) -> BoxFuture<'static, Result<Writer>> {
+        move |path| {
+            let store = store.clone();
+            Box::pin(async move {
+                store
+                    .writer_with(&path)
+                    .concurrent(concurrency)
+                    .await
+                    .context(error::WriteObjectSnafu { path })
+            })
+        }
+    }
+
+    pub async fn try_new(
+        path: String,
+        store: ObjectStore,
+        arrow_schema: SchemaRef,
+        props: Option<WriterProperties>,
+        buffer_threshold: usize,
+        concurrency: usize,
+    ) -> error::Result<Self> {
+        let buffer = SharedBuffer::with_capacity(buffer_threshold);
+
+        let arrow_writer = ArrowWriter::try_new(buffer.clone(), arrow_schema.clone(), props)
+            .context(error::WriteParquetSnafu { path: &path })?;
+
+        Ok(Self {
+            inner: LazyBufferedWriter::new(
+                buffer_threshold,
+                buffer,
+                arrow_writer,
+                &path,
+                Self::make_write_factory(store, concurrency),
+            ),
+        })
+    }
+
+    /// Write a record batch to stream writer.
+    pub async fn write(&mut self, arrow_batch: &RecordBatch) -> error::Result<()> {
+        self.inner.write(arrow_batch).await?;
+        self.inner.try_flush(false).await?;
+
+        Ok(())
+    }
+
+    /// Close parquet writer.
+    ///
+    /// Return file metadata and bytes written.
+    pub async fn close(self) -> error::Result<(FileMetaData, u64)> {
+        self.inner.close_with_arrow_writer().await
+    }
+}
+
+/// Output the stream to a parquet file.
+///
+/// Returns number of rows written.
+pub async fn stream_to_parquet(
+    mut stream: SendableRecordBatchStream,
+    store: ObjectStore,
+    path: &str,
+    threshold: usize,
+    concurrency: usize,
+) -> Result<usize> {
+    let write_props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .build();
+    let schema = stream.schema();
+    let mut buffered_writer = BufferedWriter::try_new(
+        path.to_string(),
+        store,
+        schema,
+        Some(write_props),
+        threshold,
+        concurrency,
+    )
+    .await?;
+    let mut rows_written = 0;
+    while let Some(batch) = stream.next().await {
+        let batch = batch.context(error::ReadRecordBatchSnafu)?;
+        buffered_writer.write(&batch).await?;
+        rows_written += batch.num_rows();
+    }
+    buffered_writer.close().await?;
+    Ok(rows_written)
 }
 
 #[cfg(test)]

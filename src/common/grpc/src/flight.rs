@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::{AffectedRows, FlightMetadata};
+use api::v1::{AffectedRows, FlightMetadata, Metrics};
 use arrow_flight::utils::flight_data_to_arrow_batch;
 use arrow_flight::{FlightData, SchemaAsIpc};
 use common_base::bytes::Bytes;
@@ -39,6 +39,7 @@ pub enum FlightMessage {
     Schema(SchemaRef),
     Recordbatch(RecordBatch),
     AffectedRows(usize),
+    Metrics(String),
 }
 
 pub struct FlightEncoder {
@@ -49,8 +50,12 @@ pub struct FlightEncoder {
 
 impl Default for FlightEncoder {
     fn default() -> Self {
+        let write_options = writer::IpcWriteOptions::default()
+            .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))
+            .unwrap();
+
         Self {
-            write_options: writer::IpcWriteOptions::default(),
+            write_options,
             data_gen: writer::IpcDataGenerator::default(),
             dictionary_tracker: writer::DictionaryTracker::new(false),
         }
@@ -85,6 +90,22 @@ impl FlightEncoder {
             FlightMessage::AffectedRows(rows) => {
                 let metadata = FlightMetadata {
                     affected_rows: Some(AffectedRows { value: rows as _ }),
+                    metrics: None,
+                }
+                .encode_to_vec();
+                FlightData {
+                    flight_descriptor: None,
+                    data_header: build_none_flight_msg().into(),
+                    app_metadata: metadata.into(),
+                    data_body: ProstBytes::default(),
+                }
+            }
+            FlightMessage::Metrics(s) => {
+                let metadata = FlightMetadata {
+                    affected_rows: None,
+                    metrics: Some(Metrics {
+                        metrics: s.as_bytes().to_vec(),
+                    }),
                 }
                 .encode_to_vec();
                 FlightData {
@@ -118,6 +139,11 @@ impl FlightDecoder {
                     .context(DecodeFlightDataSnafu)?;
                 if let Some(AffectedRows { value }) = metadata.affected_rows {
                     return Ok(FlightMessage::AffectedRows(value as _));
+                }
+                if let Some(Metrics { metrics }) = metadata.metrics {
+                    return Ok(FlightMessage::Metrics(
+                        String::from_utf8_lossy(&metrics).to_string(),
+                    ));
                 }
                 InvalidFlightDataSnafu {
                     reason: "Expecting FlightMetadata have some meaningful content.",

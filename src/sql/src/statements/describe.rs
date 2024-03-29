@@ -37,19 +37,21 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use crate::dialect::GreptimeDbDialect;
-    use crate::parser::ParserContext;
+    use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::statement::Statement;
+    use crate::util::format_raw_object_name;
 
     #[test]
     pub fn test_describe_table() {
         let sql = "DESCRIBE TABLE test";
         let stmts: Vec<Statement> =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, stmts.len());
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                assert_eq!(show.name.to_string(), "test");
+                assert_eq!(format_raw_object_name(&show.name), "test");
             }
             _ => {
                 unreachable!();
@@ -61,12 +63,13 @@ mod tests {
     pub fn test_describe_schema_table() {
         let sql = "DESCRIBE TABLE test_schema.test";
         let stmts: Vec<Statement> =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, stmts.len());
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                assert_eq!(show.name.to_string(), "test_schema.test");
+                assert_eq!(format_raw_object_name(&show.name), "test_schema.test");
             }
             _ => {
                 unreachable!();
@@ -78,12 +81,16 @@ mod tests {
     pub fn test_describe_catalog_schema_table() {
         let sql = "DESCRIBE TABLE test_catalog.test_schema.test";
         let stmts: Vec<Statement> =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
         assert_eq!(1, stmts.len());
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                assert_eq!(show.name.to_string(), "test_catalog.test_schema.test");
+                assert_eq!(
+                    format_raw_object_name(&show.name),
+                    "test_catalog.test_schema.test"
+                );
             }
             _ => {
                 unreachable!();
@@ -94,6 +101,11 @@ mod tests {
     #[test]
     pub fn test_describe_missing_table_name() {
         let sql = "DESCRIBE TABLE";
-        assert!(ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).is_err());
+        assert!(ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default()
+        )
+        .is_err());
     }
 }

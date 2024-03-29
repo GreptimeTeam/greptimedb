@@ -64,16 +64,16 @@ pub trait SqlQueryHandler {
     ) -> std::result::Result<bool, Self::Error>;
 }
 
-pub struct ServerSqlQueryHandlerAdaptor<E>(SqlQueryHandlerRef<E>);
+pub struct ServerSqlQueryHandlerAdapter<E>(SqlQueryHandlerRef<E>);
 
-impl<E> ServerSqlQueryHandlerAdaptor<E> {
+impl<E> ServerSqlQueryHandlerAdapter<E> {
     pub fn arc(handler: SqlQueryHandlerRef<E>) -> Arc<Self> {
         Arc::new(Self(handler))
     }
 }
 
 #[async_trait]
-impl<E> SqlQueryHandler for ServerSqlQueryHandlerAdaptor<E>
+impl<E> SqlQueryHandler for ServerSqlQueryHandlerAdapter<E>
 where
     E: ErrorExt + Send + Sync + 'static,
 {

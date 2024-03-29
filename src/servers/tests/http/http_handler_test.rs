@@ -16,12 +16,16 @@ use std::collections::HashMap;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Json, Query, RawBody, State};
+use axum::http::header;
+use axum::response::IntoResponse;
 use axum::Form;
+use headers::HeaderValue;
 use http_body::combinators::UnsyncBoxBody;
 use hyper::Response;
+use mime_guess::mime;
 use servers::http::{
     handler as http_handler, script as script_handler, ApiState, GreptimeOptionsConfigState,
-    JsonOutput,
+    GreptimeQueryOutput, HttpResponse,
 };
 use servers::metrics_handler::MetricsHandler;
 use session::context::QueryContext;
@@ -37,52 +41,65 @@ async fn test_sql_not_provided() {
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
     let ctx = QueryContext::arc();
     ctx.set_current_user(Some(auth::userinfo_by_name(None)));
-    let Json(json) = http_handler::sql(
-        State(ApiState {
-            sql_handler,
-            script_handler: None,
-        }),
-        Query(http_handler::SqlQuery::default()),
-        axum::Extension(ctx),
-        Form(http_handler::SqlQuery::default()),
-    )
-    .await;
-    assert!(!json.success());
-    assert_eq!(
-        Some(&"sql parameter is required.".to_string()),
-        json.error()
-    );
-    assert!(json.output().is_none());
+    let api_state = ApiState {
+        sql_handler,
+        script_handler: None,
+    };
+
+    for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
+        let query = http_handler::SqlQuery {
+            db: None,
+            sql: None,
+            format: Some(format.to_string()),
+            epoch: None,
+        };
+
+        let HttpResponse::Error(resp) = http_handler::sql(
+            State(api_state.clone()),
+            Query(query),
+            axum::Extension(ctx.clone()),
+            Form(http_handler::SqlQuery::default()),
+        )
+        .await
+        else {
+            unreachable!("must be error response")
+        };
+
+        assert_eq!("sql parameter is required.", resp.error());
+    }
 }
 
 #[tokio::test]
 async fn test_sql_output_rows() {
     common_telemetry::init_default_ut_logging();
 
-    let query = create_query();
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
 
     let ctx = QueryContext::arc();
     ctx.set_current_user(Some(auth::userinfo_by_name(None)));
-    let Json(json) = http_handler::sql(
-        State(ApiState {
-            sql_handler,
-            script_handler: None,
-        }),
-        query,
-        axum::Extension(ctx),
-        Form(http_handler::SqlQuery::default()),
-    )
-    .await;
-    assert!(json.success(), "{json:?}");
-    assert!(json.error().is_none());
-    match &json.output().expect("assertion failed")[0] {
-        JsonOutput::Records(records) => {
-            assert_eq!(1, records.num_rows());
-            let json = serde_json::to_string_pretty(&records).unwrap();
-            assert_eq!(
-                json,
-                r#"{
+    let api_state = ApiState {
+        sql_handler,
+        script_handler: None,
+    };
+
+    for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
+        let query = create_query(format);
+        let json = http_handler::sql(
+            State(api_state.clone()),
+            query,
+            axum::Extension(ctx.clone()),
+            Form(http_handler::SqlQuery::default()),
+        )
+        .await;
+
+        match json {
+            HttpResponse::GreptimedbV1(resp) => match &resp.output()[0] {
+                GreptimeQueryOutput::Records(records) => {
+                    assert_eq!(1, records.num_rows());
+                    let json = serde_json::to_string_pretty(&records).unwrap();
+                    assert_eq!(
+                        json,
+                        r#"{
   "schema": {
     "column_schemas": [
       {
@@ -97,9 +114,65 @@ async fn test_sql_output_rows() {
     ]
   ]
 }"#
-            );
+                    );
+                }
+                _ => unreachable!(),
+            },
+            HttpResponse::InfluxdbV1(resp) => {
+                let json = serde_json::to_string_pretty(&resp.results()).unwrap();
+                assert_eq!(
+                    json,
+                    r#"[
+  {
+    "statement_id": 0,
+    "series": [
+      {
+        "name": "",
+        "columns": [
+          "SUM(numbers.uint32s)"
+        ],
+        "values": [
+          [
+            4950
+          ]
+        ]
+      }
+    ]
+  }
+]"#
+                );
+            }
+            HttpResponse::Csv(resp) => {
+                use http_body::Body as HttpBody;
+                let mut resp = resp.into_response();
+                assert_eq!(
+                    resp.headers().get(header::CONTENT_TYPE),
+                    Some(HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref())).as_ref(),
+                );
+                assert_eq!(
+                    resp.body_mut().data().await.unwrap().unwrap(),
+                    hyper::body::Bytes::from_static(b"4950\n"),
+                );
+            }
+            HttpResponse::Table(resp) => {
+                use http_body::Body as HttpBody;
+                let mut resp = resp.into_response();
+                assert_eq!(
+                    resp.headers().get(header::CONTENT_TYPE),
+                    Some(HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref())).as_ref(),
+                );
+                assert_eq!(
+                    resp.body_mut().data().await.unwrap().unwrap(),
+                    hyper::body::Bytes::from(
+                        r#"┌─SUM(numbers.uint32s)─┐
+│ 4950                 │
+└──────────────────────┘
+"#
+                    ),
+                );
+            }
+            _ => unreachable!(),
         }
-        _ => unreachable!(),
     }
 }
 
@@ -107,31 +180,33 @@ async fn test_sql_output_rows() {
 async fn test_sql_form() {
     common_telemetry::init_default_ut_logging();
 
-    let form = create_form();
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
 
     let ctx = QueryContext::arc();
     ctx.set_current_user(Some(auth::userinfo_by_name(None)));
+    let api_state = ApiState {
+        sql_handler,
+        script_handler: None,
+    };
 
-    let Json(json) = http_handler::sql(
-        State(ApiState {
-            sql_handler,
-            script_handler: None,
-        }),
-        Query(http_handler::SqlQuery::default()),
-        axum::Extension(ctx),
-        form,
-    )
-    .await;
-    assert!(json.success(), "{json:?}");
-    assert!(json.error().is_none());
-    match &json.output().expect("assertion failed")[0] {
-        JsonOutput::Records(records) => {
-            assert_eq!(1, records.num_rows());
-            let json = serde_json::to_string_pretty(&records).unwrap();
-            assert_eq!(
-                json,
-                r#"{
+    for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
+        let form = create_form(format);
+        let json = http_handler::sql(
+            State(api_state.clone()),
+            Query(http_handler::SqlQuery::default()),
+            axum::Extension(ctx.clone()),
+            form,
+        )
+        .await;
+
+        match json {
+            HttpResponse::GreptimedbV1(resp) => match &resp.output()[0] {
+                GreptimeQueryOutput::Records(records) => {
+                    assert_eq!(1, records.num_rows());
+                    let json = serde_json::to_string_pretty(&records).unwrap();
+                    assert_eq!(
+                        json,
+                        r#"{
   "schema": {
     "column_schemas": [
       {
@@ -146,9 +221,65 @@ async fn test_sql_form() {
     ]
   ]
 }"#
-            );
+                    );
+                }
+                _ => unreachable!(),
+            },
+            HttpResponse::InfluxdbV1(resp) => {
+                let json = serde_json::to_string_pretty(&resp.results()).unwrap();
+                assert_eq!(
+                    json,
+                    r#"[
+  {
+    "statement_id": 0,
+    "series": [
+      {
+        "name": "",
+        "columns": [
+          "SUM(numbers.uint32s)"
+        ],
+        "values": [
+          [
+            4950
+          ]
+        ]
+      }
+    ]
+  }
+]"#
+                );
+            }
+            HttpResponse::Csv(resp) => {
+                use http_body::Body as HttpBody;
+                let mut resp = resp.into_response();
+                assert_eq!(
+                    resp.headers().get(header::CONTENT_TYPE),
+                    Some(HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref())).as_ref(),
+                );
+                assert_eq!(
+                    resp.body_mut().data().await.unwrap().unwrap(),
+                    hyper::body::Bytes::from_static(b"4950\n"),
+                );
+            }
+            HttpResponse::Table(resp) => {
+                use http_body::Body as HttpBody;
+                let mut resp = resp.into_response();
+                assert_eq!(
+                    resp.headers().get(header::CONTENT_TYPE),
+                    Some(HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref())).as_ref(),
+                );
+                assert_eq!(
+                    resp.body_mut().data().await.unwrap().unwrap(),
+                    hyper::body::Bytes::from(
+                        r#"┌─SUM(numbers.uint32s)─┐
+│ 4950                 │
+└──────────────────────┘
+"#
+                    ),
+                );
+            }
+            _ => unreachable!(),
         }
-        _ => unreachable!(),
     }
 }
 
@@ -161,7 +292,7 @@ lazy_static::lazy_static! {
 async fn test_metrics() {
     TEST_METRIC.inc();
     let stats = MetricsHandler;
-    let text = http_handler::metrics(axum::extract::State(stats), Query(HashMap::default())).await;
+    let text = http_handler::metrics(State(stats), Query(HashMap::default())).await;
     assert!(text.contains("test_metrics counter"));
 }
 
@@ -172,7 +303,7 @@ async fn insert_script(
 ) {
     let body = RawBody(Body::from(script.clone()));
     let invalid_query = create_invalid_script_query();
-    let Json(json) = script_handler::scripts(
+    let json = script_handler::scripts(
         State(ApiState {
             sql_handler: sql_handler.clone(),
             script_handler: Some(script_handler.clone()),
@@ -181,13 +312,15 @@ async fn insert_script(
         body,
     )
     .await;
-    assert!(!json.success(), "{json:?}");
-    assert_eq!(json.error().unwrap(), "Invalid argument: invalid schema");
+    let HttpResponse::Error(json) = json else {
+        unreachable!()
+    };
+    assert_eq!(json.error(), "invalid schema");
 
     let body = RawBody(Body::from(script.clone()));
     let exec = create_script_query();
     // Insert the script
-    let Json(json) = script_handler::scripts(
+    let json = script_handler::scripts(
         State(ApiState {
             sql_handler: sql_handler.clone(),
             script_handler: Some(script_handler.clone()),
@@ -196,9 +329,10 @@ async fn insert_script(
         body,
     )
     .await;
-    assert!(json.success(), "{json:?}");
-    assert!(json.error().is_none());
-    assert!(json.output().is_none());
+    let HttpResponse::GreptimedbV1(json) = json else {
+        unreachable!()
+    };
+    assert!(json.output().is_empty());
 }
 
 #[tokio::test]
@@ -217,7 +351,7 @@ def test(n) -> vector[i64]:
     insert_script(script.clone(), script_handler.clone(), sql_handler.clone()).await;
     // Run the script
     let exec = create_script_query();
-    let Json(json) = script_handler::run_script(
+    let json = script_handler::run_script(
         State(ApiState {
             sql_handler,
             script_handler: Some(script_handler),
@@ -225,11 +359,11 @@ def test(n) -> vector[i64]:
         exec,
     )
     .await;
-    assert!(json.success(), "{json:?}");
-    assert!(json.error().is_none());
-
-    match &json.output().unwrap()[0] {
-        JsonOutput::Records(records) => {
+    let HttpResponse::GreptimedbV1(json) = json else {
+        unreachable!()
+    };
+    match &json.output()[0] {
+        GreptimeQueryOutput::Records(records) => {
             let json = serde_json::to_string_pretty(&records).unwrap();
             assert_eq!(5, records.num_rows());
             assert_eq!(
@@ -284,7 +418,7 @@ def test(n, **params)  -> vector[i64]:
     // Run the script
     let mut exec = create_script_query();
     let _ = exec.0.params.insert("a".to_string(), "42".to_string());
-    let Json(json) = script_handler::run_script(
+    let json = script_handler::run_script(
         State(ApiState {
             sql_handler,
             script_handler: Some(script_handler),
@@ -292,11 +426,11 @@ def test(n, **params)  -> vector[i64]:
         exec,
     )
     .await;
-    assert!(json.success(), "{json:?}");
-    assert!(json.error().is_none());
-
-    match &json.output().unwrap()[0] {
-        JsonOutput::Records(records) => {
+    let HttpResponse::GreptimedbV1(json) = json else {
+        unreachable!()
+    };
+    match &json.output()[0] {
+        GreptimeQueryOutput::Records(records) => {
             let json = serde_json::to_string_pretty(&records).unwrap();
             assert_eq!(5, records.num_rows());
             assert_eq!(
@@ -350,17 +484,21 @@ fn create_invalid_script_query() -> Query<script_handler::ScriptQuery> {
     })
 }
 
-fn create_query() -> Query<http_handler::SqlQuery> {
+fn create_query(format: &str) -> Query<http_handler::SqlQuery> {
     Query(http_handler::SqlQuery {
         sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
         db: None,
+        format: Some(format.to_string()),
+        epoch: None,
     })
 }
 
-fn create_form() -> Form<http_handler::SqlQuery> {
+fn create_form(format: &str) -> Form<http_handler::SqlQuery> {
     Form(http_handler::SqlQuery {
         sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
         db: None,
+        format: Some(format.to_string()),
+        epoch: None,
     })
 }
 

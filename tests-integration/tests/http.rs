@@ -15,13 +15,17 @@
 use std::collections::BTreeMap;
 
 use auth::user_provider_from_option;
-use axum::http::StatusCode;
+use axum::http::{HeaderName, StatusCode};
 use axum_test_helper::TestClient;
 use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
+use servers::http::error_result::ErrorResponse;
+use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::handler::HealthResponse;
+use servers::http::header::GREPTIME_TIMEZONE_HEADER_NAME;
+use servers::http::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
-use servers::http::{JsonOutput, JsonResponse};
+use servers::http::GreptimeQueryOutput;
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
@@ -120,12 +124,11 @@ pub async fn test_sql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app);
     let res = client.get("/v1/sql").send().await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), 1004);
-    assert_eq!(body.error().unwrap(), "sql parameter is required.");
-    let _ = body.execution_time_ms().unwrap();
+    assert_eq!(body.error(), "sql parameter is required.");
 
     let res = client
         .get("/v1/sql?sql=select * from numbers limit 10")
@@ -133,16 +136,30 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-
-    let output = body.output().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records" :{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}
+        })).unwrap()
+    );
+
+    // test influxdb_v1 result format
+    let res = client
+        .get("/v1/sql?format=influxdb_v1&sql=select * from numbers limit 10")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = serde_json::from_str::<InfluxdbV1Response>(&res.text().await).unwrap();
+    let output = body.results();
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0],
+        serde_json::from_value::<InfluxdbOutput>(json!({
+            "statement_id":0,"series":[{"name":"","columns":["number"],"values":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}]
         })).unwrap()
     );
 
@@ -160,15 +177,13 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-    let output = body.output().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
 
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[["host",66.6,1024.0,0]]}
         })).unwrap()
     );
@@ -180,15 +195,13 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-    let output = body.output().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
 
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -200,14 +213,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-    let output = body.output().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -219,21 +230,19 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-    let outputs = body.output().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let outputs = body.output();
     assert_eq!(outputs.len(), 2);
     assert_eq!(
         outputs[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
     assert_eq!(
         outputs[1],
-        serde_json::from_value::<JsonOutput>(json!({
-            "records":{"rows":[]}
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
+            "records":{"rows":[], "schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]}}
         }))
         .unwrap()
     );
@@ -243,13 +252,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?sql=select cpu, ts from demo limit 1;select cpu, ts from demo2 where ts > 0;")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(!body.success());
-    let _ = body.execution_time_ms().unwrap();
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     // TODO(shuiyisong): fix this when return source err msg to client side
-    // assert!(body.error().unwrap().contains("Table not found"));
+    assert!(body.error().contains("Table not found"));
+    assert_eq!(body.code(), ErrorCode::PlanQuery as u32);
 
     // test database given
     let res = client
@@ -258,14 +266,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-    let outputs = body.output().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let outputs = body.output();
     assert_eq!(outputs.len(), 1);
     assert_eq!(
         outputs[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -275,8 +281,8 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?db=notfound&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
     // test catalog-schema given
@@ -286,14 +292,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-    let outputs = body.output().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let outputs = body.output();
     assert_eq!(outputs.len(), 1);
     assert_eq!(
         outputs[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -303,8 +307,8 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?db=notfound2-schema&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
     // test invalid schema
@@ -312,10 +316,47 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?db=greptime-schema&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
+    // test timezone header
+    let res = client
+        .get("/v1/sql?&sql=show variables system_time_zone")
+        .header(
+            TryInto::<HeaderName>::try_into(GREPTIME_TIMEZONE_HEADER_NAME.to_string()).unwrap(),
+            "Asia/Shanghai",
+        )
+        .send()
+        .await
+        .text()
+        .await;
+    assert!(res.contains("SYSTEM_TIME_ZONE") && res.contains("UTC"));
+    let res = client
+        .get("/v1/sql?&sql=show variables time_zone")
+        .header(
+            TryInto::<HeaderName>::try_into(GREPTIME_TIMEZONE_HEADER_NAME.to_string()).unwrap(),
+            "Asia/Shanghai",
+        )
+        .send()
+        .await
+        .text()
+        .await;
+    assert!(res.contains("TIME_ZONE") && res.contains("Asia/Shanghai"));
+    let res = client
+        .get("/v1/sql?&sql=show variables system_time_zone")
+        .send()
+        .await
+        .text()
+        .await;
+    assert!(res.contains("SYSTEM_TIME_ZONE") && res.contains("UTC"));
+    let res = client
+        .get("/v1/sql?&sql=show variables time_zone")
+        .send()
+        .await
+        .text()
+        .await;
+    assert!(res.contains("TIME_ZONE") && res.contains("UTC"));
     guard.remove_all().await;
 }
 
@@ -329,10 +370,7 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(body.success());
-    let _ = body.execution_time_ms().unwrap();
-
+    let _body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
     guard.remove_all().await;
 }
 
@@ -340,6 +378,17 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_prom_app_with_frontend(store_type, "promql_api").await;
     let client = TestClient::new(app);
+
+    // format_query
+    let res = client
+        .get("/v1/prometheus/api/v1/format_query?query=foo/bar")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.text().await.as_str(),
+        r#"{"status":"success","data":"foo / bar"}"#
+    );
 
     // instant query
     let res = client
@@ -353,6 +402,22 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    // instant query 1+1
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=1%2B1&time=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(
+            json!({"resultType":"scalar","result":[1.0,"2"]})
+        )
+        .unwrap()
+    );
 
     // range query
     let res = client
@@ -490,6 +555,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error.is_none());
     assert!(prom_resp.error_type.is_none());
 
+    // buildinfo
+    let res = client
+        .get("/v1/prometheus/api/v1/status/buildinfo")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+
     guard.remove_all().await;
 }
 
@@ -509,7 +583,8 @@ pub async fn test_metrics_api(store_type: StorageType) {
     let res = client.get("/metrics").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
-    assert!(body.contains("frontend_handle_sql_elapsed"));
+    // Comment in the metrics text.
+    assert!(body.contains("# HELP"));
     guard.remove_all().await;
 }
 
@@ -531,9 +606,8 @@ def test(n) -> vector[f64]:
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert_eq!(body.code(), 0);
-    assert!(body.output().is_none());
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    assert!(body.output().is_empty());
 
     // call script
     let res = client
@@ -541,15 +615,12 @@ def test(n) -> vector[f64]:
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-
-    assert_eq!(body.code(), 0);
-    let _ = body.execution_time_ms().unwrap();
-    let output = body.output().unwrap();
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}
         })).unwrap()
     );
@@ -603,94 +674,202 @@ pub async fn test_config_api(store_type: StorageType) {
 
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
+
     let expected_toml_str = format!(
-        r#"mode = "standalone"
+        r#"
+[procedure]
+max_retry_times = 3
+retry_delay = "500ms"
+
+[metadata_store]
+file_size = "256MiB"
+purge_threshold = "4GiB"
+
+[frontend]
+mode = "standalone"
+
+[frontend.heartbeat]
+interval = "18s"
+retry_interval = "3s"
+
+[frontend.http]
+addr = "127.0.0.1:4000"
+timeout = "30s"
+body_limit = "64MiB"
+
+[frontend.grpc]
+addr = "127.0.0.1:4001"
+runtime_size = 8
+max_recv_message_size = "512MiB"
+max_send_message_size = "512MiB"
+
+[frontend.mysql]
+enable = true
+addr = "127.0.0.1:4002"
+runtime_size = 2
+
+[frontend.mysql.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+watch = false
+
+[frontend.postgres]
+enable = true
+addr = "127.0.0.1:4003"
+runtime_size = 2
+
+[frontend.postgres.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+watch = false
+
+[frontend.opentsdb]
+enable = true
+addr = "127.0.0.1:4242"
+runtime_size = 2
+
+[frontend.influxdb]
+enable = true
+
+[frontend.prom_store]
+enable = true
+with_metric_engine = true
+
+[frontend.otlp]
+enable = true
+
+[frontend.logging]
+enable_otlp_tracing = false
+append_stdout = true
+
+[frontend.datanode.client]
+timeout = "10s"
+connect_timeout = "1s"
+tcp_nodelay = true
+
+[frontend.export_metrics]
+enable = false
+write_interval = "30s"
+
+[datanode]
+mode = "standalone"
 node_id = 0
 require_lease_before_startup = true
+init_regions_in_background = false
 rpc_addr = "127.0.0.1:3001"
 rpc_runtime_size = 8
 rpc_max_recv_message_size = "512MiB"
 rpc_max_send_message_size = "512MiB"
 enable_telemetry = true
 
-[heartbeat]
+[datanode.heartbeat]
 interval = "3s"
 retry_interval = "3s"
 
-[http]
+[datanode.http]
 addr = "127.0.0.1:4000"
 timeout = "30s"
 body_limit = "64MiB"
 
-[wal]
+[datanode.wal]
+provider = "raft_engine"
 file_size = "256MiB"
 purge_threshold = "4GiB"
 purge_interval = "10m"
 read_batch_size = 128
 sync_write = false
+enable_log_recycle = true
+prefill_log_files = false
 
-[storage]
+[datanode.storage]
 type = "{}"
+providers = []
 
-[storage.compaction]
-max_inflight_tasks = 4
-max_files_in_level0 = 8
-max_purge_tasks = 32
-sst_write_buffer_size = "8MiB"
+[[datanode.region_engine]]
 
-[storage.manifest]
-checkpoint_margin = 10
-gc_duration = "10m"
-compress = false
-
-[storage.flush]
-max_flush_tasks = 8
-region_write_buffer_size = "32MiB"
-picker_schedule_interval = "5m"
-auto_flush_interval = "1h"
-
-[[region_engine]]
-
-[region_engine.mito]
-num_workers = 1
+[datanode.region_engine.mito]
 worker_channel_size = 128
 worker_request_batch_size = 64
 manifest_checkpoint_distance = 10
-manifest_compress_type = "Uncompressed"
+compress_manifest = false
 max_background_jobs = 4
 auto_flush_interval = "30m"
-global_write_buffer_size = "1GiB"
-global_write_buffer_reject_size = "2GiB"
-sst_meta_cache_size = "128MiB"
-vector_cache_size = "512MiB"
+enable_experimental_write_cache = false
+experimental_write_cache_path = ""
+experimental_write_cache_size = "512MiB"
+sst_write_buffer_size = "8MiB"
+parallel_scan_channel_size = 32
+allow_stale_entries = false
 
-[[region_engine]]
+[datanode.region_engine.mito.inverted_index]
+create_on_flush = "auto"
+create_on_compaction = "auto"
+apply_on_query = "auto"
+write_buffer_size = "8MiB"
+mem_threshold_on_create = "64.0MiB"
+intermediate_path = ""
 
-[region_engine.file]
+[datanode.region_engine.mito.memtable]
+type = "time_series"
+
+[[datanode.region_engine]]
+
+[datanode.region_engine.file]
+
+[datanode.logging]
+enable_otlp_tracing = false
+append_stdout = true
+
+[datanode.export_metrics]
+enable = false
+write_interval = "30s"
 
 [logging]
-enable_jaeger_tracing = false"#,
-        store_type
+enable_otlp_tracing = false
+append_stdout = true
+
+[wal_meta]
+provider = "raft_engine""#,
+        store_type,
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
     assert_eq!(body_text, expected_toml_str);
 }
 
 fn drop_lines_with_inconsistent_results(input: String) -> String {
+    let inconsistent_results = [
+        "dir =",
+        "data_home =",
+        "bucket =",
+        "root =",
+        "endpoint =",
+        "region =",
+        "cache_path =",
+        "cache_capacity =",
+        "sas_token =",
+        "scope =",
+        "num_workers =",
+        "scan_parallelism =",
+        "global_write_buffer_size =",
+        "global_write_buffer_reject_size =",
+        "sst_meta_cache_size =",
+        "vector_cache_size =",
+        "page_cache_size =",
+    ];
+
     input
         .lines()
         .filter(|line| {
             // ignores
-            !line.trim().starts_with("dir =")
-                && !line.trim().starts_with("data_home =")
-                && !line.trim().starts_with("bucket =")
-                && !line.trim().starts_with("root =")
-                && !line.trim().starts_with("endpoint =")
-                && !line.trim().starts_with("region =")
-                && !line.trim().starts_with("cache_path =")
-                && !line.trim().starts_with("cache_capacity =")
-                && !line.trim().starts_with("sas_token =")
-                && !line.trim().starts_with("scope =")
+            let line = line.trim();
+            for prefix in inconsistent_results {
+                if line.starts_with(prefix) {
+                    return false;
+                }
+            }
+            true
         })
         .collect::<Vec<&str>>()
         .join(

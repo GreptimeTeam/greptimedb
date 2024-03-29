@@ -198,6 +198,15 @@ SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 | 8192     | 8192              | 10000                             | 81920000                          |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 
+-- SQLNESS ARG restart=true
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+
++----------+-------------------+-----------------------------------+-----------------------------------+
+| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
++----------+-------------------+-----------------------------------+-----------------------------------+
+| 8192     | 8192              | 10000                             | 81920000                          |
++----------+-------------------+-----------------------------------+-----------------------------------+
+
 INSERT INTO bigtable SELECT a, to_unixtime(ts) * 73 FROM bigtable;
 
 Affected Rows: 8192

@@ -17,13 +17,14 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
-use common_meta::ddl::utils::region_storage_path;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
+use common_meta::key::datanode_table::{DatanodeTableKey, RegionInfo};
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use super::update_metadata::UpdateRegionMetadata;
 use super::{RegionFailoverContext, State};
@@ -31,7 +32,6 @@ use crate::error::{
     self, Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
-use crate::inactive_region_manager::InactiveRegionManager;
 use crate::procedure::region_failover::OPEN_REGION_MESSAGE_TIMEOUT;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
@@ -42,8 +42,10 @@ pub(super) struct ActivateRegion {
     // the new leader node needs to remark the failed region as "inactive"
     // to prevent it from renewing the lease.
     remark_inactive_region: bool,
+    // An `None` option stands for uninitialized.
     region_storage_path: Option<String>,
     region_options: Option<HashMap<String, String>>,
+    region_wal_options: Option<HashMap<RegionNumber, String>>,
 }
 
 impl ActivateRegion {
@@ -53,6 +55,7 @@ impl ActivateRegion {
             remark_inactive_region: false,
             region_storage_path: None,
             region_options: None,
+            region_wal_options: None,
         }
     }
 
@@ -63,33 +66,43 @@ impl ActivateRegion {
         timeout: Duration,
     ) -> Result<MailboxReceiver> {
         let table_id = failed_region.table_id;
-        let table_info = ctx
+        // Retrieves the wal options from failed datanode table value.
+        let datanode_table_value = ctx
             .table_metadata_manager
-            .table_info_manager()
-            .get(table_id)
+            .datanode_table_manager()
+            .get(&DatanodeTableKey::new(failed_region.datanode_id, table_id))
             .await
             .context(error::TableMetadataManagerSnafu)?
-            .context(error::TableInfoNotFoundSnafu { table_id })?
-            .into_inner()
-            .table_info;
-
-        let region_storage_path =
-            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
+            .context(error::DatanodeTableNotFoundSnafu {
+                table_id,
+                datanode_id: failed_region.datanode_id,
+            })?;
 
         let candidate_ident = RegionIdent {
             datanode_id: self.candidate.id,
             ..failed_region.clone()
         };
         info!("Activating region: {candidate_ident:?}");
-        let region_options: HashMap<String, String> = (&table_info.meta.options).into();
+
+        let RegionInfo {
+            region_storage_path,
+            region_options,
+            region_wal_options,
+            ..
+        } = datanode_table_value.region_info;
+
         let instruction = Instruction::OpenRegion(OpenRegion::new(
             candidate_ident.clone(),
             &region_storage_path,
             region_options.clone(),
+            region_wal_options.clone(),
+            false,
         ));
 
         self.region_storage_path = Some(region_storage_path);
         self.region_options = Some(region_options);
+        self.region_wal_options = Some(region_wal_options);
+
         let msg = MailboxMessage::json_message(
             "Activate Region",
             &format!("Metasrv@{}", ctx.selector_ctx.server_addr),
@@ -103,17 +116,6 @@ impl ActivateRegion {
         .with_context(|_| SerializeToJsonSnafu {
             input: instruction.to_string(),
         })?;
-
-        // Ensure that metasrv will renew the lease for this candidate node.
-        //
-        // This operation may not be redundant, imagine the following scenario:
-        // This candidate once had the current region, and because it did not respond to the `close`
-        // command in time, it was considered an inactive node by metasrv, then it replied, and the
-        // current region failed over again, and the node was selected as a candidate, so it needs
-        // to clear its previous state first.
-        InactiveRegionManager::new(&ctx.in_memory)
-            .deregister_inactive_region(&candidate_ident)
-            .await?;
 
         let ch = Channel::Datanode(self.candidate.id);
         ctx.mailbox.send(&ch, msg, timeout).await
@@ -149,6 +151,11 @@ impl ActivateRegion {
                             .context(error::UnexpectedSnafu {
                                 violated: "expected region_options",
                             })?,
+                        self.region_wal_options
+                            .clone()
+                            .context(error::UnexpectedSnafu {
+                                violated: "expected region_wal_options",
+                            })?,
                     )))
                 } else {
                     // The region could be just indeed cannot be opened by the candidate, retry
@@ -182,22 +189,11 @@ impl State for ActivateRegion {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
-        if self.remark_inactive_region {
-            // Remark the fail region as inactive to prevent it from renewing the lease.
-            InactiveRegionManager::new(&ctx.in_memory)
-                .register_inactive_region(failed_region)
-                .await?;
-        }
-
         let mailbox_receiver = self
             .send_open_region_message(ctx, failed_region, OPEN_REGION_MESSAGE_TIMEOUT)
             .await?;
 
         self.handle_response(mailbox_receiver, failed_region).await
-    }
-
-    fn remark_inactive_region_if_needed(&mut self) {
-        self.remark_inactive_region = true;
     }
 }
 
@@ -245,6 +241,8 @@ mod tests {
                     },
                     &env.path,
                     HashMap::new(),
+                    HashMap::new(),
+                    false
                 )))
                 .unwrap(),
             ))
@@ -279,7 +277,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             format!("{next_state:?}"),
-            r#"UpdateRegionMetadata { candidate: Peer { id: 2, addr: "" }, region_storage_path: "greptime/public", region_options: {} }"#
+            r#"UpdateRegionMetadata { candidate: Peer { id: 2, addr: "" }, region_storage_path: "greptime/public", region_options: {}, region_wal_options: {} }"#
         );
     }
 
@@ -315,6 +313,8 @@ mod tests {
                     },
                     &env.path,
                     HashMap::new(),
+                    HashMap::new(),
+                    false
                 )))
                 .unwrap(),
             ))

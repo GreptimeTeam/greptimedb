@@ -119,6 +119,14 @@ impl CompatPrimaryKey {
         )?;
 
         batch.set_primary_key(buffer);
+
+        // update cache
+        if let Some(pk_values) = &mut batch.pk_values {
+            for value in &self.values {
+                pk_values.push(value.clone());
+            }
+        }
+
         Ok(batch)
     }
 }
@@ -177,7 +185,7 @@ fn may_compat_primary_key(
         CompatReaderSnafu {
             region_id: expect.region_id,
             reason: format!(
-                "primary key has more columns {} than exepct {}",
+                "primary key has more columns {} than expect {}",
                 actual.primary_key.len(),
                 expect.primary_key.len()
             ),

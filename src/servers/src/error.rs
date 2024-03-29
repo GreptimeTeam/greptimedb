@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use std::any::Any;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
@@ -23,7 +24,7 @@ use catalog;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_telemetry::logging;
+use common_telemetry::{debug, error};
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
@@ -34,8 +35,20 @@ use tonic::Code;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Arrow error"))]
+    Arrow {
+        #[snafu(source)]
+        error: arrow_schema::ArrowError,
+    },
+
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
+
+    #[snafu(display("Unsupported data type: {}, reason: {}", data_type, reason))]
+    UnsupportedDataType {
+        data_type: ConcreteDataType,
+        reason: String,
+    },
 
     #[snafu(display("Internal IO error"))]
     InternalIo {
@@ -213,6 +226,23 @@ pub enum Error {
         error: snap::Error,
     },
 
+    #[snafu(display("Failed to send prometheus remote request"))]
+    SendPromRemoteRequest {
+        location: Location,
+        #[snafu(source)]
+        error: reqwest::Error,
+    },
+
+    #[snafu(display("Invalid export metrics config, msg: {}", msg))]
+    InvalidExportMetricsConfig { msg: String, location: Location },
+
+    #[snafu(display("Failed to compress prometheus remote request"))]
+    CompressPromRemoteRequest {
+        location: Location,
+        #[snafu(source)]
+        error: snap::Error,
+    },
+
     #[snafu(display("Invalid prometheus remote request, msg: {}", msg))]
     InvalidPromRemoteRequest { msg: String, location: Location },
 
@@ -241,18 +271,25 @@ pub enum Error {
     #[snafu(display("Not found influx http authorization info"))]
     NotFoundInfluxAuth {},
 
+    #[snafu(display("Unsupported http auth scheme, name: {}", name))]
+    UnsupportedAuthScheme { name: String },
+
     #[snafu(display("Invalid visibility ASCII chars"))]
-    InvisibleASCII {
+    InvalidAuthHeaderInvisibleASCII {
         #[snafu(source)]
         error: hyper::header::ToStrError,
         location: Location,
     },
 
-    #[snafu(display("Unsupported http auth scheme, name: {}", name))]
-    UnsupportedAuthScheme { name: String },
+    #[snafu(display("Invalid utf-8 value"))]
+    InvalidAuthHeaderInvalidUtf8Value {
+        #[snafu(source)]
+        error: FromUtf8Error,
+        location: Location,
+    },
 
     #[snafu(display("Invalid http authorization header"))]
-    InvalidAuthorizationHeader { location: Location },
+    InvalidAuthHeader { location: Location },
 
     #[snafu(display("Invalid base64 value"))]
     InvalidBase64Value {
@@ -338,8 +375,13 @@ pub enum Error {
         source: crate::http::pprof::nix::Error,
     },
 
-    #[snafu(display(""))]
-    Metrics { source: BoxedError },
+    #[cfg(not(windows))]
+    #[snafu(display("Failed to update jemalloc metrics"))]
+    UpdateJemallocMetrics {
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
+        location: Location,
+    },
 
     #[snafu(display("DataFrame operation error"))]
     DataFrame {
@@ -381,6 +423,38 @@ pub enum Error {
         actual: i32,
         location: Location,
     },
+
+    #[snafu(display("Failed to convert to json"))]
+    ToJson {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode url"))]
+    UrlDecode {
+        #[snafu(source)]
+        error: FromUtf8Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert Mysql value, error: {}", err_msg))]
+    MysqlValueConversion { err_msg: String, location: Location },
+
+    #[snafu(display("Missing query context"))]
+    MissingQueryContext { location: Location },
+
+    #[snafu(display(
+        "Invalid parameter, physical_table is not expected when metric engine is disabled"
+    ))]
+    UnexpectedPhysicalTable { location: Location },
+
+    #[snafu(display("Failed to initialize a watcher for file {}", path))]
+    FileWatch {
+        path: String,
+        #[snafu(source)]
+        error: notify::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -397,10 +471,18 @@ impl ErrorExt for Error {
             | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
+            | SendPromRemoteRequest { .. }
             | TcpIncoming { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildHttpResponse { .. } => StatusCode::Internal,
+            | BuildHttpResponse { .. }
+            | Arrow { .. }
+            | FileWatch { .. } => StatusCode::Internal,
+
+            UnsupportedDataType { .. } => StatusCode::Unsupported,
+
+            #[cfg(not(windows))]
+            UpdateJemallocMetrics { .. } => StatusCode::Internal,
 
             CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
@@ -421,14 +503,20 @@ impl ErrorExt for Error {
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
+            | CompressPromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
+            | InvalidExportMetricsConfig { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }
             | PreparedStmtTypeMismatch { .. }
             | TimePrecision { .. }
-            | IncompatibleSchema { .. } => StatusCode::InvalidArguments,
+            | UrlDecode { .. }
+            | IncompatibleSchema { .. }
+            | MissingQueryContext { .. }
+            | MysqlValueConversion { .. }
+            | UnexpectedPhysicalTable { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }
@@ -440,16 +528,17 @@ impl ErrorExt for Error {
             DescribeStatement { source } => source.status_code(),
 
             NotFoundAuthHeader { .. } | NotFoundInfluxAuth { .. } => StatusCode::AuthHeaderNotFound,
-            InvisibleASCII { .. }
+            InvalidAuthHeaderInvisibleASCII { .. }
             | UnsupportedAuthScheme { .. }
-            | InvalidAuthorizationHeader { .. }
+            | InvalidAuthHeader { .. }
             | InvalidBase64Value { .. }
-            | InvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
+            | InvalidAuthHeaderInvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
-            InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
+
+            InvalidUtf8Value { .. } | InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
             ReplacePreparedStmtParams { source, .. }
             | GetPreparedStmtParams { source, .. }
@@ -471,9 +560,9 @@ impl ErrorExt for Error {
             #[cfg(feature = "pprof")]
             DumpPprof { source, .. } => source.status_code(),
 
-            Metrics { source } => source.status_code(),
-
             ConvertScalarValue { source, .. } => source.status_code(),
+
+            ToJson { .. } => StatusCode::Internal,
         }
     }
 
@@ -492,7 +581,9 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::Internal
         | StatusCode::PlanQuery
         | StatusCode::EngineExecuteQuery => Code::Internal,
-        StatusCode::InvalidArguments | StatusCode::InvalidSyntax => Code::InvalidArgument,
+        StatusCode::InvalidArguments | StatusCode::InvalidSyntax | StatusCode::RequestOutdated => {
+            Code::InvalidArgument
+        }
         StatusCode::Cancelled => Code::Cancelled,
         StatusCode::TableAlreadyExists
         | StatusCode::TableColumnExists
@@ -502,8 +593,10 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::TableColumnNotFound
         | StatusCode::DatabaseNotFound
         | StatusCode::UserNotFound => Code::NotFound,
-        StatusCode::StorageUnavailable => Code::Unavailable,
-        StatusCode::RuntimeResourcesExhausted | StatusCode::RateLimited => Code::ResourceExhausted,
+        StatusCode::StorageUnavailable | StatusCode::RegionNotReady => Code::Unavailable,
+        StatusCode::RuntimeResourcesExhausted
+        | StatusCode::RateLimited
+        | StatusCode::RegionBusy => Code::ResourceExhausted,
         StatusCode::UnsupportedPasswordType
         | StatusCode::UserPasswordMismatch
         | StatusCode::AuthHeaderNotFound
@@ -519,21 +612,20 @@ macro_rules! define_into_tonic_status {
     ($Error: ty) => {
         impl From<$Error> for tonic::Status {
             fn from(err: $Error) -> Self {
-                use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
                 use tonic::codegen::http::{HeaderMap, HeaderValue};
                 use tonic::metadata::MetadataMap;
+                use $crate::http::header::constants::GREPTIME_DB_HEADER_ERROR_CODE;
 
                 let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
 
                 // If either of the status_code or error msg cannot convert to valid HTTP header value
                 // (which is a very rare case), just ignore. Client will use Tonic status code and message.
                 let status_code = err.status_code();
-                headers.insert(GREPTIME_ERROR_CODE, HeaderValue::from(status_code as u32));
+                headers.insert(
+                    GREPTIME_DB_HEADER_ERROR_CODE,
+                    HeaderValue::from(status_code as u32),
+                );
                 let root_error = err.output_msg();
-
-                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.as_bytes()) {
-                    let _ = headers.insert(GREPTIME_ERROR_MSG, err_msg);
-                }
 
                 let metadata = MetadataMap::from_headers(headers);
                 tonic::Status::with_metadata(
@@ -570,7 +662,11 @@ impl IntoResponse for Error {
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => HttpStatusCode::BAD_REQUEST,
             _ => {
-                logging::error!(self; "Failed to handle HTTP request");
+                if self.status_code().should_log_error() {
+                    error!(self; "Failed to handle HTTP request: ");
+                } else {
+                    debug!("Failed to handle HTTP request: {self}");
+                }
 
                 HttpStatusCode::INTERNAL_SERVER_ERROR
             }

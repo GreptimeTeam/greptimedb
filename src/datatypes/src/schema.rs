@@ -13,7 +13,7 @@
 // limitations under the License.
 
 mod column_schema;
-mod constraint;
+pub mod constraint;
 mod raw;
 
 use std::collections::HashMap;
@@ -144,7 +144,9 @@ impl Schema {
         let mut column_schemas = Vec::with_capacity(indices.len());
         let mut timestamp_index = None;
         for index in indices {
-            if let Some(ts_index) = self.timestamp_index && ts_index == *index {
+            if let Some(ts_index) = self.timestamp_index
+                && ts_index == *index
+            {
                 timestamp_index = Some(column_schemas.len());
             }
             column_schemas.push(self.column_schemas[*index].clone());

@@ -34,7 +34,7 @@ runs:
 
     - name: Upload sqlness logs
       if: ${{ failure() && inputs.disable-run-tests == 'false' }} # Only upload logs when the integration tests failed.
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: sqlness-logs
         path: /tmp/greptime-*.log

@@ -33,7 +33,7 @@ use tonic::{Request, Response};
 
 use crate::error::{self, MissingRequestHeaderSnafu};
 use crate::metasrv::MetaSrv;
-use crate::metrics::METRIC_META_KV_REQUEST;
+use crate::metrics::METRIC_META_KV_REQUEST_ELAPSED;
 use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
@@ -48,7 +48,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[self.kv_backend().name(), "range", cluster_id_str.as_str()])
             .start_timer();
 
@@ -74,7 +74,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[self.kv_backend().name(), "put", cluster_id_str.as_str()])
             .start_timer();
 
@@ -100,7 +100,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "batch_get",
@@ -130,7 +130,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "batch_pub",
@@ -163,7 +163,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "batch_delete",
@@ -196,7 +196,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "compare_and_put",
@@ -229,7 +229,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "delete_range",
@@ -257,6 +257,7 @@ mod tests {
     use api::v1::meta::store_server::Store;
     use api::v1::meta::*;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_telemetry::tracing_context::W3cTrace;
     use tonic::IntoRequest;
 
     use crate::metasrv::builder::MetaSrvBuilder;
@@ -275,7 +276,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = RangeRequest::default();
-        req.set_header((1, 1), Role::Datanode);
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.range(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -286,7 +287,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = PutRequest::default();
-        req.set_header((1, 1), Role::Datanode);
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.put(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -297,7 +298,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = BatchGetRequest::default();
-        req.set_header((1, 1), Role::Datanode);
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.batch_get(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -308,7 +309,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = BatchPutRequest::default();
-        req.set_header((1, 1), Role::Datanode);
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.batch_put(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -319,7 +320,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = BatchDeleteRequest::default();
-        req.set_header((1, 1), Role::Datanode);
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.batch_delete(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -330,7 +331,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = CompareAndPutRequest::default();
-        req.set_header((1, 1), Role::Datanode);
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.compare_and_put(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -341,7 +342,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = DeleteRangeRequest::default();
-        req.set_header((1, 1), Role::Datanode);
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.delete_range(req.into_request()).await;
 
         let _ = res.unwrap();

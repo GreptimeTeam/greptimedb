@@ -21,21 +21,23 @@ use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::debug;
+use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
-use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
+use table::table_reference::TableReference;
 
 use super::utils::handle_retry_error;
-use crate::ddl::utils::handle_operate_region_error;
+use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
 use crate::error::{Result, TableNotFoundSnafu};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::DeserializedValueWithBytes;
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::rpc::ddl::TruncateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
@@ -74,13 +76,14 @@ impl Procedure for TruncateTableProcedure {
 
     fn lock_key(&self) -> LockKey {
         let table_ref = &self.data.table_ref();
-        let key = common_catalog::format_full_table_name(
-            table_ref.catalog,
-            table_ref.schema,
-            table_ref.table,
-        );
+        let table_id = self.data.table_id();
+        let lock_key = vec![
+            CatalogLock::Read(table_ref.catalog).into(),
+            SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
+            TableLock::Write(table_id).into(),
+        ];
 
-        LockKey::single(key)
+        LockKey::new(lock_key)
     }
 }
 
@@ -154,7 +157,7 @@ impl TruncateTableProcedure {
 
                 let request = RegionRequest {
                     header: Some(RegionRequestHeader {
-                        trace_id: common_telemetry::trace_id().unwrap_or_default(),
+                        tracing_context: TracingContext::from_current_span().to_w3c(),
                         ..Default::default()
                     }),
                     body: Some(region_request::Body::Truncate(PbTruncateRegionRequest {
@@ -166,10 +169,10 @@ impl TruncateTableProcedure {
                 let requester = requester.clone();
 
                 truncate_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await {
-                        return Err(handle_operate_region_error(datanode)(err));
-                    }
-                    Ok(())
+                    requester
+                        .handle(request)
+                        .await
+                        .map_err(add_peer_context_if_needed(datanode))
                 });
             }
         }
@@ -179,7 +182,7 @@ impl TruncateTableProcedure {
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Status::Done)
+        Ok(Status::done())
     }
 }
 

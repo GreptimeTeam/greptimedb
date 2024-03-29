@@ -152,6 +152,7 @@ impl Builder {
             .build()
             .context(BuildRuntimeSnafu)?;
 
+        let name = self.runtime_name.clone();
         let handle = runtime.handle().clone();
         let (send_stop, recv_stop) = oneshot::channel();
         // Block the runtime to shutdown.
@@ -159,14 +160,25 @@ impl Builder {
             .name(format!("{}-blocker", self.thread_name))
             .spawn(move || runtime.block_on(recv_stop));
 
+        #[cfg(tokio_unstable)]
+        register_collector(name.clone(), &handle);
+
         Ok(Runtime {
-            name: self.runtime_name.clone(),
+            name,
             handle,
             _dropper: Arc::new(Dropper {
                 close: Some(send_stop),
             }),
         })
     }
+}
+
+#[cfg(tokio_unstable)]
+pub fn register_collector(name: String, handle: &Handle) {
+    let name = name.replace("-", "_");
+    let monitor = tokio_metrics::RuntimeMonitor::new(handle);
+    let collector = tokio_metrics_collector::RuntimeCollector::new(monitor, name);
+    let _ = prometheus::register(Box::new(collector));
 }
 
 fn on_thread_start(thread_name: String) -> impl Fn() + 'static {
@@ -241,6 +253,13 @@ mod tests {
 
         assert!(metric_text.contains("runtime_threads_idle{thread_name=\"test_runtime_metric\"}"));
         assert!(metric_text.contains("runtime_threads_alive{thread_name=\"test_runtime_metric\"}"));
+
+        #[cfg(tokio_unstable)]
+        {
+            assert!(metric_text.contains("runtime_0_tokio_budget_forced_yield_count 0"));
+            assert!(metric_text.contains("runtime_0_tokio_injection_queue_depth 0"));
+            assert!(metric_text.contains("runtime_0_tokio_workers_count 5"));
+        }
     }
 
     #[test]

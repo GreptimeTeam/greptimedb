@@ -14,32 +14,37 @@
 
 //! Parquet writer.
 
+use std::sync::Arc;
+
+use common_datasource::file_format::parquet::BufferedWriter;
 use common_telemetry::debug;
 use common_time::Timestamp;
+use futures::TryFutureExt;
 use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
-use crate::error::{InvalidMetadataSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, Result, WriteBufferSnafu};
 use crate::read::{Batch, Source};
+use crate::sst::index::Indexer;
 use crate::sst::parquet::format::WriteFormat;
+use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
-use crate::sst::stream_writer::BufferedWriter;
+use crate::sst::DEFAULT_WRITE_CONCURRENCY;
 
 /// Parquet SST writer.
 pub struct ParquetWriter {
     /// SST output file path.
     file_path: String,
-    /// Input data source.
-    source: Source,
     /// Region metadata of the source and the target SST.
     metadata: RegionMetadataRef,
     object_store: ObjectStore,
+    indexer: Indexer,
 }
 
 impl ParquetWriter {
@@ -47,43 +52,36 @@ impl ParquetWriter {
     pub fn new(
         file_path: String,
         metadata: RegionMetadataRef,
-        source: Source,
         object_store: ObjectStore,
+        indexer: Indexer,
     ) -> ParquetWriter {
         ParquetWriter {
             file_path,
-            source,
             metadata,
             object_store,
+            indexer,
         }
     }
 
     /// Iterates source and writes all rows to Parquet file.
     ///
     /// Returns the [SstInfo] if the SST is written.
-    pub async fn write_all(&mut self, opts: &WriteOptions) -> Result<Option<SstInfo>> {
+    pub async fn write_all(
+        &mut self,
+        mut source: Source,
+        opts: &WriteOptions,
+    ) -> Result<Option<SstInfo>> {
         let json = self.metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
-        let ts_column = self.metadata.time_index_column();
 
         // TODO(yingwen): Find and set proper column encoding for internal columns: op type and tsid.
         let props_builder = WriterProperties::builder()
             .set_key_value_metadata(Some(vec![key_value_meta]))
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
-            .set_max_row_group_size(opts.row_group_size)
-            .set_column_encoding(
-                ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]),
-                Encoding::DELTA_BINARY_PACKED,
-            )
-            .set_column_dictionary_enabled(
-                ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]),
-                false,
-            )
-            .set_column_encoding(
-                ColumnPath::new(vec![ts_column.column_schema.name.clone()]),
-                Encoding::DELTA_BINARY_PACKED,
-            );
+            .set_max_row_group_size(opts.row_group_size);
+
+        let props_builder = Self::customize_column_config(props_builder, &self.metadata);
         let writer_props = props_builder.build();
 
         let write_format = WriteFormat::new(self.metadata.clone());
@@ -93,16 +91,27 @@ impl ParquetWriter {
             write_format.arrow_schema(),
             Some(writer_props),
             opts.write_buffer_size.as_bytes() as usize,
+            DEFAULT_WRITE_CONCURRENCY,
         )
-        .await?;
+        .await
+        .context(WriteBufferSnafu)?;
 
         let mut stats = SourceStats::default();
-        while let Some(batch) = self.source.next_batch().await? {
+        while let Some(batch) = write_next_batch(&mut source, &write_format, &mut buffered_writer)
+            .or_else(|err| async {
+                // abort index creation if error occurs.
+                self.indexer.abort().await;
+                Err(err)
+            })
+            .await?
+        {
             stats.update(&batch);
-            let arrow_batch = write_format.convert_batch(&batch)?;
-
-            buffered_writer.write(&arrow_batch).await?;
+            self.indexer.update(&batch).await;
         }
+
+        let index_size = self.indexer.finish().await;
+        let inverted_index_available = index_size.is_some();
+        let index_file_size = index_size.unwrap_or(0) as u64;
 
         if stats.num_rows == 0 {
             debug!(
@@ -110,21 +119,65 @@ impl ParquetWriter {
                 self.file_path
             );
 
-            buffered_writer.close().await?;
+            buffered_writer.close().await.context(WriteBufferSnafu)?;
             return Ok(None);
         }
 
-        let (_file_meta, file_size) = buffered_writer.close().await?;
+        let (file_meta, file_size) = buffered_writer.close().await.context(WriteBufferSnafu)?;
+
         // Safety: num rows > 0 so we must have min/max.
         let time_range = stats.time_range.unwrap();
+
+        // convert FileMetaData to ParquetMetaData
+        let parquet_metadata = parse_parquet_metadata(file_meta)?;
 
         // object_store.write will make sure all bytes are written or an error is raised.
         Ok(Some(SstInfo {
             time_range,
             file_size,
             num_rows: stats.num_rows,
+            file_metadata: Some(Arc::new(parquet_metadata)),
+            inverted_index_available,
+            index_file_size,
         }))
     }
+
+    /// Customizes per-column config according to schema and maybe column cardinality.
+    fn customize_column_config(
+        builder: WriterPropertiesBuilder,
+        region_metadata: &RegionMetadataRef,
+    ) -> WriterPropertiesBuilder {
+        let ts_col = ColumnPath::new(vec![region_metadata
+            .time_index_column()
+            .column_schema
+            .name
+            .clone()]);
+        let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
+
+        builder
+            .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_dictionary_enabled(seq_col, false)
+            .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_dictionary_enabled(ts_col, false)
+    }
+}
+
+async fn write_next_batch(
+    source: &mut Source,
+    write_format: &WriteFormat,
+    buffered_writer: &mut BufferedWriter,
+) -> Result<Option<Batch>> {
+    let Some(batch) = source.next_batch().await? else {
+        return Ok(None);
+    };
+
+    let arrow_batch = write_format.convert_batch(&batch)?;
+    buffered_writer
+        .write(&arrow_batch)
+        .await
+        .context(WriteBufferSnafu)?;
+
+    Ok(Some(batch))
 }
 
 #[derive(Default)]
@@ -155,5 +208,3 @@ impl SourceStats {
         }
     }
 }
-
-// TODO(yingwen): Port tests.

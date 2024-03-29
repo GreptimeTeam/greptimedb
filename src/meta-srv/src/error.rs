@@ -16,9 +16,12 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_meta::peer::Peer;
+use common_meta::DatanodeId;
 use common_runtime::JoinError;
+use rand::distributions::WeightedError;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
@@ -29,6 +32,35 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("The target peer is unavailable temporally: {}", peer_id))]
+    PeerUnavailable { location: Location, peer_id: u64 },
+
+    #[snafu(display("Another migration procedure is running for region: {}", region_id))]
+    MigrationRunning {
+        location: Location,
+        region_id: RegionId,
+    },
+
+    #[snafu(display("The region migration procedure aborted, reason: {}", reason))]
+    MigrationAbort { location: Location, reason: String },
+
+    #[snafu(display(
+        "Another procedure is opening the region: {} on peer: {}",
+        region_id,
+        peer_id
+    ))]
+    RegionOpeningRace {
+        location: Location,
+        peer_id: DatanodeId,
+        region_id: RegionId,
+    },
+
+    #[snafu(display("Failed to init ddl manager"))]
+    InitDdlManager {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         location: Location,
@@ -79,6 +111,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to list {}.{}'s tables", catalog, schema))]
+    ListTables {
+        location: Location,
+        catalog: String,
+        schema: String,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to join a future"))]
     Join {
         location: Location,
@@ -101,13 +141,13 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to request Datanode, expected: {}, but only {} available",
-        expected,
+        "Failed to request Datanode, required: {}, but only {} available",
+        required,
         available
     ))]
     NoEnoughAvailableDatanode {
         location: Location,
-        expected: usize,
+        required: usize,
         available: usize,
     },
 
@@ -172,6 +212,17 @@ pub enum Error {
     StartHttp {
         location: Location,
         source: servers::error::Error,
+    },
+    #[snafu(display("Failed to init export metrics task"))]
+    InitExportMetricsTask {
+        location: Location,
+        source: servers::error::Error,
+    },
+    #[snafu(display("Failed to parse duration {}", duration))]
+    ParseDuration {
+        duration: String,
+        #[snafu(source)]
+        error: humantime::DurationError,
     },
     #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
@@ -250,6 +301,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse bool: {}", err_msg))]
+    ParseBool {
+        err_msg: String,
+        #[snafu(source)]
+        error: std::str::ParseBoolError,
+        location: Location,
+    },
+
     #[snafu(display("Invalid arguments: {}", err_msg))]
     InvalidArguments { err_msg: String, location: Location },
 
@@ -278,9 +337,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to find table route for {region_id}"))]
+    RegionRouteNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
     #[snafu(display("Table info not found: {}", table_id))]
     TableInfoNotFound {
         table_id: TableId,
+        location: Location,
+    },
+
+    #[snafu(display("Datanode table not found: {}, datanode: {}", table_id, datanode_id))]
+    DatanodeTableNotFound {
+        table_id: TableId,
+        datanode_id: DatanodeId,
         location: Location,
     },
 
@@ -414,6 +486,15 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to query procedure state"))]
+    QueryProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure not found: {pid}"))]
+    ProcedureNotFound { location: Location, pid: String },
+
     #[snafu(display("Failed to submit procedure"))]
     SubmitProcedure {
         location: Location,
@@ -484,6 +565,13 @@ pub enum Error {
     #[snafu(display("Expected to retry later, reason: {}", reason))]
     RetryLater { reason: String, location: Location },
 
+    #[snafu(display("Expected to retry later, reason: {}", reason))]
+    RetryLaterWithSource {
+        reason: String,
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to update table metadata, err_msg: {}", err_msg))]
     UpdateTableMetadata { err_msg: String, location: Location },
 
@@ -549,6 +637,31 @@ pub enum Error {
         operation: String,
         location: Location,
     },
+
+    #[snafu(display("Failed to set weight array"))]
+    WeightArray {
+        #[snafu(source)]
+        error: WeightedError,
+        location: Location,
+    },
+
+    #[snafu(display("Weight array is not set"))]
+    NotSetWeightArray { location: Location },
+
+    #[snafu(display("Unexpected table route type: {}", err_msg))]
+    UnexpectedLogicalRouteTable {
+        location: Location,
+        err_msg: String,
+        source: common_meta::error::Error,
+    },
+}
+
+impl Error {
+    /// Returns `true` if the error is retryable.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Error::RetryLater { .. })
+            || matches!(self, Error::RetryLaterWithSource { .. })
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -578,7 +691,6 @@ impl ErrorExt for Error {
             | Error::LockNotConfig { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
-            | Error::ParseAddr { .. }
             | Error::SchemaAlreadyExists { .. }
             | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
@@ -586,12 +698,16 @@ impl ErrorExt for Error {
             | Error::MailboxTimeout { .. }
             | Error::MailboxReceiver { .. }
             | Error::RetryLater { .. }
+            | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }
             | Error::UpdateTableMetadata { .. }
             | Error::NoEnoughAvailableDatanode { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
-            | Error::Unsupported { .. } => StatusCode::Internal,
+            | Error::WeightArray { .. }
+            | Error::NotSetWeightArray { .. }
+            | Error::Unsupported { .. }
+            | Error::PeerUnavailable { .. } => StatusCode::Internal,
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
@@ -601,9 +717,14 @@ impl ErrorExt for Error {
             | Error::InvalidStatKey { .. }
             | Error::InvalidInactiveRegionKey { .. }
             | Error::ParseNum { .. }
+            | Error::ParseBool { .. }
+            | Error::ParseAddr { .. }
+            | Error::ParseDuration { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
+            | Error::InitExportMetricsTask { .. }
             | Error::InvalidHeartbeatRequest { .. }
+            | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
@@ -612,30 +733,35 @@ impl ErrorExt for Error {
             | Error::InvalidRegionKeyFromUtf8 { .. }
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
+            | Error::DatanodeTableNotFound { .. }
             | Error::CorruptedTableRoute { .. }
             | Error::MoveValue { .. }
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. }
             | Error::Txn { .. }
-            | Error::TableIdChanged { .. } => StatusCode::Unexpected,
+            | Error::TableIdChanged { .. }
+            | Error::RegionOpeningRace { .. }
+            | Error::RegionRouteNotFound { .. }
+            | Error::MigrationAbort { .. }
+            | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. }
             | Error::InvalidFullTableName { source, .. } => source.status_code(),
-            Error::SubmitProcedure { source, .. } | Error::WaitProcedure { source, .. } => {
-                source.status_code()
-            }
+            Error::SubmitProcedure { source, .. }
+            | Error::WaitProcedure { source, .. }
+            | Error::QueryProcedure { source, .. } => source.status_code(),
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.status_code()
             }
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
 
-            Error::ListCatalogs { source, .. } | Error::ListSchemas { source, .. } => {
-                source.status_code()
-            }
+            Error::ListCatalogs { source, .. }
+            | Error::ListSchemas { source, .. }
+            | Error::ListTables { source, .. } => source.status_code(),
             Error::StartTelemetryTask { source, .. } => source.status_code(),
 
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
@@ -649,9 +775,12 @@ impl ErrorExt for Error {
             | Error::TableMetadataManager { source, .. }
             | Error::KvBackend { source, .. }
             | Error::UpdateTableRoute { source, .. }
-            | Error::GetFullTableInfo { source, .. } => source.status_code(),
+            | Error::GetFullTableInfo { source, .. }
+            | Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
 
-            Error::InitMetadata { source, .. } => source.status_code(),
+            Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
+                source.status_code()
+            }
 
             Error::Other { source, .. } => source.status_code(),
         }

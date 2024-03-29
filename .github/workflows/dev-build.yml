@@ -55,10 +55,18 @@ on:
         description: Build and push images to DockerHub and ACR
         required: false
         default: true
+      cargo_profile:
+        type: choice
+        description: The cargo profile to use in building GreptimeDB.
+        default: nightly
+        options:
+          - dev
+          - release
+          - nightly
 
 # Use env variables to control all the release process.
 env:
-  CARGO_PROFILE: nightly
+  CARGO_PROFILE: ${{ inputs.cargo_profile }}
 
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
   DISABLE_RUN_TESTS: ${{ inputs.skip_test || vars.DEFAULT_SKIP_TEST }}
@@ -93,7 +101,7 @@ jobs:
       version: ${{ steps.create-version.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -147,12 +155,12 @@ jobs:
     runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Checkout greptimedb
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.commit }}
@@ -176,12 +184,12 @@ jobs:
     runs-on: ${{ needs.allocate-runners.outputs.linux-arm64-runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Checkout greptimedb
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.commit }}
@@ -208,7 +216,7 @@ jobs:
     outputs:
       build-result: ${{ steps.set-build-result.outputs.build-result }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -239,7 +247,7 @@ jobs:
     runs-on: ubuntu-20.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -273,7 +281,7 @@ jobs:
     ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -298,7 +306,7 @@ jobs:
     ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -322,14 +330,14 @@ jobs:
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:
-      - name: Notifiy nightly build successful result
+      - name: Notifiy dev build successful result
         uses: slackapi/slack-github-action@v1.23.0
         if: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
         with:
           payload: |
             {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has completed successfully."}
 
-      - name: Notifiy nightly build failed result
+      - name: Notifiy dev build failed result
         uses: slackapi/slack-github-action@v1.23.0
         if: ${{ needs.release-images-to-dockerhub.outputs.build-result != 'success' }}
         with:

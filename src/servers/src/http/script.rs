@@ -11,28 +11,30 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use std::collections::HashMap;
 use std::time::Instant;
 
-use axum::extract::{Json, Query, RawBody, State};
+use axum::extract::{Query, RawBody, State};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
+use snafu::ResultExt;
 
-use crate::http::{ApiState, JsonResponse};
+use crate::error::{HyperSnafu, InvalidUtf8ValueSnafu};
+use crate::http::error_result::ErrorResponse;
+use crate::http::{ApiState, GreptimedbV1Response, HttpResponse};
 
 macro_rules! json_err {
     ($e: expr) => {{
-        return Json(JsonResponse::with_error(
-            format!("Invalid argument: {}", $e),
-            common_error::status_code::StatusCode::InvalidArguments,
-        ));
+        return HttpResponse::Error(ErrorResponse::from_error($e));
     }};
 
     ($msg: expr, $code: expr) => {{
-        return Json(JsonResponse::with_error($msg.to_string(), $code));
+        return HttpResponse::Error(ErrorResponse::from_error_message($code, $msg.to_string()));
     }};
 }
 
@@ -51,7 +53,7 @@ pub async fn scripts(
     State(state): State<ApiState>,
     Query(params): Query<ScriptQuery>,
     RawBody(body): RawBody,
-) -> Json<JsonResponse> {
+) -> HttpResponse {
     if let Some(script_handler) = &state.script_handler {
         let catalog = params
             .catalog
@@ -59,32 +61,37 @@ pub async fn scripts(
         let schema = params.db.as_ref();
 
         if schema.is_none() || schema.unwrap().is_empty() {
-            json_err!("invalid schema")
+            json_err!("invalid schema", StatusCode::InvalidArguments)
         }
 
         let name = params.name.as_ref();
 
         if name.is_none() || name.unwrap().is_empty() {
-            json_err!("invalid name");
+            json_err!("invalid name", StatusCode::InvalidArguments);
         }
 
-        let bytes = unwrap_or_json_err!(hyper::body::to_bytes(body).await);
+        let bytes = unwrap_or_json_err!(hyper::body::to_bytes(body).await.context(HyperSnafu));
 
-        let script = unwrap_or_json_err!(String::from_utf8(bytes.to_vec()));
+        let script =
+            unwrap_or_json_err!(String::from_utf8(bytes.to_vec()).context(InvalidUtf8ValueSnafu));
 
         // Safety: schema and name are already checked above.
         let query_ctx = QueryContext::with(&catalog, schema.unwrap());
-        let body = match script_handler
+        match script_handler
             .insert_script(query_ctx, name.unwrap(), &script)
             .await
         {
-            Ok(()) => JsonResponse::with_output(None),
-            Err(e) => json_err!(format!("Insert script error: {e}"), e.status_code()),
-        };
-
-        Json(body)
+            Ok(()) => GreptimedbV1Response::from_output(vec![]).await,
+            Err(e) => json_err!(
+                format!("Insert script error: {}", e.output_msg()),
+                e.status_code()
+            ),
+        }
     } else {
-        json_err!("Script execution not supported, missing script handler");
+        json_err!(
+            "Script execution not supported, missing script handler",
+            StatusCode::Unsupported
+        );
     }
 }
 
@@ -102,7 +109,7 @@ pub struct ScriptQuery {
 pub async fn run_script(
     State(state): State<ApiState>,
     Query(params): Query<ScriptQuery>,
-) -> Json<JsonResponse> {
+) -> HttpResponse {
     if let Some(script_handler) = &state.script_handler {
         let catalog = params
             .catalog
@@ -111,13 +118,13 @@ pub async fn run_script(
         let schema = params.db.as_ref();
 
         if schema.is_none() || schema.unwrap().is_empty() {
-            json_err!("invalid schema")
+            json_err!("invalid schema", StatusCode::InvalidArguments)
         }
 
         let name = params.name.as_ref();
 
         if name.is_none() || name.unwrap().is_empty() {
-            json_err!("invalid name");
+            json_err!("invalid name", StatusCode::InvalidArguments);
         }
 
         // Safety: schema and name are already checked above.
@@ -125,10 +132,12 @@ pub async fn run_script(
         let output = script_handler
             .execute_script(query_ctx, name.unwrap(), params.params)
             .await;
-        let resp = JsonResponse::from_output(vec![output]).await;
-
-        Json(resp.with_execution_time(start.elapsed().as_millis()))
+        let resp = GreptimedbV1Response::from_output(vec![output]).await;
+        resp.with_execution_time(start.elapsed().as_millis() as u64)
     } else {
-        json_err!("Script execution not supported, missing script handler");
+        json_err!(
+            "Script execution not supported, missing script handler",
+            StatusCode::Unsupported
+        );
     }
 }

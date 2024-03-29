@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 #![feature(btree_extract_if)]
 #![feature(async_closure)]
+#![feature(let_chains)]
 
 pub mod cache_invalidator;
 pub mod datanode_manager;
@@ -26,14 +27,19 @@ pub mod heartbeat;
 pub mod instruction;
 pub mod key;
 pub mod kv_backend;
+pub mod lock_key;
 pub mod metrics;
 pub mod peer;
 pub mod range_stream;
+pub mod region_keeper;
 pub mod rpc;
 pub mod sequence;
 pub mod state_store;
 pub mod table_name;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
 pub mod util;
+pub mod wal_options_allocator;
 
 pub type ClusterId = u64;
 pub type DatanodeId = u64;

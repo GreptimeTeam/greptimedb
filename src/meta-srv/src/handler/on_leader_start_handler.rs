@@ -15,7 +15,7 @@
 use api::v1::meta::{HeartbeatRequest, Role};
 
 use crate::error::Result;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 pub struct OnLeaderStartHandler;
@@ -31,16 +31,19 @@ impl HeartbeatHandler for OnLeaderStartHandler {
         _req: &HeartbeatRequest,
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
-        if let Some(election) = &ctx.election {
-            if election.in_infancy() {
-                ctx.is_infancy = true;
-                // TODO(weny): Unifies the multiple leader state between Context and MetaSrv.
-                // we can't ensure the in-memory kv has already been reset in the outside loop.
-                // We still use heartbeat requests to trigger resetting in-memory kv.
-                ctx.reset_in_memory();
-            }
+    ) -> Result<HandleControl> {
+        let Some(election) = &ctx.election else {
+            return Ok(HandleControl::Continue);
+        };
+
+        if election.in_infancy() {
+            ctx.is_infancy = true;
+            // TODO(weny): Unifies the multiple leader state between Context and MetaSrv.
+            // we can't ensure the in-memory kv has already been reset in the outside loop.
+            // We still use heartbeat requests to trigger resetting in-memory kv.
+            ctx.reset_in_memory();
         }
-        Ok(())
+
+        Ok(HandleControl::Continue)
     }
 }

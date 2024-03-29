@@ -18,10 +18,11 @@ use common_telemetry::{trace, warn};
 use common_time::util as time_util;
 
 use crate::error::Result;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::keys::{LeaseKey, LeaseValue};
 use crate::metasrv::Context;
 
+/// Keeps [Datanode] leases
 pub struct KeepLeaseHandler;
 
 #[async_trait::async_trait]
@@ -35,13 +36,13 @@ impl HeartbeatHandler for KeepLeaseHandler {
         req: &HeartbeatRequest,
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         let HeartbeatRequest { header, peer, .. } = req;
         let Some(header) = &header else {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         };
         let Some(peer) = &peer else {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         };
 
         let key = LeaseKey {
@@ -69,6 +70,6 @@ impl HeartbeatHandler for KeepLeaseHandler {
             warn!("Failed to update lease KV, peer: {peer:?}, {err}");
         }
 
-        Ok(())
+        Ok(HandleControl::Continue)
     }
 }

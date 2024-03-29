@@ -7,9 +7,10 @@ license.workspace = true
 [lib]
 proc-macro = true
 
+[lints]
+workspace = true
+
 [dependencies]
-backtrace = "0.3"
-common-telemetry = { workspace = true }
 proc-macro2 = "1.0.66"
 quote = "1.0"
 syn = "1.0"
@@ -25,7 +26,7 @@ syn2 = { version = "2.0", package = "syn", features = [
 
 [dev-dependencies]
 arc-swap = "1.0"
-common-query = { workspace = true }
-datatypes = { workspace = true }
+common-query.workspace = true
+datatypes.workspace = true
 snafu.workspace = true
 static_assertions = "1.1.0"

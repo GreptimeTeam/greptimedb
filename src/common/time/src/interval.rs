@@ -20,6 +20,10 @@ use std::hash::{Hash, Hasher};
 use arrow::datatypes::IntervalUnit as ArrowIntervalUnit;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use snafu::ResultExt;
+
+use crate::duration::Duration;
+use crate::error::{Result, TimestampOverflowSnafu};
 
 #[derive(
     Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
@@ -63,7 +67,7 @@ impl From<ArrowIntervalUnit> for IntervalUnit {
 /// month-day-nano, which will be stored in the following format.
 /// Interval data format:
 /// | months | days   | nsecs      |
-/// | 4bytes | 4bytes | 8bytes     |  
+/// | 4bytes | 4bytes | 8bytes     |
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Interval {
     months: i32,
@@ -112,6 +116,14 @@ impl Interval {
             nsecs: (millis as i64) * NANOS_PER_MILLI,
             unit: IntervalUnit::DayTime,
         }
+    }
+
+    pub fn to_duration(&self) -> Result<Duration> {
+        Ok(Duration::new_nanosecond(
+            self.to_nanosecond()
+                .try_into()
+                .context(TimestampOverflowSnafu)?,
+        ))
     }
 
     /// Return a tuple(months, days, nanoseconds) from the interval.
@@ -246,21 +258,24 @@ impl Interval {
     }
 
     pub fn to_i128(&self) -> i128 {
-        let mut result = 0;
-        result |= self.months as i128;
-        result <<= 32;
-        result |= self.days as i128;
-        result <<= 64;
-        result |= self.nsecs as i128;
-        result
+        // 128            96              64                               0
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        // |     months    |      days     |          nanoseconds          |
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        let months = (self.months as u128 & u32::MAX as u128) << 96;
+        let days = (self.days as u128 & u32::MAX as u128) << 64;
+        let nsecs = self.nsecs as u128 & u64::MAX as u128;
+        (months | days | nsecs) as i128
     }
 
     pub fn to_i64(&self) -> i64 {
-        let mut result = 0;
-        result |= self.days as i64;
-        result <<= 32;
-        result |= self.nsecs / NANOS_PER_MILLI;
-        result
+        // 64                              32                              0
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        // |             days              |         milliseconds          |
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        let days = (self.days as u64 & u32::MAX as u64) << 32;
+        let milliseconds = (self.nsecs / NANOS_PER_MILLI) as u64 & u32::MAX as u64;
+        (days | milliseconds) as i64
     }
 
     pub fn to_i32(&self) -> i32 {
@@ -380,7 +395,7 @@ impl IntervalFormat {
             return "PT0S".to_string();
         }
         let fract_str = match self.microseconds {
-            0 => "".to_string(),
+            0 => String::default(),
             _ => format!(".{:06}", self.microseconds)
                 .trim_end_matches('0')
                 .to_string(),
@@ -431,7 +446,7 @@ impl IntervalFormat {
         if self.is_zero() {
             return "00:00:00".to_string();
         }
-        let mut result = "".to_string();
+        let mut result = String::default();
         if self.has_year_month() {
             if self.years != 0 {
                 result.push_str(&format!("{} year ", self.years));
@@ -449,7 +464,7 @@ impl IntervalFormat {
 
     /// get postgres time part(include hours, minutes, seconds, microseconds)
     fn get_postgres_time_part(&self) -> String {
-        let mut time_part = "".to_string();
+        let mut time_part = String::default();
         if self.has_time_part() {
             let sign = if !self.has_time_part_positive() {
                 "-"
@@ -501,7 +516,7 @@ fn get_time_part(
     is_time_part_positive: bool,
     is_only_time: bool,
 ) -> String {
-    let mut interval = "".to_string();
+    let mut interval = String::default();
     if is_time_part_positive && is_only_time {
         interval.push_str(&format!("{}:{:02}:{:02}", hours, mins, secs));
     } else {
@@ -558,6 +573,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::timestamp::TimeUnit;
 
     #[test]
     fn test_from_year_month() {
@@ -570,6 +586,21 @@ mod tests {
         let interval = Interval::from_day_time(1, 2);
         assert_eq!(interval.days, 1);
         assert_eq!(interval.nsecs, 2_000_000);
+    }
+
+    #[test]
+    fn test_to_duration() {
+        let interval = Interval::from_day_time(1, 2);
+
+        let duration = interval.to_duration().unwrap();
+        assert_eq!(86400002000000, duration.value());
+        assert_eq!(TimeUnit::Nanosecond, duration.unit());
+
+        let interval = Interval::from_year_month(12);
+
+        let duration = interval.to_duration().unwrap();
+        assert_eq!(31104000000000000, duration.value());
+        assert_eq!(TimeUnit::Nanosecond, duration.unit());
     }
 
     #[test]
@@ -607,9 +638,25 @@ mod tests {
 
     #[test]
     fn test_interval_i128_convert() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        let interval_i128 = interval.to_i128();
-        assert_eq!(interval_i128, 79228162532711081667253501953);
+        let test_interval_eq = |month, day, nano| {
+            let interval = Interval::from_month_day_nano(month, day, nano);
+            let interval_i128 = interval.to_i128();
+            let interval2 = Interval::from_i128(interval_i128);
+            assert_eq!(interval, interval2);
+        };
+
+        test_interval_eq(1, 2, 3);
+        test_interval_eq(1, -2, 3);
+        test_interval_eq(1, -2, -3);
+        test_interval_eq(-1, -2, -3);
+        test_interval_eq(i32::MAX, i32::MAX, i64::MAX);
+        test_interval_eq(i32::MIN, i32::MAX, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MIN, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MAX, i64::MIN);
+        test_interval_eq(i32::MIN, i32::MIN, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MIN, i64::MIN);
+        test_interval_eq(i32::MIN, i32::MAX, i64::MIN);
+        test_interval_eq(i32::MIN, i32::MIN, i64::MIN);
     }
 
     #[test]

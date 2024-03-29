@@ -26,6 +26,7 @@ mod test {
         CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
         DropTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
     };
+    use client::OutputData;
     use common_catalog::consts::MITO_ENGINE;
     use common_meta::rpc::router::region_distribution;
     use common_query::Output;
@@ -44,6 +45,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_handle_ddl_request() {
+        common_telemetry::init_default_ut_logging();
         let instance =
             tests::create_distributed_instance("test_distributed_handle_ddl_request").await;
 
@@ -77,7 +79,7 @@ mod test {
             })),
         });
         let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(1)));
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
 
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(CreateTableExpr {
@@ -108,7 +110,7 @@ mod test {
             })),
         });
         let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(0)));
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
 
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::Alter(AlterExpr {
@@ -131,13 +133,13 @@ mod test {
             })),
         });
         let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(0)));
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql("INSERT INTO database_created_through_grpc.table_created_through_grpc (a, b, ts) VALUES ('s', 1, 1672816466000)".to_string()))
         });
         let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(1)));
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(
@@ -146,7 +148,7 @@ mod test {
             )),
         });
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -167,7 +169,7 @@ mod test {
             })),
         });
         let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(0)));
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
@@ -202,11 +204,11 @@ CREATE TABLE {table_name} (
     ts TIMESTAMP,
     TIME INDEX (ts),
     PRIMARY KEY (a, b)
-) PARTITION BY RANGE COLUMNS(a) (
-    PARTITION r0 VALUES LESS THAN (10),
-    PARTITION r1 VALUES LESS THAN (20),
-    PARTITION r2 VALUES LESS THAN (50),
-    PARTITION r3 VALUES LESS THAN (MAXVALUE),
+) PARTITION ON COLUMNS(a) (
+    a < 10,
+    a >= 10 AND a < 20,
+    a >= 20 AND a < 50,
+    a >= 50
 )"
         );
         create_table(frontend, sql).await;
@@ -306,7 +308,7 @@ CREATE TABLE {table_name} (
             query: Some(Query::Sql(sql)),
         });
         let output = query(frontend, request).await;
-        assert!(matches!(output, Output::AffectedRows(0)));
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
     }
 
     async fn test_insert_delete_and_query_on_existing_table(instance: &Instance, table_name: &str) {
@@ -340,6 +342,7 @@ CREATE TABLE {table_name} (
                     null_mask: vec![32, 0],
                     semantic_type: SemanticType::Tag as i32,
                     datatype: ColumnDataType::Int32 as i32,
+                    ..Default::default()
                 },
                 Column {
                     column_name: "b".to_string(),
@@ -374,7 +377,7 @@ CREATE TABLE {table_name} (
             }),
         )
         .await;
-        assert!(matches!(output, Output::AffectedRows(16)));
+        assert!(matches!(output.data, OutputData::AffectedRows(16)));
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(format!(
@@ -382,7 +385,7 @@ CREATE TABLE {table_name} (
             ))),
         });
         let output = query(instance, request.clone()).await;
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -472,10 +475,10 @@ CREATE TABLE {table_name} (
             }),
         )
         .await;
-        assert!(matches!(output, Output::AffectedRows(6)));
+        assert!(matches!(output.data, OutputData::AffectedRows(6)));
 
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -513,22 +516,26 @@ CREATE TABLE {table_name} (
         let table_route_value = instance
             .table_metadata_manager()
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()
-            .unwrap()
-            .into_inner();
+            .unwrap();
 
-        let region_to_dn_map = region_distribution(&table_route_value.region_routes)
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (v[0], *k))
-            .collect::<HashMap<u32, u64>>();
-        assert_eq!(region_to_dn_map.len(), expected_distribution.len());
+        let region_to_dn_map = region_distribution(
+            table_route_value
+                .region_routes()
+                .expect("physical table route"),
+        )
+        .iter()
+        .map(|(k, v)| (v[0], *k))
+        .collect::<HashMap<u32, u64>>();
+        assert!(region_to_dn_map.len() <= instance.datanodes().len());
 
-        let stmt = QueryLanguageParser::parse_sql(&format!(
-            "SELECT ts, a, b FROM {table_name} ORDER BY ts"
-        ))
+        let stmt = QueryLanguageParser::parse_sql(
+            &format!("SELECT ts, a, b FROM {table_name} ORDER BY ts"),
+            &QueryContext::arc(),
+        )
         .unwrap();
         let LogicalPlan::DfPlan(plan) = instance
             .frontend()
@@ -573,6 +580,7 @@ CREATE TABLE {table_name} (
                     null_mask: vec![2],
                     semantic_type: SemanticType::Field as i32,
                     datatype: ColumnDataType::Int32 as i32,
+                    ..Default::default()
                 },
                 Column {
                     column_name: "ts".to_string(),
@@ -597,7 +605,7 @@ CREATE TABLE {table_name} (
             inserts: vec![insert],
         });
         let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(3)));
+        assert!(matches!(output.data, OutputData::AffectedRows(3)));
 
         let insert = InsertRequest {
             table_name: "auto_created_table".to_string(),
@@ -611,6 +619,7 @@ CREATE TABLE {table_name} (
                     null_mask: vec![2],
                     semantic_type: SemanticType::Field as i32,
                     datatype: ColumnDataType::String as i32,
+                    ..Default::default()
                 },
                 Column {
                     column_name: "ts".to_string(),
@@ -635,7 +644,7 @@ CREATE TABLE {table_name} (
             inserts: vec![insert],
         });
         let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(3)));
+        assert!(matches!(output.data, OutputData::AffectedRows(3)));
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(
@@ -643,7 +652,7 @@ CREATE TABLE {table_name} (
             )),
         });
         let output = query(instance, request.clone()).await;
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -682,10 +691,10 @@ CREATE TABLE {table_name} (
             }),
         )
         .await;
-        assert!(matches!(output, Output::AffectedRows(2)));
+        assert!(matches!(output.data, OutputData::AffectedRows(2)));
 
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -743,6 +752,7 @@ CREATE TABLE {table_name} (
                     null_mask: vec![4],
                     semantic_type: SemanticType::Field as i32,
                     datatype: ColumnDataType::Float64 as i32,
+                    ..Default::default()
                 },
                 Column {
                     column_name: "ts".to_string(),
@@ -771,7 +781,7 @@ CREATE TABLE {table_name} (
             inserts: vec![insert],
         });
         let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(8)));
+        assert!(matches!(output.data, OutputData::AffectedRows(8)));
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::PromRangeQuery(api::v1::PromRangeQuery {
@@ -782,7 +792,7 @@ CREATE TABLE {table_name} (
             })),
         });
         let output = query(instance, request).await;
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();

@@ -16,20 +16,23 @@ use common_error::ext::ErrorExt;
 
 use crate::logstore::namespace::Namespace;
 
-pub type Offset = usize;
-pub type Epoch = u64;
+/// An entry's id.
+/// Different log store implementations may interpret the id to different meanings.
 pub type Id = u64;
 
-/// Entry is the minimal data storage unit in `LogStore`.
+/// Entry is the minimal data storage unit through which users interact with the log store.
+/// The log store implementation may have larger or smaller data storage unit than an entry.
 pub trait Entry: Send + Sync {
     type Error: ErrorExt + Send + Sync;
     type Namespace: Namespace;
 
-    /// Return contained data of entry.
+    /// Returns the contained data of the entry.
     fn data(&self) -> &[u8];
 
-    /// Return entry id that monotonically increments.
+    /// Returns the id of the entry.
+    /// Usually the namespace id is identical with the region id.
     fn id(&self) -> Id;
 
+    /// Returns the namespace of the entry.
     fn namespace(&self) -> Self::Namespace;
 }

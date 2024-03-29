@@ -79,21 +79,36 @@ impl<'a> SplitReadRowHelper<'a> {
     }
 
     fn split_rows(mut self) -> Result<HashMap<RegionNumber, Rows>> {
-        let request_splits = self
-            .split_to_regions()?
-            .into_iter()
-            .map(|(region_number, row_indexes)| {
-                let rows = row_indexes
-                    .into_iter()
-                    .map(|row_idx| std::mem::take(&mut self.rows[row_idx]))
-                    .collect();
-                let rows = Rows {
-                    schema: self.schema.clone(),
-                    rows,
-                };
-                (region_number, rows)
-            })
-            .collect::<HashMap<_, _>>();
+        let regions = self.split_to_regions()?;
+        let request_splits = if regions.len() == 1 {
+            // fast path, zero copy
+            regions
+                .into_keys()
+                .map(|region_number| {
+                    let rows = std::mem::take(&mut self.rows);
+                    let rows = Rows {
+                        schema: self.schema.clone(),
+                        rows,
+                    };
+                    (region_number, rows)
+                })
+                .collect::<HashMap<_, _>>()
+        } else {
+            regions
+                .into_iter()
+                .map(|(region_number, row_indexes)| {
+                    let rows = row_indexes
+                        .into_iter()
+                        .map(|row_idx| std::mem::take(&mut self.rows[row_idx]))
+                        .collect();
+                    let rows = Rows {
+                        schema: self.schema.clone(),
+                        rows,
+                    };
+                    (region_number, rows)
+                })
+                .collect::<HashMap<_, _>>()
+        };
 
         Ok(request_splits)
     }
@@ -117,7 +132,11 @@ impl<'a> SplitReadRowHelper<'a> {
                 .iter()
                 .map(|idx| {
                     idx.as_ref().map_or(Value::Null, |idx| {
-                        helper::pb_value_to_value_ref(&row.values[*idx]).into()
+                        helper::pb_value_to_value_ref(
+                            &row.values[*idx],
+                            &self.schema[*idx].datatype_extension,
+                        )
+                        .into()
                     })
                 })
                 .collect()
@@ -144,16 +163,19 @@ mod tests {
                 column_name: "id".to_string(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
             },
             ColumnSchema {
                 column_name: "name".to_string(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
             },
             ColumnSchema {
                 column_name: "age".to_string(),
                 datatype: ColumnDataType::Uint32 as i32,
                 semantic_type: SemanticType::Field as i32,
+                ..Default::default()
             },
         ];
         let rows = vec![
@@ -195,7 +217,7 @@ mod tests {
         }
 
         fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
-            let val = values.get(0).unwrap().clone();
+            let val = values.first().unwrap().clone();
             let val = match val {
                 Value::String(v) => v.as_utf8().to_string(),
                 _ => unreachable!(),
@@ -222,7 +244,7 @@ mod tests {
         }
 
         fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
-            let val = values.get(0).unwrap().clone();
+            let val = values.first().unwrap().clone();
             let val = match val {
                 Value::Null => 1,
                 _ => 0,

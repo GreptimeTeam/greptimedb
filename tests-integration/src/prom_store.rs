@@ -23,7 +23,9 @@ mod tests {
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use frontend::instance::Instance;
     use prost::Message;
+    use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
     use servers::prom_store;
+    use servers::prom_store::to_grpc_row_insert_requests;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::PromStoreProtocolHandler;
     use session::context::QueryContext;
@@ -32,30 +34,69 @@ mod tests {
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_standalone_prom_store_remote_rw() {
-        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_prom_store_remote_rw")
-            .build()
-            .await;
+    async fn test_standalone_prom_store_remote_rw_default_physical_table() {
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new(
+            "test_standalone_prom_store_remote_rw_default_physical_table",
+        )
+        .build()
+        .await;
         let instance = &standalone.instance;
 
-        test_prom_store_remote_rw(instance).await;
+        test_prom_store_remote_rw(instance, None).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_distributed_prom_store_remote_rw() {
-        let distributed =
-            tests::create_distributed_instance("test_distributed_prom_store_remote_rw").await;
-        test_prom_store_remote_rw(&distributed.frontend()).await;
+    async fn test_distributed_prom_store_remote_rw_default_physical_table() {
+        common_telemetry::init_default_ut_logging();
+        let distributed = tests::create_distributed_instance(
+            "test_distributed_prom_store_remote_rw_default_physical_table",
+        )
+        .await;
+        test_prom_store_remote_rw(&distributed.frontend(), None).await;
     }
 
-    async fn test_prom_store_remote_rw(instance: &Arc<Instance>) {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_prom_store_remote_rw_custom_physical_table() {
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new(
+            "test_standalone_prom_store_remote_rw_custom_physical_table",
+        )
+        .build()
+        .await;
+        let instance = &standalone.instance;
+
+        test_prom_store_remote_rw(instance, Some("my_custom_physical_table".to_string())).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_distributed_prom_store_remote_rw_custom_physical_table() {
+        common_telemetry::init_default_ut_logging();
+        let distributed = tests::create_distributed_instance(
+            "test_distributed_prom_store_remote_rw_custom_physical_table",
+        )
+        .await;
+        test_prom_store_remote_rw(
+            &distributed.frontend(),
+            Some("my_custom_physical_table".to_string()),
+        )
+        .await;
+    }
+
+    async fn test_prom_store_remote_rw(instance: &Arc<Instance>, physical_table: Option<String>) {
         let write_request = WriteRequest {
             timeseries: prom_store::mock_timeseries(),
             ..Default::default()
         };
 
         let db = "prometheus";
-        let ctx = QueryContext::with(DEFAULT_CATALOG_NAME, db);
+        let mut ctx = Arc::into_inner(QueryContext::with(DEFAULT_CATALOG_NAME, db)).unwrap();
+
+        // set physical table if provided
+        if let Some(physical_table) = &physical_table {
+            ctx.set_extension(PHYSICAL_TABLE_PARAM.to_string(), physical_table.clone());
+        }
+        let ctx = Arc::new(ctx);
 
         assert!(SqlQueryHandler::do_query(
             instance.as_ref(),
@@ -63,11 +104,15 @@ mod tests {
             ctx.clone(),
         )
         .await
-        .get(0)
+        .first()
         .unwrap()
         .is_ok());
 
-        instance.write(write_request, ctx.clone()).await.unwrap();
+        let (row_inserts, _) = to_grpc_row_insert_requests(&write_request).unwrap();
+        instance
+            .write(row_inserts, ctx.clone(), true)
+            .await
+            .unwrap();
 
         let read_request = ReadRequest {
             queries: vec![
@@ -102,7 +147,7 @@ mod tests {
             ..Default::default()
         };
 
-        let resp = instance.read(read_request, ctx).await.unwrap();
+        let resp = instance.read(read_request, ctx.clone()).await.unwrap();
         assert_eq!(resp.content_type, "application/x-protobuf");
         assert_eq!(resp.content_encoding, "snappy");
         let body = prom_store::snappy_decompress(&resp.body).unwrap();
@@ -151,12 +196,12 @@ mod tests {
                     value: "metric3".to_string(),
                 },
                 Label {
-                    name: "idc".to_string(),
-                    value: "z002".to_string(),
-                },
-                Label {
                     name: "app".to_string(),
                     value: "biz".to_string(),
+                },
+                Label {
+                    name: "idc".to_string(),
+                    value: "z002".to_string(),
                 },
             ],
             timeseries.labels
@@ -179,5 +224,11 @@ mod tests {
                 }
             ]
         );
+
+        // check physical table if provided
+        if let Some(physical_table) = physical_table {
+            let sql = format!("DESC TABLE {physical_table};");
+            instance.do_query(&sql, ctx).await[0].as_ref().unwrap();
+        }
     }
 }

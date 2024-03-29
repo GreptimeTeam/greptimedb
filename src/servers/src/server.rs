@@ -12,21 +12,84 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::{error, info};
-use futures::future::{AbortHandle, AbortRegistration, Abortable};
+use futures::future::{try_join_all, AbortHandle, AbortRegistration, Abortable};
 use snafu::{ensure, ResultExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 
 use crate::error::{self, Result};
 
 pub(crate) type AbortableStream = Abortable<TcpListenerStream>;
+
+pub type ServerHandler = (Box<dyn Server>, SocketAddr);
+
+/// [ServerHandlers] is used to manage the lifecycle of all the services like http or grpc in the GreptimeDB server.
+#[derive(Clone, Default)]
+pub struct ServerHandlers {
+    handlers: Arc<RwLock<HashMap<String, ServerHandler>>>,
+}
+
+impl ServerHandlers {
+    pub fn new() -> Self {
+        Self {
+            handlers: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn insert(&self, handler: ServerHandler) {
+        let mut handlers = self.handlers.write().await;
+        handlers.insert(handler.0.name().to_string(), handler);
+    }
+
+    /// Finds the __actual__ bound address of the service by its name.
+    ///
+    /// This is useful in testing. We can configure the service to bind to port 0 first, then start
+    /// the server to get the real bound port number. This way we avoid doing careful assignment of
+    /// the port number to the service in the test.
+    ///
+    /// Note that the address is guaranteed to be correct only after the `start_all` method is
+    /// successfully invoked. Otherwise you may find the address to be what you configured before.
+    pub async fn addr(&self, name: &str) -> Option<SocketAddr> {
+        let handlers = self.handlers.read().await;
+        handlers.get(name).map(|x| x.1)
+    }
+
+    /// Starts all the managed services. It will block until all the services are started.
+    /// And it will set the actual bound address to the service.
+    pub async fn start_all(&self) -> Result<()> {
+        let mut handlers = self.handlers.write().await;
+        try_join_all(handlers.values_mut().map(|(server, addr)| async move {
+            let bind_addr = server.start(*addr).await?;
+            *addr = bind_addr;
+            info!("Service {} is started at {}", server.name(), bind_addr);
+            Ok::<(), error::Error>(())
+        }))
+        .await?;
+        Ok(())
+    }
+
+    /// Shutdown all the managed services. It will block until all the services are shutdown.
+    pub async fn shutdown_all(&self) -> Result<()> {
+        // Even though the `shutdown` method in server does not require mut self, we still acquire
+        // write lock to pair with `start_all` method.
+        let handlers = self.handlers.write().await;
+        try_join_all(handlers.values().map(|(server, _)| async move {
+            server.shutdown().await?;
+            info!("Service {} is shutdown!", server.name());
+            Ok::<(), error::Error>(())
+        }))
+        .await?;
+        Ok(())
+    }
+}
 
 #[async_trait]
 pub trait Server: Send + Sync {

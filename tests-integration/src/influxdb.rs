@@ -16,7 +16,7 @@
 mod test {
     use std::sync::Arc;
 
-    use common_query::Output;
+    use client::OutputData;
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
     use servers::influxdb::InfluxdbRequest;
@@ -56,8 +56,10 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_put_influxdb_lines_without_time_column() {
-        let instance =
-            tests::create_distributed_instance("test_distributed_put_influxdb_lines").await;
+        let instance = tests::create_distributed_instance(
+            "test_distributed_put_influxdb_lines_without_time_column",
+        )
+        .await;
         test_put_influxdb_lines_without_time_column(&instance.frontend()).await;
     }
 
@@ -78,7 +80,7 @@ monitor1,host=host2 memory=1027";
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
 
@@ -107,7 +109,7 @@ monitor1,host=host2 memory=1027 1663840496400340001";
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();

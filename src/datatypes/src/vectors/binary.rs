@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef};
+use arrow::array::{Array, ArrayBuilder, ArrayIter, ArrayRef};
 use snafu::ResultExt;
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
@@ -35,10 +35,6 @@ pub struct BinaryVector {
 impl BinaryVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
-    }
-
-    fn to_array_data(&self) -> ArrayData {
-        self.array.to_data()
     }
 }
 
@@ -74,13 +70,11 @@ impl Vector for BinaryVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        let data = self.to_array_data();
-        Arc::new(BinaryArray::from(data))
+        Arc::new(self.array.clone())
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        let data = self.to_array_data();
-        Box::new(BinaryArray::from(data))
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -165,6 +159,10 @@ impl MutableVector for BinaryVectorBuilder {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match value.as_binary()? {
             Some(v) => self.mutable_array.append_value(v),
@@ -203,6 +201,12 @@ impl ScalarVectorBuilder for BinaryVectorBuilder {
             array: self.mutable_array.finish(),
         }
     }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        BinaryVector {
+            array: self.mutable_array.finish_cloned(),
+        }
+    }
 }
 
 impl Serializable for BinaryVector {
@@ -233,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_binary_vector_misc() {
-        let v = BinaryVector::from(BinaryArray::from_iter_values(&[
+        let v = BinaryVector::from(BinaryArray::from_iter_values([
             vec![1, 2, 3],
             vec![1, 2, 3],
         ]));
@@ -353,5 +357,22 @@ mod tests {
 
         let expect: VectorRef = Arc::new(BinaryVector::from_slice(&[b"hello", b"one", b"two"]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_binary_vector_builder_finish_cloned() {
+        let mut builder = BinaryVectorBuilder::with_capacity(1024);
+        builder.push(Some(b"one"));
+        builder.push(Some(b"two"));
+        builder.push(Some(b"three"));
+        let vector = builder.finish_cloned();
+        assert_eq!(b"one", vector.get_data(0).unwrap());
+        assert_eq!(vector.len(), 3);
+        assert_eq!(builder.len(), 3);
+
+        builder.push(Some(b"four"));
+        let vector = builder.finish_cloned();
+        assert_eq!(b"four", vector.get_data(3).unwrap());
+        assert_eq!(builder.len(), 4);
     }
 }

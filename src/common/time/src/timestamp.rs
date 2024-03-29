@@ -14,29 +14,29 @@
 
 use core::default::Default;
 use std::cmp::Ordering;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
-use std::str::FromStr;
 use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{
-    DateTime, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone,
+    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime,
+    TimeZone as ChronoTimeZone, Utc,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use crate::error;
-use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampOverflowSnafu};
-use crate::timezone::TimeZone;
-use crate::util::{div_ceil, format_utc_datetime, local_datetime_to_utc};
+use crate::error::{ArithmeticOverflowSnafu, ParseTimestampSnafu, Result, TimestampOverflowSnafu};
+use crate::timezone::{get_timezone, Timezone};
+use crate::util::{datetime_to_utc, div_ceil};
+use crate::{error, Interval};
 
 /// Timestamp represents the value of units(seconds/milliseconds/microseconds/nanoseconds) elapsed
-/// since UNIX epoch. The valid value range of [Timestamp] depends on it's unit (all in UTC time zone):
+/// since UNIX epoch. The valid value range of [Timestamp] depends on it's unit (all in UTC timezone):
 /// - for [TimeUnit::Second]: [-262144-01-01 00:00:00, +262143-12-31 23:59:59]
 /// - for [TimeUnit::Millisecond]: [-262144-01-01 00:00:00.000, +262143-12-31 23:59:59.999]
 /// - for [TimeUnit::Microsecond]: [-262144-01-01 00:00:00.000000, +262143-12-31 23:59:59.999999]
-/// - for [TimeUnit::Nanosecond]: [1677-09-21 00:12:43.145225, 2262-04-11 23:47:16.854775807]
+/// - for [TimeUnit::Nanosecond]: [1677-09-21 00:12:43.145224192, 2262-04-11 23:47:16.854775807]
 ///
 /// # Note:
 /// For values out of range, you can still store these timestamps, but while performing arithmetic
@@ -104,6 +104,78 @@ impl Timestamp {
         })
     }
 
+    /// Adds a duration to timestamp.
+    /// # Note
+    /// The result time unit remains unchanged even if `duration` has a different unit with `self`.
+    /// For example, a timestamp with value 1 and time unit second, subtracted by 1 millisecond
+    /// and the result is still 1 second.
+    pub fn add_duration(&self, duration: Duration) -> error::Result<Self> {
+        let duration: i64 = match self.unit {
+            TimeUnit::Second => {
+                i64::try_from(duration.as_secs()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Millisecond => {
+                i64::try_from(duration.as_millis()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Microsecond => {
+                i64::try_from(duration.as_micros()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Nanosecond => {
+                i64::try_from(duration.as_nanos()).context(TimestampOverflowSnafu)?
+            }
+        };
+
+        let value = self
+            .value
+            .checked_add(duration)
+            .with_context(|| ArithmeticOverflowSnafu {
+                msg: format!(
+                    "Try to add timestamp: {:?} with duration: {:?}",
+                    self, duration
+                ),
+            })?;
+        Ok(Timestamp {
+            value,
+            unit: self.unit,
+        })
+    }
+
+    /// Adds given Interval to the current timestamp.
+    /// Returns None if the resulting timestamp would be out of range.
+    pub fn add_interval(&self, interval: Interval) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+        let (months, days, nsecs) = interval.to_month_day_nano();
+
+        let naive_datetime = naive_datetime
+            .checked_add_months(Months::new(months as u32))?
+            .checked_add_days(Days::new(days as u64))?
+            + Duration::from_nanos(nsecs as u64);
+
+        match Timestamp::from_chrono_datetime(naive_datetime) {
+            // Have to convert the new timestamp by the current unit.
+            Some(ts) => ts.convert_to(self.unit),
+            None => None,
+        }
+    }
+
+    /// Subtracts given Interval to the current timestamp.
+    /// Returns None if the resulting timestamp would be out of range.
+    pub fn sub_interval(&self, interval: Interval) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+        let (months, days, nsecs) = interval.to_month_day_nano();
+
+        let naive_datetime = naive_datetime
+            .checked_sub_months(Months::new(months as u32))?
+            .checked_sub_days(Days::new(days as u64))?
+            - Duration::from_nanos(nsecs as u64);
+
+        match Timestamp::from_chrono_datetime(naive_datetime) {
+            // Have to convert the new timestamp by the current unit.
+            Some(ts) => ts.convert_to(self.unit),
+            None => None,
+        }
+    }
+
     /// Subtracts current timestamp with another timestamp, yielding a duration.
     pub fn sub(&self, rhs: &Self) -> Option<chrono::Duration> {
         let lhs = self.to_chrono_datetime()?;
@@ -115,28 +187,28 @@ impl Timestamp {
         Self { unit, value }
     }
 
-    pub fn new_second(value: i64) -> Self {
+    pub const fn new_second(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Second,
         }
     }
 
-    pub fn new_millisecond(value: i64) -> Self {
+    pub const fn new_millisecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Millisecond,
         }
     }
 
-    pub fn new_microsecond(value: i64) -> Self {
+    pub const fn new_microsecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Microsecond,
         }
     }
 
-    pub fn new_nanosecond(value: i64) -> Self {
+    pub const fn new_nanosecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Nanosecond,
@@ -209,8 +281,26 @@ impl Timestamp {
                 .and_then(|v| v.checked_add(micros as i64))
                 .map(Timestamp::new_microsecond)
         } else {
+            // Refer to <https://github.com/chronotope/chrono/issues/1289>
+            //
+            // subsec nanos are always non-negative, however the timestamp itself (both in seconds and in nanos) can be
+            // negative. Now i64::MIN is NOT dividable by 1_000_000_000, so
+            //
+            //   (sec * 1_000_000_000) + nsec
+            //
+            // may underflow (even when in theory we COULD represent the datetime as i64) because we add the non-negative
+            // nanos AFTER the multiplication. This is fixed by converting the negative case to
+            //
+            //   ((sec + 1) * 1_000_000_000) + (nsec - 1_000_000_000)
+            let mut sec = sec;
+            let mut nsec = nsec as i64;
+            if sec < 0 && nsec > 0 {
+                nsec -= 1_000_000_000;
+                sec += 1;
+            }
+
             sec.checked_mul(1_000_000_000)
-                .and_then(|v| v.checked_add(nsec as i64))
+                .and_then(|v| v.checked_add(nsec))
                 .map(Timestamp::new_nanosecond)
         }
     }
@@ -218,38 +308,65 @@ impl Timestamp {
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
     /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
+        // Safety: the format is valid
         self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f%z", None)
+            .unwrap()
     }
 
+    /// Format timestamp use **system timezone**.
     pub fn to_local_string(&self) -> String {
+        // Safety: the format is valid
         self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f", None)
+            .unwrap()
     }
 
     /// Format timestamp for given timezone.
-    /// When timezone is None, using local time by default.
-    pub fn to_timezone_aware_string(&self, tz: Option<TimeZone>) -> String {
+    /// If `tz==None`, the server default timezone will used.
+    pub fn to_timezone_aware_string(&self, tz: Option<&Timezone>) -> String {
+        // Safety: the format is valid
         self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f", tz)
+            .unwrap()
     }
 
-    fn as_formatted_string(self, pattern: &str, timezone: Option<TimeZone>) -> String {
+    /// Format timestamp for given format and timezone.
+    /// If `tz==None`, the server default timezone will used.
+    pub fn as_formatted_string(self, pattern: &str, timezone: Option<&Timezone>) -> Result<String> {
         if let Some(v) = self.to_chrono_datetime() {
-            match timezone {
-                Some(TimeZone::Offset(offset)) => {
-                    format!("{}", offset.from_utc_datetime(&v).format(pattern))
+            let mut formatted = String::new();
+
+            match get_timezone(timezone) {
+                Timezone::Offset(offset) => {
+                    write!(
+                        formatted,
+                        "{}",
+                        offset.from_utc_datetime(&v).format(pattern)
+                    )
+                    .context(crate::error::FormatSnafu { pattern })?;
                 }
-                Some(TimeZone::Named(tz)) => {
-                    format!("{}", tz.from_utc_datetime(&v).format(pattern))
+                Timezone::Named(tz) => {
+                    write!(formatted, "{}", tz.from_utc_datetime(&v).format(pattern))
+                        .context(crate::error::FormatSnafu { pattern })?;
                 }
-                None => format_utc_datetime(&v, pattern),
             }
+
+            Ok(formatted)
         } else {
-            format!("[Timestamp{}: {}]", self.unit, self.value)
+            Ok(format!("[Timestamp{}: {}]", self.unit, self.value))
         }
     }
 
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
         let (sec, nsec) = self.split();
         NaiveDateTime::from_timestamp_opt(sec, nsec)
+    }
+
+    pub fn to_chrono_datetime_with_timezone(&self, tz: Option<&Timezone>) -> Option<NaiveDateTime> {
+        let datetime = self.to_chrono_datetime();
+        datetime.map(|v| match tz {
+            Some(Timezone::Offset(offset)) => offset.from_utc_datetime(&v).naive_local(),
+            Some(Timezone::Named(tz)) => tz.from_utc_datetime(&v).naive_local(),
+            None => Utc.from_utc_datetime(&v).naive_local(),
+        })
     }
 
     /// Convert timestamp to chrono date.
@@ -271,10 +388,12 @@ impl Timestamp {
     pub fn from_chrono_date(date: NaiveDate) -> Option<Self> {
         Timestamp::from_chrono_datetime(date.and_time(NaiveTime::default()))
     }
-}
 
-impl FromStr for Timestamp {
-    type Err = Error;
+    /// Accepts a string in RFC3339 / ISO8601 standard format and some variants and converts it to a nanosecond precision timestamp.
+    /// It no timezone specified in string, it cast to nanosecond epoch timestamp in UTC.
+    pub fn from_str_utc(s: &str) -> Result<Self> {
+        Self::from_str(s, None)
+    }
 
     /// Accepts a string in RFC3339 / ISO8601 standard format and some variants and converts it to a nanosecond precision timestamp.
     /// This code is copied from [arrow-datafusion](https://github.com/apache/arrow-datafusion/blob/arrow2/datafusion-physical-expr/src/arrow_temporal_util.rs#L71)
@@ -282,13 +401,13 @@ impl FromStr for Timestamp {
     /// Supported format:
     /// - `2022-09-20T14:16:43.012345Z` (Zulu timezone)
     /// - `2022-09-20T14:16:43.012345+08:00` (Explicit offset)
-    /// - `2022-09-20T14:16:43.012345` (local timezone, with T)
-    /// - `2022-09-20T14:16:43` (local timezone, no fractional seconds, with T)
+    /// - `2022-09-20T14:16:43.012345` (The given timezone, with T)
+    /// - `2022-09-20T14:16:43` (Zulu timezone, no fractional seconds, with T)
     /// - `2022-09-20 14:16:43.012345Z` (Zulu timezone, without T)
-    /// - `2022-09-20 14:16:43` (local timezone, without T)
-    /// - `2022-09-20 14:16:43.012345` (local timezone, without T)
+    /// - `2022-09-20 14:16:43` (The given timezone, without T)
+    /// - `2022-09-20 14:16:43.012345` (The given timezone, without T)
     #[allow(deprecated)]
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    pub fn from_str(s: &str, timezone: Option<&Timezone>) -> Result<Self> {
         // RFC3339 timestamp (with a T)
         let s = s.trim();
         if let Ok(ts) = DateTime::parse_from_rfc3339(s) {
@@ -305,33 +424,52 @@ impl FromStr for Timestamp {
         }
 
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-            return naive_datetime_to_timestamp(s, ts);
+            return naive_datetime_to_timestamp(s, ts, timezone);
         }
 
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
-            return naive_datetime_to_timestamp(s, ts);
+            return naive_datetime_to_timestamp(s, ts, timezone);
         }
 
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-            return naive_datetime_to_timestamp(s, ts);
+            return naive_datetime_to_timestamp(s, ts, timezone);
         }
 
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
-            return naive_datetime_to_timestamp(s, ts);
+            return naive_datetime_to_timestamp(s, ts, timezone);
         }
 
         ParseTimestampSnafu { raw: s }.fail()
     }
 }
 
+impl Timestamp {
+    pub const MIN_SECOND: Self = Self::new_second(-8_334_601_228_800);
+    pub const MAX_SECOND: Self = Self::new_second(8_210_266_876_799);
+
+    pub const MIN_MILLISECOND: Self = Self::new_millisecond(-8_334_601_228_800_000);
+    pub const MAX_MILLISECOND: Self = Self::new_millisecond(8_210_266_876_799_999);
+
+    pub const MIN_MICROSECOND: Self = Self::new_microsecond(-8_334_601_228_800_000_000);
+    pub const MAX_MICROSECOND: Self = Self::new_microsecond(8_210_266_876_799_999_999);
+
+    pub const MIN_NANOSECOND: Self = Self::new_nanosecond(i64::MIN);
+    pub const MAX_NANOSECOND: Self = Self::new_nanosecond(i64::MAX);
+}
+
 /// Converts the naive datetime (which has no specific timezone) to a
-/// nanosecond epoch timestamp relative to UTC.
-/// This code is copied from [arrow-datafusion](https://github.com/apache/arrow-datafusion/blob/arrow2/datafusion-physical-expr/src/arrow_temporal_util.rs#L137).
+/// nanosecond epoch timestamp in UTC.
 fn naive_datetime_to_timestamp(
     s: &str,
     datetime: NaiveDateTime,
+    timezone: Option<&Timezone>,
 ) -> crate::error::Result<Timestamp> {
-    match local_datetime_to_utc(&datetime) {
+    let Some(timezone) = timezone else {
+        return Timestamp::from_chrono_datetime(Utc.from_utc_datetime(&datetime).naive_utc())
+            .context(ParseTimestampSnafu { raw: s });
+    };
+
+    match datetime_to_utc(&datetime, timezone) {
         LocalResult::None => ParseTimestampSnafu { raw: s }.fail(),
         LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => {
             Timestamp::from_chrono_datetime(utc).context(ParseTimestampSnafu { raw: s })
@@ -480,11 +618,12 @@ impl Hash for Timestamp {
 mod tests {
     use std::collections::hash_map::DefaultHasher;
 
-    use chrono::{Local, Offset};
+    use chrono_tz::Tz;
     use rand::Rng;
     use serde_json::Value;
 
     use super::*;
+    use crate::timezone::set_default_timezone;
 
     #[test]
     pub fn test_time_unit() {
@@ -532,6 +671,19 @@ mod tests {
         let unit = units[unit_idx];
         let value: i64 = rng.gen();
         Timestamp::new(value, unit)
+    }
+
+    #[test]
+    fn test_add_sub_interval() {
+        let ts = Timestamp::new(1000, TimeUnit::Millisecond);
+
+        let interval = Interval::from_day_time(1, 200);
+
+        let new_ts = ts.add_interval(interval).unwrap();
+        assert_eq!(new_ts.unit(), TimeUnit::Millisecond);
+        assert_eq!(new_ts.value(), 1000 + 3600 * 24 * 1000 + 200);
+
+        assert_eq!(ts, new_ts.sub_interval(interval).unwrap());
     }
 
     #[test]
@@ -677,7 +829,7 @@ mod tests {
     // Input timestamp string is regarded as local timezone if no timezone is specified,
     // but expected timestamp is in UTC timezone
     fn check_from_str(s: &str, expect: &str) {
-        let ts = Timestamp::from_str(s).unwrap();
+        let ts = Timestamp::from_str_utc(s).unwrap();
         let time = ts.to_chrono_datetime().unwrap();
         assert_eq!(expect, time.to_string());
     }
@@ -688,71 +840,11 @@ mod tests {
         check_from_str("2020-09-08 13:42:29Z", "2020-09-08 13:42:29");
         check_from_str("2020-09-08T13:42:29+08:00", "2020-09-08 05:42:29");
 
-        check_from_str(
-            "2020-09-08 13:42:29",
-            &NaiveDateTime::from_timestamp_opt(
-                1599572549
-                    - Local
-                        .timestamp_opt(0, 0)
-                        .unwrap()
-                        .offset()
-                        .fix()
-                        .local_minus_utc() as i64,
-                0,
-            )
-            .unwrap()
-            .to_string(),
-        );
+        check_from_str("2020-09-08 13:42:29", "2020-09-08 13:42:29");
 
-        check_from_str(
-            "2020-09-08T13:42:29",
-            &NaiveDateTime::from_timestamp_opt(
-                1599572549
-                    - Local
-                        .timestamp_opt(0, 0)
-                        .unwrap()
-                        .offset()
-                        .fix()
-                        .local_minus_utc() as i64,
-                0,
-            )
-            .unwrap()
-            .to_string(),
-        );
-
-        check_from_str(
-            "2020-09-08 13:42:29.042",
-            &NaiveDateTime::from_timestamp_opt(
-                1599572549
-                    - Local
-                        .timestamp_opt(0, 0)
-                        .unwrap()
-                        .offset()
-                        .fix()
-                        .local_minus_utc() as i64,
-                42000000,
-            )
-            .unwrap()
-            .to_string(),
-        );
         check_from_str("2020-09-08 13:42:29.042Z", "2020-09-08 13:42:29.042");
         check_from_str("2020-09-08 13:42:29.042+08:00", "2020-09-08 05:42:29.042");
-        check_from_str(
-            "2020-09-08T13:42:29.042",
-            &NaiveDateTime::from_timestamp_opt(
-                1599572549
-                    - Local
-                        .timestamp_opt(0, 0)
-                        .unwrap()
-                        .offset()
-                        .fix()
-                        .local_minus_utc() as i64,
-                42000000,
-            )
-            .unwrap()
-            .to_string(),
-        );
-        check_from_str("2020-09-08T13:42:29+08:00", "2020-09-08 05:42:29");
+
         check_from_str(
             "2020-09-08T13:42:29.0042+08:00",
             "2020-09-08 05:42:29.004200",
@@ -761,9 +853,9 @@ mod tests {
 
     #[test]
     fn test_to_iso8601_string() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         let datetime_str = "2020-09-08 13:42:29.042+0000";
-        let ts = Timestamp::from_str(datetime_str).unwrap();
+        let ts = Timestamp::from_str_utc(datetime_str).unwrap();
         assert_eq!("2020-09-08 21:42:29.042+0800", ts.to_iso8601_string());
 
         let ts_millis = 1668070237000;
@@ -785,7 +877,7 @@ mod tests {
 
     #[test]
     fn test_serialize_to_json_value() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         assert_eq!(
             "1970-01-01 08:00:01+0800",
             match serde_json::Value::from(Timestamp::new(1, TimeUnit::Second)) {
@@ -998,27 +1090,55 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_in_time_zone() {
+    fn test_timestamp_add() {
+        let res = Timestamp::new(1, TimeUnit::Second)
+            .add_duration(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(2, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(0, TimeUnit::Second)
+            .add_duration(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(1, TimeUnit::Second)
+            .add_duration(Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(100, TimeUnit::Second)
+            .add_duration(Duration::from_millis(1000))
+            .unwrap();
+        assert_eq!(101, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+    }
+
+    // $TZ doesn't take effort.
+    #[test]
+    fn test_parse_in_timezone() {
         std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(
-            Timestamp::new(0, TimeUnit::Nanosecond),
-            Timestamp::from_str("1970-01-01 08:00:00.000").unwrap()
+            Timestamp::new(28800, TimeUnit::Second),
+            Timestamp::from_str_utc("1970-01-01 08:00:00.000").unwrap()
         );
 
         assert_eq!(
-            Timestamp::new(0, TimeUnit::Second),
-            Timestamp::from_str("1970-01-01 08:00:00").unwrap()
+            Timestamp::new(28800, TimeUnit::Second),
+            Timestamp::from_str_utc("1970-01-01 08:00:00").unwrap()
         );
 
         assert_eq!(
-            Timestamp::new(0, TimeUnit::Second),
-            Timestamp::from_str("      1970-01-01        08:00:00    ").unwrap()
+            Timestamp::new(28800, TimeUnit::Second),
+            Timestamp::from_str_utc("      1970-01-01        08:00:00    ").unwrap()
         );
     }
 
     #[test]
     fn test_to_local_string() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
 
         assert_eq!(
             "1970-01-01 08:00:00.000000001",
@@ -1051,51 +1171,82 @@ mod tests {
 
     #[test]
     fn test_to_timezone_aware_string() {
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         std::env::set_var("TZ", "Asia/Shanghai");
-
         assert_eq!(
             "1970-01-01 08:00:00.001",
-            Timestamp::new(1, TimeUnit::Millisecond).to_timezone_aware_string(None)
+            Timestamp::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("SYSTEM").unwrap()))
         );
         assert_eq!(
             "1970-01-01 08:00:00.001",
             Timestamp::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(TimeZone::from_tz_string("SYSTEM").unwrap())
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("SYSTEM").unwrap()))
         );
         assert_eq!(
             "1970-01-01 08:00:00.001",
             Timestamp::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(TimeZone::from_tz_string("+08:00").unwrap())
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("+08:00").unwrap()))
         );
         assert_eq!(
             "1970-01-01 07:00:00.001",
             Timestamp::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(TimeZone::from_tz_string("+07:00").unwrap())
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("+07:00").unwrap()))
         );
         assert_eq!(
             "1969-12-31 23:00:00.001",
             Timestamp::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(TimeZone::from_tz_string("-01:00").unwrap())
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("-01:00").unwrap()))
         );
         assert_eq!(
             "1970-01-01 08:00:00.001",
-            Timestamp::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(TimeZone::from_tz_string("Asia/Shanghai").unwrap())
+            Timestamp::new(1, TimeUnit::Millisecond).to_timezone_aware_string(Some(
+                &Timezone::from_tz_string("Asia/Shanghai").unwrap()
+            ))
         );
         assert_eq!(
             "1970-01-01 00:00:00.001",
             Timestamp::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(TimeZone::from_tz_string("UTC").unwrap())
+                .to_timezone_aware_string(Some(&Timezone::from_tz_string("UTC").unwrap()))
         );
         assert_eq!(
             "1970-01-01 01:00:00.001",
-            Timestamp::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(TimeZone::from_tz_string("Europe/Berlin").unwrap())
+            Timestamp::new(1, TimeUnit::Millisecond).to_timezone_aware_string(Some(
+                &Timezone::from_tz_string("Europe/Berlin").unwrap()
+            ))
         );
         assert_eq!(
             "1970-01-01 03:00:00.001",
-            Timestamp::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(TimeZone::from_tz_string("Europe/Moscow").unwrap())
+            Timestamp::new(1, TimeUnit::Millisecond).to_timezone_aware_string(Some(
+                &Timezone::from_tz_string("Europe/Moscow").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_as_formatted_string() {
+        let ts = Timestamp::new(1, TimeUnit::Millisecond);
+
+        assert_eq!(
+            "1970-01-01",
+            ts.as_formatted_string("%Y-%m-%d", None).unwrap()
+        );
+        assert_eq!(
+            "1970-01-01 00:00:00",
+            ts.as_formatted_string("%Y-%m-%d %H:%M:%S", None).unwrap()
+        );
+        assert_eq!(
+            "1970-01-01T00:00:00:001",
+            ts.as_formatted_string("%Y-%m-%dT%H:%M:%S:%3f", None)
+                .unwrap()
+        );
+        assert_eq!(
+            "1970-01-01T08:00:00:001",
+            ts.as_formatted_string(
+                "%Y-%m-%dT%H:%M:%S:%3f",
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+            )
+            .unwrap()
         );
     }
 
@@ -1135,27 +1286,31 @@ mod tests {
 
     #[test]
     fn test_from_naive_date_time() {
-        let min_sec = Timestamp::new_second(-8334632851200);
-        let max_sec = Timestamp::new_second(8210298412799);
+        let naive_date_time_min = NaiveDateTime::MIN;
+        let naive_date_time_max = NaiveDateTime::MAX;
+
+        let min_sec = Timestamp::new_second(naive_date_time_min.timestamp());
+        let max_sec = Timestamp::new_second(naive_date_time_max.timestamp());
         check_conversion(min_sec, true);
         check_conversion(Timestamp::new_second(min_sec.value - 1), false);
         check_conversion(max_sec, true);
         check_conversion(Timestamp::new_second(max_sec.value + 1), false);
 
-        let min_millis = Timestamp::new_millisecond(-8334632851200000);
-        let max_millis = Timestamp::new_millisecond(8210298412799999);
+        let min_millis = Timestamp::new_millisecond(naive_date_time_min.timestamp_millis());
+        let max_millis = Timestamp::new_millisecond(naive_date_time_max.timestamp_millis());
         check_conversion(min_millis, true);
         check_conversion(Timestamp::new_millisecond(min_millis.value - 1), false);
         check_conversion(max_millis, true);
         check_conversion(Timestamp::new_millisecond(max_millis.value + 1), false);
 
-        let min_micros = Timestamp::new_microsecond(-8334632851200000000);
-        let max_micros = Timestamp::new_microsecond(8210298412799999999);
+        let min_micros = Timestamp::new_microsecond(naive_date_time_min.timestamp_micros());
+        let max_micros = Timestamp::new_microsecond(naive_date_time_max.timestamp_micros());
         check_conversion(min_micros, true);
         check_conversion(Timestamp::new_microsecond(min_micros.value - 1), false);
         check_conversion(max_micros, true);
         check_conversion(Timestamp::new_microsecond(max_micros.value + 1), false);
 
+        // the min time that can be represented by nanoseconds is: 1677-09-21T00:12:43.145224192
         let min_nanos = Timestamp::new_nanosecond(-9223372036854775000);
         let max_nanos = Timestamp::new_nanosecond(i64::MAX);
         check_conversion(min_nanos, true);
@@ -1165,20 +1320,66 @@ mod tests {
 
     #[test]
     fn test_parse_timestamp_range() {
+        let datetime_min = NaiveDateTime::MIN.format("%Y-%m-%d %H:%M:%SZ").to_string();
+        assert_eq!("-262143-01-01 00:00:00Z", datetime_min);
+        let datetime_max = NaiveDateTime::MAX.format("%Y-%m-%d %H:%M:%SZ").to_string();
+        assert_eq!("+262142-12-31 23:59:59Z", datetime_max);
+
         let valid_strings = vec![
-            "-262144-01-01 00:00:00Z",
-            "+262143-12-31 23:59:59Z",
-            "-262144-01-01 00:00:00Z",
-            "+262143-12-31 23:59:59.999Z",
-            "-262144-01-01 00:00:00Z",
-            "+262143-12-31 23:59:59.999999Z",
-            "1677-09-21 00:12:43.145225Z",
+            "-262143-01-01 00:00:00Z",
+            "+262142-12-31 23:59:59Z",
+            "+262142-12-31 23:59:59.999Z",
+            "+262142-12-31 23:59:59.999999Z",
+            "1677-09-21 00:12:43.145224192Z",
             "2262-04-11 23:47:16.854775807Z",
             "+100000-01-01 00:00:01.5Z",
         ];
 
         for s in valid_strings {
-            Timestamp::from_str(s).unwrap();
+            Timestamp::from_str_utc(s).unwrap();
         }
+    }
+
+    #[test]
+    fn test_min_nanos_roundtrip() {
+        let (sec, nsec) = Timestamp::MIN_NANOSECOND.split();
+        let ts = Timestamp::from_splits(sec, nsec).unwrap();
+        assert_eq!(Timestamp::MIN_NANOSECOND, ts);
+    }
+
+    #[test]
+    fn test_timestamp_bound_format() {
+        assert_eq!(
+            "1677-09-21 00:12:43.145224192",
+            Timestamp::MIN_NANOSECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "2262-04-11 23:47:16.854775807",
+            Timestamp::MAX_NANOSECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "-262143-01-01 00:00:00",
+            Timestamp::MIN_MICROSECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "+262142-12-31 23:59:59.999999",
+            Timestamp::MAX_MICROSECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "-262143-01-01 00:00:00",
+            Timestamp::MIN_MILLISECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "+262142-12-31 23:59:59.999",
+            Timestamp::MAX_MILLISECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "-262143-01-01 00:00:00",
+            Timestamp::MIN_SECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+        assert_eq!(
+            "+262142-12-31 23:59:59",
+            Timestamp::MAX_SECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
     }
 }

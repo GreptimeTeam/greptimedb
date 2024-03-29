@@ -1,0 +1,33 @@
+[package]
+name = "index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+asynchronous-codec = "0.7.0"
+bytemuck.workspace = true
+bytes.workspace = true
+common-base.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-telemetry.workspace = true
+fst.workspace = true
+futures.workspace = true
+greptime-proto.workspace = true
+mockall.workspace = true
+pin-project.workspace = true
+prost.workspace = true
+regex.workspace = true
+regex-automata.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

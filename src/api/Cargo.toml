@@ -4,16 +4,20 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
-common-base = { workspace = true }
-common-error = { workspace = true }
-common-macro = { workspace = true }
-common-time = { workspace = true }
-datatypes = { workspace = true }
+common-base.workspace = true
+common-decimal.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-time.workspace = true
+datatypes.workspace = true
 greptime-proto.workspace = true
+paste = "1.0"
 prost.workspace = true
-snafu = { version = "0.7", features = ["backtraces"] }
-tonic.workspace = true
+snafu.workspace = true
 
 [build-dependencies]
 tonic-build = "0.9"

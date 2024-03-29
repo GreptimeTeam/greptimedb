@@ -7,32 +7,35 @@ license.workspace = true
 [features]
 mock = []
 
+[lints]
+workspace = true
+
 [dependencies]
-anymap = "1.0.0-beta.2"
-api = { workspace = true }
-async-stream.workspace = true
+api.workspace = true
 async-trait = "0.1"
-catalog = { workspace = true }
-client = { workspace = true }
-common-base = { workspace = true }
-common-catalog = { workspace = true }
-common-error = { workspace = true }
-common-greptimedb-telemetry = { workspace = true }
-common-grpc = { workspace = true }
-common-grpc-expr = { workspace = true }
-common-macro = { workspace = true }
-common-meta = { workspace = true }
-common-procedure = { workspace = true }
-common-runtime = { workspace = true }
-common-telemetry = { workspace = true }
-common-time = { workspace = true }
-dashmap = "5.4"
-datatypes = { workspace = true }
+client.workspace = true
+common-base.workspace = true
+common-catalog.workspace = true
+common-error.workspace = true
+common-greptimedb-telemetry.workspace = true
+common-grpc.workspace = true
+common-macro.workspace = true
+common-meta.workspace = true
+common-procedure.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
+common-wal.workspace = true
+dashmap.workspace = true
+datatypes.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
 h2 = "0.3"
 http-body = "0.4"
+humantime = "2.1"
+humantime-serde.workspace = true
+itertools.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
 parking_lot = "0.12"
@@ -41,26 +44,24 @@ prost.workspace = true
 rand.workspace = true
 regex.workspace = true
 serde.workspace = true
-serde_json = "1.0"
-servers = { workspace = true }
+serde_json.workspace = true
+servers.workspace = true
 snafu.workspace = true
-store-api = { workspace = true }
-strum.workspace = true
-table = { workspace = true }
-tokio-stream = { version = "0.1", features = ["net"] }
+store-api.workspace = true
+table.workspace = true
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
 tower = "0.4"
 typetag = "0.2"
 url = "2.3"
-uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
 client = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
-common-procedure-test = { workspace = true }
-session = { workspace = true }
+common-procedure-test.workspace = true
+session.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -16,6 +16,8 @@ use std::collections::HashMap;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, Rows, SemanticType};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -119,6 +121,7 @@ async fn test_alter_region() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -201,6 +204,7 @@ async fn test_put_after_alter() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -220,6 +224,7 @@ async fn test_put_after_alter() {
         column_name: "tag_1".to_string(),
         datatype: ColumnDataType::String as i32,
         semantic_type: SemanticType::Tag as i32,
+        ..Default::default()
     });
     // Put with new schema.
     let rows = Rows {
@@ -274,10 +279,11 @@ async fn test_alter_region_retry() {
         .unwrap();
     // Retries request.
     let request = add_tag1();
-    engine
+    let err = engine
         .handle_request(region_id, RegionRequest::Alter(request))
         .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::RequestOutdated);
 
     let expected = "\
 +-------+-------+---------+---------------------+

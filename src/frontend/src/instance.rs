@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod builder;
 mod grpc;
 mod influxdb;
 mod opentsdb;
@@ -19,49 +20,45 @@ mod otlp;
 mod prom_store;
 mod region_query;
 mod script;
-mod standalone;
-use std::collections::HashMap;
+pub mod standalone;
+
 use std::sync::Arc;
 
 use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use catalog::CatalogManagerRef;
-use client::client_manager::DatanodeClients;
+use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::cache_invalidator::DummyCacheInvalidator;
-use common_meta::ddl_manager::DdlManager;
-use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_meta::key::TableMetadataManager;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::error;
 use common_telemetry::logging::info;
-use datanode::region_server::RegionServer;
+use common_telemetry::{error, tracing};
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use operator::delete::{Deleter, DeleterRef};
-use operator::insert::{Inserter, InserterRef};
+use meta_client::MetaClientOptions;
+use operator::delete::DeleterRef;
+use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
-use operator::table::{table_idents_to_full_name, TableMutationOperator};
-use partition::manager::PartitionRuleManager;
+use prometheus::HistogramTimer;
+use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
-use query::{QueryEngineFactory, QueryEngineRef};
+use query::QueryEngineRef;
 use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
+use servers::export_metrics::ExportMetricsTask;
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
@@ -72,28 +69,26 @@ use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
+use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
+use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
-use sql::parser::ParserContext;
-use sql::statements::copy::CopyTable;
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 
-use self::region_query::FrontendRegionQueryHandler;
-use self::standalone::StandaloneTableMetadataCreator;
+use self::prom_store::ExportMetricHandler;
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
-    ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, ParseSqlSnafu,
+    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, StartServerSnafu,
     TableOperationSnafu,
 };
-use crate::frontend::FrontendOptions;
-use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
+use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::heartbeat::HeartbeatTask;
-use crate::metrics;
 use crate::script::ScriptExecutor;
-use crate::server::{start_server, ServerHandlers, Services};
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -122,108 +117,18 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
-    servers: Arc<ServerHandlers>,
+    servers: ServerHandlers,
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
+    export_metrics_task: Option<ExportMetricsTask>,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl Instance {
-    pub async fn try_new_distributed(opts: &FrontendOptions, plugins: Plugins) -> Result<Self> {
-        let meta_client = Self::create_meta_client(opts).await?;
-
-        let datanode_clients = Arc::new(DatanodeClients::default());
-
-        Self::try_new_distributed_with(meta_client, datanode_clients, plugins, opts).await
-    }
-
-    pub async fn try_new_distributed_with(
-        meta_client: Arc<MetaClient>,
-        datanode_clients: Arc<DatanodeClients>,
-        plugins: Plugins,
-        opts: &FrontendOptions,
-    ) -> Result<Self> {
-        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
-
-        let catalog_manager = KvBackendCatalogManager::new(
-            meta_backend.clone(),
-            meta_backend.clone(),
-            datanode_clients.clone(),
-        );
-        let partition_manager = Arc::new(PartitionRuleManager::new(meta_backend.clone()));
-
-        let region_query_handler = FrontendRegionQueryHandler::arc(
-            partition_manager.clone(),
-            catalog_manager.datanode_manager().clone(),
-        );
-
-        let inserter = Arc::new(Inserter::new(
-            catalog_manager.clone(),
-            partition_manager.clone(),
-            datanode_clients.clone(),
-        ));
-        let deleter = Arc::new(Deleter::new(
-            catalog_manager.clone(),
-            partition_manager,
-            datanode_clients,
-        ));
-
-        let table_mutation_handler = Arc::new(TableMutationOperator::new(
-            inserter.clone(),
-            deleter.clone(),
-        ));
-
-        let query_engine = QueryEngineFactory::new_with_plugins(
-            catalog_manager.clone(),
-            Some(region_query_handler.clone()),
-            Some(table_mutation_handler),
-            true,
-            plugins.clone(),
-        )
-        .query_engine();
-
-        let statement_executor = Arc::new(StatementExecutor::new(
-            catalog_manager.clone(),
-            query_engine.clone(),
-            meta_client.clone(),
-            meta_backend.clone(),
-            catalog_manager.clone(),
-            inserter.clone(),
-        ));
-
-        plugins.insert::<StatementExecutorRef>(statement_executor.clone());
-
-        let script_executor =
-            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
-
-        let handlers_executor = HandlerGroupExecutor::new(vec![
-            Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(meta_backend)),
-        ]);
-
-        let heartbeat_task = Some(HeartbeatTask::new(
-            meta_client.clone(),
-            opts.heartbeat.clone(),
-            Arc::new(handlers_executor),
-        ));
-
-        common_telemetry::init_node_id(opts.node_id.clone());
-
-        Ok(Instance {
-            catalog_manager,
-            script_executor,
-            statement_executor,
-            query_engine,
-            plugins: plugins.clone(),
-            servers: Arc::new(HashMap::new()),
-            heartbeat_task,
-            inserter,
-            deleter,
-        })
-    }
-
-    async fn create_meta_client(opts: &FrontendOptions) -> Result<Arc<MetaClient>> {
-        let meta_client_options = opts.meta_client.as_ref().context(MissingMetasrvOptsSnafu)?;
+    pub async fn create_meta_client(
+        meta_client_options: &MetaClientOptions,
+    ) -> Result<Arc<MetaClient>> {
         info!(
             "Creating Frontend instance in distributed mode with Meta server addr {:?}",
             meta_client_options.metasrv_addrs
@@ -244,7 +149,7 @@ impl Instance {
             .enable_router()
             .enable_store()
             .enable_heartbeat()
-            .enable_ddl()
+            .enable_procedure()
             .channel_manager(channel_manager)
             .ddl_channel_manager(ddl_channel_manager)
             .build();
@@ -285,83 +190,17 @@ impl Instance {
         Ok((kv_backend, procedure_manager))
     }
 
-    pub async fn try_new_standalone(
-        kv_backend: KvBackendRef,
-        procedure_manager: ProcedureManagerRef,
-        catalog_manager: CatalogManagerRef,
-        plugins: Plugins,
-        region_server: RegionServer,
-    ) -> Result<Self> {
-        let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
-        let datanode_manager = Arc::new(StandaloneDatanodeManager(region_server));
+    pub fn build_servers(
+        &mut self,
+        opts: impl Into<FrontendOptions> + TomlSerializable,
+        servers: ServerHandlers,
+    ) -> Result<()> {
+        let opts: FrontendOptions = opts.into();
+        self.export_metrics_task =
+            ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
+                .context(StartServerSnafu)?;
 
-        let region_query_handler =
-            FrontendRegionQueryHandler::arc(partition_manager.clone(), datanode_manager.clone());
-
-        let inserter = Arc::new(Inserter::new(
-            catalog_manager.clone(),
-            partition_manager.clone(),
-            datanode_manager.clone(),
-        ));
-        let deleter = Arc::new(Deleter::new(
-            catalog_manager.clone(),
-            partition_manager,
-            datanode_manager.clone(),
-        ));
-        let table_mutation_handler = Arc::new(TableMutationOperator::new(
-            inserter.clone(),
-            deleter.clone(),
-        ));
-
-        let query_engine = QueryEngineFactory::new_with_plugins(
-            catalog_manager.clone(),
-            Some(region_query_handler),
-            Some(table_mutation_handler),
-            true,
-            plugins.clone(),
-        )
-        .query_engine();
-
-        let script_executor =
-            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
-
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
-
-        let cache_invalidator = Arc::new(DummyCacheInvalidator);
-        let ddl_executor = Arc::new(DdlManager::new(
-            procedure_manager,
-            datanode_manager,
-            cache_invalidator.clone(),
-            table_metadata_manager.clone(),
-            Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
-        ));
-
-        let statement_executor = Arc::new(StatementExecutor::new(
-            catalog_manager.clone(),
-            query_engine.clone(),
-            ddl_executor,
-            kv_backend.clone(),
-            cache_invalidator,
-            inserter.clone(),
-        ));
-
-        Ok(Instance {
-            catalog_manager: catalog_manager.clone(),
-            script_executor,
-            statement_executor,
-            query_engine,
-            plugins,
-            servers: Arc::new(HashMap::new()),
-            heartbeat_task: None,
-            inserter,
-            deleter,
-        })
-    }
-
-    pub async fn build_servers(&mut self, opts: &FrontendOptions) -> Result<()> {
-        let servers = Services::build(opts, Arc::new(self.clone()), self.plugins.clone()).await?;
-        self.servers = Arc::new(servers);
-
+        self.servers = servers;
         Ok(())
     }
 
@@ -374,14 +213,22 @@ impl Instance {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        futures::future::try_join_all(self.servers.values().map(|server| server.0.shutdown()))
+        self.servers
+            .shutdown_all()
             .await
             .context(error::ShutdownServerSnafu)
-            .map(|_| ())
+    }
+
+    pub fn server_handlers(&self) -> &ServerHandlers {
+        &self.servers
     }
 
     pub fn statement_executor(&self) -> Arc<StatementExecutor> {
         self.statement_executor.clone()
+    }
+
+    pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
+        &self.table_metadata_manager
     }
 }
 
@@ -394,15 +241,24 @@ impl FrontendInstance for Instance {
 
         self.script_executor.start(self)?;
 
-        futures::future::try_join_all(self.servers.values().map(start_server))
-            .await
-            .context(error::StartServerSnafu)
-            .map(|_| ())
+        if let Some(t) = self.export_metrics_task.as_ref() {
+            if t.send_by_handler {
+                let handler = ExportMetricHandler::new_handler(
+                    self.inserter.clone(),
+                    self.statement_executor.clone(),
+                );
+                t.start(Some(handler)).context(StartServerSnafu)?
+            } else {
+                t.start(None).context(StartServerSnafu)?;
+            }
+        }
+
+        self.servers.start_all().await.context(StartServerSnafu)
     }
 }
 
 fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
-    ParserContext::create_with_dialect(sql, dialect).context(ParseSqlSnafu)
+    ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).context(ParseSqlSnafu)
 }
 
 impl Instance {
@@ -421,8 +277,8 @@ impl Instance {
 impl SqlQueryHandler for Instance {
     type Error = Error;
 
+    #[tracing::instrument(skip_all)]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let _timer = metrics::METRIC_HANDLE_SQL_ELAPSED.start_timer();
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -482,7 +338,6 @@ impl SqlQueryHandler for Instance {
     }
 
     async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
-        let _timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
         // plan should be prepared before exec
         // we'll do check there
         self.query_engine
@@ -491,6 +346,7 @@ impl SqlQueryHandler for Instance {
             .context(ExecLogicalPlanSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn do_promql_query(
         &self,
         query: &PromQuery,
@@ -523,11 +379,11 @@ impl SqlQueryHandler for Instance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(QueryStatement::Sql(stmt), query_ctx)
+                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
             self.query_engine
-                .describe(plan)
+                .describe(plan, query_ctx)
                 .await
                 .map(Some)
                 .context(error::DescribeStatementSnafu)
@@ -544,14 +400,27 @@ impl SqlQueryHandler for Instance {
     }
 }
 
+/// Attaches a timer to the output and observes it once the output is exhausted.
+pub fn attach_timer(output: Output, timer: HistogramTimer) -> Output {
+    match output.data {
+        OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
+        OutputData::Stream(stream) => {
+            let stream = OnDone::new(stream, move || {
+                timer.observe_duration();
+            });
+            Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
+        }
+    }
+}
+
 #[async_trait]
 impl PrometheusHandler for Instance {
+    #[tracing::instrument(skip_all)]
     async fn do_query(
         &self,
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        let _timer = metrics::METRIC_HANDLE_PROMQL_ELAPSED.start_timer();
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
@@ -563,8 +432,10 @@ impl PrometheusHandler for Instance {
             .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
             .context(AuthSnafu)?;
 
-        let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
-            query: query.clone(),
+        let stmt = QueryLanguageParser::parse_promql(query, &query_ctx).with_context(|_| {
+            ParsePromQLSnafu {
+                query: query.clone(),
+            }
         })?;
 
         let output = self
@@ -591,7 +462,7 @@ pub fn check_permission(
 ) -> Result<()> {
     let need_validate = plugins
         .get::<QueryOptions>()
-        .map(|opts| opts.disallow_cross_schema_query)
+        .map(|opts| opts.disallow_cross_catalog_query)
         .unwrap_or_default();
 
     if !need_validate {
@@ -602,16 +473,23 @@ pub fn check_permission(
         // These are executed by query engine, and will be checked there.
         Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
         // database ops won't be checked
-        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {}
+        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::DropDatabase(_) => {
+        }
         // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
         }
+        // set/show variable now only alter/show variable in session
+        Statement::SetVariables(_) | Statement::ShowVariables(_) => {}
 
         Statement::Insert(insert) => {
             validate_param(insert.table_name(), query_ctx)?;
         }
         Statement::CreateTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
+        }
+        Statement::CreateTableLike(stmt) => {
+            validate_param(&stmt.table_name, query_ctx)?;
+            validate_param(&stmt.source_name, query_ctx)?;
         }
         Statement::DropTable(drop_stmt) => {
             validate_param(drop_stmt.table_name(), query_ctx)?;
@@ -632,8 +510,11 @@ pub fn check_permission(
                 validate_param(&copy_table_from.table_name, query_ctx)?
             }
         },
-        Statement::Copy(sql::statements::copy::Copy::CopyDatabase(stmt)) => {
-            validate_param(&stmt.database_name, query_ctx)?
+        Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_database)) => {
+            match copy_database {
+                CopyDatabase::To(stmt) => validate_param(&stmt.database_name, query_ctx)?,
+                CopyDatabase::From(stmt) => validate_param(&stmt.database_name, query_ctx)?,
+            }
         }
         Statement::TruncateTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
@@ -643,7 +524,7 @@ pub fn check_permission(
 }
 
 fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> {
-    let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx.clone())
+    let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
@@ -669,7 +550,7 @@ mod tests {
         let query_ctx = QueryContext::arc();
         let plugins: Plugins = Plugins::new();
         plugins.insert(QueryOptions {
-            disallow_cross_schema_query: true,
+            disallow_cross_catalog_query: true,
         });
 
         let sql = r#"
@@ -705,8 +586,6 @@ mod tests {
             }
 
             let wrong = vec![
-                ("", "wrongschema."),
-                ("greptime.", "wrongschema."),
                 ("wrongcatalog.", "public."),
                 ("wrongcatalog.", "wrongschema."),
             ];
@@ -756,10 +635,10 @@ mod tests {
         let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         check_permission(plugins.clone(), &stmt[0], &query_ctx).unwrap();
 
-        let sql = "SHOW TABLES FROM wrongschema";
+        let sql = "SHOW TABLES FROM private";
         let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
-        assert!(re.is_err());
+        assert!(re.is_ok());
 
         // test describe table
         let sql = "DESC TABLE {catalog}{schema}demo;";

@@ -15,27 +15,29 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::Peer;
 use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
+use client::OutputData;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{RegionDistribution, TableMetaKey};
+use common_meta::peer::Peer;
 use common_meta::{distributed_time_constants, RegionIdent};
 use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::info;
+use common_test_util::recordbatch::check_output_stream;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
 use futures::TryStreamExt;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::metasrv::{SelectorContext, SelectorRef};
 use meta_srv::procedure::region_failover::{RegionFailoverContext, RegionFailoverProcedure};
-use meta_srv::selector::{Namespace, Selector};
+use meta_srv::selector::{Namespace, Selector, SelectorOptions};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{check_output_stream, get_test_store_config, StorageType};
+use tests_integration::test_util::{get_test_store_config, StorageType};
 use tokio::time;
 
 #[macro_export]
@@ -89,7 +91,8 @@ pub async fn test_region_failover(store_type: StorageType) {
     let (store_config, _guard) = get_test_store_config(&store_type);
 
     let datanodes = 5u64;
-    let cluster = GreptimeDbClusterBuilder::new(cluster_name)
+    let builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    let cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .build()
@@ -99,10 +102,10 @@ pub async fn test_region_failover(store_type: StorageType) {
 
     let table_id = prepare_testing_table(&cluster).await;
 
-    let results = write_datas(&frontend, logical_timer).await;
+    let results = insert_values(&frontend, logical_timer).await;
     logical_timer += 1000;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     assert!(has_route_cache(&frontend, table_id).await);
@@ -140,12 +143,12 @@ pub async fn test_region_failover(store_type: StorageType) {
 
     // Inserts data to each datanode after failover
     let frontend = cluster.frontend.clone();
-    let results = write_datas(&frontend, logical_timer).await;
+    let results = insert_values(&frontend, logical_timer).await;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
-    assert_writes(&frontend).await;
+    assert_values(&frontend).await;
 
     assert!(!distribution.contains_key(&failed_region.datanode_id));
 
@@ -178,12 +181,12 @@ async fn has_route_cache(instance: &Arc<Instance>, table_id: TableId) -> bool {
         .is_some()
 }
 
-async fn write_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
+async fn insert_values(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
     let query_ctx = QueryContext::arc();
 
     let mut results = Vec::new();
     for range in [5, 15, 25, 55] {
-        let result = write_data(
+        let result = insert_value(
             instance,
             &format!("INSERT INTO my_table VALUES ({},{})", range, ts),
             query_ctx.clone(),
@@ -195,7 +198,7 @@ async fn write_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Ou
     results
 }
 
-async fn write_data(
+async fn insert_value(
     instance: &Arc<Instance>,
     sql: &str,
     query_ctx: QueryContextRef,
@@ -203,7 +206,7 @@ async fn write_data(
     instance.do_query(sql, query_ctx).await.remove(0)
 }
 
-async fn assert_writes(instance: &Arc<Instance>) {
+async fn assert_values(instance: &Arc<Instance>) {
     let query_ctx = QueryContext::arc();
 
     let result = instance
@@ -224,7 +227,7 @@ async fn assert_writes(instance: &Arc<Instance>) {
 | 55 | 2023-05-31T04:51:55 |
 | 55 | 2023-05-31T04:51:56 |
 +----+---------------------+";
-    check_output_stream(result.unwrap(), expected).await;
+    check_output_stream(result.unwrap().data, expected).await;
 }
 
 async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
@@ -239,7 +242,7 @@ CREATE TABLE my_table (
     PARTITION r3 VALUES LESS THAN (MAXVALUE),
 )";
     let result = cluster.frontend.do_query(sql, QueryContext::arc()).await;
-    result.get(0).unwrap().as_ref().unwrap();
+    result.first().unwrap().as_ref().unwrap();
 
     let table = cluster
         .frontend
@@ -325,7 +328,12 @@ impl Selector for ForeignNodeSelector {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> MetaResult<Self::Output> {
+    async fn select(
+        &self,
+        _ns: Namespace,
+        _ctx: &Self::Context,
+        _opts: SelectorOptions,
+    ) -> MetaResult<Self::Output> {
         Ok(vec![self.foreign.clone()])
     }
 }
@@ -338,10 +346,13 @@ async fn run_region_failover_procedure(
     let meta_srv = &cluster.meta_srv;
     let procedure_manager = meta_srv.procedure_manager();
     let procedure = RegionFailoverProcedure::new(
+        "greptime".into(),
+        "public".into(),
         failed_region.clone(),
         RegionFailoverContext {
             region_lease_secs: 10,
             in_memory: meta_srv.in_memory().clone(),
+            kv_backend: meta_srv.kv_backend().clone(),
             mailbox: meta_srv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {

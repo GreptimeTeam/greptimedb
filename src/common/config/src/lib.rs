@@ -12,41 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
+pub mod utils;
 
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct WalConfig {
-    // wal directory
-    pub dir: Option<String>,
-    // wal file size in bytes
-    pub file_size: ReadableSize,
-    // wal purge threshold in bytes
-    pub purge_threshold: ReadableSize,
-    // purge interval in seconds
-    #[serde(with = "humantime_serde")]
-    pub purge_interval: Duration,
-    // read batch size
-    pub read_batch_size: usize,
-    // whether to sync log file after every write
-    pub sync_write: bool,
-}
-
-impl Default for WalConfig {
-    fn default() -> Self {
-        Self {
-            dir: None,
-            file_size: ReadableSize::mb(256), // log file size 256MB
-            purge_threshold: ReadableSize::gb(4), // purge threshold 4GB
-            purge_interval: Duration::from_secs(600),
-            read_batch_size: 128,
-            sync_write: false,
-        }
-    }
-}
 
 pub fn metadata_store_dir(store_dir: &str) -> String {
     format!("{store_dir}/metadata")

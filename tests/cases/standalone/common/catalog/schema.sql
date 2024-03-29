@@ -6,7 +6,7 @@ CREATE SCHEMA IF NOT EXISTS test_public_schema;
 
 SHOW DATABASES LIKE '%public%';
 
-SHOW DATABASES WHERE Schemas='test_public_schema';
+SHOW DATABASES WHERE Database = 'test_public_schema';
 
 USE test_public_schema;
 
@@ -26,6 +26,8 @@ SELECT * FROM hello;
 
 SHOW TABLES;
 
+SHOW FULL TABLES WHERE Table_type != 'VIEW';
+
 DROP TABLE hello;
 
 DROP TABLE hello;
@@ -34,7 +36,7 @@ SHOW TABLES FROM test_public_schema;
 
 SHOW TABLES FROM public;
 
-SHOW TABLES FROM public WHERE Tables='numbers';
+SHOW TABLES FROM public WHERE Tables = 'numbers';
 
 DROP SCHEMA test_public_schema;
 

@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -236,6 +236,8 @@ impl<K, V> Stream for PaginationStream<K, V> {
                 PaginationStreamState::Init => {
                     let factory = self.factory.take().expect("lost factory");
                     if !factory.more {
+                        // Ensures the factory always exists.
+                        self.factory = Some(factory);
                         return Poll::Ready(None);
                     }
                     let fut = factory.read_next().boxed();

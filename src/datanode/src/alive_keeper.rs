@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use api::v1::meta::GrantedRegion;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -26,6 +26,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_telemetry::{debug, error, info, trace, warn};
 use snafu::OptionExt;
+use store_api::region_engine::RegionRole;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 #[cfg(test)]
@@ -38,20 +39,14 @@ use crate::error::{self, Result};
 use crate::event_listener::{RegionServerEvent, RegionServerEventReceiver};
 use crate::region_server::RegionServer;
 
-const MAX_CLOSE_RETRY_TIMES: usize = 10;
-
-/// [RegionAliveKeeper] manages all `CountdownTaskHandles`.
+/// [RegionAliveKeeper] manages all [CountdownTaskHandle]s.
 ///
-/// [RegionAliveKeeper] starts a `CountdownTask` for each region. When deadline is reached,
-/// the region will be closed.
+/// [RegionAliveKeeper] starts a [CountdownTask] for each region. When the deadline is reached,
+/// the status of region be set to "readonly", ensures there is no side-effect in the entity system.
 ///
-/// The deadline is controlled by Metasrv. It works like "lease" for regions: a Datanode submits its
-/// opened regions to Metasrv, in heartbeats. If Metasrv decides some region could be resided in this
-/// Datanode, it will "extend" the region's "lease", with a deadline for [RegionAliveKeeper] to
-/// countdown.
-///
-/// On each lease extension, [RegionAliveKeeper] will reset the deadline to the corresponding time, and
-/// set region's status to "writable".
+/// The deadline is controlled by the meta server. Datanode will send its opened regions info to meta sever
+/// via heartbeat. If the meta server decides some region could be resided in this Datanode,
+/// it will renew the lease of region, a deadline of [CountdownTask] will be reset.
 pub struct RegionAliveKeeper {
     region_server: RegionServer,
     tasks: Arc<Mutex<HashMap<RegionId, Arc<CountdownTaskHandle>>>>,
@@ -59,13 +54,14 @@ pub struct RegionAliveKeeper {
     started: Arc<AtomicBool>,
 
     /// The epoch when [RegionAliveKeeper] is created. It's used to get a monotonically non-decreasing
-    /// elapsed time when submitting heartbeats to Metasrv (because [Instant] is monotonically
-    /// non-decreasing). The heartbeat request will carry the duration since this epoch, and the
+    /// elapsed time when submitting heartbeats to the meta server (because [Instant] is monotonically
+    /// non-decreasing). The heartbeat requests will carry the duration since this epoch, and the
     /// duration acts like an "invariant point" for region's keep alive lease.
     epoch: Instant,
 }
 
 impl RegionAliveKeeper {
+    /// Returns an empty [RegionAliveKeeper].
     pub fn new(region_server: RegionServer, heartbeat_interval_millis: u64) -> Self {
         Self {
             region_server,
@@ -80,26 +76,16 @@ impl RegionAliveKeeper {
         self.tasks.lock().await.get(&region_id).cloned()
     }
 
+    /// Add the countdown task for a specific region.
+    /// It will be ignored if the task exists.
     pub async fn register_region(&self, region_id: RegionId) {
         if self.find_handle(region_id).await.is_some() {
             return;
         }
 
-        let tasks = Arc::downgrade(&self.tasks);
-        let on_task_finished = async move {
-            if let Some(x) = tasks.upgrade() {
-                let _ = x.lock().await.remove(&region_id);
-            } // Else the countdown task handles map could be dropped because the keeper is dropped.
-        };
         let handle = Arc::new(CountdownTaskHandle::new(
             self.region_server.clone(),
             region_id,
-            move |result: Option<bool>| {
-                info!(
-                    "Deregister region: {region_id} after countdown task finished, result: {result:?}",
-                );
-                on_task_finished
-            },
         ));
 
         let mut handles = self.tasks.lock().await;
@@ -116,18 +102,44 @@ impl RegionAliveKeeper {
         }
     }
 
+    /// Removes the countdown task for a specific region.
     pub async fn deregister_region(&self, region_id: RegionId) {
         if self.tasks.lock().await.remove(&region_id).is_some() {
             info!("Deregister alive countdown for region {region_id}")
         }
     }
 
-    async fn keep_lived(&self, designated_regions: Vec<RegionId>, deadline: Instant) {
-        for region_id in designated_regions {
+    /// Renews the lease of regions to `deadline`.
+    async fn renew_region_leases(&self, regions: &[GrantedRegion], deadline: Instant) {
+        for region in regions {
+            let (role, region_id) = (region.role().into(), RegionId::from(region.region_id));
             if let Some(handle) = self.find_handle(region_id).await {
-                handle.reset_deadline(deadline).await;
+                handle.reset_deadline(role, deadline).await;
+            } else {
+                warn!(
+                    "Trying to renew the lease for region {region_id}, the keeper handler is not found!"
+                );
+                // Else the region alive keeper might be triggered by lagging messages, we can safely ignore it.
             }
-            // Else the region alive keeper might be triggered by lagging messages, we can safely ignore it.
+        }
+    }
+
+    async fn close_staled_region(&self, region_id: RegionId) {
+        info!("Closing staled region: {region_id}");
+        let request = RegionRequest::Close(RegionCloseRequest {});
+        if let Err(e) = self.region_server.handle_request(region_id, request).await {
+            if e.status_code() != StatusCode::RegionNotFound {
+                let _ = self.region_server.set_writable(region_id, false);
+                error!(e; "Failed to close staled region {}, set region to readonly.",region_id);
+            }
+        }
+    }
+
+    /// Closes staled regions.
+    async fn close_staled_regions(&self, regions: &[u64]) {
+        for region_id in regions {
+            self.close_staled_region(RegionId::from_u64(*region_id))
+                .await;
         }
     }
 
@@ -235,12 +247,12 @@ impl HeartbeatResponseHandler for RegionAliveKeeper {
             })?;
         let start_instant = self.epoch + Duration::from_millis(region_lease.duration_since_epoch);
         let deadline = start_instant + Duration::from_secs(region_lease.lease_seconds);
-        let region_ids = region_lease
-            .region_ids
-            .iter()
-            .map(|id| RegionId::from_u64(*id))
-            .collect();
-        self.keep_lived(region_ids, deadline).await;
+
+        self.renew_region_leases(&region_lease.regions, deadline)
+            .await;
+        self.close_staled_regions(&region_lease.closeable_region_ids)
+            .await;
+
         Ok(HandleControl::Continue)
     }
 }
@@ -251,7 +263,8 @@ enum CountdownCommand {
     /// 4 * `heartbeat_interval_millis`
     Start(u64),
     /// Reset countdown deadline to the given instance.
-    Reset(Instant),
+    /// (NextRole, Deadline)
+    Reset((RegionRole, Instant)),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
@@ -265,19 +278,7 @@ struct CountdownTaskHandle {
 
 impl CountdownTaskHandle {
     /// Creates a new [CountdownTaskHandle] and starts the countdown task.
-    /// # Params
-    /// - `on_task_finished`: a callback to be invoked when the task is finished. Note that it will not
-    ///   be invoked if the task is cancelled (by dropping the handle). This is because we want something
-    ///   meaningful to be done when the task is finished, e.g. deregister the handle from the map.
-    ///   While dropping the handle does not necessarily mean the task is finished.
-    fn new<Fut>(
-        region_server: RegionServer,
-        region_id: RegionId,
-        on_task_finished: impl FnOnce(Option<bool>) -> Fut + Send + 'static,
-    ) -> Self
-    where
-        Fut: Future<Output = ()> + Send,
-    {
+    fn new(region_server: RegionServer, region_id: RegionId) -> Self {
         let (tx, rx) = mpsc::channel(1024);
 
         let mut countdown_task = CountdownTask {
@@ -286,8 +287,7 @@ impl CountdownTaskHandle {
             rx,
         };
         let handler = common_runtime::spawn_bg(async move {
-            let result = countdown_task.run().await;
-            on_task_finished(result).await;
+            countdown_task.run().await;
         });
 
         Self {
@@ -297,6 +297,8 @@ impl CountdownTaskHandle {
         }
     }
 
+    /// Starts the [CountdownTask],
+    /// it will be ignored if the task started.
     async fn start(&self, heartbeat_interval_millis: u64) {
         if let Err(e) = self
             .tx
@@ -319,8 +321,12 @@ impl CountdownTaskHandle {
         None
     }
 
-    async fn reset_deadline(&self, deadline: Instant) {
-        if let Err(e) = self.tx.send(CountdownCommand::Reset(deadline)).await {
+    async fn reset_deadline(&self, role: RegionRole, deadline: Instant) {
+        if let Err(e) = self
+            .tx
+            .send(CountdownCommand::Reset((role, deadline)))
+            .await
+        {
             warn!(
                 "Failed to reset region alive keeper deadline: {e}. \
                 Maybe the task is stopped due to region been closed."
@@ -346,8 +352,7 @@ struct CountdownTask {
 }
 
 impl CountdownTask {
-    // returns true if region closed successfully
-    async fn run(&mut self) -> Option<bool> {
+    async fn run(&mut self) {
         // 30 years. See `Instant::far_future`.
         let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
 
@@ -355,33 +360,30 @@ impl CountdownTask {
         // "start countdown" command will be sent from heartbeat task).
         let countdown = tokio::time::sleep_until(far_future);
         tokio::pin!(countdown);
-
         let region_id = self.region_id;
+
+        let mut started = false;
         loop {
             tokio::select! {
                 command = self.rx.recv() => {
                     match command {
                         Some(CountdownCommand::Start(heartbeat_interval_millis)) => {
-                            // Set first deadline in 4 heartbeats (roughly after 20 seconds from now if heartbeat
-                            // interval is set to default 5 seconds), to make Datanode and Metasrv more tolerable to
-                            // network or other jitters during startup.
-                            let first_deadline = Instant::now() + Duration::from_millis(heartbeat_interval_millis) * 4;
-                            countdown.set(tokio::time::sleep_until(first_deadline));
-                        },
-                        Some(CountdownCommand::Reset(deadline)) => {
-                            if countdown.deadline() < deadline {
-                                trace!(
-                                    "Reset deadline of region {region_id} to approximately {} seconds later",
-                                    (deadline - Instant::now()).as_secs_f32(),
-                                );
-                                let _ = self.region_server.set_writable(self.region_id, true);
-                                countdown.set(tokio::time::sleep_until(deadline));
+                            if !started {
+                                // Set first deadline in 4 heartbeats (roughly after 12 seconds from now if heartbeat
+                                // interval is set to default 3 seconds), to make Datanode and Metasrv more tolerable to
+                                // network or other jitters during startup.
+                                let first_deadline = Instant::now() + Duration::from_millis(heartbeat_interval_millis) * 4;
+                                countdown.set(tokio::time::sleep_until(first_deadline));
+                                started = true;
                             }
-                            // Else the countdown could be either:
-                            // - not started yet;
-                            // - during startup protection;
-                            // - received a lagging heartbeat message.
-                            // All can be safely ignored.
+                        },
+                        Some(CountdownCommand::Reset((role, deadline))) => {
+                            let _ = self.region_server.set_writable(self.region_id, role.writable());
+                            trace!(
+                                "Reset deadline of region {region_id} to approximately {} seconds later.",
+                                (deadline - Instant::now()).as_secs_f32(),
+                            );
+                            countdown.set(tokio::time::sleep_until(deadline));
                         },
                         None => {
                             info!(
@@ -397,133 +399,129 @@ impl CountdownTask {
                     }
                 }
                 () = &mut countdown => {
-                    let result = self.close_region().await;
-                    info!(
-                        "Region {region_id} is closed, result: {result:?}. \
-                        RegionAliveKeeper out.",
-                    );
-                    return Some(result);
+                    warn!("The region {region_id} lease is expired, set region to readonly.");
+                    let _ = self.region_server.set_writable(self.region_id, false);
+                    // resets the countdown.
+                    let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
+                    countdown.as_mut().reset(far_future);
                 }
             }
         }
-        None
-    }
-
-    /// Returns if the region is closed successfully.
-    async fn close_region(&self) -> bool {
-        for retry in 0..MAX_CLOSE_RETRY_TIMES {
-            let request = RegionRequest::Close(RegionCloseRequest {});
-            match self
-                .region_server
-                .handle_request(self.region_id, request)
-                .await
-            {
-                Ok(_) => return true,
-                Err(e) if e.status_code() == StatusCode::RegionNotFound => return true,
-                // If region is failed to close, immediately retry. Maybe we should panic instead?
-                Err(e) => error!(e;
-                    "Retry {retry}, failed to close region {}. \
-                    For the integrity of data, retry closing and retry without wait.",
-                    self.region_id,
-                ),
-            }
-        }
-        false
     }
 }
 
 #[cfg(test)]
 mod test {
+
+    use mito2::config::MitoConfig;
+    use mito2::test_util::{CreateRequestBuilder, TestEnv};
+    use store_api::region_engine::RegionEngine;
+
     use super::*;
     use crate::tests::mock_region_server;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn region_alive_keeper() {
-        let region_server = mock_region_server();
-        let alive_keeper = Arc::new(RegionAliveKeeper::new(region_server, 300));
-        let region_id = RegionId::new(1, 2);
+        common_telemetry::init_default_ut_logging();
+        let mut region_server = mock_region_server();
+        let mut engine_env = TestEnv::with_prefix("region-alive-keeper");
+        let engine = Arc::new(engine_env.create_engine(MitoConfig::default()).await);
+        region_server.register_engine(engine.clone());
 
-        // register a region before starting
+        let alive_keeper = Arc::new(RegionAliveKeeper::new(region_server.clone(), 100));
+
+        let region_id = RegionId::new(1024, 1);
+        let builder = CreateRequestBuilder::new();
+        region_server
+            .handle_request(region_id, RegionRequest::Create(builder.build()))
+            .await
+            .unwrap();
+        region_server.set_writable(region_id, true).unwrap();
+
+        // Register a region before starting.
         alive_keeper.register_region(region_id).await;
         assert!(alive_keeper.find_handle(region_id).await.is_some());
 
+        info!("Start the keeper");
         alive_keeper.start(None).await.unwrap();
 
-        // started alive keeper should assign deadline to this region
+        // The started alive keeper should assign deadline to this region.
         let deadline = alive_keeper.deadline(region_id).await.unwrap();
         assert!(deadline >= Instant::now());
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Leader);
 
-        // extend lease then sleep
-        alive_keeper
-            .keep_lived(vec![region_id], Instant::now() + Duration::from_millis(500))
-            .await;
+        info!("Wait for lease expired");
+        // Sleep to wait lease expired.
         tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(alive_keeper.find_handle(region_id).await.is_some());
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Follower);
+
+        info!("Renew the region lease");
+        // Renew lease then sleep.
+        alive_keeper
+            .renew_region_leases(
+                &[GrantedRegion {
+                    region_id: region_id.as_u64(),
+                    role: api::v1::meta::RegionRole::Leader.into(),
+                }],
+                Instant::now() + Duration::from_millis(200),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(alive_keeper.find_handle(region_id).await.is_some());
         let deadline = alive_keeper.deadline(region_id).await.unwrap();
         assert!(deadline >= Instant::now());
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Leader);
 
-        // sleep to wait lease expired
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-        assert!(alive_keeper.find_handle(region_id).await.is_none());
+        info!("Wait for lease expired");
+        // Sleep to wait lease expired.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(alive_keeper.find_handle(region_id).await.is_some());
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Follower);
+
+        let deadline = alive_keeper.deadline(region_id).await.unwrap();
+        assert!(deadline > Instant::now() + Duration::from_secs(86400 * 365 * 29));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn countdown_task() {
         let region_server = mock_region_server();
 
-        let (tx, rx) = oneshot::channel();
+        let countdown_handle = CountdownTaskHandle::new(region_server, RegionId::new(9999, 2));
 
-        let countdown_handle = CountdownTaskHandle::new(
-            region_server,
-            RegionId::new(9999, 2),
-            |result: Option<bool>| async move {
-                tx.send((Instant::now(), result)).unwrap();
-            },
-        );
-
-        // if countdown task is not started, its deadline is set to far future
+        // If countdown task is not started, its deadline is set to far future.
         assert!(
             countdown_handle.deadline().await.unwrap()
                 > Instant::now() + Duration::from_secs(86400 * 365 * 29)
         );
 
-        // the first deadline should be set to 4 * heartbeat_interval_millis
-        // we assert it to be greater than 3 * heartbeat_interval_millis to avoid flaky test
+        // The first deadline should be set to 4 * heartbeat_interval_millis.
+        // We assert it to be greater than 3 * heartbeat_interval_millis to avoid flaky test.
         let heartbeat_interval_millis = 100;
         countdown_handle.start(heartbeat_interval_millis).await;
         assert!(
             countdown_handle.deadline().await.unwrap()
                 > Instant::now() + Duration::from_millis(heartbeat_interval_millis * 3)
         );
+        tokio::time::sleep(Duration::from_millis(heartbeat_interval_millis * 5)).await;
 
-        // reset deadline
-        // a nearer deadline will be ignored
-        countdown_handle
-            .reset_deadline(Instant::now() + Duration::from_millis(heartbeat_interval_millis))
-            .await;
+        // No effect.
+        countdown_handle.start(heartbeat_interval_millis).await;
         assert!(
             countdown_handle.deadline().await.unwrap()
-                > Instant::now() + Duration::from_millis(heartbeat_interval_millis * 3)
+                > Instant::now() + Duration::from_secs(86400 * 365 * 29)
         );
 
-        // only a farther deadline will be accepted
+        // Reset deadline.
         countdown_handle
-            .reset_deadline(Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5))
+            .reset_deadline(
+                RegionRole::Leader,
+                Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
+            )
             .await;
         assert!(
             countdown_handle.deadline().await.unwrap()
                 > Instant::now() + Duration::from_millis(heartbeat_interval_millis * 4)
-        );
-
-        // wait for countdown task to finish
-        let before_await = Instant::now();
-        let (finish_instant, result) = rx.await.unwrap();
-        // it returns `RegionNotFound`
-        assert_eq!(result, Some(true));
-        // this task should be finished after 5 * heartbeat_interval_millis
-        // we assert 4 times here
-        assert!(
-            finish_instant > before_await + Duration::from_millis(heartbeat_interval_millis * 4)
         );
     }
 }

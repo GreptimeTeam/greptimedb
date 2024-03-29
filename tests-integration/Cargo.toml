@@ -7,71 +7,78 @@ license.workspace = true
 [features]
 dashboard = []
 
+[lints]
+workspace = true
+
 [dependencies]
-api = { workspace = true }
+api.workspace = true
+arrow-flight.workspace = true
 async-trait = "0.1"
 auth.workspace = true
-axum = "0.6"
-axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
-catalog = { workspace = true }
+axum.workspace = true
+axum-test-helper = "0.3.0"
+catalog.workspace = true
 chrono.workspace = true
 client = { workspace = true, features = ["testing"] }
-common-base = { workspace = true }
-common-catalog = { workspace = true }
-common-config = { workspace = true }
-common-error = { workspace = true }
-common-grpc = { workspace = true }
+cmd.workspace = true
+common-base.workspace = true
+common-catalog.workspace = true
+common-config.workspace = true
+common-error.workspace = true
+common-grpc.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
-common-procedure = { workspace = true }
-common-query = { workspace = true }
-common-recordbatch = { workspace = true }
-common-runtime = { workspace = true }
-common-telemetry = { workspace = true }
-common-test-util = { workspace = true }
-datanode = { workspace = true, features = ["testing"] }
-datatypes = { workspace = true }
+common-procedure.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+common-test-util.workspace = true
+common-wal.workspace = true
+datanode = { workspace = true }
+datatypes.workspace = true
 dotenv = "0.15"
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
-meta-client = { workspace = true }
+meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
-object-store = { workspace = true }
-once_cell.workspace = true
-operator = { workspace = true }
-query = { workspace = true }
-rand.workspace = true
+mysql_async = { version = "0.33", default-features = false, features = [
+    "default-rustls",
+] }
+object-store.workspace = true
+operator.workspace = true
+query.workspace = true
 rstest = "0.17"
 rstest_reuse = "0.5"
 secrecy = "0.8"
-serde.workspace = true
-serde_json = "1.0"
+serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
-session = { workspace = true }
-snafu.workspace = true
-sql = { workspace = true }
+session.workspace = true
+sql.workspace = true
 sqlx = { version = "0.6", features = [
     "runtime-tokio-rustls",
     "mysql",
     "postgres",
     "chrono",
 ] }
-substrait = { workspace = true }
-table = { workspace = true }
+substrait.workspace = true
+table.workspace = true
 tempfile.workspace = true
+time = "0.3"
 tokio.workspace = true
 tonic.workspace = true
 tower = "0.4"
 uuid.workspace = true
 
 [dev-dependencies]
-datafusion-expr.workspace = true
 datafusion.workspace = true
+datafusion-expr.workspace = true
 itertools.workspace = true
 opentelemetry-proto.workspace = true
-partition = { workspace = true }
+partition.workspace = true
 paste.workspace = true
 prost.workspace = true
-script = { workspace = true }
+rand.workspace = true
+script.workspace = true
 session = { workspace = true, features = ["testing"] }
-store-api = { workspace = true }
+store-api.workspace = true
 tokio-postgres = "0.7"

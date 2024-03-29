@@ -16,11 +16,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
-use client::client_manager::DatanodeClients;
-use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::kvbackend::{
+    CachedMetaKvBackend, CachedMetaKvBackendBuilder, KvBackendCatalogManager,
+};
+use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_error::ext::ErrorExt;
+use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
@@ -158,39 +160,40 @@ impl Repl {
         let start = Instant::now();
 
         let output = if let Some(query_engine) = &self.query_engine {
-            let stmt = QueryLanguageParser::parse_sql(&sql)
-                .with_context(|_| ParseSqlSnafu { sql: sql.clone() })?;
-
             let query_ctx = QueryContext::with(self.database.catalog(), self.database.schema());
+
+            let stmt = QueryLanguageParser::parse_sql(&sql, &query_ctx)
+                .with_context(|_| ParseSqlSnafu { sql: sql.clone() })?;
 
             let plan = query_engine
                 .planner()
-                .plan(stmt, query_ctx)
+                .plan(stmt, query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
 
-            let LogicalPlan::DfPlan(plan) =
-                query_engine.optimize(&plan).context(PlanStatementSnafu)?;
+            let LogicalPlan::DfPlan(plan) = query_engine
+                .optimize(&query_engine.engine_context(query_ctx), &plan)
+                .context(PlanStatementSnafu)?;
 
             let plan = DFLogicalSubstraitConvertor {}
                 .encode(&plan)
                 .context(SubstraitEncodeLogicalPlanSnafu)?;
 
-            self.database.logical_plan(plan.to_vec(), 0).await
+            self.database.logical_plan(plan.to_vec()).await
         } else {
             self.database.sql(&sql).await
         }
         .context(RequestDatabaseSnafu { sql: &sql })?;
 
-        let either = match output {
-            Output::Stream(s) => {
+        let either = match output.data {
+            OutputData::Stream(s) => {
                 let x = RecordBatches::try_collect(s)
                     .await
                     .context(CollectRecordBatchesSnafu)?;
                 Either::Left(x)
             }
-            Output::RecordBatches(x) => Either::Left(x),
-            Output::AffectedRows(rows) => Either::Right(rows),
+            OutputData::RecordBatches(x) => Either::Left(x),
+            OutputData::AffectedRows(rows) => Either::Right(rows),
         };
 
         let end = Instant::now();
@@ -248,18 +251,17 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         .context(StartMetaClientSnafu)?;
     let meta_client = Arc::new(meta_client);
 
-    let cached_meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
-
-    let datanode_clients = Arc::new(DatanodeClients::default());
-
-    let catalog_list = KvBackendCatalogManager::new(
+    let cached_meta_backend =
+        Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
+    let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::with_invalidators(vec![
         cached_meta_backend.clone(),
-        cached_meta_backend.clone(),
-        datanode_clients,
-    );
+    ]));
+    let catalog_list =
+        KvBackendCatalogManager::new(cached_meta_backend.clone(), multi_cache_invalidator).await;
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(
         catalog_list,
+        None,
         None,
         None,
         false,

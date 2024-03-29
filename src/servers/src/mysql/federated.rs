@@ -16,13 +16,11 @@
 //! Inspired by Databend's "[mysql_federated.rs](https://github.com/datafuselabs/databend/blob/ac706bf65845e6895141c96c0a10bad6fdc2d367/src/query/service/src/servers/mysql/mysql_federated.rs)".
 
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_time::timezone::system_time_zone_name;
-use common_time::TimeZone;
+use common_time::timezone::system_timezone_name;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -39,11 +37,9 @@ static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))").unwrap());
 static SHOW_COLLATION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(show collation where(.*))").unwrap());
-static SHOW_VARIABLES_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES(.*))").unwrap());
+static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES( LIKE (.*))?)").unwrap());
 
-static SELECT_VERSION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(SELECT VERSION\(\s*\))").unwrap());
 static SELECT_DATABASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(SELECT DATABASE\(\s*\))").unwrap());
 
@@ -54,10 +50,6 @@ static SELECT_TIME_DIFF_FUNC_PATTERN: Lazy<Regex> =
 // sqlalchemy < 1.4.30
 static SHOW_SQL_MODE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'sql_mode'(.*))").unwrap());
-
-// Time zone settings
-static SET_TIME_ZONE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^SET TIME_ZONE\s*=\s*'(\S+)'").unwrap());
 
 static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
     RegexSet::new([
@@ -76,9 +68,13 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(SET sql_mode(.*))",
         "(?i)^(SET SQL_SELECT_LIMIT(.*))",
         "(?i)^(SET @@(.*))",
+        "(?i)^(SET PROFILING(.*))",
 
         "(?i)^(SHOW COLLATION)",
         "(?i)^(SHOW CHARSET)",
+
+        // mysqlclient.
+        "(?i)^(SELECT \\$\\$)",
 
         // mysqldump.
         "(?i)^(SET SESSION(.*))",
@@ -197,11 +193,8 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
 
         // get value of variables from known sources or fallback to defaults
         let value = match var_as[0] {
-            "time_zone" => query_context
-                .time_zone()
-                .map(|tz| tz.to_string())
-                .unwrap_or_else(|| "".to_owned()),
-            "system_time_zone" => system_time_zone_name(),
+            "time_zone" => query_context.timezone().to_string(),
+            "system_time_zone" => system_timezone_name(),
             _ => VAR_VALUES
                 .get(var_as[0])
                 .map(|v| v.to_string())
@@ -236,7 +229,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
     let schema = Arc::new(Schema::new(fields));
     // unwrap is safe because the schema and data are definitely able to form a recordbatch, they are all string type
     let batches = RecordBatches::try_from_columns(schema, values).unwrap();
-    Some(Output::RecordBatches(batches))
+    Some(Output::new_with_record_batches(batches))
 }
 
 fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
@@ -255,37 +248,22 @@ fn check_show_variables(query: &str) -> Option<Output> {
         Some(show_variables("sql_mode", "ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION"))
     } else if SHOW_LOWER_CASE_PATTERN.is_match(query) {
         Some(show_variables("lower_case_table_names", "0"))
-    } else if SHOW_COLLATION_PATTERN.is_match(query) || SHOW_VARIABLES_PATTERN.is_match(query) {
+    } else if SHOW_COLLATION_PATTERN.is_match(query) || SHOW_VARIABLES_LIKE_PATTERN.is_match(query)
+    {
         Some(show_variables("", ""))
     } else {
         None
     };
-    recordbatches.map(Output::RecordBatches)
-}
-
-// TODO(sunng87): extract this to use sqlparser for more variables
-fn check_set_variables(query: &str, session: SessionRef) -> Option<Output> {
-    if let Some(captures) = SET_TIME_ZONE_PATTERN.captures(query) {
-        // get the capture
-        let tz = captures.get(1).unwrap();
-        if let Ok(timezone) = TimeZone::from_tz_string(tz.as_str()) {
-            session.set_time_zone(timezone);
-            return Some(Output::AffectedRows(0));
-        }
-    }
-
-    None
+    recordbatches.map(Output::new_with_record_batches)
 }
 
 // Check for SET or others query, this is the final check of the federated query.
 fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
-        return Some(Output::RecordBatches(RecordBatches::empty()));
+        return Some(Output::new_with_record_batches(RecordBatches::empty()));
     }
 
-    let recordbatches = if SELECT_VERSION_PATTERN.is_match(query) {
-        Some(select_function("version()", &get_version()))
-    } else if SELECT_DATABASE_PATTERN.is_match(query) {
+    let recordbatches = if SELECT_DATABASE_PATTERN.is_match(query) {
         let schema = query_ctx.current_schema();
         Some(select_function("database()", schema))
     } else if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
@@ -296,7 +274,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     } else {
         None
     };
-    recordbatches.map(Output::RecordBatches)
+    recordbatches.map(Output::new_with_record_batches)
 }
 
 // Check whether the query is a federated or driver setup command,
@@ -304,7 +282,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
 pub(crate) fn check(
     query: &str,
     query_ctx: QueryContextRef,
-    session: SessionRef,
+    _session: SessionRef,
 ) -> Option<Output> {
     // INSERT don't need MySQL federated check. We assume the query doesn't contain
     // federated or driver setup command if it starts with a 'INSERT' statement.
@@ -316,21 +294,15 @@ pub(crate) fn check(
     check_select_variable(query, query_ctx.clone())
         // Then to check "show variables like ...".
         .or_else(|| check_show_variables(query))
-        .or_else(|| check_set_variables(query, session.clone()))
         // Last check
         .or_else(|| check_others(query, query_ctx))
 }
 
-// get GreptimeDB's version.
-fn get_version() -> String {
-    format!(
-        "{}-greptime",
-        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string()),
-    )
-}
 #[cfg(test)]
 mod test {
 
+    use common_query::OutputData;
+    use common_time::timezone::set_default_timezone;
     use session::context::{Channel, QueryContext};
     use session::Session;
 
@@ -338,7 +310,7 @@ mod test {
 
     #[test]
     fn test_check() {
-        let session = Arc::new(Session::new(None, Channel::Mysql));
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default()));
         let query = "select 1";
         let result = check(query, QueryContext::arc(), session.clone());
         assert!(result.is_none());
@@ -348,27 +320,14 @@ mod test {
         assert!(output.is_none());
 
         fn test(query: &str, expected: &str) {
-            let session = Arc::new(Session::new(None, Channel::Mysql));
+            let session = Arc::new(Session::new(None, Channel::Mysql, Default::default()));
             let output = check(query, QueryContext::arc(), session.clone());
-            match output.unwrap() {
-                Output::RecordBatches(r) => {
+            match output.unwrap().data {
+                OutputData::RecordBatches(r) => {
                     assert_eq!(&r.pretty_print().unwrap(), expected)
                 }
                 _ => unreachable!(),
             }
-        }
-
-        let query = "select version()";
-        let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
-        let output = check(query, QueryContext::arc(), session.clone());
-        match output.unwrap() {
-            Output::RecordBatches(r) => {
-                assert!(&r
-                    .pretty_print()
-                    .unwrap()
-                    .contains(&format!("{version}-greptime")));
-            }
-            _ => unreachable!(),
         }
 
         let query = "SELECT @@version_comment LIMIT 1";
@@ -390,16 +349,16 @@ mod test {
 +-----------------+------------------------+";
         test(query, expected);
 
-        // set sysstem timezone
-        std::env::set_var("TZ", "Asia/Shanghai");
+        // set system timezone
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         // complex variables
         let query = "/* mysql-connector-java-8.0.17 (Revision: 16a712ddb3f826a1933ab42b0039f7fb9eebc6ec) */SELECT  @@session.auto_increment_increment AS auto_increment_increment, @@character_set_client AS character_set_client, @@character_set_connection AS character_set_connection, @@character_set_results AS character_set_results, @@character_set_server AS character_set_server, @@collation_server AS collation_server, @@collation_connection AS collation_connection, @@init_connect AS init_connect, @@interactive_timeout AS interactive_timeout, @@license AS license, @@lower_case_table_names AS lower_case_table_names, @@max_allowed_packet AS max_allowed_packet, @@net_write_timeout AS net_write_timeout, @@performance_schema AS performance_schema, @@sql_mode AS sql_mode, @@system_time_zone AS system_time_zone, @@time_zone AS time_zone, @@transaction_isolation AS transaction_isolation, @@wait_timeout AS wait_timeout;";
         let expected = "\
-+--------------------------+----------------------+--------------------------+-----------------------+----------------------+------------------+----------------------+--------------+---------------------+---------+------------------------+--------------------+-------------------+--------------------+----------+------------------+-----------+-----------------------+---------------+
-| auto_increment_increment | character_set_client | character_set_connection | character_set_results | character_set_server | collation_server | collation_connection | init_connect | interactive_timeout | license | lower_case_table_names | max_allowed_packet | net_write_timeout | performance_schema | sql_mode | system_time_zone | time_zone | transaction_isolation | wait_timeout; |
-+--------------------------+----------------------+--------------------------+-----------------------+----------------------+------------------+----------------------+--------------+---------------------+---------+------------------------+--------------------+-------------------+--------------------+----------+------------------+-----------+-----------------------+---------------+
-| 0                        | 0                    | 0                        | 0                     | 0                    | 0                | 0                    | 0            | 31536000            | 0       | 0                      | 134217728          | 31536000          | 0                  | 0        | +08:00           |           | REPEATABLE-READ       | 31536000      |
-+--------------------------+----------------------+--------------------------+-----------------------+----------------------+------------------+----------------------+--------------+---------------------+---------+------------------------+--------------------+-------------------+--------------------+----------+------------------+-----------+-----------------------+---------------+";
++--------------------------+----------------------+--------------------------+-----------------------+----------------------+------------------+----------------------+--------------+---------------------+---------+------------------------+--------------------+-------------------+--------------------+----------+------------------+---------------+-----------------------+---------------+
+| auto_increment_increment | character_set_client | character_set_connection | character_set_results | character_set_server | collation_server | collation_connection | init_connect | interactive_timeout | license | lower_case_table_names | max_allowed_packet | net_write_timeout | performance_schema | sql_mode | system_time_zone | time_zone     | transaction_isolation | wait_timeout; |
++--------------------------+----------------------+--------------------------+-----------------------+----------------------+------------------+----------------------+--------------+---------------------+---------+------------------------+--------------------+-------------------+--------------------+----------+------------------+---------------+-----------------------+---------------+
+| 0                        | 0                    | 0                        | 0                     | 0                    | 0                | 0                    | 0            | 31536000            | 0       | 0                      | 134217728          | 31536000          | 0                  | 0        | Asia/Shanghai    | Asia/Shanghai | REPEATABLE-READ       | 31536000      |
++--------------------------+----------------------+--------------------------+-----------------------+----------------------+------------------+----------------------+--------------+---------------------+---------+------------------------+--------------------+-------------------+--------------------+----------+------------------+---------------+-----------------------+---------------+";
         test(query, expected);
 
         let query = "show variables";
@@ -434,37 +393,5 @@ mod test {
 | 00:00:00                         |
 +----------------------------------+";
         test(query, expected);
-    }
-
-    #[test]
-    fn test_set_time_zone() {
-        let session = Arc::new(Session::new(None, Channel::Mysql));
-        let output = check(
-            "set time_zone = 'UTC'",
-            QueryContext::arc(),
-            session.clone(),
-        );
-        match output.unwrap() {
-            Output::AffectedRows(rows) => {
-                assert_eq!(rows, 0)
-            }
-            _ => unreachable!(),
-        }
-        let query_context = session.new_query_context();
-        assert_eq!("UTC", query_context.time_zone().unwrap().to_string());
-
-        let output = check("select @@time_zone", query_context.clone(), session.clone());
-        match output.unwrap() {
-            Output::RecordBatches(r) => {
-                let expected = "\
-+-------------+
-| @@time_zone |
-+-------------+
-| UTC         |
-+-------------+";
-                assert_eq!(r.pretty_print().unwrap(), expected);
-            }
-            _ => unreachable!(),
-        }
     }
 }

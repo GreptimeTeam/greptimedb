@@ -15,38 +15,51 @@
 use std::sync::Arc;
 use std::{fs, path};
 
+use async_trait::async_trait;
 use catalog::kvbackend::KvBackendCatalogManager;
-use catalog::CatalogManagerRef;
 use clap::Parser;
-use common_base::Plugins;
-use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
-use common_meta::cache_invalidator::DummyKvCacheInvalidator;
+use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_config::{metadata_store_dir, KvBackendConfig};
+use common_meta::cache_invalidator::{CacheInvalidatorRef, MultiCacheInvalidator};
+use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
+use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::ddl_manager::DdlManager;
+use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::sequence::SequenceBuilder;
+use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
+use common_time::timezone::set_default_timezone;
+use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
-use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
+use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
+use frontend::server::Services;
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu,
-    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
-    StopProcedureManagerSnafu,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu,
+    Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
+    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
-use crate::options::{MixOptions, Options, TopLevelOptions};
+use crate::options::{CliOptions, MixOptions, Options};
+use crate::App;
 
 #[derive(Parser)]
 pub struct Command {
@@ -59,8 +72,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
-        self.subcmd.load_options(top_level_options)
+    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+        self.subcmd.load_options(cli_options)
     }
 }
 
@@ -76,9 +89,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_options),
+            SubCommand::Start(cmd) => cmd.load_options(cli_options),
         }
     }
 }
@@ -88,6 +101,7 @@ impl SubCommand {
 pub struct StandaloneOptions {
     pub mode: Mode,
     pub enable_telemetry: bool,
+    pub default_timezone: Option<String>,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     pub mysql: MysqlOptions,
@@ -95,7 +109,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub prom_store: PromStoreOptions,
-    pub wal: WalConfig,
+    pub wal: StandaloneWalConfig,
     pub storage: StorageConfig,
     pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
@@ -103,6 +117,13 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
+    pub export_metrics: ExportMetricsOption,
+}
+
+impl StandaloneOptions {
+    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["wal.broker_endpoints"])
+    }
 }
 
 impl Default for StandaloneOptions {
@@ -110,6 +131,7 @@ impl Default for StandaloneOptions {
         Self {
             mode: Mode::Standalone,
             enable_telemetry: true,
+            default_timezone: None,
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
             mysql: MysqlOptions::default(),
@@ -117,11 +139,12 @@ impl Default for StandaloneOptions {
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
             prom_store: PromStoreOptions::default(),
-            wal: WalConfig::default(),
+            wal: StandaloneWalConfig::default(),
             storage: StorageConfig::default(),
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
+            export_metrics: ExportMetricsOption::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -135,6 +158,7 @@ impl StandaloneOptions {
     fn frontend_options(self) -> FrontendOptions {
         FrontendOptions {
             mode: self.mode,
+            default_timezone: self.default_timezone,
             http: self.http,
             grpc: self.grpc,
             mysql: self.mysql,
@@ -145,6 +169,8 @@ impl StandaloneOptions {
             meta_client: None,
             logging: self.logging,
             user_provider: self.user_provider,
+            // Handle the export metrics task run by standalone to frontend for execution
+            export_metrics: self.export_metrics,
             ..Default::default()
         }
     }
@@ -153,9 +179,10 @@ impl StandaloneOptions {
         DatanodeOptions {
             node_id: Some(0),
             enable_telemetry: self.enable_telemetry,
-            wal: self.wal,
+            wal: self.wal.into(),
             storage: self.storage,
             region_engine: self.region_engine,
+            rpc_addr: self.grpc.addr,
             ..Default::default()
         }
     }
@@ -165,24 +192,37 @@ pub struct Instance {
     datanode: Datanode,
     frontend: FeInstance,
     procedure_manager: ProcedureManagerRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
 }
 
-impl Instance {
-    pub async fn start(&mut self) -> Result<()> {
-        // Start datanode instance before starting services, to avoid requests come in before internal components are started.
-        self.datanode.start().await.context(StartDatanodeSnafu)?;
-        info!("Datanode instance started");
+#[async_trait]
+impl App for Instance {
+    fn name(&self) -> &str {
+        "greptime-standalone"
+    }
+
+    async fn start(&mut self) -> Result<()> {
+        self.datanode.start_telemetry();
 
         self.procedure_manager
             .start()
             .await
             .context(StartProcedureManagerSnafu)?;
 
+        self.wal_options_allocator
+            .start()
+            .await
+            .context(StartWalOptionsAllocatorSnafu)?;
+
+        plugins::start_frontend_plugins(self.frontend.plugins().clone())
+            .await
+            .context(StartFrontendSnafu)?;
+
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
     }
 
-    pub async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         self.frontend
             .shutdown()
             .await
@@ -204,7 +244,7 @@ impl Instance {
 }
 
 #[derive(Debug, Default, Parser)]
-struct StartCommand {
+pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
@@ -218,7 +258,7 @@ struct StartCommand {
     #[clap(short, long)]
     influxdb_enable: bool,
     #[clap(short, long)]
-    config_file: Option<String>,
+    pub config_file: Option<String>,
     #[clap(long)]
     tls_mode: Option<TlsMode>,
     #[clap(long)]
@@ -228,25 +268,36 @@ struct StartCommand {
     #[clap(long)]
     user_provider: Option<String>,
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
-    env_prefix: String,
+    pub env_prefix: String,
+    /// The working home directory of this standalone instance.
+    #[clap(long)]
+    data_home: Option<String>,
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
-        let mut opts: StandaloneOptions = Options::load_layered_options(
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+        let opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            None,
+            StandaloneOptions::env_list_keys(),
         )?;
 
+        self.convert_options(cli_options, opts)
+    }
+
+    pub fn convert_options(
+        &self,
+        cli_options: &CliOptions,
+        mut opts: StandaloneOptions,
+    ) -> Result<Options> {
         opts.mode = Mode::Standalone;
 
-        if let Some(dir) = top_level_options.log_dir {
-            opts.logging.dir = dir;
+        if let Some(dir) = &cli_options.log_dir {
+            opts.logging.dir = dir.clone();
         }
 
-        if top_level_options.log_level.is_some() {
-            opts.logging.level = top_level_options.log_level;
+        if cli_options.log_level.is_some() {
+            opts.logging.level = cli_options.log_level.clone();
         }
 
         let tls_opts = TlsOption::new(
@@ -257,6 +308,10 @@ impl StartCommand {
 
         if let Some(addr) = &self.http_addr {
             opts.http.addr = addr.clone()
+        }
+
+        if let Some(data_home) = &self.data_home {
+            opts.storage.data_home = data_home.clone();
         }
 
         if let Some(addr) = &self.rpc_addr {
@@ -300,7 +355,8 @@ impl StartCommand {
         let procedure = opts.procedure.clone();
         let frontend = opts.clone().frontend_options();
         let logging = opts.logging.clone();
-        let datanode = opts.datanode_options();
+        let wal_meta = opts.wal.clone().into();
+        let datanode = opts.datanode_options().clone();
 
         Ok(Options::Standalone(Box::new(MixOptions {
             procedure,
@@ -309,6 +365,7 @@ impl StartCommand {
             frontend,
             datanode,
             logging,
+            wal_meta,
         })))
     }
 
@@ -316,19 +373,18 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
+        info!("Standalone start command: {:#?}", self);
+        info!("Building standalone instance with {opts:#?}");
+
         let mut fe_opts = opts.frontend;
         #[allow(clippy::unnecessary_mut_passed)]
-        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts)
+        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
             .await
             .context(StartFrontendSnafu)?;
 
         let dn_opts = opts.datanode;
 
-        info!("Standalone start command: {:#?}", self);
-        info!(
-            "Standalone frontend options: {:#?}, datanode options: {:#?}",
-            fe_opts, dn_opts
-        );
+        set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
@@ -338,75 +394,112 @@ impl StartCommand {
         let metadata_dir = metadata_store_dir(&opts.data_home);
         let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
             metadata_dir,
-            opts.metadata_store,
-            opts.procedure,
+            opts.metadata_store.clone(),
+            opts.procedure.clone(),
         )
         .await
         .context(StartFrontendSnafu)?;
 
-        let datanode = DatanodeBuilder::new(
-            dn_opts.clone(),
-            Some(kv_backend.clone()),
-            Default::default(),
-        )
-        .build()
-        .await
-        .context(StartDatanodeSnafu)?;
-        let region_server = datanode.region_server();
+        let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
+        let catalog_manager =
+            KvBackendCatalogManager::new(kv_backend.clone(), multi_cache_invalidator.clone()).await;
 
-        let catalog_manager = KvBackendCatalogManager::new(
-            kv_backend.clone(),
-            Arc::new(DummyKvCacheInvalidator),
-            Arc::new(StandaloneDatanodeManager(region_server.clone())),
+        let builder =
+            DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
+        let datanode = builder.build().await.context(StartDatanodeSnafu)?;
+
+        let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
+
+        let table_id_sequence = Arc::new(
+            SequenceBuilder::new("table_id", kv_backend.clone())
+                .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
         );
+        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
+            opts.wal_meta.clone(),
+            kv_backend.clone(),
+        ));
 
-        catalog_manager
-            .table_metadata_manager_ref()
-            .init()
-            .await
-            .context(InitMetadataSnafu)?;
+        let table_metadata_manager =
+            Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
-        // TODO: build frontend instance like in distributed mode
-        let mut frontend = build_frontend(
-            fe_plugins,
-            kv_backend,
+        let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
+            table_id_sequence,
+            wal_options_allocator.clone(),
+        ));
+
+        let ddl_task_executor = Self::create_ddl_task_executor(
+            table_metadata_manager,
             procedure_manager.clone(),
-            catalog_manager,
-            region_server,
+            datanode_manager.clone(),
+            multi_cache_invalidator,
+            table_meta_allocator,
         )
         .await?;
 
-        frontend
-            .build_servers(&fe_opts)
+        let mut frontend = FrontendBuilder::new(
+            kv_backend,
+            catalog_manager,
+            datanode_manager,
+            ddl_task_executor,
+        )
+        .with_plugin(fe_plugins.clone())
+        .try_build()
+        .await
+        .context(StartFrontendSnafu)?;
+
+        let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
+            .build()
             .await
+            .context(StartFrontendSnafu)?;
+        frontend
+            .build_servers(fe_opts, servers)
             .context(StartFrontendSnafu)?;
 
         Ok(Instance {
             datanode,
             frontend,
             procedure_manager,
+            wal_options_allocator,
         })
     }
-}
 
-/// Build frontend instance in standalone mode
-async fn build_frontend(
-    plugins: Plugins,
-    kv_backend: KvBackendRef,
-    procedure_manager: ProcedureManagerRef,
-    catalog_manager: CatalogManagerRef,
-    region_server: RegionServer,
-) -> Result<FeInstance> {
-    let frontend_instance = FeInstance::try_new_standalone(
-        kv_backend,
-        procedure_manager,
-        catalog_manager,
-        plugins,
-        region_server,
-    )
-    .await
-    .context(StartFrontendSnafu)?;
-    Ok(frontend_instance)
+    pub async fn create_ddl_task_executor(
+        table_metadata_manager: TableMetadataManagerRef,
+        procedure_manager: ProcedureManagerRef,
+        datanode_manager: DatanodeManagerRef,
+        cache_invalidator: CacheInvalidatorRef,
+        table_meta_allocator: TableMetadataAllocatorRef,
+    ) -> Result<ProcedureExecutorRef> {
+        let procedure_executor: ProcedureExecutorRef = Arc::new(
+            DdlManager::try_new(
+                procedure_manager,
+                datanode_manager,
+                cache_invalidator,
+                table_metadata_manager,
+                table_meta_allocator,
+                Arc::new(MemoryRegionKeeper::default()),
+                true,
+            )
+            .context(InitDdlManagerSnafu)?,
+        );
+
+        Ok(procedure_executor)
+    }
+
+    pub async fn create_table_metadata_manager(
+        kv_backend: KvBackendRef,
+    ) -> Result<TableMetadataManagerRef> {
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend));
+
+        table_metadata_manager
+            .init()
+            .await
+            .context(InitMetadataSnafu)?;
+
+        Ok(table_metadata_manager)
+    }
 }
 
 #[cfg(test)]
@@ -418,10 +511,12 @@ mod tests {
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
+    use common_wal::config::DatanodeWalConfig;
+    use datanode::config::{FileConfig, GcsConfig};
     use servers::Mode;
 
     use super::*;
-    use crate::options::ENV_VAR_SEP;
+    use crate::options::{CliOptions, ENV_VAR_SEP};
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -459,6 +554,7 @@ mod tests {
             enable_memory_catalog = true
 
             [wal]
+            provider = "raft_engine"
             dir = "/tmp/greptimedb/test/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
@@ -467,6 +563,15 @@ mod tests {
             sync_write = false
 
             [storage]
+            data_home = "/tmp/greptimedb/"
+            type = "File"
+
+            [[storage.providers]]
+            type = "Gcs"
+            bucket = "foo"
+            endpoint = "bar"
+
+            [[storage.providers]]
             type = "S3"
             access_key_id = "access_key_id"
             secret_access_key = "secret_access_key"
@@ -496,8 +601,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
-        else {
+        let Options::Standalone(options) = cmd.load_options(&CliOptions::default()).unwrap() else {
             unreachable!()
         };
         let fe_opts = options.frontend;
@@ -514,9 +618,21 @@ mod tests {
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
 
-        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
+        let DatanodeWalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
+            unreachable!()
+        };
+        assert_eq!("/tmp/greptimedb/test/wal", raft_engine_config.dir.unwrap());
 
-        match &dn_opts.storage.store {
+        assert!(matches!(
+            &dn_opts.storage.store,
+            datanode::config::ObjectStoreConfig::File(FileConfig { .. })
+        ));
+        assert_eq!(dn_opts.storage.providers.len(), 2);
+        assert!(matches!(
+            dn_opts.storage.providers[0],
+            datanode::config::ObjectStoreConfig::Gcs(GcsConfig { .. })
+        ));
+        match &dn_opts.storage.providers[1] {
             datanode::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),
@@ -533,16 +649,19 @@ mod tests {
     }
 
     #[test]
-    fn test_top_level_options() {
+    fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
         let Options::Standalone(opts) = cmd
-            .load_options(TopLevelOptions {
+            .load_options(&CliOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
+
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: None,
             })
             .unwrap()
         else {
@@ -609,11 +728,8 @@ mod tests {
                     ..Default::default()
                 };
 
-                let top_level_opts = TopLevelOptions {
-                    log_dir: None,
-                    log_level: None,
-                };
-                let Options::Standalone(opts) = command.load_options(top_level_opts).unwrap()
+                let Options::Standalone(opts) =
+                    command.load_options(&CliOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };

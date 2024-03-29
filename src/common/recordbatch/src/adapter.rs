@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -20,73 +21,94 @@ use std::task::{Context, Poll};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
-use datafusion::parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStream};
-use datafusion::physical_plan::metrics::BaselineMetrics;
-use datafusion::physical_plan::RecordBatchStream as DfRecordBatchStream;
+use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
+use datafusion::physical_plan::{ExecutionPlan, RecordBatchStream as DfRecordBatchStream};
+use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::DataFusionError;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
+use pin_project::pin_project;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::{
-    DfRecordBatch, DfSendableRecordBatchStream, RecordBatch, RecordBatchStream,
+    DfRecordBatch, DfSendableRecordBatchStream, OrderOption, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream, Stream,
 };
 
 type FutureStream =
     Pin<Box<dyn std::future::Future<Output = Result<SendableRecordBatchStream>> + Send>>;
 
-/// ParquetRecordBatchStream -> DataFusion RecordBatchStream
-pub struct ParquetRecordBatchStreamAdapter<T> {
-    stream: ParquetRecordBatchStream<T>,
-    output_schema: DfSchemaRef,
+/// Casts the `RecordBatch`es of `stream` against the `output_schema`.
+#[pin_project]
+pub struct RecordBatchStreamTypeAdapter<T, E> {
+    #[pin]
+    stream: T,
+    projected_schema: DfSchemaRef,
     projection: Vec<usize>,
+    phantom: PhantomData<E>,
 }
 
-impl<T: Unpin + AsyncFileReader + Send + 'static> ParquetRecordBatchStreamAdapter<T> {
-    pub fn new(
-        output_schema: DfSchemaRef,
-        stream: ParquetRecordBatchStream<T>,
-        projection: Option<Vec<usize>>,
-    ) -> Self {
+impl<T, E> RecordBatchStreamTypeAdapter<T, E>
+where
+    T: Stream<Item = std::result::Result<DfRecordBatch, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    pub fn new(projected_schema: DfSchemaRef, stream: T, projection: Option<Vec<usize>>) -> Self {
         let projection = if let Some(projection) = projection {
             projection
         } else {
-            (0..output_schema.fields().len()).collect()
+            (0..projected_schema.fields().len()).collect()
         };
 
         Self {
             stream,
-            output_schema,
+            projected_schema,
             projection,
+            phantom: Default::default(),
         }
     }
 }
 
-impl<T: Unpin + AsyncFileReader + Send + 'static> DfRecordBatchStream
-    for ParquetRecordBatchStreamAdapter<T>
+impl<T, E> DfRecordBatchStream for RecordBatchStreamTypeAdapter<T, E>
+where
+    T: Stream<Item = std::result::Result<DfRecordBatch, E>>,
+    E: std::error::Error + Send + Sync + 'static,
 {
     fn schema(&self) -> DfSchemaRef {
-        self.stream.schema().clone()
+        self.projected_schema.clone()
     }
 }
 
-impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchStreamAdapter<T> {
+impl<T, E> Stream for RecordBatchStreamTypeAdapter<T, E>
+where
+    T: Stream<Item = std::result::Result<DfRecordBatch, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
     type Item = DfResult<DfRecordBatch>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let batch = futures::ready!(Pin::new(&mut self.stream).poll_next(cx))
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+
+        let batch = futures::ready!(this.stream.poll_next(cx))
             .map(|r| r.map_err(|e| DataFusionError::External(Box::new(e))));
 
-        let projected_schema = self.output_schema.project(&self.projection)?;
+        let projected_schema = this.projected_schema.clone();
+        let projection = this.projection.clone();
         let batch = batch.map(|b| {
             b.and_then(|b| {
-                let mut columns = Vec::with_capacity(self.projection.len());
-                for idx in self.projection.iter() {
-                    let column = b.column(*idx);
-                    let field = self.output_schema.field(*idx);
+                let projected_column = b.project(&projection)?;
+                if projected_column.schema().fields.len() != projected_schema.fields.len() {
+                   return Err(DataFusionError::ArrowError(ArrowError::SchemaError(format!(
+                        "Trying to cast a RecordBatch into an incompatible schema. RecordBatch: {}, Target: {}",
+                        projected_column.schema(),
+                        projected_schema,
+                    ))));
+                }
 
+                let mut columns = Vec::with_capacity(projected_schema.fields.len());
+                for (idx,field) in projected_schema.fields.iter().enumerate() {
+                    let column = projected_column.column(idx);
                     if column.data_type() != field.data_type() {
                         let output = cast(&column, field.data_type())?;
                         columns.push(output)
@@ -94,9 +116,7 @@ impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchS
                         columns.push(column.clone())
                     }
                 }
-
-                let record_batch = DfRecordBatch::try_new(projected_schema.into(), columns)?;
-
+                let record_batch = DfRecordBatch::try_new(projected_schema, columns)?;
                 Ok(record_batch)
             })
         });
@@ -154,6 +174,15 @@ pub struct RecordBatchStreamAdapter {
     schema: SchemaRef,
     stream: DfSendableRecordBatchStream,
     metrics: Option<BaselineMetrics>,
+    /// Aggregated plan-level metrics. Resolved after an [ExecutionPlan] is finished.
+    metrics_2: Metrics,
+}
+
+/// Json encoded metrics. Contains metric from a whole plan tree.
+enum Metrics {
+    Unavailable,
+    Unresolved(Arc<dyn ExecutionPlan>),
+    Resolved(RecordBatchMetrics),
 }
 
 impl RecordBatchStreamAdapter {
@@ -164,12 +193,14 @@ impl RecordBatchStreamAdapter {
             schema,
             stream,
             metrics: None,
+            metrics_2: Metrics::Unavailable,
         })
     }
 
-    pub fn try_new_with_metrics(
+    pub fn try_new_with_metrics_and_df_plan(
         stream: DfSendableRecordBatchStream,
         metrics: BaselineMetrics,
+        df_plan: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
         let schema =
             Arc::new(Schema::try_from(stream.schema()).context(error::SchemaConversionSnafu)?);
@@ -177,13 +208,29 @@ impl RecordBatchStreamAdapter {
             schema,
             stream,
             metrics: Some(metrics),
+            metrics_2: Metrics::Unresolved(df_plan),
         })
+    }
+
+    pub fn set_metrics2(&mut self, plan: Arc<dyn ExecutionPlan>) {
+        self.metrics_2 = Metrics::Unresolved(plan)
     }
 }
 
 impl RecordBatchStream for RecordBatchStreamAdapter {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        match &self.metrics_2 {
+            Metrics::Resolved(metrics) => Some(*metrics),
+            Metrics::Unavailable | Metrics::Unresolved(_) => None,
+        }
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
     }
 }
 
@@ -206,7 +253,16 @@ impl Stream for RecordBatchStreamAdapter {
                     df_record_batch,
                 )))
             }
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                if let Metrics::Unresolved(df_plan) = &self.metrics_2 {
+                    let mut metrics_holder = RecordBatchMetrics::default();
+                    collect_metrics(df_plan, &mut metrics_holder);
+                    if metrics_holder.elapsed_compute != 0 || metrics_holder.memory_usage != 0 {
+                        self.metrics_2 = Metrics::Resolved(metrics_holder);
+                    }
+                }
+                Poll::Ready(None)
+            }
         }
     }
 
@@ -214,6 +270,30 @@ impl Stream for RecordBatchStreamAdapter {
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.stream.size_hint()
     }
+}
+
+fn collect_metrics(df_plan: &Arc<dyn ExecutionPlan>, result: &mut RecordBatchMetrics) {
+    if let Some(metrics) = df_plan.metrics() {
+        metrics.iter().for_each(|m| match m.value() {
+            MetricValue::ElapsedCompute(ec) => result.elapsed_compute += ec.value(),
+            MetricValue::CurrentMemoryUsage(m) => result.memory_usage += m.value(),
+            _ => {}
+        });
+    }
+
+    for child in df_plan.children() {
+        collect_metrics(&child, result);
+    }
+}
+
+/// [`RecordBatchMetrics`] carrys metrics value
+/// from datanode to frontend through gRPC
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone, Copy)]
+pub struct RecordBatchMetrics {
+    // cpu consumption in nanoseconds
+    pub elapsed_compute: usize,
+    // memory used by the plan in bytes
+    pub memory_usage: usize,
 }
 
 enum AsyncRecordBatchStreamAdapterState {
@@ -239,6 +319,14 @@ impl AsyncRecordBatchStreamAdapter {
 impl RecordBatchStream for AsyncRecordBatchStreamAdapter {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 
@@ -298,6 +386,14 @@ mod test {
         impl RecordBatchStream for MaybeErrorRecordBatchStream {
             fn schema(&self) -> SchemaRef {
                 unimplemented!()
+            }
+
+            fn output_ordering(&self) -> Option<&[OrderOption]> {
+                None
+            }
+
+            fn metrics(&self) -> Option<RecordBatchMetrics> {
+                None
             }
         }
 

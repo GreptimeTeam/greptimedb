@@ -8,15 +8,19 @@ license.workspace = true
 default = []
 test = []
 
+[lints]
+workspace = true
+
 [dependencies]
+arrow.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
-arrow.workspace = true
-common-base = { workspace = true }
-common-error = { workspace = true }
-common-macro = { workspace = true }
-common-telemetry = { workspace = true }
-common-time = { workspace = true }
+common-base.workspace = true
+common-decimal.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
 datafusion-common.workspace = true
 enum_dispatch = "0.3"
 num = "0.4"
@@ -24,5 +28,5 @@ num-traits = "0.2"
 ordered-float = { version = "3.0", features = ["serde"] }
 paste = "1.0"
 serde.workspace = true
-serde_json = "1.0"
-snafu = { version = "0.7", features = ["backtraces"] }
+serde_json.workspace = true
+snafu.workspace = true

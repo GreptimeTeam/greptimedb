@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -123,7 +123,7 @@ impl CatalogManager {
         self.kv_backend.exists(&raw_key).await
     }
 
-    pub async fn catalog_names(&self) -> BoxStream<'static, Result<String>> {
+    pub fn catalog_names(&self) -> BoxStream<'static, Result<String>> {
         let start_key = CatalogNameKey::range_start_key();
         let req = RangeRequest::new().with_prefix(start_key.as_bytes());
 

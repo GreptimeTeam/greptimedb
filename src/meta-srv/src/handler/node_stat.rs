@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,11 +18,12 @@ use api::v1::meta::HeartbeatRequest;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
 use store_api::region_engine::RegionRole;
+use store_api::storage::RegionId;
 
 use crate::error::{Error, InvalidHeartbeatRequestSnafu};
 use crate::keys::StatKey;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stat {
     pub timestamp_millis: i64,
     pub cluster_id: u64,
@@ -41,10 +42,10 @@ pub struct Stat {
     pub node_epoch: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionStat {
     /// The region_id.
-    pub id: u64,
+    pub id: RegionId,
     /// The read capacity units during this period
     pub rcus: i64,
     /// The write capacity units during this period
@@ -72,11 +73,12 @@ impl Stat {
         }
     }
 
-    pub fn region_ids(&self) -> Vec<u64> {
-        self.region_stats.iter().map(|s| s.id).collect()
+    /// Returns a tuple array containing [RegionId] and [RegionRole].
+    pub fn regions(&self) -> Vec<(RegionId, RegionRole)> {
+        self.region_stats.iter().map(|s| (s.id, s.role)).collect()
     }
 
-    pub fn retain_active_region_stats(&mut self, inactive_region_ids: &HashSet<u64>) {
+    pub fn retain_active_region_stats(&mut self, inactive_region_ids: &HashSet<RegionId>) {
         if inactive_region_ids.is_empty() {
             return;
         }
@@ -135,7 +137,7 @@ impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
 
     fn try_from(value: api::v1::meta::RegionStat) -> Result<Self, Self::Error> {
         Ok(Self {
-            id: value.region_id,
+            id: RegionId::from_u64(value.region_id),
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes,

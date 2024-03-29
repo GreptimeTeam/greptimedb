@@ -18,13 +18,15 @@ use std::str::FromStr;
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
+use futures::future::try_join_all;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{util, Entry, ErrorKind, ObjectStore};
+use object_store::{util, Entry, ErrorKind, Lister, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::manifest::ManifestVersion;
+use tokio::sync::Semaphore;
 
 use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu, OpenDalSnafu, Result,
@@ -41,7 +43,9 @@ const DEFAULT_MANIFEST_COMPRESSION_TYPE: CompressionType = CompressionType::Gzip
 /// Due to backward compatibility, it is possible that the user's manifest file has not been compressed.
 /// So when we encounter problems, we need to fall back to `FALL_BACK_COMPRESS_TYPE` for processing.
 const FALL_BACK_COMPRESS_TYPE: CompressionType = CompressionType::Uncompressed;
+const FETCH_MANIFEST_PARALLELISM: usize = 16;
 
+/// Returns the [CompressionType] according to whether to compress manifest files.
 #[inline]
 pub const fn manifest_compress_type(compress: bool) -> CompressionType {
     if compress {
@@ -100,35 +104,6 @@ pub fn is_checkpoint_file(file_name: &str) -> bool {
     CHECKPOINT_RE.is_match(file_name)
 }
 
-pub struct ObjectStoreLogIterator {
-    object_store: ObjectStore,
-    iter: Box<dyn Iterator<Item = (ManifestVersion, Entry)> + Send + Sync>,
-}
-
-impl ObjectStoreLogIterator {
-    pub async fn next_log(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        match self.iter.next() {
-            Some((v, entry)) => {
-                let compress_type = file_compress_type(entry.name());
-                let bytes = self
-                    .object_store
-                    .read(entry.path())
-                    .await
-                    .context(OpenDalSnafu)?;
-                let data = compress_type
-                    .decode(bytes)
-                    .await
-                    .context(DecompressObjectSnafu {
-                        compress_type,
-                        path: entry.path(),
-                    })?;
-                Ok(Some((v, data)))
-            }
-            None => Ok(None),
-        }
-    }
-}
-
 /// Key to identify a manifest file.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 enum FileKey {
@@ -173,6 +148,23 @@ impl ManifestObjectStore {
         format!("{}{}", self.path, LAST_CHECKPOINT_FILE)
     }
 
+    /// Returns the manifest dir
+    pub(crate) fn manifest_dir(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns a iterator of manifests.
+    pub(crate) async fn manifest_lister(&self) -> Result<Option<Lister>> {
+        match self.object_store.lister_with(&self.path).await {
+            Ok(streamer) => Ok(Some(streamer)),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                debug!("Manifest directory does not exists: {}", self.path);
+                Ok(None)
+            }
+            Err(e) => Err(e).context(OpenDalSnafu)?,
+        }
+    }
+
     /// Return all `R`s in the root directory that meet the `filter` conditions (that is, the `filter` closure returns `Some(R)`),
     /// and discard `R` that does not meet the conditions (that is, the `filter` closure returns `None`)
     /// Return an empty vector when directory is not found.
@@ -180,13 +172,8 @@ impl ManifestObjectStore {
     where
         F: Fn(Entry) -> Option<R>,
     {
-        let streamer = match self.object_store.lister_with(&self.path).await {
-            Ok(streamer) => streamer,
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                debug!("Manifest directory does not exists: {}", self.path);
-                return Ok(vec![]);
-            }
-            Err(e) => Err(e).context(OpenDalSnafu)?,
+        let Some(streamer) = self.manifest_lister().await? else {
+            return Ok(vec![]);
         };
 
         streamer
@@ -196,12 +183,17 @@ impl ManifestObjectStore {
             .context(OpenDalSnafu)
     }
 
-    /// Scan the manifest files in the range of [start, end) and return the iterator.
+    /// Sorts the manifest files.
+    fn sort_manifests(entries: &mut [(ManifestVersion, Entry)]) {
+        entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
+    }
+
+    /// Scans the manifest files in the range of [start, end) and return all manifest entries.
     pub async fn scan(
         &self,
         start: ManifestVersion,
         end: ManifestVersion,
-    ) -> Result<ObjectStoreLogIterator> {
+    ) -> Result<Vec<(ManifestVersion, Entry)>> {
         ensure!(start <= end, InvalidScanIndexSnafu { start, end });
 
         let mut entries: Vec<(ManifestVersion, Entry)> = self
@@ -217,12 +209,40 @@ impl ManifestObjectStore {
             })
             .await?;
 
-        entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
+        Self::sort_manifests(&mut entries);
 
-        Ok(ObjectStoreLogIterator {
-            object_store: self.object_store.clone(),
-            iter: Box::new(entries.into_iter()),
-        })
+        Ok(entries)
+    }
+
+    /// Fetch all manifests in concurrent.
+    pub async fn fetch_manifests(
+        &self,
+        manifests: &[(u64, Entry)],
+    ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
+        // TODO(weny): Make it configurable.
+        let semaphore = Semaphore::new(FETCH_MANIFEST_PARALLELISM);
+
+        let tasks = manifests.iter().map(|(v, entry)| async {
+            // Safety: semaphore must exist.
+            let _permit = semaphore.acquire().await.unwrap();
+
+            let compress_type = file_compress_type(entry.name());
+            let bytes = self
+                .object_store
+                .read(entry.path())
+                .await
+                .context(OpenDalSnafu)?;
+            let data = compress_type
+                .decode(bytes)
+                .await
+                .context(DecompressObjectSnafu {
+                    compress_type,
+                    path: entry.path(),
+                })?;
+            Ok((*v, data))
+        });
+
+        try_join_all(tasks).await
     }
 
     /// Delete manifest files that version < end.
@@ -555,21 +575,25 @@ mod tests {
                 .unwrap();
         }
 
-        let mut it = log_store.scan(1, 4).await.unwrap();
+        let manifests = log_store.scan(1, 4).await.unwrap();
+        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let mut it = manifests.into_iter();
         for v in 1..4 {
-            let (version, bytes) = it.next_log().await.unwrap().unwrap();
+            let (version, bytes) = it.next().unwrap();
             assert_eq!(v, version);
             assert_eq!(format!("hello, {v}").as_bytes(), bytes);
         }
-        assert!(it.next_log().await.unwrap().is_none());
+        assert!(it.next().is_none());
 
-        let mut it = log_store.scan(0, 11).await.unwrap();
+        let manifests = log_store.scan(0, 11).await.unwrap();
+        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let mut it = manifests.into_iter();
         for v in 0..5 {
-            let (version, bytes) = it.next_log().await.unwrap().unwrap();
+            let (version, bytes) = it.next().unwrap();
             assert_eq!(v, version);
             assert_eq!(format!("hello, {v}").as_bytes(), bytes);
         }
-        assert!(it.next_log().await.unwrap().is_none());
+        assert!(it.next().is_none());
 
         // test checkpoint
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
@@ -586,18 +610,24 @@ mod tests {
         let _ = log_store.delete_until(4, true).await.unwrap();
         let _ = log_store.load_checkpoint(3).await.unwrap().unwrap();
         let _ = log_store.load_last_checkpoint().await.unwrap().unwrap();
-        let mut it = log_store.scan(0, 11).await.unwrap();
-        let (version, bytes) = it.next_log().await.unwrap().unwrap();
+        let manifests = log_store.scan(0, 11).await.unwrap();
+        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let mut it = manifests.into_iter();
+
+        let (version, bytes) = it.next().unwrap();
         assert_eq!(4, version);
         assert_eq!("hello, 4".as_bytes(), bytes);
-        assert!(it.next_log().await.unwrap().is_none());
+        assert!(it.next().is_none());
 
         // delete all logs and checkpoints
         let _ = log_store.delete_until(11, false).await.unwrap();
         assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
-        let mut it = log_store.scan(0, 11).await.unwrap();
-        assert!(it.next_log().await.unwrap().is_none());
+        let manifests = log_store.scan(0, 11).await.unwrap();
+        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let mut it = manifests.into_iter();
+
+        assert!(it.next().is_none());
     }
 
     #[tokio::test]
@@ -639,9 +669,12 @@ mod tests {
             .unwrap();
 
         // test data reading
-        let mut it = log_store.scan(0, 10).await.unwrap();
+        let manifests = log_store.scan(0, 10).await.unwrap();
+        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let mut it = manifests.into_iter();
+
         for v in 0..10 {
-            let (version, bytes) = it.next_log().await.unwrap().unwrap();
+            let (version, bytes) = it.next().unwrap();
             assert_eq!(v, version);
             assert_eq!(format!("hello, {v}").as_bytes(), bytes);
         }
@@ -655,8 +688,10 @@ mod tests {
         // Delete util 10, contain uncompressed/compressed data
         // log 0, 1, 2, 7, 8, 9 will be delete
         assert_eq!(11, log_store.delete_until(10, false).await.unwrap());
-        let mut it = log_store.scan(0, 10).await.unwrap();
-        assert!(it.next_log().await.unwrap().is_none());
+        let manifests = log_store.scan(0, 10).await.unwrap();
+        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let mut it = manifests.into_iter();
+        assert!(it.next().is_none());
     }
 
     #[tokio::test]

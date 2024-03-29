@@ -15,12 +15,13 @@
 use std::collections::HashSet;
 
 use api::v1::{
-    AddColumn, AddColumns, Column, ColumnDef, ColumnSchema, CreateTableExpr, SemanticType,
+    AddColumn, AddColumns, Column, ColumnDataTypeExtension, ColumnDef, ColumnSchema,
+    CreateTableExpr, SemanticType,
 };
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
-use table::engine::TableReference;
 use table::metadata::TableId;
+use table::table_reference::TableReference;
 
 use crate::error::{
     DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu, MissingTimestampColumnSnafu, Result,
@@ -30,6 +31,7 @@ pub struct ColumnExpr<'a> {
     pub column_name: &'a str,
     pub datatype: i32,
     pub semantic_type: i32,
+    pub datatype_extension: &'a Option<ColumnDataTypeExtension>,
 }
 
 impl<'a> ColumnExpr<'a> {
@@ -50,6 +52,7 @@ impl<'a> From<&'a Column> for ColumnExpr<'a> {
             column_name: &column.column_name,
             datatype: column.datatype,
             semantic_type: column.semantic_type,
+            datatype_extension: &column.datatype_extension,
         }
     }
 }
@@ -60,6 +63,7 @@ impl<'a> From<&'a ColumnSchema> for ColumnExpr<'a> {
             column_name: &schema.column_name,
             datatype: schema.datatype,
             semantic_type: schema.semantic_type,
+            datatype_extension: &schema.datatype_extension,
         }
     }
 }
@@ -94,6 +98,7 @@ pub fn build_create_table_expr(
         column_name,
         datatype,
         semantic_type,
+        datatype_extension,
     } in column_exprs
     {
         let mut is_nullable = true;
@@ -121,6 +126,7 @@ pub fn build_create_table_expr(
             default_constraint: vec![],
             semantic_type,
             comment: String::new(),
+            datatype_extension: datatype_extension.clone(),
         };
         column_defs.push(column_def);
     }
@@ -161,6 +167,7 @@ pub fn extract_new_columns(
                 default_constraint: vec![],
                 semantic_type: expr.semantic_type,
                 comment: String::new(),
+                datatype_extension: expr.datatype_extension.clone(),
             });
             AddColumn {
                 column_def,

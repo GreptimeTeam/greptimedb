@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod error;
-
 use common_telemetry::error;
-use error::UpdateJemallocMetricsSnafu;
 use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 use prometheus::*;
 use snafu::ResultExt;
 use tikv_jemalloc_ctl::stats::{allocated_mib, resident_mib};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
+
+use crate::error::UpdateJemallocMetricsSnafu;
 
 lazy_static! {
     pub static ref SYS_JEMALLOC_RESIDEN: IntGauge = register_int_gauge!(

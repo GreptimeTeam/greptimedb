@@ -27,8 +27,9 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::RecordBatchStreamAdaptor;
+use common_recordbatch::RecordBatchStreamWrapper;
 use common_telemetry::logging;
+use common_telemetry::tracing_context::W3cTrace;
 use futures_util::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
@@ -46,6 +47,9 @@ pub struct Database {
     // The dbname follows naming rule as out mysql, postgres and http
     // protocol. The server treat dbname in priority of catalog/schema.
     dbname: String,
+    // The time zone indicates the time zone where the user is located.
+    // Some queries need to be aware of the user's time zone to perform some specific actions.
+    timezone: String,
 
     client: Client,
     ctx: FlightContext,
@@ -57,7 +61,8 @@ impl Database {
         Self {
             catalog: catalog.into(),
             schema: schema.into(),
-            dbname: "".to_string(),
+            dbname: String::default(),
+            timezone: String::default(),
             client,
             ctx: FlightContext::default(),
         }
@@ -72,8 +77,9 @@ impl Database {
     /// environment
     pub fn new_with_dbname(dbname: impl Into<String>, client: Client) -> Self {
         Self {
-            catalog: "".to_string(),
-            schema: "".to_string(),
+            catalog: String::default(),
+            schema: String::default(),
+            timezone: String::default(),
             dbname: dbname.into(),
             client,
             ctx: FlightContext::default(),
@@ -102,6 +108,14 @@ impl Database {
 
     pub fn set_dbname(&mut self, dbname: impl Into<String>) {
         self.dbname = dbname.into();
+    }
+
+    pub fn timezone(&self) -> &String {
+        &self.timezone
+    }
+
+    pub fn set_timezone(&mut self, timezone: impl Into<String>) {
+        self.timezone = timezone.into();
     }
 
     pub fn set_auth(&mut self, auth: AuthScheme) {
@@ -147,21 +161,22 @@ impl Database {
 
     async fn handle(&self, request: Request) -> Result<u32> {
         let mut client = self.client.make_database_client()?.inner;
-        let request = self.to_rpc_request(request, 0);
+        let request = self.to_rpc_request(request);
         let response = client.handle(request).await?.into_inner();
         from_grpc_response(response)
     }
 
     #[inline]
-    fn to_rpc_request(&self, request: Request, trace_id: u64) -> GreptimeRequest {
+    fn to_rpc_request(&self, request: Request) -> GreptimeRequest {
         GreptimeRequest {
             header: Some(RequestHeader {
                 catalog: self.catalog.clone(),
                 schema: self.schema.clone(),
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
-                trace_id,
-                span_id: 0,
+                timezone: self.timezone.clone(),
+                // TODO(Taylor-lagrange): add client grpc tracing
+                tracing_context: W3cTrace::new(),
             }),
             request: Some(request),
         }
@@ -172,23 +187,17 @@ impl Database {
         S: AsRef<str>,
     {
         let _timer = metrics::METRIC_GRPC_SQL.start_timer();
-        self.do_get(
-            Request::Query(QueryRequest {
-                query: Some(Query::Sql(sql.as_ref().to_string())),
-            }),
-            0,
-        )
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::Sql(sql.as_ref().to_string())),
+        }))
         .await
     }
 
-    pub async fn logical_plan(&self, logical_plan: Vec<u8>, trace_id: u64) -> Result<Output> {
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
         let _timer = metrics::METRIC_GRPC_LOGICAL_PLAN.start_timer();
-        self.do_get(
-            Request::Query(QueryRequest {
-                query: Some(Query::LogicalPlan(logical_plan)),
-            }),
-            trace_id,
-        )
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::LogicalPlan(logical_plan)),
+        }))
         .await
     }
 
@@ -200,68 +209,53 @@ impl Database {
         step: &str,
     ) -> Result<Output> {
         let _timer = metrics::METRIC_GRPC_PROMQL_RANGE_QUERY.start_timer();
-        self.do_get(
-            Request::Query(QueryRequest {
-                query: Some(Query::PromRangeQuery(PromRangeQuery {
-                    query: promql.to_string(),
-                    start: start.to_string(),
-                    end: end.to_string(),
-                    step: step.to_string(),
-                })),
-            }),
-            0,
-        )
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::PromRangeQuery(PromRangeQuery {
+                query: promql.to_string(),
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            })),
+        }))
         .await
     }
 
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
         let _timer = metrics::METRIC_GRPC_CREATE_TABLE.start_timer();
-        self.do_get(
-            Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::CreateTable(expr)),
-            }),
-            0,
-        )
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(expr)),
+        }))
         .await
     }
 
     pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
         let _timer = metrics::METRIC_GRPC_ALTER.start_timer();
-        self.do_get(
-            Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::Alter(expr)),
-            }),
-            0,
-        )
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::Alter(expr)),
+        }))
         .await
     }
 
     pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
         let _timer = metrics::METRIC_GRPC_DROP_TABLE.start_timer();
-        self.do_get(
-            Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::DropTable(expr)),
-            }),
-            0,
-        )
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::DropTable(expr)),
+        }))
         .await
     }
 
     pub async fn truncate_table(&self, expr: TruncateTableExpr) -> Result<Output> {
         let _timer = metrics::METRIC_GRPC_TRUNCATE_TABLE.start_timer();
-        self.do_get(
-            Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::TruncateTable(expr)),
-            }),
-            0,
-        )
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::TruncateTable(expr)),
+        }))
         .await
     }
 
-    async fn do_get(&self, request: Request, trace_id: u64) -> Result<Output> {
+    async fn do_get(&self, request: Request) -> Result<Output> {
         // FIXME(paomian): should be added some labels for metrics
         let _timer = metrics::METRIC_GRPC_DO_GET.start_timer();
-        let request = self.to_rpc_request(request, trace_id);
+        let request = self.to_rpc_request(request);
         let request = Ticket {
             ticket: request.encode_to_vec().into(),
         };
@@ -313,34 +307,40 @@ impl Database {
                         reason: "Expect 'AffectedRows' Flight messages to be the one and the only!"
                     }
                 );
-                Ok(Output::AffectedRows(rows))
+                Ok(Output::new_with_affected_rows(rows))
             }
-            FlightMessage::Recordbatch(_) => IllegalFlightMessagesSnafu {
-                reason: "The first flight message cannot be a RecordBatch message",
+            FlightMessage::Recordbatch(_) | FlightMessage::Metrics(_) => {
+                IllegalFlightMessagesSnafu {
+                    reason: "The first flight message cannot be a RecordBatch or Metrics message",
+                }
+                .fail()
             }
-            .fail(),
             FlightMessage::Schema(schema) => {
                 let stream = Box::pin(stream!({
                     while let Some(flight_message) = flight_message_stream.next().await {
                         let flight_message = flight_message
                             .map_err(BoxedError::new)
                             .context(ExternalSnafu)?;
-                        let FlightMessage::Recordbatch(record_batch) = flight_message else {
-                            yield IllegalFlightMessagesSnafu {reason: "A Schema message must be succeeded exclusively by a set of RecordBatch messages"}
+                        match flight_message {
+                            FlightMessage::Recordbatch(record_batch) => yield Ok(record_batch),
+                            FlightMessage::Metrics(_) => {}
+                            FlightMessage::AffectedRows(_) | FlightMessage::Schema(_) => {
+                                yield IllegalFlightMessagesSnafu {reason: format!("A Schema message must be succeeded exclusively by a set of RecordBatch messages, flight_message: {:?}", flight_message)}
                                         .fail()
                                         .map_err(BoxedError::new)
                                         .context(ExternalSnafu);
-                            break;
-                        };
-                        yield Ok(record_batch);
+                                break;
+                            }
+                        }
                     }
                 }));
-                let record_batch_stream = RecordBatchStreamAdaptor {
+                let record_batch_stream = RecordBatchStreamWrapper {
                     schema,
                     stream,
                     output_ordering: None,
+                    metrics: Default::default(),
                 };
-                Ok(Output::Stream(Box::pin(record_batch_stream)))
+                Ok(Output::new_with_stream(Box::pin(record_batch_stream)))
             }
         }
     }

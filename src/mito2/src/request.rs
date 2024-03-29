@@ -19,31 +19,31 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::helper::{
-    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
-    to_proto_value,
+    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_proto_value,
+    ColumnDataTypeWrapper,
 };
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
-use common_query::Output;
-use common_query::Output::AffectedRows;
-use common_telemetry::tracing::log::info;
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::region_engine::SetReadonlyResponse;
 use store_api::region_request::{
-    RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
-    RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    AffectedRows, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
+    RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushRequest,
+    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
-    CompactRegionSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu, FlushRegionSnafu,
-    InvalidRequestSnafu, Result,
+    CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
+    FlushRegionSnafu, InvalidRequestSnafu, Result,
 };
+use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::sst::file::FileMeta;
@@ -120,7 +120,7 @@ impl WriteRequest {
         let row_size = self
             .rows
             .rows
-            .get(0)
+            .first()
             .map(|row| row.encoded_len())
             .unwrap_or(0);
         row_size * self.rows.rows.len()
@@ -153,7 +153,11 @@ impl WriteRequest {
             if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
                 // Check data type.
                 ensure!(
-                    is_column_type_value_eq(input_col.datatype, &column.column_schema.data_type),
+                    is_column_type_value_eq(
+                        input_col.datatype,
+                        input_col.datatype_extension.clone(),
+                        &column.column_schema.data_type
+                    ),
                     InvalidRequestSnafu {
                         region_id,
                         reason: format!(
@@ -243,25 +247,30 @@ impl WriteRequest {
         // Need to add a default value for this column.
         let proto_value = self.column_default_value(column)?;
 
+        if proto_value.value_data.is_none() {
+            return Ok(());
+        }
+
         // Insert default value to each row.
         for row in &mut self.rows.rows {
             row.values.push(proto_value.clone());
         }
 
         // Insert column schema.
-        let datatype = to_column_data_type(&column.column_schema.data_type).with_context(|| {
-            InvalidRequestSnafu {
-                region_id: self.region_id,
-                reason: format!(
-                    "no protobuf type for column {} ({:?})",
-                    column.column_schema.name, column.column_schema.data_type
-                ),
-            }
-        })?;
+        let (datatype, datatype_ext) =
+            ColumnDataTypeWrapper::try_from(column.column_schema.data_type.clone())
+                .with_context(|_| ConvertColumnDataTypeSnafu {
+                    reason: format!(
+                        "no protobuf type for column {} ({:?})",
+                        column.column_schema.name, column.column_schema.data_type
+                    ),
+                })?
+                .to_parts();
         self.rows.schema.push(ColumnSchema {
             column_name: column.column_schema.name.clone(),
             datatype: datatype as i32,
             semantic_type: column.semantic_type as i32,
+            datatype_extension: datatype_ext,
         });
 
         Ok(())
@@ -269,17 +278,21 @@ impl WriteRequest {
 
     /// Checks whether we should allow a row doesn't provide this column.
     fn check_missing_column(&self, column: &ColumnMetadata) -> Result<()> {
-        // For delete request, all tags and timestamp is required. We don't fill default
-        // tag or timestamp while deleting rows.
-        ensure!(
-            self.op_type != OpType::Delete || column.semantic_type == SemanticType::Field,
-            InvalidRequestSnafu {
-                region_id: self.region_id,
-                reason: format!("delete requests need column {}", column.column_schema.name),
+        if self.op_type == OpType::Delete {
+            if column.semantic_type == SemanticType::Field {
+                // For delete request, all tags and timestamp is required. We don't fill default
+                // tag or timestamp while deleting rows.
+                return Ok(());
+            } else {
+                return InvalidRequestSnafu {
+                    region_id: self.region_id,
+                    reason: format!("delete requests need column {}", column.column_schema.name),
+                }
+                .fail();
             }
-        );
+        }
 
-        // Checks whether they have default value.
+        // Not a delete request. Checks whether they have default value.
         ensure!(
             column.column_schema.is_nullable()
                 || column.column_schema.default_constraint().is_some(),
@@ -375,16 +388,16 @@ pub(crate) fn validate_proto_value(
 
 /// Oneshot output result sender.
 #[derive(Debug)]
-pub(crate) struct OutputTx(Sender<Result<Output>>);
+pub(crate) struct OutputTx(Sender<Result<AffectedRows>>);
 
 impl OutputTx {
     /// Creates a new output sender.
-    pub(crate) fn new(sender: Sender<Result<Output>>) -> OutputTx {
+    pub(crate) fn new(sender: Sender<Result<AffectedRows>>) -> OutputTx {
         OutputTx(sender)
     }
 
     /// Sends the `result`.
-    pub(crate) fn send(self, result: Result<Output>) {
+    pub(crate) fn send(self, result: Result<AffectedRows>) {
         // Ignores send result.
         let _ = self.0.send(result);
     }
@@ -406,14 +419,14 @@ impl OptionOutputTx {
     }
 
     /// Sends the `result` and consumes the inner sender.
-    pub(crate) fn send_mut(&mut self, result: Result<Output>) {
+    pub(crate) fn send_mut(&mut self, result: Result<AffectedRows>) {
         if let Some(sender) = self.0.take() {
             sender.send(result);
         }
     }
 
     /// Sends the `result` and consumes the sender.
-    pub(crate) fn send(mut self, result: Result<Output>) {
+    pub(crate) fn send(mut self, result: Result<AffectedRows>) {
         if let Some(sender) = self.0.take() {
             sender.send(result);
         }
@@ -425,8 +438,8 @@ impl OptionOutputTx {
     }
 }
 
-impl From<Sender<Result<Output>>> for OptionOutputTx {
-    fn from(sender: Sender<Result<Output>>) -> Self {
+impl From<Sender<Result<AffectedRows>>> for OptionOutputTx {
+    fn from(sender: Sender<Result<AffectedRows>>) -> Self {
         Self::new(Some(OutputTx::new(sender)))
     }
 }
@@ -468,8 +481,23 @@ pub(crate) enum WorkerRequest {
         notify: BackgroundNotify,
     },
 
+    /// The internal commands.
+    SetReadonlyGracefully {
+        /// Id of the region to send.
+        region_id: RegionId,
+        /// The sender of [SetReadonlyResponse].
+        sender: Sender<SetReadonlyResponse>,
+    },
+
     /// Notify a worker to stop.
     Stop,
+
+    /// Use [RegionEdit] to edit a region directly.
+    EditRegion {
+        region_id: RegionId,
+        edit: RegionEdit,
+        tx: Sender<Result<()>>,
+    },
 }
 
 impl WorkerRequest {
@@ -477,7 +505,7 @@ impl WorkerRequest {
     pub(crate) fn try_from_region_request(
         region_id: RegionId,
         value: RegionRequest,
-    ) -> Result<(WorkerRequest, Receiver<Result<Output>>)> {
+    ) -> Result<(WorkerRequest, Receiver<Result<AffectedRows>>)> {
         let (sender, receiver) = oneshot::channel();
         let worker_request = match value {
             RegionRequest::Put(v) => {
@@ -534,9 +562,25 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Truncate(v),
             }),
+            RegionRequest::Catchup(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::Catchup(v),
+            }),
         };
 
         Ok((worker_request, receiver))
+    }
+
+    pub(crate) fn new_set_readonly_gracefully(
+        region_id: RegionId,
+    ) -> (WorkerRequest, Receiver<SetReadonlyResponse>) {
+        let (sender, receiver) = oneshot::channel();
+
+        (
+            WorkerRequest::SetReadonlyGracefully { region_id, sender },
+            receiver,
+        )
     }
 }
 
@@ -551,6 +595,7 @@ pub(crate) enum DdlRequest {
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
     Truncate(RegionTruncateRequest),
+    Catchup(RegionCatchupRequest),
 }
 
 /// Sender and Ddl request.
@@ -602,7 +647,7 @@ impl FlushFinished {
     /// Marks the flush job as successful and observes the timer.
     pub(crate) fn on_success(self) {
         for sender in self.senders {
-            sender.send(Ok(Output::AffectedRows(0)));
+            sender.send(Ok(0));
         }
     }
 }
@@ -618,8 +663,7 @@ impl OnFailure for FlushFinished {
         // Clean flushed files.
         for file in &self.file_metas {
             self.file_purger.send_request(PurgeRequest {
-                region_id: file.region_id,
-                file_id: file.file_id,
+                file_meta: file.clone(),
             });
         }
     }
@@ -657,7 +701,7 @@ impl CompactionFinished {
         COMPACTION_ELAPSED_TOTAL.observe(self.start_time.elapsed().as_secs_f64());
 
         for sender in self.senders {
-            sender.send(Ok(AffectedRows(0)));
+            sender.send(Ok(0));
         }
         info!("Successfully compacted region: {}", self.region_id);
     }
@@ -674,14 +718,12 @@ impl OnFailure for CompactionFinished {
             }));
         }
         for file in &self.compacted_files {
-            let file_id = file.file_id;
             warn!(
                 "Cleaning region {} compaction output file: {}",
-                self.region_id, file_id
+                self.region_id, file.file_id
             );
             self.file_purger.send_request(PurgeRequest {
-                region_id: self.region_id,
-                file_id,
+                file_meta: file.clone(),
             });
         }
     }
@@ -716,6 +758,7 @@ mod tests {
             column_name: name.to_string(),
             datatype: data_type as i32,
             semantic_type: semantic_type as i32,
+            ..Default::default()
         }
     }
 
@@ -950,22 +993,19 @@ mod tests {
         request.fill_missing_columns(&metadata).unwrap();
 
         let expect_rows = Rows {
-            schema: vec![
-                new_column_schema(
-                    "ts",
-                    ColumnDataType::TimestampMillisecond,
-                    SemanticType::Timestamp,
-                ),
-                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
-            ],
+            schema: vec![new_column_schema(
+                "ts",
+                ColumnDataType::TimestampMillisecond,
+                SemanticType::Timestamp,
+            )],
             rows: vec![Row {
-                values: vec![ts_ms_value(1), Value { value_data: None }],
+                values: vec![ts_ms_value(1)],
             }],
         };
         assert_eq!(expect_rows, request.rows);
     }
 
-    fn region_metadata_two_fields() -> RegionMetadata {
+    fn builder_with_ts_tag() -> RegionMetadataBuilder {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -986,6 +1026,13 @@ mod tests {
                 semantic_type: SemanticType::Tag,
                 column_id: 2,
             })
+            .primary_key(vec![2]);
+        builder
+    }
+
+    fn region_metadata_two_fields() -> RegionMetadata {
+        let mut builder = builder_with_ts_tag();
+        builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: datatypes::schema::ColumnSchema::new(
                     "f0",
@@ -1008,8 +1055,7 @@ mod tests {
                 .unwrap(),
                 semantic_type: SemanticType::Field,
                 column_id: 4,
-            })
-            .primary_key(vec![2]);
+            });
         builder.build().unwrap()
     }
 
@@ -1059,17 +1105,74 @@ mod tests {
                     ColumnDataType::TimestampMillisecond,
                     SemanticType::Timestamp,
                 ),
-                new_column_schema("f0", ColumnDataType::Int64, SemanticType::Field),
                 new_column_schema("f1", ColumnDataType::Int64, SemanticType::Field),
             ],
             // Column f1 is not nullable and we use 0 for padding.
             rows: vec![Row {
-                values: vec![
-                    i64_value(100),
-                    ts_ms_value(1),
-                    Value { value_data: None },
-                    i64_value(0),
-                ],
+                values: vec![i64_value(100), ts_ms_value(1), i64_value(0)],
+            }],
+        };
+        assert_eq!(expect_rows, request.rows);
+    }
+
+    #[test]
+    fn test_fill_missing_without_default_in_delete() {
+        let mut builder = builder_with_ts_tag();
+        builder
+            // f0 is nullable.
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "f0",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            // f1 is not nullable and don't has default.
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "f1",
+                    ConcreteDataType::int64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            });
+        let metadata = builder.build().unwrap();
+
+        let rows = Rows {
+            schema: vec![
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Timestamp,
+                ),
+            ],
+            // Missing f0 (nullable), f1 (not nullable).
+            rows: vec![Row {
+                values: vec![i64_value(100), ts_ms_value(1)],
+            }],
+        };
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Delete, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        assert!(err.is_fill_default());
+        request.fill_missing_columns(&metadata).unwrap();
+
+        let expect_rows = Rows {
+            schema: vec![
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Timestamp,
+                ),
+                new_column_schema("f1", ColumnDataType::Int64, SemanticType::Field),
+            ],
+            // Column f1 is not nullable and we use 0 for padding.
+            rows: vec![Row {
+                values: vec![i64_value(100), ts_ms_value(1), i64_value(0)],
             }],
         };
         assert_eq!(expect_rows, request.rows);

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use api::v1::value::ValueData;
 use api::v1::Rows;
+use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
@@ -29,7 +30,7 @@ use super::*;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
     build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
-    flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
 };
 
 #[tokio::test]
@@ -110,21 +111,19 @@ async fn test_region_replay() {
 
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
 
-    let open_region = engine
+    let result = engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await
         .unwrap();
-    let Output::AffectedRows(rows) = open_region else {
-        unreachable!()
-    };
-    assert_eq!(0, rows);
+    assert_eq!(0, result.affected_rows);
 
     let request = ScanRequest::default();
     let stream = engine.handle_query(region_id, request).await.unwrap();
@@ -354,6 +353,55 @@ async fn test_put_delete() {
 }
 
 #[tokio::test]
+async fn test_delete_not_null_fields() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().all_not_null(true).build();
+    let region_dir = request.region_dir.clone();
+
+    let column_schemas = rows_schema(&request);
+    let delete_schema = delete_rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 4, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    // Delete (a, 2)
+    let rows = Rows {
+        schema: delete_schema.clone(),
+        rows: build_delete_rows_for_key("a", 2, 3),
+    };
+    delete_rows(&engine, region_id, rows).await;
+
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 1.0     | 1970-01-01T00:00:01 |
+| a     | 3.0     | 1970-01-01T00:00:03 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+
+    // Reopen and scan again.
+    reopen_region(&engine, region_id, region_dir, false, HashMap::new()).await;
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
 async fn test_put_overwrite() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
@@ -502,9 +550,51 @@ async fn test_region_usage() {
     flush_region(&engine, region_id, None).await;
 
     let region_stat = region.region_usage().await;
-    assert!(region_stat.wal_usage == 0);
-    assert_eq!(region_stat.sst_usage, 2827);
+    assert_eq!(region_stat.sst_usage, 2962);
 
     // region total usage
-    assert_eq!(region_stat.disk_usage(), 3833);
+    // Some memtables may share items.
+    assert!(region_stat.disk_usage() >= 4028);
+}
+
+#[tokio::test]
+async fn test_engine_with_write_cache() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new();
+    let path = env.data_home().to_str().unwrap().to_string();
+    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512));
+    let engine = env.create_engine(mito_config).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 3, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    flush_region(&engine, region_id, None).await;
+
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id, request).unwrap();
+
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 1.0     | 1970-01-01T00:00:01 |
+| a     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }

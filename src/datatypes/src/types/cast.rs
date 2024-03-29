@@ -16,6 +16,21 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 use crate::types::TimeType;
 use crate::value::Value;
+use crate::vectors::Helper;
+
+/// Used to cast the value to dest ConcreteDataType temporarily.
+/// To keep the same behavior as arrow-rs.
+pub fn cast(src_value: Value, dest_type: &ConcreteDataType) -> Result<Value> {
+    if src_value == Value::Null {
+        return Ok(Value::Null);
+    }
+    let src_type = src_value.data_type();
+    let scalar_value = src_value.try_to_scalar_value(&src_type)?;
+    let new_value = Helper::try_from_scalar_value(scalar_value, 1)?
+        .cast(dest_type)?
+        .get(0);
+    Ok(new_value)
+}
 
 /// Cast options for cast functions.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
@@ -157,10 +172,9 @@ fn invalid_type_cast(src_value: &Value, dest_type: &ConcreteDataType) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use common_base::bytes::StringBytes;
     use common_time::time::Time;
+    use common_time::timezone::set_default_timezone;
     use common_time::{Date, DateTime, Timestamp};
     use ordered_float::OrderedFloat;
 
@@ -198,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_cast_with_opt() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         // non-strict mode
         let cast_option = CastOption { strict: false };
         let src_value = Value::Int8(-1);
@@ -233,7 +247,7 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(
             res.unwrap_err().to_string(),
-            "Type Timestamp with value 1970-01-01 08:00:10+0800 can't be cast to the destination type Int8"
+            "Type TimestampSecond with value 1970-01-01 08:00:10+0800 can't be cast to the destination type Int8"
         );
     }
 
@@ -267,7 +281,7 @@ mod tests {
 
         // date -> other types
         test_can_cast!(
-            Value::Date(Date::from_str("2021-01-01").unwrap()),
+            Value::Date(Date::from_str_utc("2021-01-01").unwrap()),
             null_datatype,
             int32_datatype,
             timestamp_second_datatype,
@@ -276,7 +290,7 @@ mod tests {
 
         // datetime -> other types
         test_can_cast!(
-            Value::DateTime(DateTime::from_str("2021-01-01 00:00:00").unwrap()),
+            Value::DateTime(DateTime::from_str_system("2021-01-01 00:00:00").unwrap()),
             null_datatype,
             int64_datatype,
             timestamp_second_datatype,
@@ -285,7 +299,7 @@ mod tests {
 
         // timestamp -> other types
         test_can_cast!(
-            Value::Timestamp(Timestamp::from_str("2021-01-01 00:00:00").unwrap()),
+            Value::Timestamp(Timestamp::from_str_utc("2021-01-01 00:00:00").unwrap()),
             null_datatype,
             int64_datatype,
             date_datatype,

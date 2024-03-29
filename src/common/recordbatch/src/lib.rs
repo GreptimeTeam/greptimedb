@@ -14,12 +14,15 @@
 
 pub mod adapter;
 pub mod error;
+pub mod filter;
 mod recordbatch;
 pub mod util;
 
 use std::pin::Pin;
 use std::sync::Arc;
 
+use adapter::RecordBatchMetrics;
+use arc_swap::ArcSwapOption;
 use datafusion::physical_plan::memory::MemoryStream;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::arrow::compute::SortOptions;
@@ -36,9 +39,9 @@ use snafu::{ensure, ResultExt};
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn schema(&self) -> SchemaRef;
 
-    fn output_ordering(&self) -> Option<&[OrderOption]> {
-        None
-    }
+    fn output_ordering(&self) -> Option<&[OrderOption]>;
+
+    fn metrics(&self) -> Option<RecordBatchMetrics>;
 }
 
 pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
@@ -66,6 +69,14 @@ impl EmptyRecordBatchStream {
 impl RecordBatchStream for EmptyRecordBatchStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 
@@ -185,6 +196,14 @@ impl RecordBatchStream for SimpleRecordBatchStream {
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
+    }
 }
 
 impl Stream for SimpleRecordBatchStream {
@@ -202,25 +221,27 @@ impl Stream for SimpleRecordBatchStream {
 }
 
 /// Adapt a [Stream] of [RecordBatch] to a [RecordBatchStream].
-pub struct RecordBatchStreamAdaptor<S> {
+pub struct RecordBatchStreamWrapper<S> {
     pub schema: SchemaRef,
     pub stream: S,
     pub output_ordering: Option<Vec<OrderOption>>,
+    pub metrics: Arc<ArcSwapOption<RecordBatchMetrics>>,
 }
 
-impl<S> RecordBatchStreamAdaptor<S> {
-    /// Creates a RecordBatchStreamAdaptor without output ordering requirement.
-    pub fn new(schema: SchemaRef, stream: S) -> RecordBatchStreamAdaptor<S> {
-        RecordBatchStreamAdaptor {
+impl<S> RecordBatchStreamWrapper<S> {
+    /// Creates a [RecordBatchStreamWrapper] without output ordering requirement.
+    pub fn new(schema: SchemaRef, stream: S) -> RecordBatchStreamWrapper<S> {
+        RecordBatchStreamWrapper {
             schema,
             stream,
             output_ordering: None,
+            metrics: Default::default(),
         }
     }
 }
 
 impl<S: Stream<Item = Result<RecordBatch>> + Unpin> RecordBatchStream
-    for RecordBatchStreamAdaptor<S>
+    for RecordBatchStreamWrapper<S>
 {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
@@ -229,9 +250,13 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> RecordBatchStream
     fn output_ordering(&self) -> Option<&[OrderOption]> {
         self.output_ordering.as_deref()
     }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.metrics.load().as_ref().map(|s| *s.as_ref())
+    }
 }
 
-impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStreamAdaptor<S> {
+impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStreamWrapper<S> {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

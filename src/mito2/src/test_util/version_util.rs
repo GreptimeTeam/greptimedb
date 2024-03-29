@@ -25,7 +25,7 @@ use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder}
 use store_api::storage::RegionId;
 
 use crate::manifest::action::RegionEdit;
-use crate::memtable::{MemtableBuilder, MemtableBuilderRef};
+use crate::memtable::time_partition::TimePartitions;
 use crate::region::version::{Version, VersionBuilder, VersionControl};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
@@ -79,10 +79,6 @@ impl VersionControlBuilder {
         self.file_purger.clone()
     }
 
-    pub(crate) fn memtable_builder(&self) -> MemtableBuilderRef {
-        self.memtable_builder.clone()
-    }
-
     pub(crate) fn push_l0_file(&mut self, start_ms: i64, end_ms: i64) -> &mut Self {
         let file_id = FileId::random();
         self.files.insert(
@@ -96,6 +92,8 @@ impl VersionControlBuilder {
                 ),
                 level: 0,
                 file_size: 0, // We don't care file size.
+                available_indexes: Default::default(),
+                index_file_size: 0,
             },
         );
         self
@@ -103,7 +101,12 @@ impl VersionControlBuilder {
 
     pub(crate) fn build_version(&self) -> Version {
         let metadata = Arc::new(self.metadata.clone());
-        let mutable = self.memtable_builder.build(&metadata);
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            self.memtable_builder.clone(),
+            0,
+            None,
+        ));
         VersionBuilder::new(metadata, mutable)
             .add_files(self.file_purger.clone(), self.files.values().cloned())
             .build()
@@ -136,6 +139,8 @@ pub(crate) fn apply_edit(
                 ),
                 level: 0,
                 file_size: 0, // We don't care file size.
+                available_indexes: Default::default(),
+                index_file_size: 0,
             }
         })
         .collect();

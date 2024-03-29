@@ -17,59 +17,58 @@ use std::env;
 use std::sync::{Arc, Mutex, Once};
 
 use once_cell::sync::Lazy;
-use opentelemetry::global;
-use opentelemetry::sdk::propagation::TraceContextPropagator;
+use opentelemetry::{global, KeyValue};
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::trace::Sampler;
+use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
-pub use tracing::{event, span, Level};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
 use tracing_log::LogTracer;
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
-pub use crate::{debug, error, info, log, trace, warn};
+use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
+pub use crate::{debug, error, info, trace, warn};
 
-tokio::task_local! {
-    /// Task local trace id. See [trace_id](crate::trace_id) for more details.
-    pub static TRACE_ID: u64;
-}
+const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
-/// Get current [TRACE_ID] from tokio [task_local](tokio::task_local) storage.
-///
-/// # Usage
-/// To set current trace id, wrap your async code like this:
-/// ```rust, no_run
-/// common_telemetry::TRACE_ID
-///     .scope(id, async move {
-///         query_handler
-///             .do_query(query, self.session.context())
-///             .await
-///     })
-///     .await
-/// ```
-/// Then all functions called from this stack will be able to retrieve the trace id
-/// via this method.
-pub fn trace_id() -> Option<u64> {
-    TRACE_ID.try_with(|id| Some(*id)).unwrap_or(None)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingOptions {
     pub dir: String,
     pub level: Option<String>,
-    pub enable_jaeger_tracing: bool,
+    pub enable_otlp_tracing: bool,
+    pub otlp_endpoint: Option<String>,
+    pub tracing_sample_ratio: Option<TracingSampleOptions>,
+    pub append_stdout: bool,
 }
+
+impl PartialEq for LoggingOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.dir == other.dir
+            && self.level == other.level
+            && self.enable_otlp_tracing == other.enable_otlp_tracing
+            && self.otlp_endpoint == other.otlp_endpoint
+            && self.tracing_sample_ratio == other.tracing_sample_ratio
+            && self.append_stdout == other.append_stdout
+    }
+}
+
+impl Eq for LoggingOptions {}
 
 impl Default for LoggingOptions {
     fn default() -> Self {
         Self {
             dir: "/tmp/greptimedb/logs".to_string(),
             level: None,
-            enable_jaeger_tracing: false,
+            enable_otlp_tracing: false,
+            otlp_endpoint: None,
+            tracing_sample_ratio: None,
+            append_stdout: true,
         }
     }
 }
@@ -107,9 +106,10 @@ pub fn init_default_ut_logging() {
             "unittest",
             &opts,
             TracingOptions::default(),
+            None
         ));
 
-        info!("logs dir = {}", dir);
+        crate::info!("logs dir = {}", dir);
     });
 }
 
@@ -123,33 +123,44 @@ pub fn init_global_logging(
     app_name: &str,
     opts: &LoggingOptions,
     tracing_opts: TracingOptions,
+    node_id: Option<String>,
 ) -> Vec<WorkerGuard> {
     let mut guards = vec![];
     let dir = &opts.dir;
     let level = &opts.level;
-    let enable_jaeger_tracing = opts.enable_jaeger_tracing;
+    let enable_otlp_tracing = opts.enable_otlp_tracing;
 
     // Enable log compatible layer to convert log record to tracing span.
     LogTracer::init().expect("log tracer must be valid");
 
-    // Stdout layer.
-    let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
-    let stdout_logging_layer = Layer::new().with_writer(stdout_writer);
-    guards.push(stdout_guard);
+    // stdout log layer.
+    let stdout_logging_layer = if opts.append_stdout {
+        let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
+        guards.push(stdout_guard);
 
-    // JSON log layer.
+        Some(
+            Layer::new()
+                .with_writer(stdout_writer)
+                .with_ansi(atty::is(atty::Stream::Stdout)),
+        )
+    } else {
+        None
+    };
+
+    // file log layer.
     let rolling_appender = RollingFileAppender::new(Rotation::HOURLY, dir, app_name);
     let (rolling_writer, rolling_writer_guard) = tracing_appender::non_blocking(rolling_appender);
-    let file_logging_layer = BunyanFormattingLayer::new(app_name.to_string(), rolling_writer);
+    let file_logging_layer = Layer::new().with_writer(rolling_writer).with_ansi(false);
     guards.push(rolling_writer_guard);
 
-    // error JSON log layer.
+    // error file log layer.
     let err_rolling_appender =
         RollingFileAppender::new(Rotation::HOURLY, dir, format!("{}-{}", app_name, "err"));
     let (err_rolling_writer, err_rolling_writer_guard) =
         tracing_appender::non_blocking(err_rolling_appender);
-    let err_file_logging_layer =
-        BunyanFormattingLayer::new(app_name.to_string(), err_rolling_writer);
+    let err_file_logging_layer = Layer::new()
+        .with_writer(err_rolling_writer)
+        .with_ansi(false);
     guards.push(err_rolling_writer_guard);
 
     // resolve log level settings from:
@@ -164,7 +175,12 @@ pub fn init_global_logging(
     let filter = targets_string
         .parse::<filter::Targets>()
         .expect("error parsing log level string");
-
+    let sampler = opts
+        .tracing_sample_ratio
+        .as_ref()
+        .map(create_sampler)
+        .map(Sampler::ParentBased)
+        .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
     // Must enable 'tokio_unstable' cfg to use this feature.
     // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
     #[cfg(feature = "tokio-console")]
@@ -185,13 +201,12 @@ pub fn init_global_logging(
             None
         };
 
-        let stdout_logging_layer = stdout_logging_layer.with_filter(filter.clone());
+        let stdout_logging_layer = stdout_logging_layer.map(|x| x.with_filter(filter.clone()));
 
         let file_logging_layer = file_logging_layer.with_filter(filter);
 
         Registry::default()
             .with(tokio_console_layer)
-            .with(JsonStorageLayer)
             .with(stdout_logging_layer)
             .with(file_logging_layer)
             .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR))
@@ -203,20 +218,40 @@ pub fn init_global_logging(
     #[cfg(not(feature = "tokio-console"))]
     let subscriber = Registry::default()
         .with(filter)
-        .with(JsonStorageLayer)
         .with(stdout_logging_layer)
         .with(file_logging_layer)
         .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR));
 
-    if enable_jaeger_tracing {
-        // Jaeger layer.
+    if enable_otlp_tracing {
         global::set_text_map_propagator(TraceContextPropagator::new());
-        let tracer = opentelemetry_jaeger::new_pipeline()
-            .with_service_name(app_name)
-            .install_batch(opentelemetry::runtime::Tokio)
-            .expect("install");
-        let jaeger_layer = Some(tracing_opentelemetry::layer().with_tracer(tracer));
-        let subscriber = subscriber.with(jaeger_layer);
+        // otlp exporter
+        let tracer = opentelemetry_otlp::new_pipeline()
+            .tracing()
+            .with_exporter(
+                opentelemetry_otlp::new_exporter().tonic().with_endpoint(
+                    opts.otlp_endpoint
+                        .as_ref()
+                        .map(|e| format!("http://{}", e))
+                        .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string()),
+                ),
+            )
+            .with_trace_config(
+                opentelemetry_sdk::trace::config()
+                    .with_sampler(sampler)
+                    .with_resource(opentelemetry_sdk::Resource::new(vec![
+                        KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
+                        KeyValue::new(
+                            resource::SERVICE_INSTANCE_ID,
+                            node_id.unwrap_or("none".to_string()),
+                        ),
+                        KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+                        KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
+                    ])),
+            )
+            .install_batch(opentelemetry_sdk::runtime::Tokio)
+            .expect("otlp tracer install failed");
+        let tracing_layer = Some(tracing_opentelemetry::layer().with_tracer(tracer));
+        let subscriber = subscriber.with(tracing_layer);
         tracing::subscriber::set_global_default(subscriber)
             .expect("error setting global tracing subscriber");
     } else {

@@ -22,11 +22,13 @@ use common_macro::stack_trace_debug;
 use common_runtime::JoinError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
+use object_store::ErrorKind;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
+use crate::cache::file_cache::FileType;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
@@ -34,6 +36,17 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display(
+    "Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
+    region_id, expected_last_entry_id, replayed_last_entry_id
+    ))]
+    UnexpectedReplay {
+        location: Location,
+        region_id: RegionId,
+        expected_last_entry_id: u64,
+        replayed_last_entry_id: u64,
+    },
+
     #[snafu(display("OpenDAL operator failed"))]
     OpenDal {
         location: Location,
@@ -120,14 +133,6 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to write parquet file, path: {}", path))]
-    WriteParquet {
-        path: String,
-        location: Location,
-        #[snafu(source)]
-        error: parquet::errors::ParquetError,
-    },
-
     #[snafu(display("Failed to read parquet file, path: {}", path))]
     ReadParquet {
         path: String,
@@ -159,6 +164,16 @@ pub enum Error {
     InvalidRequest {
         region_id: RegionId,
         reason: String,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to convert ConcreteDataType to ColumnDataType, reason: {}",
+        reason
+    ))]
+    ConvertColumnDataType {
+        reason: String,
+        source: api::error::Error,
         location: Location,
     },
 
@@ -299,14 +314,16 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build scan predicate"))]
-    BuildPredicate {
-        source: table::error::Error,
+    #[snafu(display("Failed to delete SST file, file id: {}", file_id))]
+    DeleteSst {
+        file_id: FileId,
+        #[snafu(source)]
+        error: object_store::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to delete SST file, file id: {}", file_id))]
-    DeleteSst {
+    #[snafu(display("Failed to delete index file, file id: {}", file_id))]
+    DeleteIndex {
         file_id: FileId,
         #[snafu(source)]
         error: object_store::Error,
@@ -371,6 +388,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Schema version doesn't match. Expect {} but gives {}", expect, actual))]
+    InvalidRegionRequestSchemaVersion {
+        expect: u64,
+        actual: u64,
+        location: Location,
+    },
+
     #[snafu(display("Region {} is read only", region_id))]
     RegionReadonly {
         region_id: RegionId,
@@ -395,6 +419,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Empty manifest directory, manifest_dir: {}", manifest_dir,))]
+    EmptyManifestDir {
+        manifest_dir: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to read arrow record batch from parquet file {}", path))]
     ArrowReader {
         path: String,
@@ -402,6 +432,149 @@ pub enum Error {
         error: ArrowError,
         location: Location,
     },
+
+    #[snafu(display("Invalid file metadata"))]
+    ConvertMetaData {
+        location: Location,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Column not found, column: {column}"))]
+    ColumnNotFound { column: String, location: Location },
+
+    #[snafu(display("Failed to build index applier"))]
+    BuildIndexApplier {
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert value"))]
+    ConvertValue {
+        source: datatypes::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to apply index"))]
+    ApplyIndex {
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to push index value"))]
+    PushIndexValue {
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write index completely"))]
+    IndexFinish {
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Operate on aborted index"))]
+    OperateAbortedIndex { location: Location },
+
+    #[snafu(display("Failed to read puffin metadata"))]
+    PuffinReadMetadata {
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read puffin blob"))]
+    PuffinReadBlob {
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
+    PuffinBlobTypeNotFound {
+        blob_type: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write puffin completely"))]
+    PuffinFinish {
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to add blob to puffin file"))]
+    PuffinAddBlob {
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to clean dir {dir}"))]
+    CleanDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid config, {reason}"))]
+    InvalidConfig { reason: String, location: Location },
+
+    #[snafu(display(
+        "Stale log entry found during replay, region: {}, flushed: {}, replayed: {}",
+        region_id,
+        flushed_entry_id,
+        unexpected_entry_id
+    ))]
+    StaleLogEntry {
+        region_id: RegionId,
+        flushed_entry_id: u64,
+        unexpected_entry_id: u64,
+    },
+
+    #[snafu(display(
+        "Failed to upload file, region_id: {}, file_id: {}, file_type: {:?}",
+        region_id,
+        file_id,
+        file_type,
+    ))]
+    Upload {
+        region_id: RegionId,
+        file_id: FileId,
+        file_type: FileType,
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to filter record batch"))]
+    FilterRecordBatch {
+        source: common_recordbatch::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("BiError, first: {first}, second: {second}"))]
+    BiError {
+        first: Box<Error>,
+        second: Box<Error>,
+        location: Location,
+    },
+
+    #[snafu(display("Encode null value"))]
+    IndexEncodeNull { location: Location },
+
+    #[snafu(display("Failed to encode memtable to Parquet bytes"))]
+    EncodeMemtable {
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to iter data part"))]
+    ReadDataPart {
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Invalid region options, {}", reason))]
+    InvalidRegionOptions { reason: String, location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -411,6 +584,14 @@ impl Error {
     pub(crate) fn is_fill_default(&self) -> bool {
         matches!(self, Error::FillDefault { .. })
     }
+
+    /// Returns true if the file is not found on the object store.
+    pub(crate) fn is_object_not_found(&self) -> bool {
+        match self {
+            Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
+            _ => false,
+        }
+    }
 }
 
 impl ErrorExt for Error {
@@ -419,7 +600,6 @@ impl ErrorExt for Error {
 
         match self {
             OpenDal { .. }
-            | WriteParquet { .. }
             | ReadParquet { .. }
             | WriteWal { .. }
             | ReadWal { .. }
@@ -431,14 +611,24 @@ impl ErrorExt for Error {
             | NewRecordBatch { .. }
             | RegionCorrupted { .. }
             | CreateDefault { .. }
-            | InvalidParquet { .. } => StatusCode::Unexpected,
+            | InvalidParquet { .. }
+            | OperateAbortedIndex { .. }
+            | PuffinBlobTypeNotFound { .. }
+            | UnexpectedReplay { .. }
+            | IndexEncodeNull { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidRequest { .. }
             | FillDefault { .. }
-            | InvalidMetadata { .. } => StatusCode::InvalidArguments,
+            | ConvertColumnDataType { .. }
+            | ColumnNotFound { .. }
+            | InvalidMetadata { .. }
+            | InvalidRegionOptions { .. } => StatusCode::InvalidArguments,
+
+            InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
+
             RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
@@ -454,14 +644,14 @@ impl ErrorExt for Error {
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
+            ConvertMetaData { .. } => StatusCode::Internal,
             ComputeArrow { .. } => StatusCode::Internal,
             ComputeVector { .. } => StatusCode::Internal,
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             StopScheduler { .. } => StatusCode::Internal,
-            BuildPredicate { source, .. } => source.status_code(),
-            DeleteSst { .. } => StatusCode::StorageUnavailable,
+            DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
@@ -472,8 +662,24 @@ impl ErrorExt for Error {
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionReadonly { .. } => StatusCode::RegionReadonly,
             JsonOptions { .. } => StatusCode::InvalidArguments,
-            EmptyRegionDir { .. } => StatusCode::RegionNotFound,
+            EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
+            ConvertValue { source, .. } => source.status_code(),
+            BuildIndexApplier { source, .. }
+            | PushIndexValue { source, .. }
+            | ApplyIndex { source, .. }
+            | IndexFinish { source, .. } => source.status_code(),
+            PuffinReadMetadata { source, .. }
+            | PuffinReadBlob { source, .. }
+            | PuffinFinish { source, .. }
+            | PuffinAddBlob { source, .. } => source.status_code(),
+            CleanDir { .. } => StatusCode::Unexpected,
+            InvalidConfig { .. } => StatusCode::InvalidArguments,
+            StaleLogEntry { .. } => StatusCode::Unexpected,
+            FilterRecordBatch { source, .. } => source.status_code(),
+            Upload { .. } => StatusCode::StorageUnavailable,
+            BiError { .. } => StatusCode::Internal,
+            EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
         }
     }
 

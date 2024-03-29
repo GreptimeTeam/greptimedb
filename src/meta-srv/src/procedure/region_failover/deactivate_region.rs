@@ -18,18 +18,18 @@ use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::peer::Peer;
+use common_meta::rpc::router::RegionStatus;
 use common_meta::RegionIdent;
 use common_telemetry::{debug, info, warn};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use super::activate_region::ActivateRegion;
 use super::{RegionFailoverContext, State};
 use crate::error::{
-    Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
+    self, Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
-use crate::inactive_region_manager::InactiveRegionManager;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -40,6 +40,36 @@ pub(super) struct DeactivateRegion {
 impl DeactivateRegion {
     pub(super) fn new(candidate: Peer) -> Self {
         Self { candidate }
+    }
+
+    async fn mark_leader_downgraded(
+        &self,
+        ctx: &RegionFailoverContext,
+        failed_region: &RegionIdent,
+    ) -> Result<()> {
+        let table_id = failed_region.table_id;
+
+        let table_route_value = ctx
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .get_raw(table_id)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .context(error::TableRouteNotFoundSnafu { table_id })?;
+
+        ctx.table_metadata_manager
+            .update_leader_region_status(table_id, &table_route_value, |region| {
+                if region.region.id.region_number() == failed_region.region_number {
+                    Some(Some(RegionStatus::Downgraded))
+                } else {
+                    None
+                }
+            })
+            .await
+            .context(error::UpdateTableRouteSnafu)?;
+
+        Ok(())
     }
 
     async fn send_close_region_message(
@@ -61,22 +91,13 @@ impl DeactivateRegion {
         })?;
 
         let ch = Channel::Datanode(failed_region.datanode_id);
-        // Mark the region as inactive
-        InactiveRegionManager::new(&ctx.in_memory)
-            .register_inactive_region(failed_region)
-            .await?;
-        // We first marked the region as inactive, which means that the failed region cannot
-        // be successfully renewed from now on, so after the lease time is exceeded, the region
-        // will be automatically closed.
-        // If the deadline is exceeded, we can proceed to the next step with confidence,
-        // as the expiration means that the region has been closed.
         let timeout = Duration::from_secs(ctx.region_lease_secs);
         ctx.mailbox.send(&ch, msg, timeout).await
     }
 
     async fn handle_response(
         &self,
-        ctx: &RegionFailoverContext,
+        _ctx: &RegionFailoverContext,
         mailbox_receiver: MailboxReceiver,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
@@ -93,10 +114,6 @@ impl DeactivateRegion {
                     .fail();
                 };
                 if result {
-                    InactiveRegionManager::new(&ctx.in_memory)
-                        .deregister_inactive_region(failed_region)
-                        .await?;
-
                     Ok(Box::new(ActivateRegion::new(self.candidate.clone())))
                 } else {
                     // Under rare circumstances would a Datanode fail to close a Region.
@@ -136,6 +153,7 @@ impl State for DeactivateRegion {
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
         info!("Deactivating region: {failed_region:?}");
+        self.mark_leader_downgraded(ctx, failed_region).await?;
         let result = self.send_close_region_message(ctx, failed_region).await;
         let mailbox_receiver = match result {
             Ok(mailbox_receiver) => mailbox_receiver,
@@ -163,6 +181,42 @@ mod tests {
 
     use super::super::tests::TestingEnvBuilder;
     use super::*;
+
+    #[tokio::test]
+    async fn test_mark_leader_downgraded() {
+        common_telemetry::init_default_ut_logging();
+
+        let env = TestingEnvBuilder::new().build().await;
+        let failed_region = env.failed_region(1).await;
+
+        let state = DeactivateRegion::new(Peer::new(2, ""));
+
+        state
+            .mark_leader_downgraded(&env.context, &failed_region)
+            .await
+            .unwrap();
+
+        let table_id = failed_region.table_id;
+
+        let table_route_value = env
+            .context
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .get(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let should_downgraded = table_route_value
+            .region_routes()
+            .unwrap()
+            .iter()
+            .find(|route| route.region.id.region_number() == failed_region.region_number)
+            .unwrap();
+
+        assert!(should_downgraded.is_leader_downgraded());
+    }
 
     #[tokio::test]
     async fn test_deactivate_region_success() {
@@ -226,7 +280,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             format!("{next_state:?}"),
-            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None }"#
+            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None, region_wal_options: None }"#
         );
     }
 
@@ -268,7 +322,7 @@ mod tests {
         // Timeout or not, proceed to `ActivateRegion`.
         assert_eq!(
             format!("{next_state:?}"),
-            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None }"#
+            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None, region_wal_options: None }"#
         );
     }
 }

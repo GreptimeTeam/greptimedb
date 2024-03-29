@@ -1,0 +1,48 @@
+# Use the legacy glibc 2.28.
+FROM ubuntu:18.10
+
+ENV LANG en_US.utf8
+WORKDIR /greptimedb
+
+# Use old-releases.ubuntu.com to avoid 404s: https://help.ubuntu.com/community/EOLUpgrades.
+RUN echo "deb http://old-releases.ubuntu.com/ubuntu/ cosmic main restricted universe multiverse\n\
+deb http://old-releases.ubuntu.com/ubuntu/ cosmic-updates main restricted universe multiverse\n\
+deb http://old-releases.ubuntu.com/ubuntu/ cosmic-security main restricted universe multiverse" > /etc/apt/sources.list
+
+# Install dependencies.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    libssl-dev \
+    tzdata \
+    curl \
+    ca-certificates \
+    git \
+    build-essential \
+    unzip \
+    pkg-config
+
+# Install protoc.
+ENV PROTOC_VERSION=25.1
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+        PROTOC_ZIP=protoc-${PROTOC_VERSION}-linux-x86_64.zip; \
+    elif [ "$(uname -m)" = "aarch64" ]; then \
+        PROTOC_ZIP=protoc-${PROTOC_VERSION}-linux-aarch_64.zip; \
+    else \
+        echo "Unsupported architecture"; exit 1; \
+    fi && \
+    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP} && \
+    unzip -o ${PROTOC_ZIP} -d /usr/local bin/protoc && \
+    unzip -o ${PROTOC_ZIP} -d /usr/local 'include/*' && \
+    rm -f ${PROTOC_ZIP}
+
+# Install Rust.
+SHELL ["/bin/bash", "-c"]
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y
+ENV PATH /root/.cargo/bin/:$PATH
+
+# Install Rust toolchains.
+ARG RUST_TOOLCHAIN
+RUN rustup toolchain install ${RUST_TOOLCHAIN}
+
+# Install nextest.
+RUN cargo install cargo-binstall --locked
+RUN cargo binstall cargo-nextest --no-confirm

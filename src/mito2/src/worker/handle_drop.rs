@@ -16,13 +16,12 @@
 
 use std::time::Duration;
 
-use common_query::Output;
-use common_telemetry::info;
-use common_telemetry::tracing::warn;
+use common_telemetry::{info, warn};
 use futures::TryStreamExt;
 use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
+use store_api::region_request::AffectedRows;
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
@@ -35,7 +34,10 @@ const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
 const MAX_RETRY_TIMES: u64 = 288; // 24 hours (5m * 288)
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_drop_request(&mut self, region_id: RegionId) -> Result<Output> {
+    pub(crate) async fn handle_drop_request(
+        &mut self,
+        region_id: RegionId,
+    ) -> Result<AffectedRows> {
         let region = self.regions.writable_region(region_id)?;
 
         info!("Try to drop region: {}", region_id);
@@ -59,7 +61,9 @@ impl<S> RegionWorkerLoop<S> {
         self.compaction_scheduler.on_region_dropped(region_id);
 
         // mark region version as dropped
-        region.version_control.mark_dropped(&self.memtable_builder);
+        region
+            .version_control
+            .mark_dropped(&region.memtable_builder);
         info!(
             "Region {} is dropped logically, but some files are not deleted yet",
             region_id
@@ -87,7 +91,7 @@ impl<S> RegionWorkerLoop<S> {
             listener.on_later_drop_end(region_id, removed);
         });
 
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 }
 

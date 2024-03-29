@@ -13,19 +13,13 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use api::v1::meta::HeartbeatResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_function::scalars::FunctionRef;
-use common_meta::heartbeat::handler::{
-    HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
-};
-use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{Instruction, OpenRegion, RegionIdent};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
@@ -34,62 +28,18 @@ use query::dataframe::DataFrame;
 use query::plan::LogicalPlan;
 use query::planner::LogicalPlanner;
 use query::query_engine::DescribeResult;
-use query::QueryEngine;
+use query::{QueryEngine, QueryEngineContext};
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole};
-use store_api::region_request::RegionRequest;
+use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
+use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use table::TableRef;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+use crate::error::Error;
 use crate::event_listener::NoopRegionServerEventListener;
 use crate::region_server::RegionServer;
-
-pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> MessageMeta {
-    MessageMeta {
-        id,
-        subject: subject.to_string(),
-        to: to.to_string(),
-        from: from.to_string(),
-    }
-}
-
-async fn handle_instruction(
-    executor: Arc<dyn HeartbeatResponseHandlerExecutor>,
-    mailbox: Arc<HeartbeatMailbox>,
-    instruction: Instruction,
-) {
-    let response = HeartbeatResponse::default();
-    let mut ctx: HeartbeatResponseHandlerContext =
-        HeartbeatResponseHandlerContext::new(mailbox, response);
-    ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
-    executor.handle(ctx).await.unwrap();
-}
-
-fn close_region_instruction() -> Instruction {
-    Instruction::CloseRegion(RegionIdent {
-        table_id: 1024,
-        region_number: 0,
-        cluster_id: 1,
-        datanode_id: 2,
-        engine: "mito2".to_string(),
-    })
-}
-
-fn open_region_instruction() -> Instruction {
-    Instruction::OpenRegion(OpenRegion::new(
-        RegionIdent {
-            table_id: 1024,
-            region_number: 0,
-            cluster_id: 1,
-            datanode_id: 2,
-            engine: "mito2".to_string(),
-        },
-        "path/dir",
-        HashMap::new(),
-    ))
-}
 
 pub struct MockQueryEngine;
 
@@ -107,7 +57,11 @@ impl QueryEngine for MockQueryEngine {
         "MockQueryEngine"
     }
 
-    async fn describe(&self, _plan: LogicalPlan) -> query::error::Result<DescribeResult> {
+    async fn describe(
+        &self,
+        _plan: LogicalPlan,
+        _query_ctx: QueryContextRef,
+    ) -> query::error::Result<DescribeResult> {
         unimplemented!()
     }
 
@@ -128,6 +82,10 @@ impl QueryEngine for MockQueryEngine {
     fn read_table(&self, _table: TableRef) -> query::error::Result<DataFrame> {
         unimplemented!()
     }
+
+    fn engine_context(&self, _query_ctx: QueryContextRef) -> QueryEngineContext {
+        unimplemented!()
+    }
 }
 
 /// Create a region server without any engine
@@ -139,15 +97,62 @@ pub fn mock_region_server() -> RegionServer {
     )
 }
 
+pub type MockRequestHandler =
+    Box<dyn Fn(RegionId, RegionRequest) -> Result<AffectedRows, Error> + Send + Sync>;
+
 pub struct MockRegionEngine {
     sender: Sender<(RegionId, RegionRequest)>,
+    pub(crate) handle_request_delay: Option<Duration>,
+    pub(crate) handle_request_mock_fn: Option<MockRequestHandler>,
+    pub(crate) mock_role: Option<Option<RegionRole>>,
 }
 
 impl MockRegionEngine {
     pub fn new() -> (Arc<Self>, Receiver<(RegionId, RegionRequest)>) {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
 
-        (Arc::new(Self { sender: tx }), rx)
+        (
+            Arc::new(Self {
+                handle_request_delay: None,
+                sender: tx,
+                handle_request_mock_fn: None,
+                mock_role: None,
+            }),
+            rx,
+        )
+    }
+
+    pub fn with_mock_fn(
+        mock_fn: MockRequestHandler,
+    ) -> (Arc<Self>, Receiver<(RegionId, RegionRequest)>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+
+        (
+            Arc::new(Self {
+                handle_request_delay: None,
+                sender: tx,
+                handle_request_mock_fn: Some(mock_fn),
+                mock_role: None,
+            }),
+            rx,
+        )
+    }
+
+    pub fn with_custom_apply_fn<F>(apply: F) -> (Arc<Self>, Receiver<(RegionId, RegionRequest)>)
+    where
+        F: FnOnce(&mut MockRegionEngine),
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let mut region_engine = Self {
+            handle_request_delay: None,
+            sender: tx,
+            handle_request_mock_fn: None,
+            mock_role: None,
+        };
+
+        apply(&mut region_engine);
+
+        (Arc::new(region_engine), rx)
     }
 }
 
@@ -161,10 +166,18 @@ impl RegionEngine for MockRegionEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<Output, BoxedError> {
-        let _ = self.sender.send((region_id, request)).await;
+    ) -> Result<RegionHandleResult, BoxedError> {
+        if let Some(delay) = self.handle_request_delay {
+            tokio::time::sleep(delay).await;
+        }
+        if let Some(mock_fn) = &self.handle_request_mock_fn {
+            return mock_fn(region_id, request)
+                .map_err(BoxedError::new)
+                .map(RegionHandleResult::new);
+        };
 
-        Ok(Output::AffectedRows(0))
+        let _ = self.sender.send((region_id, request)).await;
+        Ok(RegionHandleResult::new(0))
     }
 
     async fn handle_query(
@@ -191,7 +204,21 @@ impl RegionEngine for MockRegionEngine {
         Ok(())
     }
 
+    async fn set_readonly_gracefully(
+        &self,
+        _region_id: RegionId,
+    ) -> Result<SetReadonlyResponse, BoxedError> {
+        unimplemented!()
+    }
+
     fn role(&self, _region_id: RegionId) -> Option<RegionRole> {
+        if let Some(role) = self.mock_role {
+            return role;
+        }
         Some(RegionRole::Leader)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

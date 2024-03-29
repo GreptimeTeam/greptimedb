@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod bytea;
 mod interval;
 
 use std::collections::HashMap;
@@ -28,7 +29,10 @@ use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::api::Type;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::plan::LogicalPlan;
+use session::context::QueryContextRef;
+use session::session_config::PGByteaOutputValue;
 
+use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use self::interval::PgInterval;
 use crate::error::{self, Error, Result};
 use crate::SqlPlan;
@@ -50,7 +54,11 @@ pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Ve
         .collect::<Result<Vec<FieldInfo>>>()
 }
 
-pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWireResult<()> {
+pub(super) fn encode_value(
+    query_ctx: &QueryContextRef,
+    value: &Value,
+    builder: &mut DataRowEncoder,
+) -> PgWireResult<()> {
     match value {
         Value::Null => builder.encode_field(&None::<&i8>),
         Value::Boolean(v) => builder.encode_field(v),
@@ -65,7 +73,13 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
         Value::Float32(v) => builder.encode_field(&v.0),
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
-        Value::Binary(v) => builder.encode_field(&v.deref()),
+        Value::Binary(v) => {
+            let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
+            match *bytea_output {
+                PGByteaOutputValue::ESCAPE => builder.encode_field(&EscapeOutputBytea(v.deref())),
+                PGByteaOutputValue::HEX => builder.encode_field(&HexOutputBytea(v.deref())),
+            }
+        }
         Value::Date(v) => {
             if let Some(date) = v.to_chrono_date() {
                 builder.encode_field(&date)
@@ -103,6 +117,7 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
             }
         }
         Value::Interval(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::Decimal128(v) => builder.encode_field(&v.to_string()),
         Value::List(_) | Value::Duration(_) => {
             Err(PgWireError::ApiError(Box::new(Error::Internal {
                 err_msg: format!(
@@ -131,10 +146,12 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Time(_) => Ok(Type::TIME),
         &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL),
+        &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC),
         &ConcreteDataType::Duration(_)
         | &ConcreteDataType::List(_)
-        | &ConcreteDataType::Dictionary(_) => error::InternalSnafu {
-            err_msg: format!("not implemented for column datatype {origin:?}"),
+        | &ConcreteDataType::Dictionary(_) => error::UnsupportedDataTypeSnafu {
+            data_type: origin,
+            reason: "not implemented",
         }
         .fail(),
     }
@@ -165,7 +182,7 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
 pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWireResult<String> {
     // the index is managed from portal's parameters count so it's safe to
     // unwrap here.
-    let param_type = portal.statement().parameter_types().get(idx).unwrap();
+    let param_type = portal.statement.parameter_types.get(idx).unwrap();
     match param_type {
         &Type::VARCHAR | &Type::TEXT => Ok(format!(
             "'{}'",
@@ -215,7 +232,7 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
 
 pub(super) fn invalid_parameter_error(msg: &str, detail: Option<&str>) -> PgWireError {
     let mut error_info = ErrorInfo::new("ERROR".to_owned(), "22023".to_owned(), msg.to_owned());
-    error_info.set_detail(detail.map(|s| s.to_owned()));
+    error_info.detail = detail.map(|s| s.to_owned());
     PgWireError::UserError(Box::new(error_info))
 }
 
@@ -243,7 +260,7 @@ pub(super) fn parameters_to_scalar_values(
     let param_count = portal.parameter_len();
     let mut results = Vec::with_capacity(param_count);
 
-    let client_param_types = portal.statement().parameter_types();
+    let client_param_types = &portal.statement.parameter_types;
     let param_types = plan
         .get_param_types()
         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -560,6 +577,7 @@ mod test {
     use datatypes::value::ListValue;
     use pgwire::api::results::{FieldFormat, FieldInfo};
     use pgwire::api::Type;
+    use session::context::QueryContextBuilder;
 
     use super::*;
 
@@ -781,12 +799,16 @@ mod test {
             Value::Timestamp(1000001i64.into()),
             Value::Interval(1000001i128.into()),
         ];
+        let query_context = QueryContextBuilder::default()
+            .configuration_parameter(Default::default())
+            .build();
         let mut builder = DataRowEncoder::new(Arc::new(schema));
         for i in values.iter() {
-            encode_value(i, &mut builder).unwrap();
+            encode_value(&query_context, i, &mut builder).unwrap();
         }
 
         let err = encode_value(
+            &query_context,
             &Value::List(ListValue::new(
                 Some(Box::default()),
                 ConcreteDataType::int16_datatype(),

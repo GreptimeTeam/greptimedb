@@ -12,53 +12,100 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod alter;
+mod close;
+mod create;
+mod drop;
+mod open;
+mod options;
+mod put;
+mod read;
+mod region_metadata;
+mod state;
+
+use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use api::v1::SemanticType;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
-use common_query::Output;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
-use common_time::Timestamp;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::ColumnSchema;
-use datatypes::value::Value;
-use mito2::engine::{MitoEngine, MITO_ENGINE_NAME};
-use object_store::util::join_dir;
-use snafu::{ensure, ResultExt};
-use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::region_engine::{RegionEngine, RegionRole};
-use store_api::region_request::{RegionCreateRequest, RegionRequest};
-use store_api::storage::consts::ReservedColumnId;
-use store_api::storage::{RegionGroup, RegionId, ScanRequest};
+use mito2::engine::MitoEngine;
+use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
+use store_api::region_request::RegionRequest;
+use store_api::storage::{RegionId, ScanRequest};
 
-use crate::error::{CreateMitoRegionSnafu, InternalColumnOccupiedSnafu, Result};
+use self::state::MetricEngineState;
+use crate::data_region::DataRegion;
+use crate::error::{Result, UnsupportedRegionRequestSnafu};
+use crate::metadata_region::MetadataRegion;
 use crate::utils;
 
-/// region group value for data region inside a metric region
-pub const METRIC_DATA_REGION_GROUP: RegionGroup = 0;
-
-/// region group value for metadata region inside a metric region
-pub const METRIC_METADATA_REGION_GROUP: RegionGroup = 1;
-
-pub const METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME: &str = "ts";
-pub const METADATA_SCHEMA_KEY_COLUMN_NAME: &str = "k";
-pub const METADATA_SCHEMA_VALUE_COLUMN_NAME: &str = "v";
-
-pub const METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX: usize = 0;
-pub const METADATA_SCHEMA_KEY_COLUMN_INDEX: usize = 1;
-pub const METADATA_SCHEMA_VALUE_COLUMN_INDEX: usize = 2;
-
-/// Column name of internal column `__metric` that stores the original metric name
-pub const DATA_SCHEMA_METRIC_NAME_COLUMN_NAME: &str = "__metric";
-pub const DATA_SCHEMA_TSID_COLUMN_NAME: &str = "__tsid";
-
-pub const METADATA_REGION_SUBDIR: &str = "metadata";
-pub const DATA_REGION_SUBDIR: &str = "data";
-
-pub const METRIC_ENGINE_NAME: &str = "metric";
-
+#[cfg_attr(doc, aquamarine::aquamarine)]
+/// # Metric Engine
+///
+/// ## Regions
+///
+/// Regions in this metric engine has several roles. There is `PhysicalRegion`,
+/// which refer to the region that actually stores the data. And `LogicalRegion`
+/// that is "simulated" over physical regions. Each logical region is associated
+/// with one physical region group, which is a group of two physical regions.
+/// Their relationship is illustrated below:
+///
+/// ```mermaid
+/// erDiagram
+///     LogicalRegion ||--o{ PhysicalRegionGroup : corresponds
+///     PhysicalRegionGroup ||--|| DataRegion : contains
+///     PhysicalRegionGroup ||--|| MetadataRegion : contains
+/// ```
+///
+/// Metric engine uses two region groups. One is for data region
+/// ([METRIC_DATA_REGION_GROUP](crate::consts::METRIC_DATA_REGION_GROUP)), and the
+/// other is for metadata region ([METRIC_METADATA_REGION_GROUP](crate::consts::METRIC_METADATA_REGION_GROUP)).
+/// From the definition of [`RegionId`], we can convert between these two physical
+/// region ids easily. Thus in the code base we usually refer to one "physical
+/// region id", and convert it to the other one when necessary.
+///
+/// The logical region, in contrast, is a virtual region. It doesn't has dedicated
+/// storage or region group. Only a region id that is allocated by meta server.
+/// And all other things is shared with other logical region that are associated
+/// with the same physical region group.
+///
+/// For more document about physical regions, please refer to [`MetadataRegion`]
+/// and [`DataRegion`].
+///
+/// ## Operations
+///
+/// Both physical and logical region are accessible to user. But the operation
+/// they support are different. List below:
+///
+/// | Operations | Logical Region | Physical Region |
+/// | ---------- | -------------- | --------------- |
+/// |   Create   |       ✅        |        ✅        |
+/// |    Drop    |       ✅        |        ❓*       |
+/// |   Write    |       ✅        |        ❌        |
+/// |    Read    |       ✅        |        ✅        |
+/// |   Close    |       ✅        |        ✅        |
+/// |    Open    |       ✅        |        ✅        |
+/// |   Alter    |       ✅        |        ❌        |
+///
+/// *: Physical region can be dropped only when all related logical regions are dropped.
+///
+/// ## Internal Columns
+///
+/// The physical data region contains two internal columns. Should
+/// mention that "internal" here is for metric engine itself. Mito
+/// engine will add it's internal columns to the region as well.
+///
+/// Their column id is registered in [`ReservedColumnId`]. And column name is
+/// defined in [`DATA_SCHEMA_TSID_COLUMN_NAME`] and [`DATA_SCHEMA_TABLE_ID_COLUMN_NAME`].
+///
+/// Tsid is generated by hashing all tags. And table id is retrieved from logical region
+/// id to distinguish data from different logical tables.
+#[derive(Clone)]
 pub struct MetricEngine {
     inner: Arc<MetricEngineInner>,
 }
@@ -70,32 +117,43 @@ impl RegionEngine for MetricEngine {
         METRIC_ENGINE_NAME
     }
 
-    /// Handles request to the region.
-    ///
-    /// Only query is not included, which is handled in `handle_query`
+    /// Handles non-query request to the region. Returns the count of affected rows.
     async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> std::result::Result<Output, BoxedError> {
+    ) -> Result<RegionHandleResult, BoxedError> {
+        let mut extension_return_value = HashMap::new();
+
         let result = match request {
-            RegionRequest::Put(_) => todo!(),
-            RegionRequest::Delete(_) => todo!(),
-            RegionRequest::Create(create) => self
-                .inner
-                .create_region(region_id, create)
-                .await
-                .map(|_| Output::AffectedRows(0)),
-            RegionRequest::Drop(_) => todo!(),
-            RegionRequest::Open(_) => todo!(),
-            RegionRequest::Close(_) => todo!(),
-            RegionRequest::Alter(_) => todo!(),
-            RegionRequest::Flush(_) => todo!(),
-            RegionRequest::Compact(_) => todo!(),
-            RegionRequest::Truncate(_) => todo!(),
+            RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
+            RegionRequest::Create(create) => {
+                self.inner
+                    .create_region(region_id, create, &mut extension_return_value)
+                    .await
+            }
+            RegionRequest::Drop(drop) => self.inner.drop_region(region_id, drop).await,
+            RegionRequest::Open(open) => self.inner.open_region(region_id, open).await,
+            RegionRequest::Close(close) => self.inner.close_region(region_id, close).await,
+            RegionRequest::Alter(alter) => {
+                self.inner
+                    .alter_region(region_id, alter, &mut extension_return_value)
+                    .await
+            }
+            RegionRequest::Delete(_)
+            | RegionRequest::Flush(_)
+            | RegionRequest::Compact(_)
+            | RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
+            // It always Ok(0), all data is the latest.
+            RegionRequest::Catchup(_) => Ok(0),
         };
 
-        result.map_err(BoxedError::new)
+        result
+            .map_err(BoxedError::new)
+            .map(|rows| RegionHandleResult {
+                affected_rows: rows,
+                extension: extension_return_value,
+            })
     }
 
     /// Handles substrait query and return a stream of record batches
@@ -103,350 +161,202 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        todo!()
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        self.inner
+            .read_region(region_id, request)
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Retrieves region's metadata.
-    async fn get_metadata(
-        &self,
-        region_id: RegionId,
-    ) -> std::result::Result<RegionMetadataRef, BoxedError> {
-        todo!()
+    async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
+        self.inner
+            .load_region_metadata(region_id)
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Retrieves region's disk usage.
+    ///
+    /// Note: Returns `None` if it's a logical region.
     async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
-        todo!()
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.region_disk_usage(region_id).await
+        } else {
+            None
+        }
     }
 
     /// Stops the engine
-    async fn stop(&self) -> std::result::Result<(), BoxedError> {
-        todo!()
+    async fn stop(&self) -> Result<(), BoxedError> {
+        // don't need to stop the underlying mito engine
+        Ok(())
     }
 
-    fn set_writable(
+    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+        // ignore the region not found error
+        for x in [
+            utils::to_metadata_region_id(region_id),
+            utils::to_data_region_id(region_id),
+            region_id,
+        ] {
+            if let Err(e) = self.inner.mito.set_writable(x, writable)
+                && e.status_code() != StatusCode::RegionNotFound
+            {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    async fn set_readonly_gracefully(
         &self,
         region_id: RegionId,
-        writable: bool,
-    ) -> std::result::Result<(), BoxedError> {
-        todo!()
+    ) -> std::result::Result<SetReadonlyResponse, BoxedError> {
+        self.inner.mito.set_readonly_gracefully(region_id).await
     }
 
+    /// Returns the physical region role.
+    ///
+    /// Note: Returns `None` if it's a logical region.
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
-        todo!()
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.role(region_id)
+        } else {
+            None
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
 impl MetricEngine {
     pub fn new(mito: MitoEngine) -> Self {
+        let metadata_region = MetadataRegion::new(mito.clone());
+        let data_region = DataRegion::new(mito.clone());
         Self {
-            inner: Arc::new(MetricEngineInner { mito }),
+            inner: Arc::new(MetricEngineInner {
+                mito,
+                metadata_region,
+                data_region,
+                state: RwLock::default(),
+            }),
         }
+    }
+
+    pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
+        self.inner
+            .metadata_region
+            .logical_regions(physical_region_id)
+            .await
     }
 }
 
 struct MetricEngineInner {
     mito: MitoEngine,
-}
-
-impl MetricEngineInner {
-    /// Initialize a metric region at given region id.
-    pub async fn create_region(
-        &self,
-        region_id: RegionId,
-        request: RegionCreateRequest,
-    ) -> Result<()> {
-        Self::verify_region_create_request(&request)?;
-
-        let (data_region_id, metadata_region_id) = Self::transform_region_id(region_id);
-
-        // create metadata region
-        let create_metadata_region_request =
-            self.create_request_for_metadata_region(&request.region_dir);
-        self.mito
-            .handle_request(
-                metadata_region_id,
-                RegionRequest::Create(create_metadata_region_request),
-            )
-            .await
-            .with_context(|_| CreateMitoRegionSnafu {
-                region_type: METADATA_REGION_SUBDIR,
-            })?;
-
-        // create data region
-        let create_data_region_request = self.create_request_for_data_region(&request);
-        self.mito
-            .handle_request(
-                data_region_id,
-                RegionRequest::Create(create_data_region_request),
-            )
-            .await
-            .with_context(|_| CreateMitoRegionSnafu {
-                region_type: DATA_REGION_SUBDIR,
-            })?;
-
-        Ok(())
-    }
-
-    /// Check if
-    /// - internal columns are not occupied
-    fn verify_region_create_request(request: &RegionCreateRequest) -> Result<()> {
-        let name_to_index = request
-            .column_metadatas
-            .iter()
-            .enumerate()
-            .map(|(idx, metadata)| (metadata.column_schema.name.clone(), idx))
-            .collect::<HashMap<String, usize>>();
-
-        // check if internal columns are not occupied
-        ensure!(
-            !name_to_index.contains_key(DATA_SCHEMA_METRIC_NAME_COLUMN_NAME),
-            InternalColumnOccupiedSnafu {
-                column: DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
-            }
-        );
-        ensure!(
-            !name_to_index.contains_key(DATA_SCHEMA_TSID_COLUMN_NAME),
-            InternalColumnOccupiedSnafu {
-                column: DATA_SCHEMA_TSID_COLUMN_NAME,
-            }
-        );
-
-        Ok(())
-    }
-
-    /// Build data region id and metadata region id from the given region id.
-    ///
-    /// Return value: (data_region_id, metadata_region_id)
-    fn transform_region_id(region_id: RegionId) -> (RegionId, RegionId) {
-        (
-            utils::to_data_region_id(region_id),
-            utils::to_metadata_region_id(region_id),
-        )
-    }
-
-    /// Build [RegionCreateRequest] for metadata region
-    ///
-    /// This method will append [METADATA_REGION_SUBDIR] to the given `region_dir`.
-    pub fn create_request_for_metadata_region(&self, region_dir: &str) -> RegionCreateRequest {
-        // ts TIME INDEX DEFAULT 0
-        let timestamp_column_metadata = ColumnMetadata {
-            column_id: METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX as _,
-            semantic_type: SemanticType::Timestamp,
-            column_schema: ColumnSchema::new(
-                METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_default_constraint(Some(datatypes::schema::ColumnDefaultConstraint::Value(
-                Value::Timestamp(Timestamp::new_millisecond(0)),
-            )))
-            .unwrap(),
-        };
-        // key STRING PRIMARY KEY
-        let key_column_metadata = ColumnMetadata {
-            column_id: METADATA_SCHEMA_KEY_COLUMN_INDEX as _,
-            semantic_type: SemanticType::Tag,
-            column_schema: ColumnSchema::new(
-                METADATA_SCHEMA_KEY_COLUMN_NAME,
-                ConcreteDataType::string_datatype(),
-                false,
-            ),
-        };
-        // val STRING
-        let value_column_metadata = ColumnMetadata {
-            column_id: METADATA_SCHEMA_VALUE_COLUMN_INDEX as _,
-            semantic_type: SemanticType::Field,
-            column_schema: ColumnSchema::new(
-                METADATA_SCHEMA_VALUE_COLUMN_NAME,
-                ConcreteDataType::string_datatype(),
-                true,
-            ),
-        };
-
-        // concat region dir
-        let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
-
-        RegionCreateRequest {
-            engine: MITO_ENGINE_NAME.to_string(),
-            column_metadatas: vec![
-                timestamp_column_metadata,
-                key_column_metadata,
-                value_column_metadata,
-            ],
-            primary_key: vec![METADATA_SCHEMA_KEY_COLUMN_INDEX as _],
-            options: HashMap::new(),
-            region_dir: metadata_region_dir,
-        }
-    }
-
-    /// Convert [RegionCreateRequest] for data region.
-    ///
-    /// All tag columns in the original request will be converted to value columns.
-    /// Those columns real semantic type is stored in metadata region.
-    ///
-    /// This will also add internal columns to the request.
-    pub fn create_request_for_data_region(
-        &self,
-        request: &RegionCreateRequest,
-    ) -> RegionCreateRequest {
-        let mut data_region_request = request.clone();
-
-        // concat region dir
-        data_region_request.region_dir = join_dir(&request.region_dir, DATA_REGION_SUBDIR);
-
-        // convert semantic type
-        data_region_request
-            .column_metadatas
-            .iter_mut()
-            .for_each(|metadata| {
-                if metadata.semantic_type == SemanticType::Tag {
-                    metadata.semantic_type = SemanticType::Field;
-                }
-            });
-
-        // add internal columns
-        let metric_name_col = ColumnMetadata {
-            column_id: ReservedColumnId::metric_name(),
-            semantic_type: SemanticType::Tag,
-            column_schema: ColumnSchema::new(
-                DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
-                ConcreteDataType::string_datatype(),
-                false,
-            ),
-        };
-        let tsid_col = ColumnMetadata {
-            column_id: ReservedColumnId::tsid(),
-            semantic_type: SemanticType::Tag,
-            column_schema: ColumnSchema::new(
-                DATA_SCHEMA_TSID_COLUMN_NAME,
-                ConcreteDataType::int64_datatype(),
-                false,
-            ),
-        };
-        data_region_request.column_metadatas.push(metric_name_col);
-        data_region_request.column_metadatas.push(tsid_col);
-        data_region_request.primary_key =
-            vec![ReservedColumnId::metric_name(), ReservedColumnId::tsid()];
-
-        data_region_request
-    }
+    metadata_region: MetadataRegion,
+    data_region: DataRegion,
+    state: RwLock<MetricEngineState>,
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
+    use std::collections::HashMap;
+
+    use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+    use store_api::region_request::{RegionCloseRequest, RegionOpenRequest};
+
     use super::*;
     use crate::test_util::TestEnv;
 
-    #[test]
-    fn test_verify_region_create_request() {
-        // internal column is occupied
-        let request = RegionCreateRequest {
-            column_metadatas: vec![
-                ColumnMetadata {
-                    column_id: 0,
-                    semantic_type: SemanticType::Timestamp,
-                    column_schema: ColumnSchema::new(
-                        METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                },
-                ColumnMetadata {
-                    column_id: 1,
-                    semantic_type: SemanticType::Tag,
-                    column_schema: ColumnSchema::new(
-                        DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
-                        ConcreteDataType::string_datatype(),
-                        false,
-                    ),
-                },
-            ],
-            region_dir: "test_dir".to_string(),
-            engine: METRIC_ENGINE_NAME.to_string(),
-            primary_key: vec![],
-            options: HashMap::new(),
-        };
-        let result = MetricEngineInner::verify_region_create_request(&request);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Internal column __metric is reserved".to_string()
-        );
+    #[tokio::test]
+    async fn close_open_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
 
-        // valid request
-        let request = RegionCreateRequest {
-            column_metadatas: vec![
-                ColumnMetadata {
-                    column_id: 0,
-                    semantic_type: SemanticType::Timestamp,
-                    column_schema: ColumnSchema::new(
-                        METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                },
-                ColumnMetadata {
-                    column_id: 1,
-                    semantic_type: SemanticType::Tag,
-                    column_schema: ColumnSchema::new(
-                        "column1".to_string(),
-                        ConcreteDataType::string_datatype(),
-                        false,
-                    ),
-                },
-            ],
-            region_dir: "test_dir".to_string(),
+        // close physical region
+        let physical_region_id = env.default_physical_region_id();
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap();
+
+        // reopen physical region
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            primary_key: vec![],
-            options: HashMap::new(),
+            region_dir: env.default_region_dir(),
+            options: physical_region_option,
+            skip_wal_replay: false,
         };
-        let result = MetricEngineInner::verify_region_create_request(&request);
-        assert!(result.is_ok());
+        engine
+            .handle_request(physical_region_id, RegionRequest::Open(open_request))
+            .await
+            .unwrap();
+
+        // close nonexistent region
+        let nonexistent_region_id = RegionId::new(12313, 12);
+        engine
+            .handle_request(
+                nonexistent_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap_err();
+
+        // open nonexistent region won't report error
+        let invalid_open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            region_dir: env.default_region_dir(),
+            options: HashMap::new(),
+            skip_wal_replay: false,
+        };
+        engine
+            .handle_request(
+                nonexistent_region_id,
+                RegionRequest::Open(invalid_open_request),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn test_create_request_for_data_region() {
-        let request = RegionCreateRequest {
-            engine: METRIC_ENGINE_NAME.to_string(),
-            column_metadatas: vec![
-                ColumnMetadata {
-                    column_id: 0,
-                    semantic_type: SemanticType::Timestamp,
-                    column_schema: ColumnSchema::new(
-                        "timestamp",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                },
-                ColumnMetadata {
-                    column_id: 1,
-                    semantic_type: SemanticType::Tag,
-                    column_schema: ColumnSchema::new(
-                        "tag",
-                        ConcreteDataType::string_datatype(),
-                        false,
-                    ),
-                },
-            ],
-            primary_key: vec![0],
-            options: HashMap::new(),
-            region_dir: "test_dir".to_string(),
-        };
-
+    async fn test_role() {
         let env = TestEnv::new().await;
-        let engine = MetricEngineInner { mito: env.mito() };
-        let data_region_request = engine.create_request_for_data_region(&request);
+        env.init_metric_region().await;
 
-        assert_eq!(
-            data_region_request.region_dir,
-            "/test_dir/data/".to_string()
-        );
-        assert_eq!(data_region_request.column_metadatas.len(), 4);
-        assert_eq!(
-            data_region_request.primary_key,
-            vec![ReservedColumnId::metric_name(), ReservedColumnId::tsid()]
-        );
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+
+        assert!(env.metric().role(logical_region_id).is_none());
+        assert!(env.metric().role(physical_region_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_region_disk_usage() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+
+        assert!(env
+            .metric()
+            .region_disk_usage(logical_region_id)
+            .await
+            .is_none());
+        assert!(env
+            .metric()
+            .region_disk_usage(physical_region_id)
+            .await
+            .is_some());
     }
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -26,7 +27,7 @@ use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameValue};
 use common_meta::key::table_region::{TableRegionKey, TableRegionValue};
 use common_meta::key::table_route::{TableRouteKey, TableRouteValue as NextTableRouteValue};
-use common_meta::key::{RegionDistribution, TableMetaKey};
+use common_meta::key::{RegionDistribution, TableMetaKey, TableMetaValue};
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::PaginationStream;
@@ -69,14 +70,14 @@ impl UpgradeCommand {
                 etcd_addr: &self.etcd_addr,
             })?;
         let tool = MigrateTableMetadata {
-            etcd_store: EtcdStore::with_etcd_client(client),
+            etcd_store: EtcdStore::with_etcd_client(client, 128),
             dryrun: self.dryrun,
             skip_catalog_keys: self.skip_catalog_keys,
             skip_table_global_keys: self.skip_table_global_keys,
             skip_schema_keys: self.skip_schema_keys,
             skip_table_route_keys: self.skip_table_route_keys,
         };
-        Ok(Instance::Tool(Box::new(tool)))
+        Ok(Instance::new(Box::new(tool)))
     }
 }
 
@@ -152,7 +153,7 @@ impl MigrateTableMetadata {
         )
         .unwrap();
 
-        let new_table_value = NextTableRouteValue::new(table_route.region_routes);
+        let new_table_value = NextTableRouteValue::physical(table_route.region_routes);
 
         let table_id = table_route.table.id as u32;
         let new_key = TableRouteKey::new(table_id);
@@ -395,6 +396,9 @@ impl MigrateTableMetadata {
         let region_distribution: RegionDistribution =
             value.regions_id_map.clone().into_iter().collect();
 
+        // TODO(niebayes): properly fetch or construct wal options.
+        let region_wal_options = HashMap::default();
+
         let datanode_table_kvs = region_distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
@@ -409,6 +413,7 @@ impl MigrateTableMetadata {
                             engine: engine.to_string(),
                             region_storage_path: region_storage_path.clone(),
                             region_options: (&value.table_info.meta.options).into(),
+                            region_wal_options: region_wal_options.clone(),
                         },
                     ),
                 )

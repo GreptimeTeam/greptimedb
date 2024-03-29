@@ -25,7 +25,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: arduino/setup-protoc@v1
+    - uses: arduino/setup-protoc@v3
 
     - name: Install rust toolchain
       uses: dtolnay/rust-toolchain@master
@@ -38,7 +38,7 @@ runs:
       uses: Swatinem/rust-cache@v2
 
     - name: Install Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
@@ -62,15 +62,15 @@ runs:
 
     - name: Upload sqlness logs
       if: ${{ failure() }} # Only upload logs when the integration tests failed.
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: sqlness-logs
-        path: ${{ runner.temp }}/greptime-*.log
+        path: /tmp/greptime-*.log
         retention-days: 3
 
     - name: Build greptime binary
       shell: pwsh
-      run: cargo build --profile ${{ inputs.cargo-profile }} --features ${{ inputs.features }} --target ${{ inputs.arch }}
+      run: cargo build --profile ${{ inputs.cargo-profile }} --features ${{ inputs.features }} --target ${{ inputs.arch }} --bin greptime
 
     - name: Upload artifacts
       uses: ./.github/actions/upload-artifacts

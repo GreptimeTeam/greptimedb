@@ -29,7 +29,7 @@ use client::api::v1::column::Values;
 use client::api::v1::{
     Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertRequest, InsertRequests, SemanticType,
 };
-use client::{Client, Database, Output, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use futures_util::TryStreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -152,6 +152,7 @@ fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
                 .unwrap_or_default(),
             datatype: datatype.into(),
             semantic_type: semantic_type as i32,
+            ..Default::default()
         };
         columns.push(column);
     }
@@ -257,7 +258,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
         catalog_name: CATALOG_NAME.to_string(),
         schema_name: SCHEMA_NAME.to_string(),
         table_name: table_name.to_string(),
-        desc: "".to_string(),
+        desc: String::default(),
         column_defs: vec![
             ColumnDef {
                 name: "VendorID".to_string(),
@@ -266,6 +267,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Tag as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "tpep_pickup_datetime".to_string(),
@@ -274,6 +276,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Timestamp as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "tpep_dropoff_datetime".to_string(),
@@ -282,6 +285,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "passenger_count".to_string(),
@@ -290,6 +294,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "trip_distance".to_string(),
@@ -298,6 +303,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "RatecodeID".to_string(),
@@ -306,6 +312,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "store_and_fwd_flag".to_string(),
@@ -314,6 +321,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "PULocationID".to_string(),
@@ -322,6 +330,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "DOLocationID".to_string(),
@@ -330,6 +339,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "payment_type".to_string(),
@@ -338,6 +348,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "fare_amount".to_string(),
@@ -346,6 +357,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "extra".to_string(),
@@ -354,6 +366,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "mta_tax".to_string(),
@@ -362,6 +375,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "tip_amount".to_string(),
@@ -370,6 +384,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "tolls_amount".to_string(),
@@ -378,6 +393,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "improvement_surcharge".to_string(),
@@ -386,6 +402,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "total_amount".to_string(),
@@ -394,6 +411,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "congestion_surcharge".to_string(),
@@ -402,6 +420,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "airport_fee".to_string(),
@@ -410,6 +429,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
         ],
         time_index: "tpep_pickup_datetime".to_string(),
@@ -482,9 +502,9 @@ async fn do_query(num_iter: usize, db: &Database, table_name: &str) {
         for i in 0..num_iter {
             let now = Instant::now();
             let res = db.sql(&query).await.unwrap();
-            match res {
-                Output::AffectedRows(_) | Output::RecordBatches(_) => (),
-                Output::Stream(stream) => {
+            match res.data {
+                OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => (),
+                OutputData::Stream(stream) => {
                     stream.try_collect::<Vec<_>>().await.unwrap();
                 }
             }

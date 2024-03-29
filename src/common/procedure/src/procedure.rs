@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -24,6 +25,8 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::watcher::Watcher;
+
+pub type Output = Arc<dyn Any + Send + Sync>;
 
 /// Procedure execution status.
 #[derive(Debug)]
@@ -40,7 +43,7 @@ pub enum Status {
         persist: bool,
     },
     /// the procedure is done.
-    Done,
+    Done { output: Option<Output> },
 }
 
 impl Status {
@@ -49,13 +52,45 @@ impl Status {
         Status::Executing { persist }
     }
 
+    /// Returns a [Status::Done] without output.
+    pub fn done() -> Status {
+        Status::Done { output: None }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Downcasts [Status::Done]'s output to &T
+    ///  #Panic:
+    /// - if [Status] is not the [Status::Done].
+    /// - if the output is None.
+    pub fn downcast_output_ref<T: 'static>(&self) -> Option<&T> {
+        if let Status::Done { output } = self {
+            output
+                .as_ref()
+                .expect("Try to downcast the output of Status::Done, but the output is None")
+                .downcast_ref()
+        } else {
+            panic!("Expected the Status::Done, but got: {:?}", self)
+        }
+    }
+
+    /// Returns a [Status::Done] with output.
+    pub fn done_with_output<T: Any + Send + Sync>(output: T) -> Status {
+        Status::Done {
+            output: Some(Arc::new(output)),
+        }
+    }
+    /// Returns `true` if the procedure is done.
+    pub fn is_done(&self) -> bool {
+        matches!(self, Status::Done { .. })
+    }
+
     /// Returns `true` if the procedure needs the framework to persist its intermediate state.
     pub fn need_persist(&self) -> bool {
         // If the procedure is done, the framework doesn't need to persist the procedure
         // anymore. It only needs to mark the procedure as committed.
         match self {
             Status::Executing { persist } | Status::Suspended { persist, .. } => *persist,
-            Status::Done => false,
+            Status::Done { .. } => false,
         }
     }
 }
@@ -81,7 +116,7 @@ pub struct Context {
 
 /// A `Procedure` represents an operation or a set of operations to be performed step-by-step.
 #[async_trait]
-pub trait Procedure: Send + Sync {
+pub trait Procedure: Send {
     /// Type name of the procedure.
     fn type_name(&self) -> &str;
 
@@ -116,22 +151,49 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum StringKey {
+    Share(String),
+    Exclusive(String),
+}
+
 /// Keys to identify required locks.
 ///
 /// [LockKey] always sorts keys lexicographically so that they can be acquired
 /// in the same order.
-// Most procedures should only acquire 1 ~ 2 locks so we use smallvec to hold keys.
+/// Most procedures should only acquire 1 ~ 2 locks so we use smallvec to hold keys.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LockKey(SmallVec<[String; 2]>);
+pub struct LockKey(SmallVec<[StringKey; 2]>);
+
+impl StringKey {
+    pub fn into_string(self) -> String {
+        match self {
+            StringKey::Share(s) => s,
+            StringKey::Exclusive(s) => s,
+        }
+    }
+
+    pub fn as_string(&self) -> &String {
+        match self {
+            StringKey::Share(s) => s,
+            StringKey::Exclusive(s) => s,
+        }
+    }
+}
 
 impl LockKey {
     /// Returns a new [LockKey] with only one key.
-    pub fn single(key: impl Into<String>) -> LockKey {
+    pub fn single(key: impl Into<StringKey>) -> LockKey {
         LockKey(smallvec![key.into()])
     }
 
+    /// Returns a new [LockKey] with only one key.
+    pub fn single_exclusive(key: impl Into<String>) -> LockKey {
+        LockKey(smallvec![StringKey::Exclusive(key.into())])
+    }
+
     /// Returns a new [LockKey] with keys from specific `iter`.
-    pub fn new(iter: impl IntoIterator<Item = String>) -> LockKey {
+    pub fn new(iter: impl IntoIterator<Item = StringKey>) -> LockKey {
         let mut vec: SmallVec<_> = iter.into_iter().collect();
         vec.sort();
         // Dedup keys to avoid acquiring the same key multiple times.
@@ -139,14 +201,14 @@ impl LockKey {
         LockKey(vec)
     }
 
-    /// Returns the keys to lock.
-    pub fn keys_to_lock(&self) -> impl Iterator<Item = &String> {
-        self.0.iter()
+    /// Returns a new [LockKey] with keys from specific `iter`.
+    pub fn new_exclusive(iter: impl IntoIterator<Item = String>) -> LockKey {
+        Self::new(iter.into_iter().map(StringKey::Exclusive))
     }
 
-    /// Returns the keys to unlock.
-    pub fn keys_to_unlock(&self) -> impl Iterator<Item = &String> {
-        self.0.iter().rev()
+    /// Returns the keys to lock.
+    pub fn keys_to_lock(&self) -> impl Iterator<Item = &StringKey> {
+        self.0.iter()
     }
 }
 
@@ -224,7 +286,7 @@ pub enum ProcedureState {
     #[default]
     Running,
     /// The procedure is finished.
-    Done,
+    Done { output: Option<Output> },
     /// The procedure is failed and can be retried.
     Retrying { error: Arc<Error> },
     /// The procedure is failed and cannot proceed anymore.
@@ -249,7 +311,7 @@ impl ProcedureState {
 
     /// Returns true if the procedure state is done.
     pub fn is_done(&self) -> bool {
-        matches!(self, ProcedureState::Done)
+        matches!(self, ProcedureState::Done { .. })
     }
 
     /// Returns true if the procedure state failed.
@@ -333,27 +395,32 @@ mod tests {
         };
         assert!(status.need_persist());
 
-        let status = Status::Done;
+        let status = Status::done();
         assert!(!status.need_persist());
     }
 
     #[test]
     fn test_lock_key() {
         let entity = "catalog.schema.my_table";
-        let key = LockKey::single(entity);
-        assert_eq!(vec![entity], key.keys_to_lock().collect::<Vec<_>>());
-        assert_eq!(vec![entity], key.keys_to_unlock().collect::<Vec<_>>());
+        let key = LockKey::single_exclusive(entity);
+        assert_eq!(
+            vec![&StringKey::Exclusive(entity.to_string())],
+            key.keys_to_lock().collect::<Vec<_>>()
+        );
 
-        let key = LockKey::new([
+        let key = LockKey::new_exclusive([
             "b".to_string(),
             "c".to_string(),
             "a".to_string(),
             "c".to_string(),
         ]);
-        assert_eq!(vec!["a", "b", "c"], key.keys_to_lock().collect::<Vec<_>>());
         assert_eq!(
-            vec!["c", "b", "a"],
-            key.keys_to_unlock().collect::<Vec<_>>()
+            vec![
+                &StringKey::Exclusive("a".to_string()),
+                &StringKey::Exclusive("b".to_string()),
+                &StringKey::Exclusive("c".to_string())
+            ],
+            key.keys_to_lock().collect::<Vec<_>>()
         );
     }
 
@@ -383,7 +450,7 @@ mod tests {
     fn test_procedure_state() {
         assert!(ProcedureState::Running.is_running());
         assert!(ProcedureState::Running.error().is_none());
-        assert!(ProcedureState::Done.is_done());
+        assert!(ProcedureState::Done { output: None }.is_done());
 
         let state = ProcedureState::failed(Arc::new(Error::external(MockError::new(
             StatusCode::Unexpected,

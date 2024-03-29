@@ -14,10 +14,10 @@
 
 use std::fmt;
 
-use strum::{AsRefStr, EnumString};
+use strum::{AsRefStr, EnumIter, EnumString, FromRepr};
 
 /// Common status code for public API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, AsRefStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, AsRefStr, EnumIter, FromRepr)]
 pub enum StatusCode {
     // ====== Begin of common status code ==============
     /// Success.
@@ -59,11 +59,17 @@ pub enum StatusCode {
     RegionNotFound = 4005,
     RegionAlreadyExists = 4006,
     RegionReadonly = 4007,
+    RegionNotReady = 4008,
+    // If mutually exclusive operations are reached at the same time,
+    // only one can be executed, another one will get region busy.
+    RegionBusy = 4009,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
     /// Storage is temporarily unable to handle the request
     StorageUnavailable = 5000,
+    /// Request is outdated, e.g., version mismatch
+    RequestOutdated = 5001,
     // ====== End of storage related status code =======
 
     // ====== Begin of server related status code =====
@@ -103,7 +109,9 @@ impl StatusCode {
         match self {
             StatusCode::StorageUnavailable
             | StatusCode::RuntimeResourcesExhausted
-            | StatusCode::Internal => true,
+            | StatusCode::Internal
+            | StatusCode::RegionNotReady
+            | StatusCode::RegionBusy => true,
 
             StatusCode::Success
             | StatusCode::Unknown
@@ -129,7 +137,8 @@ impl StatusCode {
             | StatusCode::AuthHeaderNotFound
             | StatusCode::InvalidAuthHeader
             | StatusCode::AccessDenied
-            | StatusCode::PermissionDenied => false,
+            | StatusCode::PermissionDenied
+            | StatusCode::RequestOutdated => false,
         }
     }
 
@@ -138,7 +147,6 @@ impl StatusCode {
     pub fn should_log_error(&self) -> bool {
         match self {
             StatusCode::Unknown
-            | StatusCode::Unsupported
             | StatusCode::Unexpected
             | StatusCode::Internal
             | StatusCode::Cancelled
@@ -147,11 +155,14 @@ impl StatusCode {
             | StatusCode::StorageUnavailable
             | StatusCode::RuntimeResourcesExhausted => true,
             StatusCode::Success
+            | StatusCode::Unsupported
             | StatusCode::InvalidArguments
             | StatusCode::InvalidSyntax
             | StatusCode::TableAlreadyExists
             | StatusCode::TableNotFound
             | StatusCode::RegionNotFound
+            | StatusCode::RegionNotReady
+            | StatusCode::RegionBusy
             | StatusCode::RegionAlreadyExists
             | StatusCode::RegionReadonly
             | StatusCode::TableColumnNotFound
@@ -164,51 +175,13 @@ impl StatusCode {
             | StatusCode::AuthHeaderNotFound
             | StatusCode::InvalidAuthHeader
             | StatusCode::AccessDenied
-            | StatusCode::PermissionDenied => false,
+            | StatusCode::PermissionDenied
+            | StatusCode::RequestOutdated => false,
         }
     }
 
     pub fn from_u32(value: u32) -> Option<Self> {
-        match value {
-            v if v == StatusCode::Success as u32 => Some(StatusCode::Success),
-            v if v == StatusCode::Unknown as u32 => Some(StatusCode::Unknown),
-            v if v == StatusCode::Unsupported as u32 => Some(StatusCode::Unsupported),
-            v if v == StatusCode::Unexpected as u32 => Some(StatusCode::Unexpected),
-            v if v == StatusCode::Internal as u32 => Some(StatusCode::Internal),
-            v if v == StatusCode::InvalidArguments as u32 => Some(StatusCode::InvalidArguments),
-            v if v == StatusCode::Cancelled as u32 => Some(StatusCode::Cancelled),
-            v if v == StatusCode::InvalidSyntax as u32 => Some(StatusCode::InvalidSyntax),
-            v if v == StatusCode::PlanQuery as u32 => Some(StatusCode::PlanQuery),
-            v if v == StatusCode::EngineExecuteQuery as u32 => Some(StatusCode::EngineExecuteQuery),
-            v if v == StatusCode::TableAlreadyExists as u32 => Some(StatusCode::TableAlreadyExists),
-            v if v == StatusCode::TableNotFound as u32 => Some(StatusCode::TableNotFound),
-            v if v == StatusCode::RegionNotFound as u32 => Some(StatusCode::RegionNotFound),
-            v if v == StatusCode::RegionAlreadyExists as u32 => {
-                Some(StatusCode::RegionAlreadyExists)
-            }
-            v if v == StatusCode::RegionReadonly as u32 => Some(StatusCode::RegionReadonly),
-            v if v == StatusCode::TableColumnNotFound as u32 => {
-                Some(StatusCode::TableColumnNotFound)
-            }
-            v if v == StatusCode::TableColumnExists as u32 => Some(StatusCode::TableColumnExists),
-            v if v == StatusCode::DatabaseNotFound as u32 => Some(StatusCode::DatabaseNotFound),
-            v if v == StatusCode::StorageUnavailable as u32 => Some(StatusCode::StorageUnavailable),
-            v if v == StatusCode::RuntimeResourcesExhausted as u32 => {
-                Some(StatusCode::RuntimeResourcesExhausted)
-            }
-            v if v == StatusCode::RateLimited as u32 => Some(StatusCode::RateLimited),
-            v if v == StatusCode::UserNotFound as u32 => Some(StatusCode::UserNotFound),
-            v if v == StatusCode::UnsupportedPasswordType as u32 => {
-                Some(StatusCode::UnsupportedPasswordType)
-            }
-            v if v == StatusCode::UserPasswordMismatch as u32 => {
-                Some(StatusCode::UserPasswordMismatch)
-            }
-            v if v == StatusCode::AuthHeaderNotFound as u32 => Some(StatusCode::AuthHeaderNotFound),
-            v if v == StatusCode::InvalidAuthHeader as u32 => Some(StatusCode::InvalidAuthHeader),
-            v if v == StatusCode::AccessDenied as u32 => Some(StatusCode::AccessDenied),
-            _ => None,
-        }
+        StatusCode::from_repr(value as usize)
     }
 }
 
@@ -221,6 +194,8 @@ impl fmt::Display for StatusCode {
 
 #[cfg(test)]
 mod tests {
+    use strum::IntoEnumIterator;
+
     use super::*;
 
     fn assert_status_code_display(code: StatusCode, msg: &str) {
@@ -232,6 +207,16 @@ mod tests {
     fn test_display_status_code() {
         assert_status_code_display(StatusCode::Unknown, "Unknown");
         assert_status_code_display(StatusCode::TableAlreadyExists, "TableAlreadyExists");
+    }
+
+    #[test]
+    fn test_from_u32() {
+        for code in StatusCode::iter() {
+            let num = code as u32;
+            assert_eq!(StatusCode::from_u32(num), Some(code));
+        }
+
+        assert_eq!(StatusCode::from_u32(10000), None);
     }
 
     #[test]

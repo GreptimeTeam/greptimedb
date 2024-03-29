@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use clap::Parser;
 use common_telemetry::logging;
 use meta_srv::bootstrap::MetaSrvInstance;
@@ -21,21 +22,34 @@ use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartMetaServerSnafu};
-use crate::options::{Options, TopLevelOptions};
+use crate::options::{CliOptions, Options};
+use crate::App;
 
 pub struct Instance {
     instance: MetaSrvInstance,
 }
 
 impl Instance {
-    pub async fn start(&mut self) -> Result<()> {
+    fn new(instance: MetaSrvInstance) -> Self {
+        Self { instance }
+    }
+}
+
+#[async_trait]
+impl App for Instance {
+    fn name(&self) -> &str {
+        "greptime-metasrv"
+    }
+
+    async fn start(&mut self) -> Result<()> {
         plugins::start_meta_srv_plugins(self.instance.plugins())
             .await
             .context(StartMetaServerSnafu)?;
+
         self.instance.start().await.context(StartMetaServerSnafu)
     }
 
-    pub async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         self.instance
             .shutdown()
             .await
@@ -54,8 +68,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        self.subcmd.load_options(top_level_opts)
+    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+        self.subcmd.load_options(cli_options)
     }
 }
 
@@ -71,9 +85,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Start(cmd) => cmd.load_options(cli_options),
         }
     }
 }
@@ -100,22 +114,31 @@ struct StartCommand {
     http_timeout: Option<u64>,
     #[clap(long, default_value = "GREPTIMEDB_METASRV")]
     env_prefix: String,
+    /// The working home directory of this metasrv instance.
+    #[clap(long)]
+    data_home: Option<String>,
+    /// If it's not empty, the metasrv will store all data with this key prefix.
+    #[clap(long, default_value = "")]
+    store_key_prefix: String,
+    /// The max operations per txn
+    #[clap(long)]
+    max_txn_ops: Option<usize>,
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         let mut opts: MetaSrvOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            None,
+            MetaSrvOptions::env_list_keys(),
         )?;
 
-        if let Some(dir) = top_level_opts.log_dir {
-            opts.logging.dir = dir;
+        if let Some(dir) = &cli_options.log_dir {
+            opts.logging.dir = dir.clone();
         }
 
-        if top_level_opts.log_level.is_some() {
-            opts.logging.level = top_level_opts.log_level;
+        if cli_options.log_level.is_some() {
+            opts.logging.level = cli_options.log_level.clone();
         }
 
         if let Some(addr) = &self.bind_addr {
@@ -152,6 +175,18 @@ impl StartCommand {
             opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
+        if let Some(data_home) = &self.data_home {
+            opts.data_home = data_home.clone();
+        }
+
+        if !self.store_key_prefix.is_empty() {
+            opts.store_key_prefix = self.store_key_prefix.clone()
+        }
+
+        if let Some(max_txn_ops) = self.max_txn_ops {
+            opts.max_txn_ops = max_txn_ops;
+        }
+
         // Disable dashboard in metasrv.
         opts.http.disable_dashboard = true;
 
@@ -166,11 +201,16 @@ impl StartCommand {
         logging::info!("MetaSrv start command: {:#?}", self);
         logging::info!("MetaSrv options: {:#?}", opts);
 
-        let instance = MetaSrvInstance::new(opts, plugins)
+        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
+            .await
+            .context(error::BuildMetaServerSnafu)?;
+        let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
+
+        let instance = MetaSrvInstance::new(opts, plugins, metasrv)
             .await
             .context(error::BuildMetaServerSnafu)?;
 
-        Ok(Instance { instance })
+        Ok(Instance::new(instance))
     }
 }
 
@@ -194,8 +234,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Metasrv(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
-        else {
+        let Options::Metasrv(options) = cmd.load_options(&CliOptions::default()).unwrap() else {
             unreachable!()
         };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
@@ -216,6 +255,12 @@ mod tests {
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
+            
+            [failure_detector]
+            threshold = 8.0
+            min_std_deviation = "100ms"
+            acceptable_heartbeat_pause = "3000ms"
+            first_heartbeat_estimate = "1000ms"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -224,8 +269,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Metasrv(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
-        else {
+        let Options::Metasrv(options) = cmd.load_options(&CliOptions::default()).unwrap() else {
             unreachable!()
         };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
@@ -234,10 +278,29 @@ mod tests {
         assert_eq!(SelectorType::LeaseBased, options.selector);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
+        assert_eq!(8.0, options.failure_detector.threshold);
+        assert_eq!(
+            100.0,
+            options.failure_detector.min_std_deviation.as_millis() as f32
+        );
+        assert_eq!(
+            3000,
+            options
+                .failure_detector
+                .acceptable_heartbeat_pause
+                .as_millis()
+        );
+        assert_eq!(
+            1000,
+            options
+                .failure_detector
+                .first_heartbeat_estimate
+                .as_millis()
+        );
     }
 
     #[test]
-    fn test_top_level_options() {
+    fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
             bind_addr: Some("127.0.0.1:3002".to_string()),
             server_addr: Some("127.0.0.1:3002".to_string()),
@@ -247,9 +310,12 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(TopLevelOptions {
+            .load_options(&CliOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
+
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: None,
             })
             .unwrap();
 
@@ -308,8 +374,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Metasrv(opts) =
-                    command.load_options(TopLevelOptions::default()).unwrap()
+                let Options::Metasrv(opts) = command.load_options(&CliOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };

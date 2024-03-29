@@ -12,24 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{QueryRequest, RegionRequest, RegionResponse};
+use std::sync::Arc;
+
+use api::v1::region::{QueryRequest, RegionRequest};
 use api::v1::ResponseHeader;
+use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
 use async_stream::stream;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
-use common_meta::datanode_manager::{AffectedRows, Datanode};
+use common_meta::datanode_manager::{Datanode, HandleResponse};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
+use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
 use snafu::{location, Location, OptionExt, ResultExt};
 use tokio_stream::StreamExt;
 
-use crate::error::Error::RegionServer;
 use crate::error::{
     self, ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
     MissingFieldSnafu, Result, ServerSnafu,
@@ -43,9 +46,9 @@ pub struct RegionRequester {
 
 #[async_trait]
 impl Datanode for RegionRequester {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<HandleResponse> {
         self.handle_inner(request).await.map_err(|err| {
-            if matches!(err, RegionServer { .. }) {
+            if err.should_retry() {
                 meta_error::Error::RetryLater {
                     source: BoxedError::new(err),
                 }
@@ -120,32 +123,49 @@ impl RegionRequester {
             .fail();
         };
 
+        let metrics = Arc::new(ArcSwapOption::from(None));
+        let metrics_ref = metrics.clone();
+
+        let tracing_context = TracingContext::from_current_span();
+
         let stream = Box::pin(stream!({
+            let _span = tracing_context.attach(common_telemetry::tracing::info_span!(
+                "poll_flight_data_stream"
+            ));
             while let Some(flight_message) = flight_message_stream.next().await {
                 let flight_message = flight_message
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
-                let FlightMessage::Recordbatch(record_batch) = flight_message else {
-                    yield IllegalFlightMessagesSnafu {
+
+                match flight_message {
+                    FlightMessage::Recordbatch(record_batch) => yield Ok(record_batch),
+                    FlightMessage::Metrics(s) => {
+                        let m = serde_json::from_str(&s).ok().map(Arc::new);
+                        metrics_ref.swap(m);
+                        break;
+                    }
+                    _ => {
+                        yield IllegalFlightMessagesSnafu {
                             reason: "A Schema message must be succeeded exclusively by a set of RecordBatch messages"
                         }
                         .fail()
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu);
-                    break;
-                };
-                yield Ok(record_batch);
+                        break;
+                    }
+                }
             }
         }));
-        let record_batch_stream = RecordBatchStreamAdaptor {
+        let record_batch_stream = RecordBatchStreamWrapper {
             schema,
             stream,
             output_ordering: None,
+            metrics,
         };
         Ok(Box::pin(record_batch_stream))
     }
 
-    async fn handle_inner(&self, request: RegionRequest) -> Result<AffectedRows> {
+    async fn handle_inner(&self, request: RegionRequest) -> Result<HandleResponse> {
         let request_type = request
             .body
             .as_ref()
@@ -158,10 +178,7 @@ impl RegionRequester {
 
         let mut client = self.client.raw_region_client()?;
 
-        let RegionResponse {
-            header,
-            affected_rows,
-        } = client
+        let response = client
             .handle(request)
             .await
             .map_err(|e| {
@@ -175,19 +192,20 @@ impl RegionRequester {
             })?
             .into_inner();
 
-        check_response_header(header)?;
+        check_response_header(&response.header)?;
 
-        Ok(affected_rows)
+        Ok(HandleResponse::from_region_response(response))
     }
 
-    pub async fn handle(&self, request: RegionRequest) -> Result<AffectedRows> {
+    pub async fn handle(&self, request: RegionRequest) -> Result<HandleResponse> {
         self.handle_inner(request).await
     }
 }
 
-pub fn check_response_header(header: Option<ResponseHeader>) -> Result<()> {
+pub fn check_response_header(header: &Option<ResponseHeader>) -> Result<()> {
     let status = header
-        .and_then(|header| header.status)
+        .as_ref()
+        .and_then(|header| header.status.as_ref())
         .context(IllegalDatabaseResponseSnafu {
             err_msg: "either response header or status is missing",
         })?;
@@ -201,7 +219,7 @@ pub fn check_response_header(header: Option<ResponseHeader>) -> Result<()> {
             })?;
         ServerSnafu {
             code,
-            msg: status.err_msg,
+            msg: status.err_msg.clone(),
         }
         .fail()
     }
@@ -216,30 +234,30 @@ mod test {
 
     #[test]
     fn test_check_response_header() {
-        let result = check_response_header(None);
+        let result = check_response_header(&None);
         assert!(matches!(
             result.unwrap_err(),
             IllegalDatabaseResponse { .. }
         ));
 
-        let result = check_response_header(Some(ResponseHeader { status: None }));
+        let result = check_response_header(&Some(ResponseHeader { status: None }));
         assert!(matches!(
             result.unwrap_err(),
             IllegalDatabaseResponse { .. }
         ));
 
-        let result = check_response_header(Some(ResponseHeader {
+        let result = check_response_header(&Some(ResponseHeader {
             status: Some(PbStatus {
                 status_code: StatusCode::Success as u32,
-                err_msg: "".to_string(),
+                err_msg: String::default(),
             }),
         }));
         assert!(result.is_ok());
 
-        let result = check_response_header(Some(ResponseHeader {
+        let result = check_response_header(&Some(ResponseHeader {
             status: Some(PbStatus {
                 status_code: u32::MAX,
-                err_msg: "".to_string(),
+                err_msg: String::default(),
             }),
         }));
         assert!(matches!(
@@ -247,7 +265,7 @@ mod test {
             IllegalDatabaseResponse { .. }
         ));
 
-        let result = check_response_header(Some(ResponseHeader {
+        let result = check_response_header(&Some(ResponseHeader {
             status: Some(PbStatus {
                 status_code: StatusCode::Internal as u32,
                 err_msg: "blabla".to_string(),

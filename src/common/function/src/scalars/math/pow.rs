@@ -25,8 +25,8 @@ use datatypes::with_match_primitive_type_id;
 use num::traits::Pow;
 use num_traits::AsPrimitive;
 
+use crate::function::{Function, FunctionContext};
 use crate::scalars::expression::{scalar_binary_op, EvalContext};
-use crate::scalars::function::{Function, FunctionContext};
 
 #[derive(Clone, Debug, Default)]
 pub struct PowFunction;
@@ -83,6 +83,7 @@ mod tests {
     use datatypes::vectors::{Float32Vector, Int8Vector};
 
     use super::*;
+    use crate::function::FunctionContext;
     #[test]
     fn test_pow_function() {
         let pow = PowFunction;

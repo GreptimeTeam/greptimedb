@@ -12,14 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::print_stdout)]
+
 use std::path::PathBuf;
 
-use clap::Parser;
-use env::Env;
+use clap::{Parser, ValueEnum};
+use env::{Env, WalConfig};
 use sqlness::{ConfigBuilder, Runner};
 
 mod env;
 mod util;
+
+#[derive(ValueEnum, Debug, Clone)]
+#[clap(rename_all = "snake_case")]
+enum Wal {
+    RaftEngine,
+    Kafka,
+}
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -41,9 +50,23 @@ struct Args {
     #[clap(short, long, default_value = ".*")]
     test_filter: String,
 
-    /// Address of the server
+    /// Address of the server.
     #[clap(short, long)]
     server_addr: Option<String>,
+
+    /// The type of Wal.
+    #[clap(short, long, default_value = "raft_engine")]
+    wal: Wal,
+
+    /// The kafka wal broker endpoints. This config will suppress sqlness runner
+    /// from starting a kafka cluster, and use the given endpoint as kafka backend.
+    #[clap(short, long)]
+    kafka_wal_broker_endpoints: Option<String>,
+
+    /// The path to the directory where GreptimeDB's binaries resides.
+    /// If not set, sqlness will build GreptimeDB on the fly.
+    #[clap(long)]
+    bins_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -63,6 +86,22 @@ async fn main() {
         .env_config_file(args.env_config_file)
         .build()
         .unwrap();
-    let runner = Runner::new(config, Env::new(data_home, args.server_addr));
+
+    let wal = match args.wal {
+        Wal::RaftEngine => WalConfig::RaftEngine,
+        Wal::Kafka => WalConfig::Kafka {
+            needs_kafka_cluster: args.kafka_wal_broker_endpoints.is_none(),
+            broker_endpoints: args
+                .kafka_wal_broker_endpoints
+                .map(|s| s.split(',').map(|s| s.to_string()).collect())
+                // otherwise default to the same port in `kafka-cluster.yml`
+                .unwrap_or(vec!["127.0.0.1:9092".to_string()]),
+        },
+    };
+
+    let runner = Runner::new(
+        config,
+        Env::new(data_home, args.server_addr, wal, args.bins_dir),
+    );
     runner.run().await.unwrap();
 }

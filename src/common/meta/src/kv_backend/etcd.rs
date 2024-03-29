@@ -33,42 +33,22 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
-pub struct KvPair<'a>(&'a etcd_client::KeyValue);
-
-impl<'a> KvPair<'a> {
-    /// Creates a `KvPair` from etcd KeyValue
-    #[inline]
-    pub fn new(kv: &'a etcd_client::KeyValue) -> Self {
-        Self(kv)
-    }
-
-    #[inline]
-    pub fn from_etcd_kv(kv: &etcd_client::KeyValue) -> KeyValue {
-        KeyValue::from(KvPair::new(kv))
-    }
+fn convert_key_value(kv: etcd_client::KeyValue) -> KeyValue {
+    let (key, value) = kv.into_key_value();
+    KeyValue { key, value }
 }
-
-impl<'a> From<KvPair<'a>> for KeyValue {
-    fn from(kv: KvPair<'a>) -> Self {
-        Self {
-            key: kv.0.key().to_vec(),
-            value: kv.0.value().to_vec(),
-        }
-    }
-}
-
-// Maximum number of operations permitted in a transaction.
-// The etcd default configuration's `--max-txn-ops` is 128.
-//
-// For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
-const MAX_TXN_SIZE: usize = 128;
 
 pub struct EtcdStore {
     client: Client,
+    // Maximum number of operations permitted in a transaction.
+    // The etcd default configuration's `--max-txn-ops` is 128.
+    //
+    // For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
+    max_txn_ops: usize,
 }
 
 impl EtcdStore {
-    pub async fn with_endpoints<E, S>(endpoints: S) -> Result<KvBackendRef>
+    pub async fn with_endpoints<E, S>(endpoints: S, max_txn_ops: usize) -> Result<KvBackendRef>
     where
         E: AsRef<str>,
         S: AsRef<[E]>,
@@ -77,16 +57,23 @@ impl EtcdStore {
             .await
             .context(error::ConnectEtcdSnafu)?;
 
-        Ok(Self::with_etcd_client(client))
+        Ok(Self::with_etcd_client(client, max_txn_ops))
     }
 
-    pub fn with_etcd_client(client: Client) -> KvBackendRef {
-        Arc::new(Self { client })
+    pub fn with_etcd_client(client: Client, max_txn_ops: usize) -> KvBackendRef {
+        Arc::new(Self {
+            client,
+            max_txn_ops,
+        })
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
-        if txn_ops.len() < MAX_TXN_SIZE {
+        let max_txn_ops = self.max_txn_ops();
+        if txn_ops.len() < max_txn_ops {
             // fast path
+            let _timer = METRIC_META_TXN_REQUEST
+                .with_label_values(&["etcd", "txn"])
+                .start_timer();
             let txn = Txn::new().and_then(txn_ops);
             let txn_res = self
                 .client
@@ -98,8 +85,11 @@ impl EtcdStore {
         }
 
         let txns = txn_ops
-            .chunks(MAX_TXN_SIZE)
+            .chunks(max_txn_ops)
             .map(|part| async move {
+                let _timer = METRIC_META_TXN_REQUEST
+                    .with_label_values(&["etcd", "txn"])
+                    .start_timer();
                 let txn = Txn::new().and_then(part);
                 self.client.kv_client().txn(txn).await
             })
@@ -124,7 +114,7 @@ impl KvBackend for EtcdStore {
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         let Get { key, options } = req.try_into()?;
 
-        let res = self
+        let mut res = self
             .client
             .kv_client()
             .get(key, options)
@@ -132,9 +122,9 @@ impl KvBackend for EtcdStore {
             .context(error::EtcdFailedSnafu)?;
 
         let kvs = res
-            .kvs()
-            .iter()
-            .map(KvPair::from_etcd_kv)
+            .take_kvs()
+            .into_iter()
+            .map(convert_key_value)
             .collect::<Vec<_>>();
 
         Ok(RangeResponse {
@@ -150,14 +140,14 @@ impl KvBackend for EtcdStore {
             options,
         } = req.try_into()?;
 
-        let res = self
+        let mut res = self
             .client
             .kv_client()
             .put(key, value, options)
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.prev_key().map(KvPair::from_etcd_kv);
+        let prev_kv = res.take_prev_key().map(convert_key_value);
         Ok(PutResponse { prev_kv })
     }
 
@@ -166,7 +156,7 @@ impl KvBackend for EtcdStore {
 
         let put_ops = kvs
             .into_iter()
-            .map(|kv| (TxnOp::put(kv.key, kv.value, options.clone())))
+            .map(|kv| TxnOp::put(kv.key, kv.value, options.clone()))
             .collect::<Vec<_>>();
 
         let txn_responses = self.do_multi_txn(put_ops).await?;
@@ -175,9 +165,9 @@ impl KvBackend for EtcdStore {
         for txn_res in txn_responses {
             for op_res in txn_res.op_responses() {
                 match op_res {
-                    TxnOpResponse::Put(put_res) => {
-                        if let Some(prev_kv) = put_res.prev_key() {
-                            prev_kvs.push(KvPair::from_etcd_kv(prev_kv));
+                    TxnOpResponse::Put(mut put_res) => {
+                        if let Some(prev_kv) = put_res.take_prev_key().map(convert_key_value) {
+                            prev_kvs.push(prev_kv);
                         }
                     }
                     _ => unreachable!(),
@@ -193,7 +183,7 @@ impl KvBackend for EtcdStore {
 
         let get_ops: Vec<_> = keys
             .into_iter()
-            .map(|k| TxnOp::get(k, options.clone()))
+            .map(|key| TxnOp::get(key, options.clone()))
             .collect();
 
         let txn_responses = self.do_multi_txn(get_ops).await?;
@@ -201,12 +191,11 @@ impl KvBackend for EtcdStore {
         let mut kvs = vec![];
         for txn_res in txn_responses {
             for op_res in txn_res.op_responses() {
-                let get_res = match op_res {
+                let mut get_res = match op_res {
                     TxnOpResponse::Get(get_res) => get_res,
                     _ => unreachable!(),
                 };
-
-                kvs.extend(get_res.kvs().iter().map(KvPair::from_etcd_kv));
+                kvs.extend(get_res.take_kvs().into_iter().map(convert_key_value));
             }
         }
 
@@ -252,8 +241,8 @@ impl KvBackend for EtcdStore {
             })?;
 
         let prev_kv = match op_res {
-            TxnOpResponse::Put(res) => res.prev_key().map(KvPair::from_etcd_kv),
-            TxnOpResponse::Get(res) => res.kvs().first().map(KvPair::from_etcd_kv),
+            TxnOpResponse::Put(mut res) => res.take_prev_key().map(convert_key_value),
+            TxnOpResponse::Get(mut res) => res.take_kvs().into_iter().next().map(convert_key_value),
             _ => unreachable!(),
         };
 
@@ -263,7 +252,7 @@ impl KvBackend for EtcdStore {
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let Delete { key, options } = req.try_into()?;
 
-        let res = self
+        let mut res = self
             .client
             .kv_client()
             .delete(key, options)
@@ -271,9 +260,9 @@ impl KvBackend for EtcdStore {
             .context(error::EtcdFailedSnafu)?;
 
         let prev_kvs = res
-            .prev_kvs()
-            .iter()
-            .map(KvPair::from_etcd_kv)
+            .take_prev_kvs()
+            .into_iter()
+            .map(convert_key_value)
             .collect::<Vec<_>>();
 
         Ok(DeleteRangeResponse {
@@ -289,7 +278,7 @@ impl KvBackend for EtcdStore {
 
         let delete_ops = keys
             .into_iter()
-            .map(|k| TxnOp::delete(k, options.clone()))
+            .map(|key| TxnOp::delete(key, options.clone()))
             .collect::<Vec<_>>();
 
         let txn_responses = self.do_multi_txn(delete_ops).await?;
@@ -297,10 +286,14 @@ impl KvBackend for EtcdStore {
         for txn_res in txn_responses {
             for op_res in txn_res.op_responses() {
                 match op_res {
-                    TxnOpResponse::Delete(delete_res) => {
-                        delete_res.prev_kvs().iter().for_each(|kv| {
-                            prev_kvs.push(KvPair::from_etcd_kv(kv));
-                        });
+                    TxnOpResponse::Delete(mut delete_res) => {
+                        delete_res
+                            .take_prev_kvs()
+                            .into_iter()
+                            .map(convert_key_value)
+                            .for_each(|kv| {
+                                prev_kvs.push(kv);
+                            });
                     }
                     _ => unreachable!(),
                 }
@@ -320,14 +313,20 @@ impl TxnService for EtcdStore {
             .with_label_values(&["etcd", "txn"])
             .start_timer();
 
+        let max_operations = txn.max_operations();
+
         let etcd_txn: Txn = txn.into();
         let txn_res = self
             .client
             .kv_client()
             .txn(etcd_txn)
             .await
-            .context(error::EtcdFailedSnafu)?;
+            .context(error::EtcdTxnFailedSnafu { max_operations })?;
         txn_res.try_into()
+    }
+
+    fn max_txn_ops(&self) -> usize {
+        self.max_txn_ops
     }
 }
 
@@ -559,7 +558,7 @@ mod tests {
         let batch_get: BatchGet = req.try_into().unwrap();
         let keys = batch_get.keys;
 
-        assert_eq!(b"k1".to_vec(), keys.get(0).unwrap().clone());
+        assert_eq!(b"k1".to_vec(), keys.first().unwrap().clone());
         assert_eq!(b"k2".to_vec(), keys.get(1).unwrap().clone());
         assert_eq!(b"k3".to_vec(), keys.get(2).unwrap().clone());
     }
@@ -576,7 +575,7 @@ mod tests {
 
         let batch_put: BatchPut = req.try_into().unwrap();
 
-        let kv = batch_put.kvs.get(0).unwrap();
+        let kv = batch_put.kvs.first().unwrap();
         assert_eq!(b"test_key", kv.key());
         assert_eq!(b"test_value", kv.value());
         let _ = batch_put.options.unwrap();
@@ -592,7 +591,7 @@ mod tests {
         let batch_delete: BatchDelete = req.try_into().unwrap();
 
         assert_eq!(batch_delete.keys.len(), 3);
-        assert_eq!(b"k1".to_vec(), batch_delete.keys.get(0).unwrap().clone());
+        assert_eq!(b"k1".to_vec(), batch_delete.keys.first().unwrap().clone());
         assert_eq!(b"k2".to_vec(), batch_delete.keys.get(1).unwrap().clone());
         assert_eq!(b"k3".to_vec(), batch_delete.keys.get(2).unwrap().clone());
         let _ = batch_delete.options.unwrap();

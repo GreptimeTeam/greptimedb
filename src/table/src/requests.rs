@@ -23,50 +23,46 @@ use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
 use datatypes::prelude::VectorRef;
-use datatypes::schema::{ColumnSchema, RawSchema};
+use datatypes::schema::ColumnSchema;
 use serde::{Deserialize, Serialize};
-use store_api::storage::RegionNumber;
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
+use store_api::mito_engine_options::is_mito_engine_option_key;
 
-use crate::engine::TableReference;
 use crate::error;
 use crate::error::ParseTableOptionSnafu;
 use crate::metadata::{TableId, TableVersion};
+use crate::table_reference::TableReference;
 
 pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";
 pub const FILE_TABLE_PATTERN_KEY: &str = "pattern";
 pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 
-#[derive(Debug, Clone)]
-pub struct CreateDatabaseRequest {
-    pub db_name: String,
-    pub create_if_not_exists: bool,
-}
-
-/// Create table request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateTableRequest {
-    pub id: TableId,
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub desc: Option<String>,
-    pub schema: RawSchema,
-    pub region_numbers: Vec<u32>,
-    pub primary_key_indices: Vec<usize>,
-    pub create_if_not_exists: bool,
-    pub table_options: TableOptions,
-    pub engine: String,
-}
-
-impl CreateTableRequest {
-    pub fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
-        }
+/// Returns true if the `key` is a valid key for any engine or storage.
+pub fn validate_table_option(key: &str) -> bool {
+    if is_supported_in_s3(key) {
+        return true;
     }
+
+    if is_mito_engine_option_key(key) {
+        return true;
+    }
+
+    [
+        // common keys:
+        WRITE_BUFFER_SIZE_KEY,
+        TTL_KEY,
+        REGIONS_KEY,
+        STORAGE_KEY,
+        // file engine keys:
+        FILE_TABLE_LOCATION_KEY,
+        FILE_TABLE_FORMAT_KEY,
+        FILE_TABLE_PATTERN_KEY,
+        // metric engine keys:
+        PHYSICAL_TABLE_METADATA_KEY,
+        LOGICAL_TABLE_METADATA_KEY,
+    ]
+    .contains(&key)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +80,7 @@ pub struct TableOptions {
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
 pub const REGIONS_KEY: &str = "regions";
+pub const STORAGE_KEY: &str = "storage";
 
 impl TryFrom<&HashMap<String, String>> for TableOptions {
     type Error = error::Error;
@@ -147,16 +144,6 @@ impl From<&TableOptions> for HashMap<String, String> {
     }
 }
 
-/// Open table request
-#[derive(Debug, Clone)]
-pub struct OpenTableRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: TableId,
-    pub region_numbers: Vec<RegionNumber>,
-}
-
 /// Alter table request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlterTableRequest {
@@ -167,20 +154,6 @@ pub struct AlterTableRequest {
     pub alter_kind: AlterKind,
     // None in standalone.
     pub table_version: Option<TableVersion>,
-}
-
-impl AlterTableRequest {
-    pub fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
-        }
-    }
-
-    pub fn is_rename_table(&self) -> bool {
-        matches!(self.alter_kind, AlterKind::RenameTable { .. })
-    }
 }
 
 /// Add column request
@@ -196,48 +169,6 @@ pub enum AlterKind {
     AddColumns { columns: Vec<AddColumnRequest> },
     DropColumns { names: Vec<String> },
     RenameTable { new_table_name: String },
-}
-
-/// Drop table request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DropTableRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: TableId,
-}
-
-impl DropTableRequest {
-    pub fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
-        }
-    }
-}
-
-/// Close table request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloseTableRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: TableId,
-    /// Do nothing if region_numbers is empty
-    pub region_numbers: Vec<RegionNumber>,
-    /// flush regions
-    pub flush: bool,
-}
-
-impl CloseTableRequest {
-    pub fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -284,20 +215,14 @@ pub struct CopyTableRequest {
 pub struct FlushTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
-    pub table_name: Option<String>,
-    pub region_number: Option<RegionNumber>,
-    /// Wait until the flush is done.
-    pub wait: Option<bool>,
+    pub table_name: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct CompactTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
-    pub table_name: Option<String>,
-    pub region_number: Option<RegionNumber>,
-    /// Wait until the compaction is done.
-    pub wait: Option<bool>,
+    pub table_name: String,
 }
 
 /// Truncate table request
@@ -319,30 +244,6 @@ impl TruncateTableRequest {
     }
 }
 
-#[macro_export]
-macro_rules! meter_insert_request {
-    ($req: expr) => {
-        meter_macros::write_meter!(
-            $req.catalog_name.to_string(),
-            $req.schema_name.to_string(),
-            $req.table_name.to_string(),
-            $req
-        );
-    };
-}
-
-pub fn valid_table_option(key: &str) -> bool {
-    matches!(
-        key,
-        FILE_TABLE_LOCATION_KEY
-            | FILE_TABLE_FORMAT_KEY
-            | FILE_TABLE_PATTERN_KEY
-            | WRITE_BUFFER_SIZE_KEY
-            | TTL_KEY
-            | REGIONS_KEY
-    ) | is_supported_in_s3(key)
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CopyDatabaseRequest {
     pub catalog_name: String,
@@ -359,13 +260,14 @@ mod tests {
 
     #[test]
     fn test_validate_table_option() {
-        assert!(valid_table_option(FILE_TABLE_LOCATION_KEY));
-        assert!(valid_table_option(FILE_TABLE_FORMAT_KEY));
-        assert!(valid_table_option(FILE_TABLE_PATTERN_KEY));
-        assert!(valid_table_option(TTL_KEY));
-        assert!(valid_table_option(REGIONS_KEY));
-        assert!(valid_table_option(WRITE_BUFFER_SIZE_KEY));
-        assert!(!valid_table_option("foo"));
+        assert!(validate_table_option(FILE_TABLE_LOCATION_KEY));
+        assert!(validate_table_option(FILE_TABLE_FORMAT_KEY));
+        assert!(validate_table_option(FILE_TABLE_PATTERN_KEY));
+        assert!(validate_table_option(TTL_KEY));
+        assert!(validate_table_option(REGIONS_KEY));
+        assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
+        assert!(validate_table_option(STORAGE_KEY));
+        assert!(!validate_table_option("foo"));
     }
 
     #[test]

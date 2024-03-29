@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::NUMBERS_TABLE_ID;
-use common_query::Output;
+use common_query::OutputData;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use futures::Future;
 use once_cell::sync::{Lazy, OnceCell};
@@ -52,7 +52,8 @@ where
 pub(crate) fn sample_script_engine() -> PyEngine {
     let catalog_manager =
         MemoryCatalogManager::new_with_table(NumbersTable::table(NUMBERS_TABLE_ID));
-    let query_engine = QueryEngineFactory::new(catalog_manager, None, None, false).query_engine();
+    let query_engine =
+        QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine();
 
     PyEngine::new(query_engine.clone())
 }
@@ -68,9 +69,9 @@ async fn run_compiled(script: &PyScript) {
         .execute(HashMap::default(), EvalContext::default())
         .await
         .unwrap();
-    let _res = match output {
-        Output::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
-        Output::RecordBatches(rbs) => rbs,
+    let _res = match output.data {
+        OutputData::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
+        OutputData::RecordBatches(rbs) => rbs,
         _ => unreachable!(),
     };
 }

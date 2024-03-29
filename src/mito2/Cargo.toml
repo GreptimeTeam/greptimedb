@@ -8,59 +8,72 @@ license.workspace = true
 default = []
 test = ["common-test-util", "log-store"]
 
+[lints]
+workspace = true
+
 [dependencies]
-anymap = "1.0.0-beta.2"
 api.workspace = true
 aquamarine.workspace = true
-arc-swap = "1.6"
 async-channel = "1.9"
-async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
-bytes = "1.4"
-chrono.workspace = true
-common-base = { workspace = true }
-common-catalog = { workspace = true }
-common-datasource = { workspace = true }
-common-error = { workspace = true }
-common-macro = { workspace = true }
-common-procedure = { workspace = true }
-common-query = { workspace = true }
-common-recordbatch = { workspace = true }
-common-runtime = { workspace = true }
-common-telemetry = { workspace = true }
+bytes.workspace = true
+common-base.workspace = true
+common-config.workspace = true
+common-datasource.workspace = true
+common-decimal.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
 common-test-util = { workspace = true, optional = true }
-common-time = { workspace = true }
-dashmap = "5.4"
+common-time.workspace = true
+common-wal.workspace = true
+datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datafusion.workspace = true
-datatypes = { workspace = true }
+datatypes.workspace = true
 futures.workspace = true
-humantime-serde = { workspace = true }
+humantime-serde.workspace = true
+index.workspace = true
+itertools.workspace = true
 lazy_static = "1.4"
 log-store = { workspace = true, optional = true }
 memcomparable = "0.2"
-moka = { workspace = true, features = ["sync"] }
-object-store = { workspace = true }
+moka = { workspace = true, features = ["sync", "future"] }
+object-store.workspace = true
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
+pin-project.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+puffin.workspace = true
+rand.workspace = true
 regex = "1.5"
-serde = { version = "1.0", features = ["derive"] }
+serde.workspace = true
 serde_json.workspace = true
-serde_with = "3"
+serde_with.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
-store-api = { workspace = true }
+store-api.workspace = true
 strum.workspace = true
-table = { workspace = true }
-tokio-util.workspace = true
+table.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-common-procedure-test = { workspace = true }
-common-test-util = { workspace = true }
-log-store = { workspace = true }
+common-procedure-test.workspace = true
+common-test-util.workspace = true
+criterion = "0.4"
+log-store.workspace = true
+object-store = { workspace = true, features = ["services-memory"] }
+toml.workspace = true
+
+[[bench]]
+name = "memtable_bench"
+harness = false
+required-features = ["test"]

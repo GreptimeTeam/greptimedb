@@ -11,15 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{self, Value};
 use itertools::Itertools;
-use opensrv_mysql::{ParamValue, ValueInner};
+use opensrv_mysql::{to_naive_datetime, ParamValue, ValueInner};
 use snafu::ResultExt;
 use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
 use sql::statements::statement::Statement;
@@ -170,9 +171,29 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             let date: common_time::Date = NaiveDate::from(param.value).into();
             Ok(ScalarValue::Date32(Some(date.val())))
         }
-        ValueInner::Datetime(_) => Ok(ScalarValue::Date64(Some(
-            NaiveDateTime::from(param.value).timestamp_millis(),
-        ))),
+        ValueInner::Datetime(_) => {
+            let timestamp_millis = to_naive_datetime(param.value)
+                .map_err(|e| {
+                    error::MysqlValueConversionSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?
+                .timestamp_millis();
+
+            match t {
+                ConcreteDataType::DateTime(_) => Ok(ScalarValue::Date64(Some(timestamp_millis))),
+                ConcreteDataType::Timestamp(_) => Ok(ScalarValue::TimestampMillisecond(
+                    Some(timestamp_millis),
+                    None,
+                )),
+                _ => error::PreparedStmtTypeMismatchSnafu {
+                    expected: t,
+                    actual: param.coltype,
+                }
+                .fail(),
+            }
+        }
         ValueInner::Time(_) => Ok(ScalarValue::Time64Nanosecond(Some(
             Duration::from(param.value).as_millis() as i64,
         ))),
@@ -182,7 +203,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 #[cfg(test)]
 mod tests {
     use sql::dialect::MySqlDialect;
-    use sql::parser::ParserContext;
+    use sql::parser::{ParseOptions, ParserContext};
 
     use super::*;
 
@@ -211,7 +232,9 @@ mod tests {
     }
 
     fn parse_sql(sql: &str) -> Statement {
-        let mut stmts = ParserContext::create_with_dialect(sql, &MySqlDialect {}).unwrap();
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &MySqlDialect {}, ParseOptions::default())
+                .unwrap();
         stmts.remove(0)
     }
 

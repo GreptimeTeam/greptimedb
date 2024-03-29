@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
+#![feature(let_chains)]
 
 use datatypes::schema::Schema;
 use query::plan::LogicalPlan;
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod configurator;
 pub mod error;
+pub mod export_metrics;
 pub mod grpc;
 pub mod heartbeat_options;
 pub mod http;
@@ -34,9 +36,13 @@ pub mod mysql;
 pub mod opentsdb;
 pub mod otlp;
 pub mod postgres;
+mod prom_row_builder;
 pub mod prom_store;
 pub mod prometheus_handler;
+pub mod proto;
 pub mod query_handler;
+#[allow(clippy::all)]
+mod repeated_field;
 mod row_writer;
 pub mod server;
 mod shutdown;

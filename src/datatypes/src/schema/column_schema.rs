@@ -109,6 +109,11 @@ impl ColumnSchema {
         &mut self.metadata
     }
 
+    /// Retrieve the column comment
+    pub fn column_comment(&self) -> Option<&String> {
+        self.metadata.get(COMMENT_KEY)
+    }
+
     pub fn with_time_index(mut self, is_time_index: bool) -> Self {
         self.is_time_index = is_time_index;
         if is_time_index {
@@ -121,6 +126,10 @@ impl ColumnSchema {
         self
     }
 
+    /// Set default constraint.
+    ///
+    /// If a default constraint exists for the column, this method will
+    /// validate it against the column's data type and nullability.
     pub fn with_default_constraint(
         mut self,
         default_constraint: Option<ColumnDefaultConstraint>,
@@ -131,6 +140,23 @@ impl ColumnSchema {
 
         self.default_constraint = default_constraint;
         Ok(self)
+    }
+
+    /// Set the nullablity to `true` of the column.
+    /// Similar to [set_nullable] but take the ownership and return a owned value.
+    ///
+    /// [set_nullable]: Self::set_nullable
+    pub fn with_nullable_set(mut self) -> Self {
+        self.is_nullable = true;
+        self
+    }
+
+    /// Set the nullability to `true` of the column.
+    /// Similar to [with_nullable_set] but don't take the ownership
+    ///
+    /// [with_nullable_set]: Self::with_nullable_set
+    pub fn set_nullable(&mut self) {
+        self.is_nullable = true;
     }
 
     /// Creates a new [`ColumnSchema`] with given metadata.
@@ -305,12 +331,16 @@ mod tests {
 
     #[test]
     fn test_column_schema_with_metadata() {
-        let metadata = Metadata::from([("k1".to_string(), "v1".to_string())]);
+        let metadata = Metadata::from([
+            ("k1".to_string(), "v1".to_string()),
+            (COMMENT_KEY.to_string(), "test comment".to_string()),
+        ]);
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
             .with_metadata(metadata)
             .with_default_constraint(Some(ColumnDefaultConstraint::null_value()))
             .unwrap();
         assert_eq!("v1", column_schema.metadata().get("k1").unwrap());
+        assert_eq!("test comment", column_schema.column_comment().unwrap());
         assert!(column_schema
             .metadata()
             .get(DEFAULT_CONSTRAINT_KEY)

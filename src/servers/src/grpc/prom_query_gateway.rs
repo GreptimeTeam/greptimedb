@@ -31,8 +31,9 @@ use session::context::QueryContext;
 use snafu::OptionExt;
 use tonic::{Request, Response};
 
+use super::greptime_handler::create_query_context;
 use crate::error::InvalidQuerySnafu;
-use crate::grpc::greptime_handler::{auth, create_query_context};
+use crate::grpc::greptime_handler::auth;
 use crate::grpc::TonicResult;
 use crate::http::prometheus::{retrieve_metric_name_and_result_type, PrometheusJsonResponse};
 use crate::prometheus_handler::PrometheusHandlerRef;
@@ -125,7 +126,6 @@ impl PrometheusGatewayService {
                         err.status_code().to_string(),
                         err.output_msg(),
                     )
-                    .0
                 }
             };
         // range query only returns matrix
@@ -133,8 +133,6 @@ impl PrometheusGatewayService {
             result_type = ValueType::Matrix;
         };
 
-        PrometheusJsonResponse::from_query_result(result, metric_name, result_type)
-            .await
-            .0
+        PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
     }
 }

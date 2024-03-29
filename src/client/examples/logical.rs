@@ -37,7 +37,7 @@ async fn run() {
         catalog_name: "greptime".to_string(),
         schema_name: "public".to_string(),
         table_name: "test_logical_dist_exec".to_string(),
-        desc: "".to_string(),
+        desc: String::default(),
         column_defs: vec![
             ColumnDef {
                 name: "timestamp".to_string(),
@@ -46,6 +46,7 @@ async fn run() {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Timestamp as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "key".to_string(),
@@ -54,6 +55,7 @@ async fn run() {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Tag as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "value".to_string(),
@@ -62,6 +64,7 @@ async fn run() {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
         ],
         time_index: "timestamp".to_string(),
@@ -78,7 +81,7 @@ async fn run() {
 
     let logical = mock_logical_plan();
     event!(Level::INFO, "plan size: {:#?}", logical.len());
-    let result = db.logical_plan(logical, 0).await.unwrap();
+    let result = db.logical_plan(logical).await.unwrap();
 
     event!(Level::INFO, "result: {:#?}", result);
 }

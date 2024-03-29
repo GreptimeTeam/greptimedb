@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use sqlparser::ast::{ObjectName, Query, SetExpr, Statement, UnaryOperator, Values};
 use sqlparser::parser::ParserError;
 use sqlparser_derive::{Visit, VisitMut};
@@ -106,7 +107,7 @@ impl Insert {
     }
 }
 
-fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Result<Vec<Vec<Value>>> {
+fn sql_exprs_to_values(exprs: &[Vec<Expr>]) -> Result<Vec<Vec<Value>>> {
     let mut values = Vec::with_capacity(exprs.len());
     for es in exprs.iter() {
         let mut vs = Vec::with_capacity(es.len());
@@ -170,16 +171,17 @@ impl TryFrom<Statement> for Insert {
 mod tests {
     use super::*;
     use crate::dialect::GreptimeDbDialect;
-    use crate::parser::ParserContext;
+    use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::statement::Statement;
 
     #[test]
     fn test_insert_value_with_unary_op() {
         // insert "-1"
         let sql = "INSERT INTO my_table VALUES(-1)";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .remove(0);
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .remove(0);
         match stmt {
             Statement::Insert(insert) => {
                 let values = insert.values_body().unwrap();
@@ -190,9 +192,10 @@ mod tests {
 
         // insert "+1"
         let sql = "INSERT INTO my_table VALUES(+1)";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .remove(0);
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .remove(0);
         match stmt {
             Statement::Insert(insert) => {
                 let values = insert.values_body().unwrap();
@@ -206,9 +209,10 @@ mod tests {
     fn test_insert_value_with_default() {
         // insert "default"
         let sql = "INSERT INTO my_table VALUES(default)";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .remove(0);
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .remove(0);
         match stmt {
             Statement::Insert(insert) => {
                 let values = insert.values_body().unwrap();
@@ -222,9 +226,10 @@ mod tests {
     fn test_insert_value_with_default_uppercase() {
         // insert "DEFAULT"
         let sql = "INSERT INTO my_table VALUES(DEFAULT)";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .remove(0);
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .remove(0);
         match stmt {
             Statement::Insert(insert) => {
                 let values = insert.values_body().unwrap();
@@ -238,9 +243,10 @@ mod tests {
     fn test_insert_value_with_quoted_string() {
         // insert 'default'
         let sql = "INSERT INTO my_table VALUES('default')";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .remove(0);
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .remove(0);
         match stmt {
             Statement::Insert(insert) => {
                 let values = insert.values_body().unwrap();
@@ -254,9 +260,10 @@ mod tests {
 
         // insert "default". Treating double-quoted identifiers as strings.
         let sql = "INSERT INTO my_table VALUES(\"default\")";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .remove(0);
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .remove(0);
         match stmt {
             Statement::Insert(insert) => {
                 let values = insert.values_body().unwrap();
@@ -269,9 +276,10 @@ mod tests {
         }
 
         let sql = "INSERT INTO my_table VALUES(`default`)";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .remove(0);
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .remove(0);
         match stmt {
             Statement::Insert(insert) => {
                 assert!(insert.values_body().is_err());
@@ -283,9 +291,10 @@ mod tests {
     #[test]
     fn test_insert_select() {
         let sql = "INSERT INTO my_table select * from other_table";
-        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
-            .unwrap()
-            .remove(0);
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .remove(0);
         match stmt {
             Statement::Insert(insert) => {
                 let q = insert.query_body().unwrap().unwrap();

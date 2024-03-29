@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info, warn};
-use common_time::util::current_time_millis;
+use common_wal::options::WalOptions;
 use futures::StreamExt;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};
@@ -31,9 +31,13 @@ use store_api::storage::{ColumnId, RegionId};
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
-use crate::error::{EmptyRegionDirSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result};
+use crate::error::{
+    EmptyRegionDirSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
+};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::memtable::MemtableBuilderRef;
+use crate::manifest::storage::manifest_compress_type;
+use crate::memtable::time_partition::TimePartitions;
+use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
@@ -41,18 +45,23 @@ use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::{EntryId, Wal};
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
     region_id: RegionId,
     metadata: Option<RegionMetadata>,
-    memtable_builder: MemtableBuilderRef,
+    memtable_builder_provider: MemtableBuilderProvider,
     object_store_manager: ObjectStoreManagerRef,
     region_dir: String,
     scheduler: SchedulerRef,
-    options: HashMap<String, String>,
+    options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
+    skip_wal_replay: bool,
+    intermediate_manager: IntermediateManager,
+    time_provider: Option<TimeProviderRef>,
 }
 
 impl RegionOpener {
@@ -60,19 +69,23 @@ impl RegionOpener {
     pub(crate) fn new(
         region_id: RegionId,
         region_dir: &str,
-        memtable_builder: MemtableBuilderRef,
+        memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
         scheduler: SchedulerRef,
+        intermediate_manager: IntermediateManager,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
             metadata: None,
-            memtable_builder,
+            memtable_builder_provider,
             object_store_manager,
             region_dir: normalize_dir(region_dir),
             scheduler,
-            options: HashMap::new(),
+            options: None,
             cache_manager: None,
+            skip_wal_replay: false,
+            intermediate_manager,
+            time_provider: None,
         }
     }
 
@@ -82,9 +95,15 @@ impl RegionOpener {
         self
     }
 
+    /// Parses and sets options for the region.
+    pub(crate) fn parse_options(mut self, options: HashMap<String, String>) -> Result<Self> {
+        self.options = Some(RegionOptions::try_from(&options)?);
+        Ok(self)
+    }
+
     /// Sets options for the region.
-    pub(crate) fn options(mut self, value: HashMap<String, String>) -> Self {
-        self.options = value;
+    pub(crate) fn options(mut self, options: RegionOptions) -> Self {
+        self.options = Some(options);
         self
     }
 
@@ -94,13 +113,20 @@ impl RegionOpener {
         self
     }
 
+    /// Sets the `skip_wal_replay`.
+    pub(crate) fn skip_wal_replay(mut self, skip: bool) -> Self {
+        self.skip_wal_replay = skip;
+        self
+    }
+
     /// Writes region manifest and creates a new region if it does not exist.
     /// Opens the region if it already exists.
     ///
     /// # Panics
-    /// Panics if metadata is not set.
+    /// - Panics if metadata is not set.
+    /// - Panics if options is not set.
     pub(crate) async fn create_or_open<S: LogStore>(
-        self,
+        mut self,
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<MitoRegion> {
@@ -135,7 +161,8 @@ impl RegionOpener {
                 );
             }
         }
-        let options = RegionOptions::try_from(&self.options)?;
+        let options = self.options.take().unwrap();
+        let wal_options = options.wal_options.clone();
         let object_store = self.object_store(&options.storage)?.clone();
 
         // Create a manifest manager for this region and writes regions to the manifest file.
@@ -144,13 +171,32 @@ impl RegionOpener {
         let manifest_manager =
             RegionManifestManager::new(metadata.clone(), region_manifest_options).await?;
 
-        let mutable = self.memtable_builder.build(&metadata);
+        let memtable_builder = self
+            .memtable_builder_provider
+            .builder_for_options(options.memtable.as_ref(), !options.append_mode);
+        // Initial memtable id is 0.
+        let part_duration = options.compaction.time_window();
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            memtable_builder.clone(),
+            0,
+            part_duration,
+        ));
+
+        debug!("Create region {} with options: {:?}", region_id, options);
 
         let version = VersionBuilder::new(metadata, mutable)
             .options(options)
             .build();
         let version_control = Arc::new(VersionControl::new(version));
-        let access_layer = Arc::new(AccessLayer::new(self.region_dir, object_store));
+        let access_layer = Arc::new(AccessLayer::new(
+            self.region_dir,
+            object_store,
+            self.intermediate_manager,
+        ));
+        let time_provider = self
+            .time_provider
+            .unwrap_or_else(|| Arc::new(StdTimeProvider));
 
         Ok(MitoRegion {
             region_id,
@@ -162,9 +208,12 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
             )),
-            last_flush_millis: AtomicI64::new(current_time_millis()),
+            wal_options,
+            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
+            time_provider,
+            memtable_builder,
         })
     }
 
@@ -205,7 +254,9 @@ impl RegionOpener {
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
-        let region_options = RegionOptions::try_from(&self.options)?;
+        let region_options = self.options.as_ref().unwrap().clone();
+        let wal_options = region_options.wal_options.clone();
+
         let region_manifest_options = self.manifest_options(config, &region_options)?;
         let Some(manifest_manager) = RegionManifestManager::open(region_manifest_options).await?
         else {
@@ -217,13 +268,31 @@ impl RegionOpener {
 
         let region_id = self.region_id;
         let object_store = self.object_store(&region_options.storage)?.clone();
-        let access_layer = Arc::new(AccessLayer::new(self.region_dir.clone(), object_store));
+
+        debug!("Open region {} with options: {:?}", region_id, self.options);
+
+        let access_layer = Arc::new(AccessLayer::new(
+            self.region_dir.clone(),
+            object_store,
+            self.intermediate_manager.clone(),
+        ));
         let file_purger = Arc::new(LocalFilePurger::new(
             self.scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
         ));
-        let mutable = self.memtable_builder.build(&metadata);
+        let memtable_builder = self.memtable_builder_provider.builder_for_options(
+            region_options.memtable.as_ref(),
+            !region_options.append_mode,
+        );
+        // Initial memtable id is 0.
+        let part_duration = region_options.compaction.time_window();
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            memtable_builder.clone(),
+            0,
+            part_duration,
+        ));
         let version = VersionBuilder::new(metadata, mutable)
             .add_files(file_purger.clone(), manifest.files.values().cloned())
             .flushed_entry_id(manifest.flushed_entry_id)
@@ -234,7 +303,28 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
-        replay_memtable(wal, region_id, flushed_entry_id, &version_control).await?;
+        if !self.skip_wal_replay {
+            info!(
+                "Start replaying memtable at flushed_entry_id + 1 {} for region {}",
+                flushed_entry_id + 1,
+                region_id
+            );
+            replay_memtable(
+                wal,
+                &wal_options,
+                region_id,
+                flushed_entry_id,
+                &version_control,
+                config.allow_stale_entries,
+            )
+            .await?;
+        } else {
+            info!("Skip the WAL replay for region: {}", region_id);
+        }
+        let time_provider = self
+            .time_provider
+            .clone()
+            .unwrap_or_else(|| Arc::new(StdTimeProvider));
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -242,9 +332,12 @@ impl RegionOpener {
             access_layer,
             manifest_manager,
             file_purger,
-            last_flush_millis: AtomicI64::new(current_time_millis()),
+            wal_options,
+            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
+            time_provider,
+            memtable_builder,
         };
         Ok(Some(region))
     }
@@ -259,7 +352,9 @@ impl RegionOpener {
         Ok(RegionManifestOptions {
             manifest_dir: new_manifest_dir(&self.region_dir),
             object_store,
-            compress_type: config.manifest_compress_type,
+            // We don't allow users to set the compression algorithm as we use it as a file suffix.
+            // Currently, the manifest storage doesn't have good support for changing compression algorithms.
+            compress_type: manifest_compress_type(config.compress_manifest),
             checkpoint_distance: config.manifest_checkpoint_distance,
         })
     }
@@ -329,21 +424,40 @@ pub(crate) fn check_recovered_region(
 }
 
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.
-async fn replay_memtable<S: LogStore>(
+pub(crate) async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
+    wal_options: &WalOptions,
     region_id: RegionId,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
-) -> Result<()> {
+    allow_stale_entries: bool,
+) -> Result<EntryId> {
     let mut rows_replayed = 0;
     // Last entry id should start from flushed entry id since there might be no
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
-    let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control);
-    let mut wal_stream = wal.scan(region_id, flushed_entry_id)?;
+    let replay_from_entry_id = flushed_entry_id + 1;
+    let mut stale_entry_found = false;
+
+    let mut wal_stream = wal.scan(region_id, replay_from_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
+        if entry_id <= flushed_entry_id {
+            stale_entry_found = true;
+            warn!("Stale WAL entries read during replay, region id: {}, flushed entry id: {}, entry id read: {}", region_id, flushed_entry_id, entry_id);
+            ensure!(
+                allow_stale_entries,
+                StaleLogEntrySnafu {
+                    region_id,
+                    flushed_entry_id,
+                    unexpected_entry_id: entry_id,
+                }
+            );
+        }
         last_entry_id = last_entry_id.max(entry_id);
+
+        let mut region_write_ctx =
+            RegionWriteCtx::new(region_id, version_control, wal_options.clone());
         for mutation in entry.mutations {
             rows_replayed += mutation
                 .rows
@@ -352,17 +466,23 @@ async fn replay_memtable<S: LogStore>(
                 .unwrap_or(0);
             region_write_ctx.push_mutation(mutation.op_type, mutation.rows, OptionOutputTx::none());
         }
+
+        // set next_entry_id and write to memtable.
+        region_write_ctx.set_next_entry_id(last_entry_id + 1);
+        region_write_ctx.write_memtable();
     }
 
-    // set next_entry_id and write to memtable.
-    region_write_ctx.set_next_entry_id(last_entry_id + 1);
-    region_write_ctx.write_memtable();
+    if allow_stale_entries && stale_entry_found {
+        wal.obsolete(region_id, flushed_entry_id, wal_options)
+            .await?;
+        info!("Force obsolete WAL entries, region id: {}, flushed entry id: {}, last entry id read: {}", region_id, flushed_entry_id, last_entry_id);
+    }
 
     info!(
         "Replay WAL for region: {}, rows recovered: {}, last entry id: {}",
         region_id, rows_replayed, last_entry_id
     );
-    Ok(())
+    Ok(last_entry_id)
 }
 
 /// Returns the directory to the manifest files.

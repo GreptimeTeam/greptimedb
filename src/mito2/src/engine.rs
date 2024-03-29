@@ -17,7 +17,11 @@
 #[cfg(test)]
 mod alter_test;
 #[cfg(test)]
+mod append_mode_test;
+#[cfg(test)]
 mod basic_test;
+#[cfg(test)]
+mod catchup_test;
 #[cfg(test)]
 mod close_test;
 #[cfg(test)]
@@ -33,30 +37,38 @@ pub mod listener;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
+mod parallel_test;
+#[cfg(test)]
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
 #[cfg(test)]
+mod set_readonly_test;
+#[cfg(test)]
 mod truncate_test;
 
+use std::any::Any;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
+use common_telemetry::tracing;
 use object_store::manager::ObjectStoreManagerRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole};
-use store_api::region_request::RegionRequest;
+use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
+use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::sync::oneshot;
 
 use crate::config::MitoConfig;
-use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RecvSnafu, RegionNotFoundSnafu, Result};
+use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
-use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
 use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
@@ -71,16 +83,17 @@ pub struct MitoEngine {
 
 impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
-    pub fn new<S: LogStore>(
+    pub async fn new<S: LogStore>(
+        data_home: &str,
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-    ) -> MitoEngine {
-        config.sanitize();
+    ) -> Result<MitoEngine> {
+        config.sanitize(data_home)?;
 
-        MitoEngine {
-            inner: Arc::new(EngineInner::new(config, log_store, object_store_manager)),
-        }
+        Ok(MitoEngine {
+            inner: Arc::new(EngineInner::new(config, log_store, object_store_manager).await?),
+        })
     }
 
     /// Returns true if the specific region exists.
@@ -101,7 +114,38 @@ impl MitoEngine {
 
     /// Returns a scanner to scan for `request`.
     fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+        self.scan_region(region_id, request)?.scanner()
+    }
+
+    /// Scans a region.
+    fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         self.inner.handle_query(region_id, request)
+    }
+
+    /// Edit region's metadata by [RegionEdit] directly. Use with care.
+    /// Now we only allow adding files to region (the [RegionEdit] struct can only contain a non-empty "files_to_add" field).
+    /// Other region editing intention will result in an "invalid request" error.
+    /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
+    pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        ensure!(
+            is_valid_region_edit(&edit),
+            InvalidRequestSnafu {
+                region_id,
+                reason: "invalid region edit"
+            }
+        );
+
+        let (tx, rx) = oneshot::channel();
+        let request = WorkerRequest::EditRegion {
+            region_id,
+            edit,
+            tx,
+        };
+        self.inner
+            .workers
+            .submit_to_worker(region_id, request)
+            .await?;
+        rx.await.context(RecvSnafu)?
     }
 
     #[cfg(test)]
@@ -110,22 +154,42 @@ impl MitoEngine {
     }
 }
 
+/// Check whether the region edit is valid. Only adding files to region is considered valid now.
+fn is_valid_region_edit(edit: &RegionEdit) -> bool {
+    !edit.files_to_add.is_empty()
+        && edit.files_to_remove.is_empty()
+        && matches!(
+            edit,
+            RegionEdit {
+                files_to_add: _,
+                files_to_remove: _,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+            }
+        )
+}
+
 /// Inner struct of [MitoEngine].
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
+    /// Config of the engine.
+    config: Arc<MitoConfig>,
 }
 
 impl EngineInner {
     /// Returns a new [EngineInner] with specific `config`, `log_store` and `object_store`.
-    fn new<S: LogStore>(
+    async fn new<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-    ) -> EngineInner {
-        EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store_manager),
-        }
+    ) -> Result<EngineInner> {
+        let config = Arc::new(config);
+        Ok(EngineInner {
+            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager).await?,
+            config,
+        })
     }
 
     /// Stop the inner engine.
@@ -146,7 +210,11 @@ impl EngineInner {
     }
 
     /// Handles [RegionRequest] and return its executed result.
-    async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<Output> {
+    async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<AffectedRows> {
         let _timer = HANDLE_REQUEST_ELAPSED
             .with_label_values(&[request.type_name()])
             .start_timer();
@@ -157,8 +225,9 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
-    /// Handles the scan `request` and returns a [Scanner] for the `request`.
-    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+    /// Handles the scan `request` and returns a [ScanRegion].
+    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
+        let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self
             .workers
@@ -167,14 +236,22 @@ impl EngineInner {
         let version = region.version();
         // Get cache.
         let cache_manager = self.workers.cache_manager();
+        let scan_parallelism = ScanParallism {
+            parallelism: self.config.scan_parallelism,
+            channel_size: self.config.parallel_scan_channel_size,
+        };
+
         let scan_region = ScanRegion::new(
             version,
             region.access_layer.clone(),
             request,
             Some(cache_manager),
-        );
+        )
+        .with_parallelism(scan_parallelism)
+        .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
+        .with_start_time(query_start);
 
-        scan_region.scanner()
+        Ok(scan_region)
     }
 
     /// Set writable mode for a region.
@@ -186,6 +263,16 @@ impl EngineInner {
 
         region.set_writable(writable);
         Ok(())
+    }
+
+    /// Sets read-only for a region and ensures no more writes in the region after it returns.
+    async fn set_readonly_gracefully(&self, region_id: RegionId) -> Result<SetReadonlyResponse> {
+        // Notes: It acquires the mutable ownership to ensure no other threads,
+        // Therefore, we submit it to the worker.
+        let (request, receiver) = WorkerRequest::new_set_readonly_gracefully(region_id);
+        self.workers.submit_to_worker(region_id, request).await?;
+
+        receiver.await.context(RecvSnafu)
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
@@ -205,18 +292,21 @@ impl RegionEngine for MitoEngine {
         MITO_ENGINE_NAME
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> std::result::Result<Output, BoxedError> {
+    ) -> Result<RegionHandleResult, BoxedError> {
         self.inner
             .handle_request(region_id, request)
             .await
+            .map(RegionHandleResult::new)
             .map_err(BoxedError::new)
     }
 
     /// Handle substrait query and return a stream of record batches
+    #[tracing::instrument(skip_all)]
     async fn handle_query(
         &self,
         region_id: RegionId,
@@ -261,8 +351,22 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
+    async fn set_readonly_gracefully(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SetReadonlyResponse, BoxedError> {
+        self.inner
+            .set_readonly_gracefully(region_id)
+            .await
+            .map_err(BoxedError::new)
+    }
+
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.inner.role(region_id)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -270,25 +374,98 @@ impl RegionEngine for MitoEngine {
 #[cfg(any(test, feature = "test"))]
 impl MitoEngine {
     /// Returns a new [MitoEngine] for tests.
-    pub fn new_for_test<S: LogStore>(
+    pub async fn new_for_test<S: LogStore>(
+        data_home: &str,
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
-    ) -> MitoEngine {
-        config.sanitize();
+        time_provider: crate::time_provider::TimeProviderRef,
+    ) -> Result<MitoEngine> {
+        config.sanitize(data_home)?;
 
-        MitoEngine {
+        let config = Arc::new(config);
+        Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
-                    config,
+                    config.clone(),
                     log_store,
                     object_store_manager,
                     write_buffer_manager,
                     listener,
-                ),
+                    time_provider,
+                )
+                .await?,
+                config,
             }),
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::sst::file::FileMeta;
+
+    #[test]
+    fn test_is_valid_region_edit() {
+        // Valid: has only "files_to_add"
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+        assert!(is_valid_region_edit(&edit));
+
+        // Invalid: "files_to_add" is empty
+        let edit = RegionEdit {
+            files_to_add: vec![],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+        assert!(!is_valid_region_edit(&edit));
+
+        // Invalid: "files_to_remove" is not empty
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![FileMeta::default()],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+        assert!(!is_valid_region_edit(&edit));
+
+        // Invalid: other fields are not all "None"s
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            compaction_time_window: Some(Duration::from_secs(1)),
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+        assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: Some(1),
+            flushed_sequence: None,
+        };
+        assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: Some(1),
+        };
+        assert!(!is_valid_region_edit(&edit));
     }
 }

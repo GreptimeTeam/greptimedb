@@ -2,6 +2,8 @@
 mode = "standalone"
 # Whether to enable greptimedb telemetry, true by default.
 enable_telemetry = true
+# The default timezone of the server
+# default_timezone = "UTC"
 
 # HTTP server options.
 [http]
@@ -42,6 +44,8 @@ mode = "disable"
 cert_path = ""
 # Private key file path.
 key_path = ""
+# Watch for Certificate and key file change and auto reload
+watch = false
 
 # PostgresSQL server options.
 [postgres]
@@ -60,6 +64,8 @@ mode = "disable"
 cert_path = ""
 # private key file path.
 key_path = ""
+# Watch for Certificate and key file change and auto reload
+watch = false
 
 # OpenTSDB protocol options.
 [opentsdb]
@@ -79,9 +85,17 @@ enable = true
 [prom_store]
 # Whether to enable Prometheus remote write and read in HTTP API, true by default.
 enable = true
+# Whether to store the data from Prometheus remote write in metric engine.
+# true by default
+with_metric_engine = true
 
-# WAL options.
 [wal]
+# Available wal providers:
+# - "raft_engine" (default)
+# - "kafka"
+provider = "raft_engine"
+
+# Raft-engine wal options.
 # WAL data directory
 # dir = "/tmp/greptimedb/wal"
 # WAL file size in bytes.
@@ -94,6 +108,47 @@ purge_interval = "10m"
 read_batch_size = 128
 # Whether to sync log file after every write.
 sync_write = false
+# Whether to reuse logically truncated log files.
+enable_log_recycle = true
+# Whether to pre-create log files on start up
+prefill_log_files = false
+# Duration for fsyncing log files.
+sync_period = "1000ms"
+
+# Kafka wal options.
+# The broker endpoints of the Kafka cluster. ["127.0.0.1:9092"] by default.
+# broker_endpoints = ["127.0.0.1:9092"]
+
+# Number of topics to be created upon start.
+# num_topics = 64
+# Topic selector type.
+# Available selector types:
+# - "round_robin" (default)
+# selector_type = "round_robin"
+# The prefix of topic name.
+# topic_name_prefix = "greptimedb_wal_topic"
+# The number of replicas of each partition.
+# Warning: the replication factor must be positive and must not be greater than the number of broker endpoints.
+# replication_factor = 1
+
+# The max size of a single producer batch.
+# Warning: Kafka has a default limit of 1MB per message in a topic.
+# max_batch_size = "1MB"
+# The linger duration.
+# linger = "200ms"
+# The consumer wait timeout.
+# consumer_wait_timeout = "100ms"
+# Create topic timeout.
+# create_topic_timeout = "30s"
+
+# The initial backoff delay.
+# backoff_init = "500ms"
+# The maximum backoff delay.
+# backoff_max = "10s"
+# Exponential backoff rate, i.e. next backoff = base * current backoff.
+# backoff_base = 2
+# The deadline of retries.
+# backoff_deadline = "5mins"
 
 # Metadata storage options.
 [metadata_store]
@@ -122,35 +177,84 @@ type = "File"
 # The local file cache capacity in bytes.
 # cache_capacity = "256MB"
 
-# Compaction options.
-[storage.compaction]
-# Max task number that can concurrently run.
-max_inflight_tasks = 4
-# Max files in level 0 to trigger compaction.
-max_files_in_level0 = 8
-# Max task number for SST purge task after compaction.
-max_purge_tasks = 32
+# Custom storage options
+#[[storage.providers]]
+#type = "S3"
+#[[storage.providers]]
+#type = "Gcs"
 
-# Storage manifest options
-[storage.manifest]
-# Region checkpoint actions margin.
-# Create a checkpoint every <checkpoint_margin> actions.
-checkpoint_margin = 10
-# Region manifest logs and checkpoints gc execution duration
-gc_duration = '10m'
-
-# Storage flush options
-[storage.flush]
-# Max inflight flush tasks.
-max_flush_tasks = 8
-# Default write buffer size for a region.
-region_write_buffer_size = "32MB"
-# Interval to check whether a region needs flush.
-picker_schedule_interval = "5m"
+# Mito engine options
+[[region_engine]]
+[region_engine.mito]
+# Number of region workers
+num_workers = 8
+# Request channel size of each worker
+worker_channel_size = 128
+# Max batch size for a worker to handle requests
+worker_request_batch_size = 64
+# Number of meta action updated to trigger a new checkpoint for the manifest
+manifest_checkpoint_distance = 10
+# Whether to compress manifest and checkpoint file by gzip (default false).
+compress_manifest = false
+# Max number of running background jobs
+max_background_jobs = 4
 # Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
-# Global write buffer size for all regions.
+# Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
 global_write_buffer_size = "1GB"
+# Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`
+global_write_buffer_reject_size = "2GB"
+# Cache size for SST metadata. Setting it to 0 to disable the cache.
+# If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
+sst_meta_cache_size = "128MB"
+# Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
+# If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+vector_cache_size = "512MB"
+# Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
+# If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+page_cache_size = "512MB"
+# Buffer size for SST writing.
+sst_write_buffer_size = "8MB"
+# Parallelism to scan a region (default: 1/4 of cpu cores).
+# - 0: using the default value (1/4 of cpu cores).
+# - 1: scan in current thread.
+# - n: scan in parallelism n.
+scan_parallelism = 0
+# Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
+parallel_scan_channel_size = 32
+# Whether to allow stale WAL entries read during replay.
+allow_stale_entries = false
+
+[region_engine.mito.inverted_index]
+# Whether to create the index on flush.
+# - "auto": automatically
+# - "disable": never
+create_on_flush = "auto"
+# Whether to create the index on compaction.
+# - "auto": automatically
+# - "disable": never
+create_on_compaction = "auto"
+# Whether to apply the index on query
+# - "auto": automatically
+# - "disable": never
+apply_on_query = "auto"
+# Memory threshold for performing an external sort during index creation.
+# Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
+mem_threshold_on_create = "64M"
+# File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`).
+intermediate_path = ""
+
+[region_engine.mito.memtable]
+# Memtable type.
+# - "partition_tree": partition tree memtable
+# - "time_series": time-series memtable (deprecated)
+type = "partition_tree"
+# The max number of keys in one shard.
+index_max_keys_per_shard = 8192
+# The max rows of data inside the actively writing buffer in one shard.
+data_freeze_threshold = 32768
+# Max dictionary bytes.
+fork_dictionary_bytes = "1GiB"
 
 # Log options
 # [logging]
@@ -158,3 +262,25 @@ global_write_buffer_size = "1GB"
 # dir = "/tmp/greptimedb/logs"
 # Specify the log level [info | debug | error | warn]
 # level = "info"
+# whether enable tracing, default is false
+# enable_otlp_tracing = false
+# tracing exporter endpoint with format `ip:port`, we use grpc oltp as exporter, default endpoint is `localhost:4317`
+# otlp_endpoint = "localhost:4317"
+# Whether to append logs to stdout. Defaults to true.
+# append_stdout = true
+# The percentage of tracing will be sampled and exported. Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1. ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+# [logging.tracing_sample_ratio]
+# default_ratio = 0.0
+
+# Standalone export the metrics generated by itself
+# encoded to Prometheus remote-write format
+# and send to Prometheus remote-write compatible receiver (e.g. send to `greptimedb` itself)
+# This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
+# [export_metrics]
+# whether enable export metrics, default is false
+# enable = false
+# The interval of export metrics
+# write_interval = "30s"
+# for `standalone`, `self_import` is recommend to collect metrics generated by itself
+# [export_metrics.self_import]
+# db = "information_schema"

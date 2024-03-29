@@ -18,7 +18,7 @@ use common_test_util::ports;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use table::test_util::MemTable;
 
-use crate::{create_testing_grpc_query_handler, create_testing_sql_query_handler};
+use crate::create_testing_sql_query_handler;
 
 fn make_test_app() -> Router {
     let http_opts = HttpOptions {
@@ -27,12 +27,10 @@ fn make_test_app() -> Router {
     };
 
     let server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(create_testing_sql_query_handler(
-            MemTable::default_numbers_table(),
-        ))
-        .with_grpc_handler(create_testing_grpc_query_handler(
-            MemTable::default_numbers_table(),
-        ))
+        .with_sql_handler(
+            create_testing_sql_query_handler(MemTable::default_numbers_table()),
+            None,
+        )
         .build();
     server.build(server.make_app())
 }

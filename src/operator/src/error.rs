@@ -20,9 +20,9 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
-use datatypes::value::Value;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
+use sql::ast::Value;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -66,6 +66,15 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to send request to region"))]
+    RequestRegion {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Unsupported region request"))]
+    UnsupportedRegionRequest { location: Location },
 
     #[snafu(display("Failed to parse SQL"))]
     ParseSql {
@@ -351,8 +360,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to read parquet file"))]
-    ReadParquet {
+    #[snafu(display("Failed to read parquet file metadata"))]
+    ReadParquetMetadata {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
         location: Location,
@@ -376,12 +385,6 @@ pub enum Error {
         location: Location,
         #[snafu(source)]
         error: datafusion::error::DataFusionError,
-    },
-
-    #[snafu(display("Failed to write parquet file"))]
-    WriteParquet {
-        location: Location,
-        source: storage::error::Error,
     },
 
     #[snafu(display(
@@ -424,6 +427,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid COPY DATABASE location, must end with '/': {}", value))]
+    InvalidCopyDatabasePath { value: String, location: Location },
+
     #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
@@ -444,6 +450,12 @@ pub enum Error {
 
     #[snafu(display("Missing insert body"))]
     MissingInsertBody {
+        source: sql::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse sql value"))]
+    ParseSqlValue {
         source: sql::error::Error,
         location: Location,
     },
@@ -489,6 +501,39 @@ pub enum Error {
         location: Location,
         source: query::error::Error,
     },
+
+    #[snafu(display("Invalid table name: {}", table_name))]
+    InvalidTableName {
+        table_name: String,
+        location: Location,
+    },
+
+    #[snafu(display("Do not support {} in multiple catalogs", ddl_name))]
+    DdlWithMultiCatalogs {
+        ddl_name: String,
+        location: Location,
+    },
+
+    #[snafu(display("Do not support {} in multiple schemas", ddl_name))]
+    DdlWithMultiSchemas {
+        ddl_name: String,
+        location: Location,
+    },
+
+    #[snafu(display("Empty {} expr", name))]
+    EmptyDdlExpr { name: String, location: Location },
+
+    #[snafu(display("Failed to create logical tables: {}", reason))]
+    CreateLogicalTables { reason: String, location: Location },
+
+    #[snafu(display("Invalid partition rule: {}", reason))]
+    InvalidPartitionRule { reason: String, location: Location },
+
+    #[snafu(display("Invalid configuration value."))]
+    InvalidConfigValue {
+        source: session::session_config::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -497,6 +542,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::InvalidSql { .. }
+            | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }
             | Error::IllegalPrimaryKeysDef { .. }
@@ -513,7 +559,9 @@ impl ErrorExt for Error {
             | Error::InvalidPartitionColumns { .. }
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
-            | Error::SchemaIncompatible { .. } => StatusCode::InvalidArguments,
+            | Error::SchemaIncompatible { .. }
+            | Error::UnsupportedRegionRequest { .. }
+            | Error::InvalidTableName { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
@@ -540,6 +588,7 @@ impl ErrorExt for Error {
             | Error::IntoVectors { source, .. } => source.status_code(),
 
             Error::RequestInserts { source, .. } => source.status_code(),
+            Error::RequestRegion { source, .. } => source.status_code(),
             Error::RequestDeletes { source, .. } => source.status_code(),
 
             Error::ColumnDataType { source, .. } | Error::InvalidColumnDef { source, .. } => {
@@ -586,23 +635,32 @@ impl ErrorExt for Error {
 
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
-            Error::ReadObject { .. } | Error::ReadParquet { .. } | Error::ReadOrc { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            Error::ReadObject { .. }
+            | Error::ReadParquetMetadata { .. }
+            | Error::ReadOrc { .. } => StatusCode::StorageUnavailable,
 
             Error::ListObjects { source, .. }
             | Error::ParseUrl { source, .. }
             | Error::BuildBackend { source, .. } => source.status_code(),
 
-            Error::WriteParquet { source, .. } => source.status_code(),
             Error::ExecuteDdl { source, .. } => source.status_code(),
-            Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
+            Error::InvalidCopyParameter { .. } | Error::InvalidCopyDatabasePath { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             Error::ReadRecordBatch { source, .. } | Error::BuildColumnVectors { source, .. } => {
                 source.status_code()
             }
 
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
+
+            Error::DdlWithMultiCatalogs { .. }
+            | Error::DdlWithMultiSchemas { .. }
+            | Error::EmptyDdlExpr { .. }
+            | Error::InvalidPartitionRule { .. }
+            | Error::ParseSqlValue { .. } => StatusCode::InvalidArguments,
+
+            Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
         }
     }
 

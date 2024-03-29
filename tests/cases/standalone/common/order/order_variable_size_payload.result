@@ -9,17 +9,17 @@ Affected Rows: 7
 -- SQLNESS SORT_RESULT 2 2
 SELECT * FROM t0 ORDER BY t0.c0 DESC;
 
-+------+-------------------------+
-| c0   | t                       |
-+------+-------------------------+
-| null | 1970-01-01T00:00:00.002 |
-| null | 1970-01-01T00:00:00.003 |
-| null | 1970-01-01T00:00:00.004 |
-| null | 1970-01-01T00:00:00.005 |
-| null | 1970-01-01T00:00:00.006 |
-| null | 1970-01-01T00:00:00.007 |
-| a    | 1970-01-01T00:00:00.001 |
-+------+-------------------------+
++----+-------------------------+
+| c0 | t                       |
++----+-------------------------+
+|    | 1970-01-01T00:00:00.002 |
+|    | 1970-01-01T00:00:00.003 |
+|    | 1970-01-01T00:00:00.004 |
+|    | 1970-01-01T00:00:00.005 |
+|    | 1970-01-01T00:00:00.006 |
+|    | 1970-01-01T00:00:00.007 |
+| a  | 1970-01-01T00:00:00.001 |
++----+-------------------------+
 
 CREATE TABLE test0 (job VARCHAR, host VARCHAR, t TIMESTAMP TIME INDEX);
 
@@ -75,7 +75,7 @@ SELECT * FROM test1 ORDER BY s;
 | 3555555555552 | 1970-01-01T00:00:00.003 |
 | 3555555555553 | 1970-01-01T00:00:00.007 |
 | 355555555556  | 1970-01-01T00:00:00.005 |
-| null          | 1970-01-01T00:00:00.002 |
+|               | 1970-01-01T00:00:00.002 |
 +---------------+-------------------------+
 
 CREATE TABLE test4 (i INT, j INT, t TIMESTAMP TIME INDEX);
@@ -342,24 +342,24 @@ select i, split_part(s, 'b', 1) from test8 order by i;
 | i | split_part(test8.s,Utf8("b"),Int64(1)) |
 +---+----------------------------------------+
 | 1 | cc                                     |
-| 2 | null                                   |
+| 2 |                                        |
 | 3 | a                                      |
 |   | d                                      |
 +---+----------------------------------------+
 
-CREATE TABLE DirectReports
+CREATE TABLE "DirectReports"
 (
-    EmployeeID smallint,
+    "EmployeeID" smallint,
     "Name" varchar NOT NULL,
-    Title varchar NOT NULL,
-    EmployeeLevel int NOT NULL,
+    "Title" varchar NOT NULL,
+    "EmployeeLevel" int NOT NULL,
     "Sort" varchar NOT NULL,
     "Timestamp" TIMESTAMP TIME INDEX,
 );
 
 Affected Rows: 0
 
-INSERT INTO DirectReports VALUES
+INSERT INTO "DirectReports" VALUES
 (1, 'Ken Sánchez', 'Chief Executive Officer', 1, 'Ken Sánchez', 1),
 (273, '>Brian Welcker', 'Vice President of Sales', 2, 'Ken Sánchez>Brian Welcker', 2),
 (274, '>>Stephen Jiang', 'North American Sales Manager', 3, 'Ken Sánchez>Brian Welcker>Stephen Jiang', 3),
@@ -426,7 +426,7 @@ DROP table test8;
 
 Affected Rows: 0
 
-DROP TABLE DirectReports;
+DROP TABLE "DirectReports";
 
 Affected Rows: 0
 

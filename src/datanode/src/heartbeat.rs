@@ -37,9 +37,11 @@ use crate::alive_keeper::RegionAliveKeeper;
 use crate::config::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
 use crate::event_listener::RegionServerEventReceiver;
+use crate::metrics;
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
+pub(crate) mod task_tracker;
 
 pub struct HeartbeatTask {
     node_id: u64,
@@ -72,9 +74,9 @@ impl HeartbeatTask {
             opts.heartbeat.interval.as_millis() as u64,
         ));
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
+            region_alive_keeper.clone(),
             Arc::new(ParseMailboxMessageHandler),
             Arc::new(RegionHeartbeatResponseHandler::new(region_server.clone())),
-            region_alive_keeper.clone(),
         ]));
 
         Ok(Self {
@@ -101,8 +103,10 @@ impl HeartbeatTask {
         quit_signal: Arc<Notify>,
     ) -> Result<HeartbeatSender> {
         let client_id = meta_client.id();
-
         let (tx, mut rx) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
+
+        let mut last_received_lease = Instant::now();
+
         let _handle = common_runtime::spawn_bg(async move {
             while let Some(res) = match rx.message().await {
                 Ok(m) => m,
@@ -113,6 +117,28 @@ impl HeartbeatTask {
             } {
                 if let Some(msg) = res.mailbox_message.as_ref() {
                     info!("Received mailbox message: {msg:?}, meta_client id: {client_id:?}");
+                }
+                if let Some(lease) = res.region_lease.as_ref() {
+                    metrics::LAST_RECEIVED_HEARTBEAT_ELAPSED
+                        .set(last_received_lease.elapsed().as_millis() as i64);
+                    // Resets the timer.
+                    last_received_lease = Instant::now();
+
+                    let mut leader_region_lease_count = 0;
+                    let mut follower_region_lease_count = 0;
+                    for lease in &lease.regions {
+                        match lease.role() {
+                            RegionRole::Leader => leader_region_lease_count += 1,
+                            RegionRole::Follower => follower_region_lease_count += 1,
+                        }
+                    }
+
+                    metrics::HEARTBEAT_REGION_LEASES
+                        .with_label_values(&["leader"])
+                        .set(leader_region_lease_count);
+                    metrics::HEARTBEAT_REGION_LEASES
+                        .with_label_values(&["follower"])
+                        .set(follower_region_lease_count);
                 }
                 let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), res);
                 if let Err(e) = Self::handle_response(ctx, handler_executor.clone()).await {
@@ -279,7 +305,7 @@ impl HeartbeatTask {
     }
 
     async fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
-        let regions = region_server.opened_regions();
+        let regions = region_server.reportable_regions();
 
         let mut region_stats = Vec::new();
         for stat in regions {
