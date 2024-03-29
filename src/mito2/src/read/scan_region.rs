@@ -547,7 +547,7 @@ impl ScanInput {
         semaphore: Arc<Semaphore>,
         sender: mpsc::Sender<Result<Batch>>,
     ) {
-        tokio::spawn(async move {
+        common_runtime::spawn_read(async move {
             loop {
                 // We release the permit before sending result to avoid the task waiting on
                 // the channel with the permit holded

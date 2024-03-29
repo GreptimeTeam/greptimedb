@@ -72,7 +72,7 @@ impl UnorderedScan {
         let cache_manager = self.input.cache_manager.clone();
         let stream = try_stream! {
             for mut source in sources {
-                let cache = cache_manager.as_ref().map(|cache| cache.as_ref());
+                let cache = cache_manager.as_deref();
                 while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, &mut metrics).await? {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
@@ -121,7 +121,7 @@ impl UnorderedScan {
         // becomes a bottleneck.
         let mut source = Source::Stream(stream);
         let stream = try_stream! {
-            let cache = cache_manager.as_ref().map(|cache| cache.as_ref());
+            let cache = cache_manager.as_deref();
             while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, &mut metrics).await? {
                 metrics.num_batches += 1;
                 metrics.num_rows += batch.num_rows();
