@@ -192,14 +192,18 @@ impl StateStore for KvStateStore {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::sync::Arc;
 
     use common_procedure::store::state_store::KeyValue;
+    use common_telemetry::info;
     use futures::TryStreamExt;
     use rand::{Rng, RngCore};
     use uuid::Uuid;
 
     use super::*;
+    use crate::kv_backend::chroot::ChrootKvBackend;
+    use crate::kv_backend::etcd::EtcdStore;
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[tokio::test]
@@ -267,11 +271,12 @@ mod tests {
         kv_backend: KvBackendRef,
         size_limit: u32,
         num_per_range: u32,
+        max_bytes: u32,
     ) {
         let num_cases = rand::thread_rng().gen_range(1..=26);
         let mut cases = Vec::with_capacity(num_cases);
         for i in 0..num_cases {
-            let size = rand::thread_rng().gen_range(size_limit..=8192u32);
+            let size = rand::thread_rng().gen_range(size_limit..=max_bytes);
             let mut large_value = vec![0u8; size as usize];
             rand::thread_rng().fill_bytes(&mut large_value);
 
@@ -332,6 +337,43 @@ mod tests {
         let size_limit = rand::thread_rng().gen_range(128..=512);
         let page_size = rand::thread_rng().gen_range(1..10);
         let kv_backend = Arc::new(MemoryKvBackend::new());
-        test_meta_state_store_split_value_with_size_limit(kv_backend, size_limit, page_size).await;
+        test_meta_state_store_split_value_with_size_limit(kv_backend, size_limit, page_size, 8192)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_etcd_store_split_value() {
+        common_telemetry::init_default_ut_logging();
+        let prefix = "test_etcd_store_split_value/";
+        let endpoints = env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+        let kv_backend: KvBackendRef = if endpoints.is_empty() {
+            Arc::new(MemoryKvBackend::new())
+        } else {
+            let endpoints = endpoints
+                .split(',')
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let backend = EtcdStore::with_endpoints(endpoints, 128)
+                .await
+                .expect("malformed endpoints");
+            // Each retry requires a new isolation namespace.
+            let chroot = format!("{}{}", prefix, Uuid::new_v4());
+            info!("chroot length: {}", chroot.len());
+            Arc::new(ChrootKvBackend::new(chroot.into(), backend))
+        };
+
+        let key_preserve_size = 1024;
+        // The etcd default size limit of any requests is 1.5MiB.
+        // However, some KvBackends, the `ChrootKvBackend`, will add the prefix to `key`;
+        // we don't know the exact size of the key.
+        let size_limit = 1536 * 1024 - key_preserve_size;
+        let page_size = rand::thread_rng().gen_range(1..10);
+        test_meta_state_store_split_value_with_size_limit(
+            kv_backend,
+            size_limit,
+            page_size,
+            size_limit * 10,
+        )
+        .await;
     }
 }
