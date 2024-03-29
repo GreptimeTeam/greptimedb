@@ -19,7 +19,7 @@ use cmd::options::MixOptions;
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::KvBackendConfig;
-use common_meta::cache_invalidator::DummyCacheInvalidator;
+use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
@@ -126,8 +126,9 @@ impl GreptimeDbStandaloneBuilder {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
 
+        let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
         let catalog_manager =
-            KvBackendCatalogManager::new(kv_backend.clone(), Arc::new(DummyCacheInvalidator));
+            KvBackendCatalogManager::new(kv_backend.clone(), multi_cache_invalidator.clone()).await;
 
         let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
@@ -150,7 +151,7 @@ impl GreptimeDbStandaloneBuilder {
             DdlManager::try_new(
                 procedure_manager.clone(),
                 datanode_manager.clone(),
-                Arc::new(DummyCacheInvalidator),
+                multi_cache_invalidator,
                 table_metadata_manager,
                 table_meta_allocator,
                 Arc::new(MemoryRegionKeeper::default()),
@@ -161,12 +162,11 @@ impl GreptimeDbStandaloneBuilder {
 
         let instance = FrontendBuilder::new(
             kv_backend.clone(),
-            catalog_manager.clone(),
+            catalog_manager,
             datanode_manager,
             ddl_task_executor,
         )
         .with_plugin(plugins)
-        .with_cache_invalidator(catalog_manager)
         .try_build()
         .await
         .unwrap();

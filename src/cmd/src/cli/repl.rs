@@ -22,6 +22,7 @@ use catalog::kvbackend::{
 use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_error::ext::ErrorExt;
+use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
@@ -252,9 +253,11 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
 
     let cached_meta_backend =
         Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
-
+    let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::with_invalidators(vec![
+        cached_meta_backend.clone(),
+    ]));
     let catalog_list =
-        KvBackendCatalogManager::new(cached_meta_backend.clone(), cached_meta_backend);
+        KvBackendCatalogManager::new(cached_meta_backend.clone(), multi_cache_invalidator).await;
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(
         catalog_list,
