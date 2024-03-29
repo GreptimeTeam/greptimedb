@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod check;
+mod metadata;
+
 use std::collections::HashMap;
 use std::ops::Deref;
 
@@ -67,17 +70,18 @@ impl CreateLogicalTablesProcedure {
         physical_table_id: TableId,
         context: DdlContext,
     ) -> Self {
-        let len = tasks.len();
-        let data = CreateTablesData {
-            cluster_id,
-            state: CreateTablesState::Prepare,
-            tasks,
-            table_ids_already_exists: vec![None; len],
-            physical_table_id,
-            physical_region_numbers: vec![],
-            physical_columns: vec![],
-        };
-        Self { context, data }
+        Self {
+            context,
+            data: CreateTablesData {
+                cluster_id,
+                state: CreateTablesState::Prepare,
+                tasks,
+                table_ids_already_exists: vec![],
+                physical_table_id,
+                physical_region_numbers: vec![],
+                physical_columns: vec![],
+            },
+        }
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
@@ -96,52 +100,23 @@ impl CreateLogicalTablesProcedure {
     /// - Failed to check whether tables exist.
     /// - One of logical tables has existing, and the table creation task without setting `create_if_not_exists`.
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
-        let manager = &self.context.table_metadata_manager;
-
+        self.check_input_tasks().await?;
         // Sets physical region numbers
-        let physical_table_id = self.data.physical_table_id();
-        let physical_region_numbers = manager
-            .table_route_manager()
-            .get_physical_table_route(physical_table_id)
-            .await
-            .map(|(_, route)| TableRouteValue::Physical(route).region_numbers())?;
-        self.data
-            .set_physical_region_numbers(physical_region_numbers);
-
+        self.fill_physical_table_info().await?;
         // Checks if the tables exist
-        let table_name_keys = self
-            .data
-            .all_create_table_exprs()
-            .iter()
-            .map(|expr| TableNameKey::new(&expr.catalog_name, &expr.schema_name, &expr.table_name))
-            .collect::<Vec<_>>();
-        let already_exists_tables_ids = manager
-            .table_name_manager()
-            .batch_get(table_name_keys)
-            .await?
-            .iter()
-            .map(|x| x.map(|x| x.table_id()))
-            .collect::<Vec<_>>();
-
-        // Validates the tasks
-        let tasks = &mut self.data.tasks;
-        for (task, table_id) in tasks.iter().zip(already_exists_tables_ids.iter()) {
-            if table_id.is_some() {
-                // If a table already exists, we just ignore it.
-                ensure!(
-                    task.create_table.create_if_not_exists,
-                    TableAlreadyExistsSnafu {
-                        table_name: task.create_table.table_name.to_string(),
-                    }
-                );
-                continue;
-            }
-        }
+        self.check_tables_already_exist().await?;
 
         // If all tables already exist, returns the table_ids.
-        if already_exists_tables_ids.iter().all(Option::is_some) {
+        if self
+            .data
+            .table_ids_already_exists
+            .iter()
+            .all(Option::is_some)
+        {
             return Ok(Status::done_with_output(
-                already_exists_tables_ids
+                self.data
+                    .table_ids_already_exists
+                    .drain(..)
                     .into_iter()
                     .flatten()
                     .collect::<Vec<_>>(),
@@ -149,23 +124,8 @@ impl CreateLogicalTablesProcedure {
         }
 
         // Allocates table ids and sort columns on their names.
-        for (task, table_id) in tasks.iter_mut().zip(already_exists_tables_ids.iter()) {
-            let table_id = if let Some(table_id) = table_id {
-                *table_id
-            } else {
-                self.context
-                    .table_metadata_allocator
-                    .allocate_table_id(task)
-                    .await?
-            };
-            task.set_table_id(table_id);
+        self.allocate_table_ids().await?;
 
-            // sort columns in task
-            task.sort_columns();
-        }
-
-        self.data
-            .set_table_ids_already_exists(already_exists_tables_ids);
         self.data.state = CreateTablesState::DatanodeCreateRegions;
         Ok(Status::executing(true))
     }
@@ -439,14 +399,6 @@ impl CreateTablesData {
 
     fn physical_table_id(&self) -> TableId {
         self.physical_table_id
-    }
-
-    fn set_physical_region_numbers(&mut self, physical_region_numbers: Vec<RegionNumber>) {
-        self.physical_region_numbers = physical_region_numbers;
-    }
-
-    fn set_table_ids_already_exists(&mut self, table_ids_already_exists: Vec<Option<TableId>>) {
-        self.table_ids_already_exists = table_ids_already_exists;
     }
 
     fn all_create_table_exprs(&self) -> Vec<&CreateTableExpr> {

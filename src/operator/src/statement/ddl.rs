@@ -329,22 +329,6 @@ impl StatementExecutor {
                 name: "alter table"
             }
         );
-        ensure!(
-            alter_table_exprs
-                .windows(2)
-                .all(|expr| expr[0].catalog_name == expr[1].catalog_name),
-            DdlWithMultiCatalogsSnafu {
-                ddl_name: "alter tables",
-            }
-        );
-        ensure!(
-            alter_table_exprs
-                .windows(2)
-                .all(|expr| expr[0].schema_name == expr[1].schema_name),
-            DdlWithMultiSchemasSnafu {
-                ddl_name: "alter tables",
-            }
-        );
 
         self.alter_logical_tables_procedure(alter_table_exprs)
             .await?;
