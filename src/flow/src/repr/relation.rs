@@ -194,6 +194,25 @@ pub struct ColumnType {
     pub nullable: bool,
 }
 
+impl ColumnType {
+    /// Constructs a new `ColumnType` from a scalar type and a nullability flag.
+    pub fn new(scalar_type: ConcreteDataType, nullable: bool) -> Self {
+        ColumnType {
+            scalar_type,
+            nullable,
+        }
+    }
+    /// Returns the scalar type of this column.
+    pub fn scalar_type(&self) -> &ConcreteDataType {
+        &self.scalar_type
+    }
+
+    /// Returns true if this column can be null.
+    pub fn nullable(&self) -> bool {
+        self.nullable
+    }
+}
+
 /// This method exists solely for the purpose of making ColumnType nullable by
 /// default in unit tests. The default value of a bool is false, and the only
 /// way to make an object take on any other value by default is to pass it a

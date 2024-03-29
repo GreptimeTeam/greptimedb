@@ -16,6 +16,7 @@ use common_time::{Date, DateTime};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use serde::{Deserialize, Serialize};
+use smallvec::smallvec;
 
 use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
 use crate::expr::relation::accum::{Accum, Accumulator};
@@ -120,227 +121,81 @@ impl AggregateFunc {
     }
 }
 
+macro_rules! generate_signature {
+    ($value:ident, { $($user_arm:tt)* },
+    [ $(
+        $auto_arm:ident=>($con_type:ident,$generic:ident)
+        ),*
+    ]) => {
+        match $value {
+            $($user_arm)*,
+            $(
+                Self::$auto_arm => Signature {
+                    input: smallvec![
+                        ConcreteDataType::$con_type(),
+                        ConcreteDataType::$con_type(),
+                    ],
+                    output: ConcreteDataType::$con_type(),
+                    generic_fn: GenericFn::$generic,
+                },
+            )*
+        }
+    };
+}
 
 impl AggregateFunc {
     /// all concrete datatypes with precision types will be returned with largest possible variant
     /// as a exception, count have a signature of `null -> i64`, but it's actually `anytype -> i64`
     pub fn signature(&self) -> Signature {
-        match self {
-            AggregateFunc::MaxInt16 => Signature {
-                input: ConcreteDataType::int16_datatype(),
-                output: ConcreteDataType::int16_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxInt32 => Signature {
-                input: ConcreteDataType::int32_datatype(),
-                output: ConcreteDataType::int32_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxInt64 => Signature {
-                input: ConcreteDataType::int64_datatype(),
-                output: ConcreteDataType::int64_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxUInt16 => Signature {
-                input: ConcreteDataType::uint16_datatype(),
-                output: ConcreteDataType::uint16_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxUInt32 => Signature {
-                input: ConcreteDataType::uint32_datatype(),
-                output: ConcreteDataType::uint32_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxUInt64 => Signature {
-                input: ConcreteDataType::uint64_datatype(),
-                output: ConcreteDataType::uint64_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxFloat32 => Signature {
-                input: ConcreteDataType::float32_datatype(),
-                output: ConcreteDataType::float32_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxFloat64 => Signature {
-                input: ConcreteDataType::float64_datatype(),
-                output: ConcreteDataType::float64_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxBool => Signature {
-                input: ConcreteDataType::boolean_datatype(),
-                output: ConcreteDataType::boolean_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxString => Signature {
-                input: ConcreteDataType::string_datatype(),
-                output: ConcreteDataType::string_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxDate => Signature {
-                input: ConcreteDataType::date_datatype(),
-                output: ConcreteDataType::date_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxDateTime => Signature {
-                input: ConcreteDataType::datetime_datatype(),
-                output: ConcreteDataType::datetime_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxTimestamp => Signature {
-                input: ConcreteDataType::timestamp_second_datatype(),
-                output: ConcreteDataType::timestamp_second_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxTime => Signature {
-                input: ConcreteDataType::time_second_datatype(),
-                output: ConcreteDataType::time_second_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxDuration => Signature {
-                input: ConcreteDataType::duration_second_datatype(),
-                output: ConcreteDataType::duration_second_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MaxInterval => Signature {
-                input: ConcreteDataType::interval_year_month_datatype(),
-                output: ConcreteDataType::interval_year_month_datatype(),
-                generic_fn: GenericFn::Max,
-            },
-            AggregateFunc::MinInt16 => Signature {
-                input: ConcreteDataType::int16_datatype(),
-                output: ConcreteDataType::int16_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinInt32 => Signature {
-                input: ConcreteDataType::int32_datatype(),
-                output: ConcreteDataType::int32_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinInt64 => Signature {
-                input: ConcreteDataType::int64_datatype(),
-                output: ConcreteDataType::int64_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinUInt16 => Signature {
-                input: ConcreteDataType::uint16_datatype(),
-                output: ConcreteDataType::uint16_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinUInt32 => Signature {
-                input: ConcreteDataType::uint32_datatype(),
-                output: ConcreteDataType::uint32_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinUInt64 => Signature {
-                input: ConcreteDataType::uint64_datatype(),
-                output: ConcreteDataType::uint64_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinFloat32 => Signature {
-                input: ConcreteDataType::float32_datatype(),
-                output: ConcreteDataType::float32_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinFloat64 => Signature {
-                input: ConcreteDataType::float64_datatype(),
-                output: ConcreteDataType::float64_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinBool => Signature {
-                input: ConcreteDataType::boolean_datatype(),
-                output: ConcreteDataType::boolean_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinString => Signature {
-                input: ConcreteDataType::string_datatype(),
-                output: ConcreteDataType::string_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinDate => Signature {
-                input: ConcreteDataType::date_datatype(),
-                output: ConcreteDataType::date_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinDateTime => Signature {
-                input: ConcreteDataType::datetime_datatype(),
-                output: ConcreteDataType::datetime_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinTimestamp => Signature {
-                input: ConcreteDataType::timestamp_second_datatype(),
-                output: ConcreteDataType::timestamp_second_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinTime => Signature {
-                input: ConcreteDataType::time_second_datatype(),
-                output: ConcreteDataType::time_second_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinDuration => Signature {
-                input: ConcreteDataType::duration_second_datatype(),
-                output: ConcreteDataType::duration_second_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::MinInterval => Signature {
-                input: ConcreteDataType::interval_year_month_datatype(),
-                output: ConcreteDataType::interval_year_month_datatype(),
-                generic_fn: GenericFn::Min,
-            },
-            AggregateFunc::SumInt16 => Signature {
-                input: ConcreteDataType::int16_datatype(),
-                output: ConcreteDataType::int16_datatype(),
-                generic_fn: GenericFn::Sum,
-            },
-            AggregateFunc::SumInt32 => Signature {
-                input: ConcreteDataType::int32_datatype(),
-                output: ConcreteDataType::int32_datatype(),
-                generic_fn: GenericFn::Sum,
-            },
-            AggregateFunc::SumInt64 => Signature {
-                input: ConcreteDataType::int64_datatype(),
-                output: ConcreteDataType::int64_datatype(),
-                generic_fn: GenericFn::Sum,
-            },
-            AggregateFunc::SumUInt16 => Signature {
-                input: ConcreteDataType::uint16_datatype(),
-                output: ConcreteDataType::uint16_datatype(),
-                generic_fn: GenericFn::Sum,
-            },
-            AggregateFunc::SumUInt32 => Signature {
-                input: ConcreteDataType::uint32_datatype(),
-                output: ConcreteDataType::uint32_datatype(),
-                generic_fn: GenericFn::Sum,
-            },
-            AggregateFunc::SumUInt64 => Signature {
-                input: ConcreteDataType::uint64_datatype(),
-                output: ConcreteDataType::uint64_datatype(),
-                generic_fn: GenericFn::Sum,
-            },
-            AggregateFunc::SumFloat32 => Signature {
-                input: ConcreteDataType::float32_datatype(),
-                output: ConcreteDataType::float32_datatype(),
-                generic_fn: GenericFn::Sum,
-            },
-            AggregateFunc::SumFloat64 => Signature {
-                input: ConcreteDataType::float64_datatype(),
-                output: ConcreteDataType::float64_datatype(),
-                generic_fn: GenericFn::Sum,
-            },
+        generate_signature!(self, {
             AggregateFunc::Count => Signature {
-                input: ConcreteDataType::null_datatype(),
+                input: smallvec![ConcreteDataType::null_datatype()],
                 output: ConcreteDataType::int64_datatype(),
                 generic_fn: GenericFn::Count,
-            },
-            AggregateFunc::Any => Signature {
-                input: ConcreteDataType::boolean_datatype(),
-                output: ConcreteDataType::boolean_datatype(),
-                generic_fn: GenericFn::Any,
-            },
-            AggregateFunc::All => Signature {
-                input: ConcreteDataType::boolean_datatype(),
-                output: ConcreteDataType::boolean_datatype(),
-                generic_fn: GenericFn::All,
-            },
-        }
+            }
+        },[
+            MaxInt16 => (int16_datatype, Max),
+            MaxInt32 => (int32_datatype, Max),
+            MaxInt64 => (int64_datatype, Max),
+            MaxUInt16 => (uint16_datatype, Max),
+            MaxUInt32 => (uint32_datatype, Max),
+            MaxUInt64 => (uint64_datatype, Max),
+            MaxFloat32 => (float32_datatype, Max),
+            MaxFloat64 => (float64_datatype, Max),
+            MaxBool => (boolean_datatype, Max),
+            MaxString => (string_datatype, Max),
+            MaxDate => (date_datatype, Max),
+            MaxDateTime => (datetime_datatype, Max),
+            MaxTimestamp => (timestamp_second_datatype, Max),
+            MaxTime => (time_second_datatype, Max),
+            MaxDuration => (duration_second_datatype, Max),
+            MaxInterval => (interval_year_month_datatype, Max),
+            MinInt16 => (int16_datatype, Min),
+            MinInt32 => (int32_datatype, Min),
+            MinInt64 => (int64_datatype, Min),
+            MinUInt16 => (uint16_datatype, Min),
+            MinUInt32 => (uint32_datatype, Min),
+            MinUInt64 => (uint64_datatype, Min),
+            MinFloat32 => (float32_datatype, Min),
+            MinFloat64 => (float64_datatype, Min),
+            MinBool => (boolean_datatype, Min),
+            MinString => (string_datatype, Min),
+            MinDate => (date_datatype, Min),
+            MinDateTime => (datetime_datatype, Min),
+            MinTimestamp => (timestamp_second_datatype, Min),
+            MinTime => (time_second_datatype, Min),
+            MinDuration => (duration_second_datatype, Min),
+            MinInterval => (interval_year_month_datatype, Min),
+            SumInt16 => (int16_datatype, Sum),
+            SumInt32 => (int32_datatype, Sum),
+            SumInt64 => (int64_datatype, Sum),
+            SumUInt16 => (uint16_datatype, Sum),
+            SumUInt32 => (uint32_datatype, Sum),
+            SumUInt64 => (uint64_datatype, Sum),
+            SumFloat32 => (float32_datatype, Sum),
+            SumFloat64 => (float64_datatype, Sum),
+            Any => (boolean_datatype, Any),
+            All => (boolean_datatype, All)
+        ])
     }
 }

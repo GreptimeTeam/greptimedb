@@ -221,7 +221,7 @@ impl Accumulator for SimpleNumber {
             (f, v) => {
                 let expected_datatype = f.signature().input;
                 return Err(TypeMismatchSnafu {
-                    expected: expected_datatype,
+                    expected: expected_datatype[0].clone(),
                     actual: v.data_type(),
                 }
                 .build())?;
@@ -341,7 +341,7 @@ impl Accumulator for Float {
             (f, v) => {
                 let expected_datatype = f.signature().input;
                 return Err(TypeMismatchSnafu {
-                    expected: expected_datatype,
+                    expected: expected_datatype[0].clone(),
                     actual: v.data_type(),
                 }
                 .build())?;
@@ -445,25 +445,27 @@ impl Accumulator for OrdValue {
         // if aggr_fn is count, the incoming value type doesn't matter in type checking
         // otherwise, type need to be the same or value can be null
         let check_type_aggr_fn_and_arg_value =
-            ty_eq_without_precision(value.data_type(), aggr_fn.signature().input)
+            ty_eq_without_precision(value.data_type(), aggr_fn.signature().input[0].clone())
                 || matches!(aggr_fn, AggregateFunc::Count)
                 || value.is_null();
         let check_type_aggr_fn_and_self_val = self
             .val
             .as_ref()
-            .map(|zelf| ty_eq_without_precision(zelf.data_type(), aggr_fn.signature().input))
+            .map(|zelf| {
+                ty_eq_without_precision(zelf.data_type(), aggr_fn.signature().input[0].clone())
+            })
             .unwrap_or(true)
             || matches!(aggr_fn, AggregateFunc::Count);
 
         if !check_type_aggr_fn_and_arg_value {
             return Err(TypeMismatchSnafu {
-                expected: aggr_fn.signature().input,
+                expected: aggr_fn.signature().input[0].clone(),
                 actual: value.data_type(),
             }
             .build());
         } else if !check_type_aggr_fn_and_self_val {
             return Err(TypeMismatchSnafu {
-                expected: aggr_fn.signature().input,
+                expected: aggr_fn.signature().input[0].clone(),
                 actual: self
                     .val
                     .as_ref()

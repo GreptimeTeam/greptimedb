@@ -12,13 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use common_time::DateTime;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
+use smallvec::smallvec;
 use snafu::ResultExt;
+use strum::{EnumIter, IntoEnumIterator};
 
 use crate::adapter::error::{Error, InvalidQuerySnafu};
 use crate::expr::error::{
@@ -37,6 +42,35 @@ pub enum UnmaterializableFunc {
     CurrentSchema,
 }
 
+impl UnmaterializableFunc {
+    pub fn signature(&self) -> Signature {
+        match self {
+            Self::Now => Signature {
+                input: smallvec![],
+                output: ConcreteDataType::datetime_datatype(),
+                generic_fn: GenericFn::Now,
+            },
+            Self::CurrentSchema => Signature {
+                input: smallvec![],
+                output: ConcreteDataType::string_datatype(),
+                generic_fn: GenericFn::CurrentSchema,
+            },
+        }
+    }
+    pub fn from_str(
+        name: &str,
+    ) -> Result<Self, Error> {
+        match name {
+            "now" => Ok(Self::Now),
+            "current_schema" => Ok(Self::CurrentSchema),
+            _ => InvalidQuerySnafu {
+                reason: format!("Unknown unmaterializable function: {}", name),
+            }
+            .fail(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum UnaryFunc {
     Not,
@@ -48,6 +82,35 @@ pub enum UnaryFunc {
 }
 
 impl UnaryFunc {
+    pub fn signature(&self) -> Signature {
+        match self {
+            Self::IsNull => Signature {
+                input: smallvec![ConcreteDataType::null_datatype()],
+                output: ConcreteDataType::boolean_datatype(),
+                generic_fn: GenericFn::IsNull,
+            },
+            Self::Not | Self::IsTrue | Self::IsFalse => Signature {
+                input: smallvec![ConcreteDataType::boolean_datatype()],
+                output: ConcreteDataType::boolean_datatype(),
+                generic_fn: match self {
+                    Self::Not => GenericFn::Not,
+                    Self::IsTrue => GenericFn::IsTrue,
+                    Self::IsFalse => GenericFn::IsFalse,
+                    _ => unreachable!(),
+                },
+            },
+            Self::StepTimestamp => Signature {
+                input: smallvec![ConcreteDataType::datetime_datatype()],
+                output: ConcreteDataType::datetime_datatype(),
+                generic_fn: GenericFn::StepTimestamp,
+            },
+            Self::Cast(to) => Signature {
+                input: smallvec![ConcreteDataType::null_datatype()],
+                output: to.clone(),
+                generic_fn: GenericFn::Cast,
+            },
+        }
+    }
     pub fn from_str_and_type(
         name: &str,
         arg_type: Option<ConcreteDataType>,
@@ -132,7 +195,7 @@ impl UnaryFunc {
 }
 
 /// TODO(discord9): support more binary functions for more types
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash, EnumIter)]
 pub enum BinaryFunc {
     Eq,
     NotEq,
@@ -180,118 +243,120 @@ pub enum BinaryFunc {
     ModUInt64,
 }
 
+macro_rules! generate_binary_signature {
+    ($value:ident, { $($user_arm:tt)* },
+    [ $(
+        $auto_arm:ident=>($con_type:ident,$generic:ident)
+        ),*
+    ]) => {
+        match $value {
+            $($user_arm)*,
+            $(
+                Self::$auto_arm => Signature {
+                    input: smallvec![
+                        ConcreteDataType::$con_type(),
+                        ConcreteDataType::$con_type(),
+                    ],
+                    output: ConcreteDataType::$con_type(),
+                    generic_fn: GenericFn::$generic,
+                },
+            )*
+        }
+    };
+}
+
+static SPECIALIZAITION: OnceLock<HashMap<(GenericFn, ConcreteDataType), BinaryFunc>> =
+    OnceLock::new();
+
 impl BinaryFunc {
+    /// Use null type to ref to any type
+    pub fn signature(&self) -> Signature {
+        generate_binary_signature!(self, {
+                Self::Eq | Self::NotEq | Self::Lt | Self::Lte | Self::Gt | Self::Gte => Signature {
+                    input: smallvec![
+                        ConcreteDataType::null_datatype(),
+                        ConcreteDataType::null_datatype()
+                    ],
+                    output: ConcreteDataType::null_datatype(),
+                    generic_fn: match self {
+                        Self::Eq => GenericFn::Eq,
+                        Self::NotEq => GenericFn::NotEq,
+                        Self::Lt => GenericFn::Lt,
+                        Self::Lte => GenericFn::Lte,
+                        Self::Gt => GenericFn::Gt,
+                        Self::Gte => GenericFn::Gte,
+                        _ => unreachable!(),
+                    },
+                }
+            },
+            [
+                AddInt16=>(int16_datatype,Add),
+                AddInt32=>(int32_datatype,Add),
+                AddInt64=>(int64_datatype,Add),
+                AddUInt16=>(uint16_datatype,Add),
+                AddUInt32=>(uint32_datatype,Add),
+                AddUInt64=>(uint64_datatype,Add),
+                AddFloat32=>(float32_datatype,Add),
+                AddFloat64=>(float64_datatype,Add),
+                SubInt16=>(int16_datatype,Sub),
+                SubInt32=>(int32_datatype,Sub),
+                SubInt64=>(int64_datatype,Sub),
+                SubUInt16=>(uint16_datatype,Sub),
+                SubUInt32=>(uint32_datatype,Sub),
+                SubUInt64=>(uint64_datatype,Sub),
+                SubFloat32=>(float32_datatype,Sub),
+                SubFloat64=>(float64_datatype,Sub),
+                MulInt16=>(int16_datatype,Mul),
+                MulInt32=>(int32_datatype,Mul),
+                MulInt64=>(int64_datatype,Mul),
+                MulUInt16=>(uint16_datatype,Mul),
+                MulUInt32=>(uint32_datatype,Mul),
+                MulUInt64=>(uint64_datatype,Mul),
+                MulFloat32=>(float32_datatype,Mul),
+                MulFloat64=>(float64_datatype,Mul),
+                DivInt16=>(int16_datatype,Div),
+                DivInt32=>(int32_datatype,Div),
+                DivInt64=>(int64_datatype,Div),
+                DivUInt16=>(uint16_datatype,Div),
+                DivUInt32=>(uint32_datatype,Div),
+                DivUInt64=>(uint64_datatype,Div),
+                DivFloat32=>(float32_datatype,Div),
+                DivFloat64=>(float64_datatype,Div),
+                ModInt16=>(int16_datatype,Mod),
+                ModInt32=>(int32_datatype,Mod),
+                ModInt64=>(int64_datatype,Mod),
+                ModUInt16=>(uint16_datatype,Mod),
+                ModUInt32=>(uint32_datatype,Mod),
+                ModUInt64=>(uint64_datatype,Mod)
+            ]
+        )
+    }
 
-    pub fn specialization(generic: GenericFn, input_type: ConcreteDataType)->Result<Self, Error>{
-        let spec_fn = match generic {
-            GenericFn::Eq => Self::Eq,
-            GenericFn::NotEq => Self::NotEq,
-            GenericFn::Lt => Self::Lt,
-            GenericFn::Lte => Self::Lte,
-            GenericFn::Gt => Self::Gt,
-            GenericFn::Gte => Self::Gte,
-            GenericFn::Add => {
-                match input_type {
-                    ConcreteDataType::Int16(_) => Self::AddInt16,
-                    ConcreteDataType::Int32(_) => Self::AddInt32,
-                    ConcreteDataType::Int64(_) => Self::AddInt64,
-                    ConcreteDataType::UInt16(_) => Self::AddUInt16,
-                    ConcreteDataType::UInt32(_) => Self::AddUInt32,
-                    ConcreteDataType::UInt64(_) => Self::AddUInt64,
-                    ConcreteDataType::Float32(_) => Self::AddFloat32,
-                    ConcreteDataType::Float64(_) => Self::AddFloat64,
-                    _ => {
-                        return InvalidQuerySnafu {
-                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
-                        }
-                        .fail();
-                    }
-                }
+    pub fn specialization(generic: GenericFn, input_type: ConcreteDataType) -> Result<Self, Error> {
+        let rule = SPECIALIZAITION.get_or_init(|| {
+            let mut spec = HashMap::new();
+            for func in BinaryFunc::iter() {
+                let sig = func.signature();
+                spec.insert((sig.generic_fn, sig.input[0].clone()), func);
             }
-            GenericFn::Sub => {
-                match input_type {
-                    ConcreteDataType::Int16(_) => Self::SubInt16,
-                    ConcreteDataType::Int32(_) => Self::SubInt32,
-                    ConcreteDataType::Int64(_) => Self::SubInt64,
-                    ConcreteDataType::UInt16(_) => Self::SubUInt16,
-                    ConcreteDataType::UInt32(_) => Self::SubUInt32,
-                    ConcreteDataType::UInt64(_) => Self::SubUInt64,
-                    ConcreteDataType::Float32(_) => Self::SubFloat32,
-                    ConcreteDataType::Float64(_) => Self::SubFloat64,
-                    _ => {
-                        return InvalidQuerySnafu {
-                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
-                        }
-                        .fail();
-                    }
+            spec
+        });
+        rule.get(&(generic.clone(), input_type.clone()))
+            .cloned()
+            .ok_or_else(|| {
+                InvalidQuerySnafu {
+                    reason: format!(
+                        "No specialization found for binary function {:?} with input type {:?}",
+                        generic, input_type
+                    ),
                 }
-            }
-            GenericFn::Mul => {
-                match input_type {
-                    ConcreteDataType::Int16(_) => Self::SubInt16,
-                    ConcreteDataType::Int32(_) => Self::SubInt32,
-                    ConcreteDataType::Int64(_) => Self::SubInt64,
-                    ConcreteDataType::UInt16(_) => Self::SubUInt16,
-                    ConcreteDataType::UInt32(_) => Self::SubUInt32,
-                    ConcreteDataType::UInt64(_) => Self::SubUInt64,
-                    ConcreteDataType::Float32(_) => Self::SubFloat32,
-                    ConcreteDataType::Float64(_) => Self::SubFloat64,
-                    _ => {
-                        return InvalidQuerySnafu {
-                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
-                        }
-                        .fail();
-                    }
-                }
-            }
-            GenericFn::Div => {
-                match input_type {
-                    ConcreteDataType::Int16(_) => Self::DivInt16,
-                    ConcreteDataType::Int32(_) => Self::DivInt32,
-                    ConcreteDataType::Int64(_) => Self::DivInt64,
-                    ConcreteDataType::UInt16(_) => Self::DivUInt16,
-                    ConcreteDataType::UInt32(_) => Self::DivUInt32,
-                    ConcreteDataType::UInt64(_) => Self::DivUInt64,
-                    ConcreteDataType::Float32(_) => Self::DivFloat32,
-                    ConcreteDataType::Float64(_) => Self::DivFloat64,
-                    _ => {
-                        return InvalidQuerySnafu {
-                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
-                        }
-                        .fail();
-                    }
-                }
-            }
-            GenericFn::Mod => {
-                match input_type {
-                    ConcreteDataType::Int16(_) => Self::ModInt16,
-                    ConcreteDataType::Int32(_) => Self::ModInt32,
-                    ConcreteDataType::Int64(_) => Self::ModInt64,
-                    ConcreteDataType::UInt16(_) => Self::ModUInt16,
-                    ConcreteDataType::UInt32(_) => Self::ModUInt32,
-                    ConcreteDataType::UInt64(_) => Self::ModUInt64,
-
-                    _ => {
-                        return InvalidQuerySnafu {
-                            reason: format!("Binary function {:?} doesn't support the type {:?}", generic, input_type),
-                        }
-                        .fail();
-                    }
-                }
-            }
-            _ => {
-                return InvalidQuerySnafu {
-                    reason: format!("Unknown binary function: {:?}", generic),
-                }
-                .fail();
-            }
-        };
-        Ok(spec_fn)
+                .build()
+            })
     }
 
     pub fn from_str_and_types(
         name: &str,
-        arg_types: &[Option<ConcreteDataType>; 2],
+        arg_types: &[Option<ConcreteDataType>],
     ) -> Result<Self, Error> {
         // get first arg type and make sure if both is some, they are the same
         let generic_fn = {
@@ -342,8 +407,13 @@ impl BinaryFunc {
             }
             .fail();
         }
-
-        todo!()
+        let spec_fn = Self::specialization(
+            generic_fn,
+            arg_type
+                .clone()
+                .unwrap_or(ConcreteDataType::null_datatype()),
+        )?;
+        Ok(spec_fn)
     }
 
     pub fn eval(
@@ -435,6 +505,31 @@ pub enum VariadicFunc {
 }
 
 impl VariadicFunc {
+    pub fn signature(&self) -> Signature {
+        Signature {
+            input: smallvec![ConcreteDataType::boolean_datatype()],
+            output: ConcreteDataType::boolean_datatype(),
+            generic_fn: match self {
+                Self::And => GenericFn::And,
+                Self::Or => GenericFn::Or,
+            },
+        }
+    }
+    pub fn from_str_and_types(
+        name: &str,
+        arg_types: &[Option<ConcreteDataType>],
+    ) -> Result<Self, Error> {
+        // TODO: future variadic funcs to be added might need to check arg_types
+        let _ = arg_types;
+        match name {
+            "and" => Ok(Self::And),
+            "or" => Ok(Self::Or),
+            _ => InvalidQuerySnafu {
+                reason: format!("Unknown variadic function: {}", name),
+            }
+            .fail(),
+        }
+    }
     pub fn eval(&self, values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
         match self {
             VariadicFunc::And => and(values, exprs),

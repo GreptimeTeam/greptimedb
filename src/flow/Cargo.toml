@@ -26,6 +26,7 @@ snafu.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 datafusion-substrait.workspace = true
+strum.workspace = true
 
 [dependencies.substrait_proto]
 package = "substrait"
