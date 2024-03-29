@@ -455,6 +455,17 @@ impl PrometheusHandler for Instance {
     }
 }
 
+/// Validate `stmt.database` permission if it's presented.
+macro_rules! validate_db_permission {
+    ($stmt: expr, $query_ctx: expr) => {
+        if let Some(database) = &$stmt.database {
+            validate_catalog_and_schema($query_ctx.current_catalog(), database, $query_ctx)
+                .map_err(BoxedError::new)
+                .context(SqlExecInterceptedSnafu)?;
+        }
+    };
+}
+
 pub fn check_permission(
     plugins: Plugins,
     stmt: &Statement,
@@ -495,11 +506,13 @@ pub fn check_permission(
             validate_param(drop_stmt.table_name(), query_ctx)?;
         }
         Statement::ShowTables(stmt) => {
-            if let Some(database) = &stmt.database {
-                validate_catalog_and_schema(query_ctx.current_catalog(), database, query_ctx)
-                    .map_err(BoxedError::new)
-                    .context(SqlExecInterceptedSnafu)?;
-            }
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowColumns(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowIndex(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
         }
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;

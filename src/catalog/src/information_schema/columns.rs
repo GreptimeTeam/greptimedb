@@ -48,16 +48,16 @@ pub(super) struct InformationSchemaColumns {
     catalog_manager: Weak<dyn CatalogManager>,
 }
 
-const TABLE_CATALOG: &str = "table_catalog";
-const TABLE_SCHEMA: &str = "table_schema";
-const TABLE_NAME: &str = "table_name";
-const COLUMN_NAME: &str = "column_name";
-const DATA_TYPE: &str = "data_type";
-const SEMANTIC_TYPE: &str = "semantic_type";
-const COLUMN_DEFAULT: &str = "column_default";
-const IS_NULLABLE: &str = "is_nullable";
+pub const TABLE_CATALOG: &str = "table_catalog";
+pub const TABLE_SCHEMA: &str = "table_schema";
+pub const TABLE_NAME: &str = "table_name";
+pub const COLUMN_NAME: &str = "column_name";
+pub const DATA_TYPE: &str = "data_type";
+pub const SEMANTIC_TYPE: &str = "semantic_type";
+pub const COLUMN_DEFAULT: &str = "column_default";
+pub const IS_NULLABLE: &str = "is_nullable";
 const COLUMN_TYPE: &str = "column_type";
-const COLUMN_COMMENT: &str = "column_comment";
+pub const COLUMN_COMMENT: &str = "column_comment";
 const INIT_CAPACITY: usize = 42;
 
 impl InformationSchemaColumns {

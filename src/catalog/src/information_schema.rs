@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod columns;
-mod key_column_usage;
+pub mod columns;
+pub mod key_column_usage;
 mod memory_table;
 mod partitions;
 mod predicate;
