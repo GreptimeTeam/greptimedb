@@ -252,7 +252,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?sql=select cpu, ts from demo limit 1;select cpu, ts from demo2 where ts > 0;")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     // TODO(shuiyisong): fix this when return source err msg to client side
@@ -403,6 +403,22 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
+    // instant query 1+1
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=1%2B1&time=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(
+            json!({"resultType":"scalar","result":[1.0,"2"]})
+        )
+        .unwrap()
+    );
+
     // range query
     let res = client
         .get("/v1/prometheus/api/v1/query_range?query=up&start=1&end=100&step=5")
@@ -538,6 +554,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(prom_resp.status, "success");
     assert!(prom_resp.error.is_none());
     assert!(prom_resp.error_type.is_none());
+
+    // buildinfo
+    let res = client
+        .get("/v1/prometheus/api/v1/status/buildinfo")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
 
     guard.remove_all().await;
 }
@@ -787,11 +812,7 @@ mem_threshold_on_create = "64.0MiB"
 intermediate_path = ""
 
 [datanode.region_engine.mito.memtable]
-type = "experimental"
-index_max_keys_per_shard = 8192
-data_freeze_threshold = 131072
-dedup = true
-fork_dictionary_bytes = "1GiB"
+type = "time_series"
 
 [[datanode.region_engine]]
 

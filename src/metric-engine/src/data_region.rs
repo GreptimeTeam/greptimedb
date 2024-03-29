@@ -58,18 +58,19 @@ impl DataRegion {
     /// Invoker don't need to set up or verify the column id. This method will adjust
     /// it using underlying schema.
     ///
-    /// This method will also set the nullable marker to true.
+    /// This method will also set the nullable marker to true. All of those change are applies
+    /// to `columns` in-place.
     pub async fn add_columns(
         &self,
         region_id: RegionId,
-        columns: Vec<ColumnMetadata>,
+        columns: &mut [ColumnMetadata],
     ) -> Result<()> {
         let region_id = utils::to_data_region_id(region_id);
 
         let mut retries = 0;
         // submit alter request
         while retries < MAX_RETRIES {
-            let request = self.assemble_alter_request(region_id, &columns).await?;
+            let request = self.assemble_alter_request(region_id, columns).await?;
 
             let _timer = MITO_DDL_DURATION.start_timer();
 
@@ -90,10 +91,12 @@ impl DataRegion {
         Ok(())
     }
 
+    /// Generate warpped [RegionAlterRequest] with given [ColumnMetadata].
+    /// This method will modify `columns` in-place.
     async fn assemble_alter_request(
         &self,
         region_id: RegionId,
-        columns: &[ColumnMetadata],
+        columns: &mut [ColumnMetadata],
     ) -> Result<RegionRequest> {
         // retrieve underlying version
         let region_metadata = self
@@ -118,15 +121,14 @@ impl DataRegion {
             .unwrap_or(0);
 
         // overwrite semantic type
-        let columns = columns
-            .iter()
+        let new_columns = columns
+            .iter_mut()
             .enumerate()
             .map(|(delta, c)| {
-                let mut c = c.clone();
                 if c.semantic_type == SemanticType::Tag {
                     if !c.column_schema.data_type.is_string() {
                         return ColumnTypeMismatchSnafu {
-                            column_type: c.column_schema.data_type,
+                            column_type: c.column_schema.data_type.clone(),
                         }
                         .fail();
                     }
@@ -138,11 +140,10 @@ impl DataRegion {
                 };
 
                 c.column_id = new_column_id_start + delta as u32;
-
-                c.column_schema = c.column_schema.with_nullable_set();
+                c.column_schema.set_nullable();
 
                 Ok(AddColumn {
-                    column_metadata: c,
+                    column_metadata: c.clone(),
                     location: None,
                 })
             })
@@ -151,7 +152,9 @@ impl DataRegion {
         // assemble alter request
         let alter_request = RegionRequest::Alter(RegionAlterRequest {
             schema_version: version,
-            kind: AlterKind::AddColumns { columns },
+            kind: AlterKind::AddColumns {
+                columns: new_columns,
+            },
         });
 
         Ok(alter_request)
@@ -167,6 +170,7 @@ impl DataRegion {
             .handle_request(region_id, RegionRequest::Put(request))
             .await
             .context(MitoWriteOperationSnafu)
+            .map(|result| result.affected_rows)
     }
 
     pub async fn physical_columns(
@@ -205,7 +209,7 @@ mod test {
         // TestEnv will create a logical region which changes the version to 1.
         assert_eq!(current_version, 1);
 
-        let new_columns = vec![
+        let mut new_columns = vec![
             ColumnMetadata {
                 column_id: 0,
                 semantic_type: SemanticType::Tag,
@@ -226,7 +230,7 @@ mod test {
             },
         ];
         env.data_region()
-            .add_columns(env.default_physical_region_id(), new_columns)
+            .add_columns(env.default_physical_region_id(), &mut new_columns)
             .await
             .unwrap();
 
@@ -258,14 +262,14 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
 
-        let new_columns = vec![ColumnMetadata {
+        let mut new_columns = vec![ColumnMetadata {
             column_id: 0,
             semantic_type: SemanticType::Tag,
             column_schema: ColumnSchema::new("tag2", ConcreteDataType::int64_datatype(), false),
         }];
         let result = env
             .data_region()
-            .add_columns(env.default_physical_region_id(), new_columns)
+            .add_columns(env.default_physical_region_id(), &mut new_columns)
             .await;
         assert!(result.is_err());
     }

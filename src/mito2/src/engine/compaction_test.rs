@@ -42,7 +42,7 @@ async fn put_and_flush(
     };
     put_rows(engine, region_id, rows).await;
 
-    let rows = engine
+    let result = engine
         .handle_request(
             region_id,
             RegionRequest::Flush(RegionFlushRequest {
@@ -51,7 +51,7 @@ async fn put_and_flush(
         )
         .await
         .unwrap();
-    assert_eq!(0, rows);
+    assert_eq!(0, result.affected_rows);
 }
 
 async fn delete_and_flush(
@@ -66,16 +66,16 @@ async fn delete_and_flush(
         rows: build_rows_for_key("a", rows.start, rows.end, 0),
     };
 
-    let rows_affected = engine
+    let result = engine
         .handle_request(
             region_id,
             RegionRequest::Delete(RegionDeleteRequest { rows }),
         )
         .await
         .unwrap();
-    assert_eq!(row_cnt, rows_affected);
+    assert_eq!(row_cnt, result.affected_rows);
 
-    let rows = engine
+    let result = engine
         .handle_request(
             region_id,
             RegionRequest::Flush(RegionFlushRequest {
@@ -84,7 +84,7 @@ async fn delete_and_flush(
         )
         .await
         .unwrap();
-    assert_eq!(0, rows);
+    assert_eq!(0, result.affected_rows);
 }
 
 async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
@@ -127,11 +127,11 @@ async fn test_compaction_region() {
     delete_and_flush(&engine, region_id, &column_schemas, 15..30).await;
     put_and_flush(&engine, region_id, &column_schemas, 15..25).await;
 
-    let output = engine
+    let result = engine
         .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
         .await
         .unwrap();
-    assert_eq!(output, 0);
+    assert_eq!(result.affected_rows, 0);
 
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
     assert_eq!(

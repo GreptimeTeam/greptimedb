@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +21,7 @@ use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::TableMetaKey;
 use partition::manager::TableRouteCacheInvalidator;
@@ -67,22 +66,17 @@ async fn test_invalidate_table_cache_handler() {
         InvalidateTableCacheHandler::new(backend.clone()),
     )]));
 
-    let (tx, mut rx) = mpsc::channel(8);
+    let (tx, _) = mpsc::channel(8);
     let mailbox = Arc::new(HeartbeatMailbox::new(tx));
 
     // removes a valid key
     handle_instruction(
         executor.clone(),
         mailbox.clone(),
-        Instruction::InvalidateTableIdCache(table_id),
+        Instruction::InvalidateCaches(vec![CacheIdent::TableId(table_id)]),
     )
     .await;
 
-    let (_, reply) = rx.recv().await.unwrap();
-    assert_matches!(
-        reply,
-        InstructionReply::InvalidateTableCache(SimpleReply { result: true, .. })
-    );
     assert!(!backend
         .inner
         .lock()
@@ -90,13 +84,12 @@ async fn test_invalidate_table_cache_handler() {
         .contains_key(&table_info_key.as_raw_key()));
 
     // removes a invalid key
-    handle_instruction(executor, mailbox, Instruction::InvalidateTableIdCache(0)).await;
-
-    let (_, reply) = rx.recv().await.unwrap();
-    assert_matches!(
-        reply,
-        InstructionReply::InvalidateTableCache(SimpleReply { result: true, .. })
-    );
+    handle_instruction(
+        executor,
+        mailbox,
+        Instruction::InvalidateCaches(vec![CacheIdent::TableId(0)]),
+    )
+    .await;
 }
 
 pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> MessageMeta {

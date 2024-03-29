@@ -27,6 +27,7 @@ use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use common_telemetry::tracing;
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
+use common_version::BuildInfo;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector};
@@ -51,21 +52,42 @@ use crate::http::header::collect_plan_metrics;
 use crate::prom_store::METRIC_NAME_LABEL;
 use crate::prometheus_handler::PrometheusHandlerRef;
 
+/// For [ValueType::Vector] result type
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct PromSeries {
+pub struct PromSeriesVector {
     pub metric: HashMap<String, String>,
-    /// For [ValueType::Matrix] result type
-    pub values: Vec<(f64, String)>,
-    /// For [ValueType::Vector] result type
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<(f64, String)>,
+}
+
+/// For [ValueType::Matrix] result type
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct PromSeriesMatrix {
+    pub metric: HashMap<String, String>,
+    pub values: Vec<(f64, String)>,
+}
+
+/// Variants corresponding to [ValueType]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(untagged)]
+pub enum PromQueryResult {
+    Matrix(Vec<PromSeriesMatrix>),
+    Vector(Vec<PromSeriesVector>),
+    Scalar(#[serde(skip_serializing_if = "Option::is_none")] Option<(f64, String)>),
+    String(#[serde(skip_serializing_if = "Option::is_none")] Option<(f64, String)>),
+}
+
+impl Default for PromQueryResult {
+    fn default() -> Self {
+        PromQueryResult::Matrix(Default::default())
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromData {
     #[serde(rename = "resultType")]
     pub result_type: String,
-    pub result: Vec<PromSeries>,
+    pub result: PromQueryResult,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -76,6 +98,7 @@ pub enum PrometheusResponse {
     Series(Vec<HashMap<String, String>>),
     LabelValues(Vec<String>),
     FormatQuery(String),
+    BuildInfo(BuildInfo),
 }
 
 impl Default for PrometheusResponse {
@@ -111,6 +134,19 @@ pub async fn format_query(
             PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
         }
     }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct BuildInfoQuery {}
+
+#[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "build_info_query")
+)]
+pub async fn build_info_query() -> PrometheusJsonResponse {
+    let build_info = common_version::build_info().clone();
+    PrometheusJsonResponse::success(PrometheusResponse::BuildInfo(build_info))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -255,7 +291,7 @@ pub async fn labels_query(
         queries = form_params.matches.0;
     }
     if queries.is_empty() {
-        match get_all_column_names(catalog, schema, &handler.catalog_manager()).await {
+        match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await {
             Ok(labels) => {
                 return PrometheusJsonResponse::success(PrometheusResponse::Labels(labels))
             }
@@ -530,7 +566,11 @@ pub async fn label_values_query(
     let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
 
     if label_name == METRIC_NAME_LABEL {
-        let mut table_names = match handler.catalog_manager().table_names(catalog, schema).await {
+        let mut table_names = match handler
+            .catalog_manager()
+            .table_names(&catalog, &schema)
+            .await
+        {
             Ok(table_names) => table_names,
             Err(e) => {
                 return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg());

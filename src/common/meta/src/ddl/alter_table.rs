@@ -43,6 +43,7 @@ use crate::cache_invalidator::Context;
 use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
 use crate::error::{self, ConvertAlterTableRequestSnafu, Error, InvalidProtoMsgSnafu, Result};
+use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::DeserializedValueWithBytes;
@@ -280,7 +281,7 @@ impl AlterTableProcedure {
 
         let new_meta = table_info
             .meta
-            .builder_with_alter_kind(table_ref.table, &request.alter_kind)
+            .builder_with_alter_kind(table_ref.table, &request.alter_kind, false)
             .context(error::TableSnafu)?
             .build()
             .with_context(|_| error::BuildTableMetaSnafu {
@@ -333,11 +334,17 @@ impl AlterTableProcedure {
 
         if matches!(alter_kind, Kind::RenameTable { .. }) {
             cache_invalidator
-                .invalidate_table_name(&Context::default(), self.data.table_ref().into())
+                .invalidate(
+                    &Context::default(),
+                    vec![CacheIdent::TableName(self.data.table_ref().into())],
+                )
                 .await?;
         } else {
             cache_invalidator
-                .invalidate_table_id(&Context::default(), self.data.table_id())
+                .invalidate(
+                    &Context::default(),
+                    vec![CacheIdent::TableId(self.data.table_id())],
+                )
                 .await?;
         };
 
@@ -356,7 +363,8 @@ impl AlterTableProcedure {
                 )
                 .into(),
             );
-            lock_key.push(TableLock::Read(*physical_table_id).into())
+            // We must acquire the write lock since this may update the physical table schema
+            lock_key.push(TableLock::Write(*physical_table_id).into())
         }
 
         let table_ref = self.data.table_ref();

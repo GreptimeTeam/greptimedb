@@ -16,9 +16,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use api::v1::CreateTableExpr;
 use arc_swap::ArcSwap;
 use catalog::{OpenSystemTableHook, RegisterSystemTableRequest};
-use common_catalog::consts::{default_engine, DEFAULT_SCHEMA_NAME, SCRIPTS_TABLE_ID};
+use common_catalog::consts::{default_engine, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::logging;
@@ -26,7 +27,6 @@ use futures::future::FutureExt;
 use query::QueryEngineRef;
 use servers::query_handler::grpc::GrpcQueryHandlerRef;
 use snafu::{OptionExt, ResultExt};
-use table::requests::{CreateTableRequest, TableOptions};
 use table::TableRef;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
@@ -34,10 +34,7 @@ use crate::error::{
     CompilePythonSnafu, ExecutePythonSnafu, Result, ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
 };
 use crate::python::{PyEngine, PyScript};
-use crate::table::{
-    build_scripts_schema, get_primary_key_indices, ScriptsTable, ScriptsTableRef,
-    SCRIPTS_TABLE_NAME,
-};
+use crate::table::{build_scripts_schema, ScriptsTable, ScriptsTableRef, SCRIPTS_TABLE_NAME};
 
 pub struct ScriptManager<E: ErrorExt + Send + Sync + 'static> {
     compiled: RwLock<HashMap<String, Arc<PyScript>>>,
@@ -69,19 +66,21 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptManager<E> {
     }
 
     pub fn create_table_request(&self, catalog: &str) -> RegisterSystemTableRequest {
-        let request = CreateTableRequest {
-            id: SCRIPTS_TABLE_ID,
+        let (time_index, primary_keys, column_defs) = build_scripts_schema();
+
+        let create_table_expr = CreateTableExpr {
             catalog_name: catalog.to_string(),
             // TODO(dennis): put the scripts table into `system` schema?
             // We always put the scripts table into `public` schema right now.
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: SCRIPTS_TABLE_NAME.to_string(),
-            desc: Some("GreptimeDB scripts table for Python".to_string()),
-            schema: build_scripts_schema(),
-            region_numbers: vec![0],
-            primary_key_indices: get_primary_key_indices(),
+            desc: "GreptimeDB scripts table for Python".to_string(),
+            column_defs,
+            time_index,
+            primary_keys,
             create_if_not_exists: true,
-            table_options: TableOptions::default(),
+            table_options: Default::default(),
+            table_id: None, // Should and will be assigned by Meta.
             engine: default_engine().to_string(),
         };
 
@@ -94,7 +93,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptManager<E> {
         });
 
         RegisterSystemTableRequest {
-            create_table_request: request,
+            create_table_expr,
             open_hook: Some(hook),
         }
     }

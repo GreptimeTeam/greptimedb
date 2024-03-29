@@ -25,13 +25,13 @@ use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef, Context};
 use common_meta::error::Result as MetaResult;
+use common_meta::instruction::CacheIdent;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::table_name::TableName;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 use moka::future::{Cache as AsyncCache, CacheBuilder};
@@ -39,7 +39,6 @@ use moka::sync::Cache;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use snafu::prelude::*;
 use table::dist_table::DistTable;
-use table::metadata::TableId;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
@@ -79,24 +78,18 @@ fn make_table(table_info_value: TableInfoValue) -> CatalogResult<TableRef> {
 
 #[async_trait::async_trait]
 impl CacheInvalidator for KvBackendCatalogManager {
-    async fn invalidate_table_id(&self, ctx: &Context, table_id: TableId) -> MetaResult<()> {
-        self.cache_invalidator
-            .invalidate_table_id(ctx, table_id)
-            .await
-    }
-
-    async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> MetaResult<()> {
-        let table_cache_key = format_full_table_name(
-            &table_name.catalog_name,
-            &table_name.schema_name,
-            &table_name.table_name,
-        );
-        self.cache_invalidator
-            .invalidate_table_name(ctx, table_name)
-            .await?;
-        self.table_cache.invalidate(&table_cache_key).await;
-
-        Ok(())
+    async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> MetaResult<()> {
+        for cache in &caches {
+            if let CacheIdent::TableName(table_name) = cache {
+                let table_cache_key = format_full_table_name(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                );
+                self.table_cache.invalidate(&table_cache_key).await;
+            }
+        }
+        self.cache_invalidator.invalidate(ctx, caches).await
     }
 }
 
@@ -145,8 +138,7 @@ impl CatalogManager for KvBackendCatalogManager {
         let stream = self
             .table_metadata_manager
             .catalog_manager()
-            .catalog_names()
-            .await;
+            .catalog_names();
 
         let keys = stream
             .try_collect::<Vec<_>>()
@@ -161,8 +153,7 @@ impl CatalogManager for KvBackendCatalogManager {
         let stream = self
             .table_metadata_manager
             .schema_manager()
-            .schema_names(catalog)
-            .await;
+            .schema_names(catalog);
         let mut keys = stream
             .try_collect::<BTreeSet<_>>()
             .await
@@ -178,8 +169,7 @@ impl CatalogManager for KvBackendCatalogManager {
         let stream = self
             .table_metadata_manager
             .table_name_manager()
-            .tables(catalog, schema)
-            .await;
+            .tables(catalog, schema);
         let mut tables = stream
             .try_collect::<Vec<_>>()
             .await
@@ -304,7 +294,6 @@ impl CatalogManager for KvBackendCatalogManager {
             .table_metadata_manager
             .table_name_manager()
             .tables(catalog, schema)
-            .await
             .map_ok(|(_, v)| v.table_id());
         const BATCH_SIZE: usize = 128;
         let user_tables = try_stream!({

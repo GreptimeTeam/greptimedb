@@ -415,13 +415,13 @@ struct PartitionToWrite<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
+    use crate::memtable::partition_tree::PartitionTreeMemtableBuilder;
     use crate::test_util::memtable_util::{self, collect_iter_timestamps};
 
     #[test]
     fn test_no_duration() {
         let metadata = memtable_util::metadata_for_test();
-        let builder = Arc::new(MergeTreeMemtableBuilder::default());
+        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder, 0, None);
         assert_eq!(1, partitions.num_partitions());
         assert!(partitions.is_empty());
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn test_write_single_part() {
         let metadata = memtable_util::metadata_for_test();
-        let builder = Arc::new(MergeTreeMemtableBuilder::default());
+        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
         let partitions =
             TimePartitions::new(metadata.clone(), builder, 0, Some(Duration::from_secs(10)));
         assert_eq!(0, partitions.num_partitions());
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn test_write_multi_parts() {
         let metadata = memtable_util::metadata_for_test();
-        let builder = Arc::new(MergeTreeMemtableBuilder::default());
+        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
         let partitions =
             TimePartitions::new(metadata.clone(), builder, 0, Some(Duration::from_secs(5)));
         assert_eq!(0, partitions.num_partitions());

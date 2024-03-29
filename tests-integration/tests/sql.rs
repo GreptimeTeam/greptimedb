@@ -60,6 +60,7 @@ macro_rules! sql_tests {
                 test_postgres_auth,
                 test_postgres_crud,
                 test_postgres_timezone,
+                test_postgres_bytea,
                 test_postgres_parameter_inference,
                 test_mysql_prepare_stmt_insert_timestamp,
             );
@@ -196,6 +197,23 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let ret: i64 = row.get("i");
         assert_eq!(ret, 6);
     }
+
+    // parameter type mismatch
+    let query_re = sqlx::query("select i from demo where i = ?")
+        .bind("test")
+        .fetch_all(&pool)
+        .await;
+    assert!(query_re.is_err());
+    assert_eq!(
+        query_re
+            .err()
+            .unwrap()
+            .into_database_error()
+            .unwrap()
+            .downcast::<MySqlDatabaseError>()
+            .code(),
+        Some("22007")
+    );
 
     let _ = sqlx::query("delete from demo")
         .execute(&pool)
@@ -398,7 +416,69 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
+pub async fn test_postgres_bytea(store_type: StorageType) {
+    let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_bytea_output").await;
 
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+    let _ = client
+        .simple_query("CREATE TABLE test(b BLOB, ts TIMESTAMP TIME INDEX)")
+        .await
+        .unwrap();
+    let _ = client
+        .simple_query("INSERT INTO test VALUES(X'6162636b6c6d2aa954', 0)")
+        .await
+        .unwrap();
+    let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
+        match &mess[0] {
+            SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
+            _ => unreachable!(),
+        }
+    };
+
+    let r = client.simple_query("SELECT b FROM test").await.unwrap();
+    let b = get_row(r);
+    assert_eq!(b, "\\x6162636b6c6d2aa954");
+
+    let _ = client.simple_query("SET bytea_output='hex'").await.unwrap();
+    let r = client.simple_query("SELECT b FROM test").await.unwrap();
+    let b = get_row(r);
+    assert_eq!(b, "\\x6162636b6c6d2aa954");
+
+    let _ = client
+        .simple_query("SET bytea_output='escape'")
+        .await
+        .unwrap();
+    let r = client.simple_query("SELECT b FROM test").await.unwrap();
+    let b = get_row(r);
+    assert_eq!(b, "abcklm*\\251T");
+
+    let _e = client
+        .simple_query("SET bytea_output='invalid'")
+        .await
+        .unwrap_err();
+
+    // binary format shall not be affected by bytea_output
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("postgres://{addr}/public"))
+        .await
+        .unwrap();
+
+    let row = sqlx::query("select b from test")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let val: Vec<u8> = row.get("b");
+    assert_eq!(val, [97, 98, 99, 107, 108, 109, 42, 169, 84]);
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
 pub async fn test_postgres_timezone(store_type: StorageType) {
     let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_inference").await;
 

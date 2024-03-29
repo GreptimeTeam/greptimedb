@@ -64,6 +64,17 @@ with(
     'index.inverted_index.ignore_column_ids'='1,2,3',
     'index.inverted_index.segment_row_count'='512',
     'wal_options'='{"wal.provider":"raft_engine"}',
+    'memtable.type' = 'partition_tree',
 );
 
 drop table test_mito_options;
+
+create table if not exists invalid_compaction(
+    host string,
+    ts timestamp,
+    memory double,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+engine=mito
+with('compaction.type'='twcs', 'compaction.twcs.max_active_window_files'='8d');

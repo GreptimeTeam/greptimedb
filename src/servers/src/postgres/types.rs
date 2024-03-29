@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod bytea;
 mod interval;
 
 use std::collections::HashMap;
@@ -28,7 +29,10 @@ use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::api::Type;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::plan::LogicalPlan;
+use session::context::QueryContextRef;
+use session::session_config::PGByteaOutputValue;
 
+use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use self::interval::PgInterval;
 use crate::error::{self, Error, Result};
 use crate::SqlPlan;
@@ -50,7 +54,11 @@ pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Ve
         .collect::<Result<Vec<FieldInfo>>>()
 }
 
-pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWireResult<()> {
+pub(super) fn encode_value(
+    query_ctx: &QueryContextRef,
+    value: &Value,
+    builder: &mut DataRowEncoder,
+) -> PgWireResult<()> {
     match value {
         Value::Null => builder.encode_field(&None::<&i8>),
         Value::Boolean(v) => builder.encode_field(v),
@@ -65,7 +73,13 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
         Value::Float32(v) => builder.encode_field(&v.0),
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
-        Value::Binary(v) => builder.encode_field(&v.deref()),
+        Value::Binary(v) => {
+            let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
+            match *bytea_output {
+                PGByteaOutputValue::ESCAPE => builder.encode_field(&EscapeOutputBytea(v.deref())),
+                PGByteaOutputValue::HEX => builder.encode_field(&HexOutputBytea(v.deref())),
+            }
+        }
         Value::Date(v) => {
             if let Some(date) = v.to_chrono_date() {
                 builder.encode_field(&date)
@@ -563,6 +577,7 @@ mod test {
     use datatypes::value::ListValue;
     use pgwire::api::results::{FieldFormat, FieldInfo};
     use pgwire::api::Type;
+    use session::context::QueryContextBuilder;
 
     use super::*;
 
@@ -784,12 +799,16 @@ mod test {
             Value::Timestamp(1000001i64.into()),
             Value::Interval(1000001i128.into()),
         ];
+        let query_context = QueryContextBuilder::default()
+            .configuration_parameter(Default::default())
+            .build();
         let mut builder = DataRowEncoder::new(Arc::new(schema));
         for i in values.iter() {
-            encode_value(i, &mut builder).unwrap();
+            encode_value(&query_context, i, &mut builder).unwrap();
         }
 
         let err = encode_value(
+            &query_context,
             &Value::List(ListValue::new(
                 Some(Box::default()),
                 ConcreteDataType::int16_datatype(),

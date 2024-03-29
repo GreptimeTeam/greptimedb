@@ -449,8 +449,9 @@ pub enum Error {
     ))]
     UnexpectedPhysicalTable { location: Location },
 
-    #[snafu(display("Failed to initialize a watcher for file"))]
+    #[snafu(display("Failed to initialize a watcher for file {}", path))]
     FileWatch {
+        path: String,
         #[snafu(source)]
         error: notify::Error,
     },

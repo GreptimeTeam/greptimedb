@@ -19,6 +19,5 @@ show databases;
 | illegal-database   |
 | information_schema |
 | public             |
-| test_public_schema |
 +--------------------+
 

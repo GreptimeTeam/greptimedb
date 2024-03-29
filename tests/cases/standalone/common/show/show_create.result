@@ -96,5 +96,5 @@ WITH(
   storage = 'S3'
 );
 
-Error: 1004(InvalidArguments), Object store not found: s3
+Error: 1004(InvalidArguments), Object store not found: S3
 

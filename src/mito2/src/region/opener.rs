@@ -37,7 +37,7 @@ use crate::error::{
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::MemtableBuilderRef;
+use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
@@ -53,7 +53,7 @@ use crate::wal::{EntryId, Wal};
 pub(crate) struct RegionOpener {
     region_id: RegionId,
     metadata: Option<RegionMetadata>,
-    memtable_builder: MemtableBuilderRef,
+    memtable_builder_provider: MemtableBuilderProvider,
     object_store_manager: ObjectStoreManagerRef,
     region_dir: String,
     scheduler: SchedulerRef,
@@ -69,7 +69,7 @@ impl RegionOpener {
     pub(crate) fn new(
         region_id: RegionId,
         region_dir: &str,
-        memtable_builder: MemtableBuilderRef,
+        memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
         scheduler: SchedulerRef,
         intermediate_manager: IntermediateManager,
@@ -77,7 +77,7 @@ impl RegionOpener {
         RegionOpener {
             region_id,
             metadata: None,
-            memtable_builder,
+            memtable_builder_provider,
             object_store_manager,
             region_dir: normalize_dir(region_dir),
             scheduler,
@@ -171,11 +171,14 @@ impl RegionOpener {
         let manifest_manager =
             RegionManifestManager::new(metadata.clone(), region_manifest_options).await?;
 
+        let memtable_builder = self
+            .memtable_builder_provider
+            .builder_for_options(options.memtable.as_ref(), !options.append_mode);
         // Initial memtable id is 0.
         let part_duration = options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
-            self.memtable_builder,
+            memtable_builder.clone(),
             0,
             part_duration,
         ));
@@ -210,6 +213,7 @@ impl RegionOpener {
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
             time_provider,
+            memtable_builder,
         })
     }
 
@@ -277,11 +281,15 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
         ));
+        let memtable_builder = self.memtable_builder_provider.builder_for_options(
+            region_options.memtable.as_ref(),
+            !region_options.append_mode,
+        );
         // Initial memtable id is 0.
         let part_duration = region_options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
-            self.memtable_builder.clone(),
+            memtable_builder.clone(),
             0,
             part_duration,
         ));
@@ -329,6 +337,7 @@ impl RegionOpener {
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
             time_provider,
+            memtable_builder,
         };
         Ok(Some(region))
     }

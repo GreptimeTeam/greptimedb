@@ -18,8 +18,8 @@ use std::fmt::Debug;
 use std::ops::Range;
 
 use crate::error::Result;
-use crate::memtable::merge_tree::data::{DataBatch, DataBufferReader, DataPartReader};
-use crate::memtable::merge_tree::PkIndex;
+use crate::memtable::partition_tree::data::{DataBatch, DataBufferReader, DataPartReader};
+use crate::memtable::partition_tree::PkIndex;
 
 /// Nodes of merger's heap.
 pub trait Node: Ord {
@@ -297,7 +297,7 @@ mod tests {
     use store_api::metadata::RegionMetadataRef;
 
     use super::*;
-    use crate::memtable::merge_tree::data::{timestamp_array_to_i64_slice, DataBuffer};
+    use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBuffer};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     fn write_rows_to_buffer(

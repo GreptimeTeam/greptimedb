@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use catalog::kvbackend::KvBackendCatalogManager;
+use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::datanode_manager::DatanodeManagerRef;
@@ -41,6 +41,7 @@ use crate::script::ScriptExecutor;
 pub struct FrontendBuilder {
     kv_backend: KvBackendRef,
     cache_invalidator: Option<CacheInvalidatorRef>,
+    catalog_manager: CatalogManagerRef,
     datanode_manager: DatanodeManagerRef,
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
@@ -50,12 +51,14 @@ pub struct FrontendBuilder {
 impl FrontendBuilder {
     pub fn new(
         kv_backend: KvBackendRef,
+        catalog_manager: CatalogManagerRef,
         datanode_manager: DatanodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {
             kv_backend,
             cache_invalidator: None,
+            catalog_manager,
             datanode_manager,
             plugins: None,
             procedure_executor,
@@ -89,29 +92,27 @@ impl FrontendBuilder {
         let datanode_manager = self.datanode_manager;
         let plugins = self.plugins.unwrap_or_default();
 
-        let catalog_manager = KvBackendCatalogManager::new(
-            kv_backend.clone(),
-            self.cache_invalidator
-                .unwrap_or_else(|| Arc::new(DummyCacheInvalidator)),
-        );
-
         let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
+
+        let cache_invalidator = self
+            .cache_invalidator
+            .unwrap_or_else(|| Arc::new(DummyCacheInvalidator));
 
         let region_query_handler =
             FrontendRegionQueryHandler::arc(partition_manager.clone(), datanode_manager.clone());
 
         let inserter = Arc::new(Inserter::new(
-            catalog_manager.clone(),
+            self.catalog_manager.clone(),
             partition_manager.clone(),
             datanode_manager.clone(),
         ));
         let deleter = Arc::new(Deleter::new(
-            catalog_manager.clone(),
+            self.catalog_manager.clone(),
             partition_manager.clone(),
             datanode_manager.clone(),
         ));
         let requester = Arc::new(Requester::new(
-            catalog_manager.clone(),
+            self.catalog_manager.clone(),
             partition_manager,
             datanode_manager.clone(),
         ));
@@ -126,7 +127,7 @@ impl FrontendBuilder {
         ));
 
         let query_engine = QueryEngineFactory::new_with_plugins(
-            catalog_manager.clone(),
+            self.catalog_manager.clone(),
             Some(region_query_handler.clone()),
             Some(table_mutation_handler),
             Some(procedure_service_handler),
@@ -135,22 +136,23 @@ impl FrontendBuilder {
         )
         .query_engine();
 
-        let script_executor =
-            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
+        let script_executor = Arc::new(
+            ScriptExecutor::new(self.catalog_manager.clone(), query_engine.clone()).await?,
+        );
 
         let statement_executor = Arc::new(StatementExecutor::new(
-            catalog_manager.clone(),
+            self.catalog_manager.clone(),
             query_engine.clone(),
             self.procedure_executor,
             kv_backend.clone(),
-            catalog_manager.clone(),
+            cache_invalidator,
             inserter.clone(),
         ));
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
         Ok(Instance {
-            catalog_manager,
+            catalog_manager: self.catalog_manager,
             script_executor,
             statement_executor,
             query_engine,

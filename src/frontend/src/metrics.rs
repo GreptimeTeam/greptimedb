@@ -41,13 +41,6 @@ lazy_static! {
         .with_label_values(&["insert"]);
     pub static ref EXECUTE_SCRIPT_ELAPSED: Histogram = HANDLE_SCRIPT_ELAPSED
         .with_label_values(&["execute"]);
-
-    /// The samples count of Prometheus remote write.
-    pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounter = register_int_counter!(
-        "greptime_frontend_prometheus_remote_write_samples",
-        "frontend prometheus remote write samples"
-    )
-    .unwrap();
     pub static ref OTLP_METRICS_ROWS: IntCounter = register_int_counter!(
         "greptime_frontend_otlp_metrics_rows",
         "frontend otlp metrics rows"

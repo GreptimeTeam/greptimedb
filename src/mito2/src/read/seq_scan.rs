@@ -67,6 +67,8 @@ pub struct SeqScan {
     index_applier: Option<SstIndexApplierRef>,
     /// Start time of the query.
     query_start: Option<Instant>,
+    /// The region is using append mode.
+    append_mode: bool,
 }
 
 impl SeqScan {
@@ -85,6 +87,7 @@ impl SeqScan {
             parallelism: ScanParallism::default(),
             index_applier: None,
             query_start: None,
+            append_mode: false,
         }
     }
 
@@ -151,6 +154,12 @@ impl SeqScan {
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_append_mode(mut self, is_append_mode: bool) -> Self {
+        self.append_mode = is_append_mode;
+        self
+    }
+
     /// Builds a stream for the query.
     pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
         let mut metrics = Metrics::default();
@@ -210,8 +219,10 @@ impl SeqScan {
     pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let sources = self.build_sources().await?;
-        let mut builder = MergeReaderBuilder::from_sources(sources);
-        Ok(Box::new(builder.build().await?))
+        let dedup = !self.append_mode;
+        let mut builder = MergeReaderBuilder::from_sources(sources, dedup);
+        let reader = builder.build().await?;
+        Ok(Box::new(reader))
     }
 
     /// Builds a [BoxedBatchReader] that can scan memtables and SSTs in parallel.
@@ -228,8 +239,10 @@ impl SeqScan {
                 Source::Stream(stream)
             })
             .collect();
-        let mut builder = MergeReaderBuilder::from_sources(sources);
-        Ok(Box::new(builder.build().await?))
+        let dedup = !self.append_mode;
+        let mut builder = MergeReaderBuilder::from_sources(sources, dedup);
+        let reader = builder.build().await?;
+        Ok(Box::new(reader))
     }
 
     /// Builds and returns sources to read.

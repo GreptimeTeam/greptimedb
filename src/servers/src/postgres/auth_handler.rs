@@ -237,14 +237,11 @@ where
     if let Some(db) = db_ref {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         if query_handler
-            .is_valid_schema(catalog, schema)
+            .is_valid_schema(&catalog, &schema)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {
-            Ok(DbResolution::Resolved(
-                catalog.to_owned(),
-                schema.to_owned(),
-            ))
+            Ok(DbResolution::Resolved(catalog, schema))
         } else {
             Ok(DbResolution::NotFound(format!("Database not found: {db}")))
         }

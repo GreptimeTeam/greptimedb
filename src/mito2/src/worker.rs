@@ -48,9 +48,7 @@ use crate::config::MitoConfig;
 use crate::error::{InvalidRequestSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::manifest::action::RegionEdit;
-use crate::memtable::merge_tree::MergeTreeMemtableBuilder;
-use crate::memtable::time_series::TimeSeriesMemtableBuilder;
-use crate::memtable::{MemtableBuilderRef, MemtableConfig};
+use crate::memtable::MemtableBuilderProvider;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
@@ -338,19 +336,10 @@ impl<S: LogStore> WorkerStarter<S> {
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
-        let memtable_builder = match &self.config.memtable {
-            MemtableConfig::Experimental(merge_tree) => Arc::new(MergeTreeMemtableBuilder::new(
-                merge_tree.clone(),
-                Some(self.write_buffer_manager.clone()),
-            )) as _,
-            MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(Some(
-                self.write_buffer_manager.clone(),
-            ))) as _,
-        };
         let now = self.time_provider.current_time_millis();
         let mut worker_thread = RegionWorkerLoop {
             id: self.id,
-            config: self.config,
+            config: self.config.clone(),
             regions: regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
             sender: sender.clone(),
@@ -358,7 +347,10 @@ impl<S: LogStore> WorkerStarter<S> {
             wal: Wal::new(self.log_store),
             object_store_manager: self.object_store_manager.clone(),
             running: running.clone(),
-            memtable_builder,
+            memtable_builder_provider: MemtableBuilderProvider::new(
+                Some(self.write_buffer_manager.clone()),
+                self.config,
+            ),
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
@@ -513,8 +505,8 @@ struct RegionWorkerLoop<S> {
     object_store_manager: ObjectStoreManagerRef,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
-    /// Memtable builder for each region.
-    memtable_builder: MemtableBuilderRef,
+    /// Memtable builder provider for each region.
+    memtable_builder_provider: MemtableBuilderProvider,
     /// Background job scheduler.
     scheduler: SchedulerRef,
     /// Engine write buffer manager.

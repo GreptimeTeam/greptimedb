@@ -32,7 +32,6 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing = "0.1"
 tracing-appender = "0.2"
-tracing-futures = { version = "0.2", features = ["futures-03"] }
 tracing-log = "0.1"
 tracing-opentelemetry = "0.22.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

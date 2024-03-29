@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use catalog::kvbackend::CachedMetaKvBackendBuilder;
+use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager};
 use clap::Parser;
 use client::client_manager::DatanodeClients;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -248,11 +248,12 @@ impl StartCommand {
             .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
 
+        let catalog_manager =
+            KvBackendCatalogManager::new(cached_meta_backend.clone(), cached_meta_backend.clone());
+
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                cached_meta_backend.clone(),
-            )),
+            Arc::new(InvalidateTableCacheHandler::new(catalog_manager.clone())),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -263,10 +264,11 @@ impl StartCommand {
 
         let mut instance = FrontendBuilder::new(
             cached_meta_backend.clone(),
+            catalog_manager.clone(),
             Arc::new(DatanodeClients::default()),
             meta_client,
         )
-        .with_cache_invalidator(cached_meta_backend)
+        .with_cache_invalidator(catalog_manager.clone())
         .with_plugin(plugins.clone())
         .with_heartbeat_task(heartbeat_task)
         .try_build()

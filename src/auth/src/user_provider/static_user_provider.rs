@@ -13,60 +13,34 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io;
-use std::io::BufRead;
-use std::path::Path;
 
 use async_trait::async_trait;
-use secrecy::ExposeSecret;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::OptionExt;
 
-use crate::error::{
-    Error, IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
-    UserNotFoundSnafu, UserPasswordMismatchSnafu,
-};
-use crate::user_info::DefaultUserInfo;
-use crate::{auth_mysql, Identity, Password, UserInfoRef, UserProvider};
+use crate::error::{InvalidConfigSnafu, Result};
+use crate::user_provider::{authenticate_with_credential, load_credential_from_file};
+use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const STATIC_USER_PROVIDER: &str = "static_user_provider";
 
-impl TryFrom<&str> for StaticUserProvider {
-    type Error = Error;
+pub(crate) struct StaticUserProvider {
+    users: HashMap<String, Vec<u8>>,
+}
 
-    fn try_from(value: &str) -> Result<Self> {
+impl StaticUserProvider {
+    pub(crate) fn new(value: &str) -> Result<Self> {
         let (mode, content) = value.split_once(':').context(InvalidConfigSnafu {
             value: value.to_string(),
             msg: "StaticUserProviderOption must be in format `<option>:<value>`",
         })?;
         return match mode {
             "file" => {
-                // check valid path
-                let path = Path::new(content);
-                ensure!(path.exists() && path.is_file(), InvalidConfigSnafu {
-                    value: content.to_string(),
-                    msg: "StaticUserProviderOption file must be a valid file path",
-                });
-
-                let file = File::open(path).context(IoSnafu)?;
-                let credential = io::BufReader::new(file)
-                    .lines()
-                    .map_while(std::result::Result::ok)
-                    .filter_map(|line| {
-                        if let Some((k, v)) = line.split_once('=') {
-                            Some((k.to_string(), v.as_bytes().to_vec()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<HashMap<String, Vec<u8>>>();
-
-                ensure!(!credential.is_empty(), InvalidConfigSnafu {
-                    value: content.to_string(),
-                    msg: "StaticUserProviderOption file must contains at least one valid credential",
-                });
-
-                Ok(StaticUserProvider { users: credential, })
+                let users = load_credential_from_file(content)?
+                    .context(InvalidConfigSnafu {
+                        value: content.to_string(),
+                        msg: "StaticFileUserProvider must be a valid file path",
+                    })?;
+                Ok(StaticUserProvider { users })
             }
             "cmd" => content
                 .split(',')
@@ -83,13 +57,9 @@ impl TryFrom<&str> for StaticUserProvider {
                 value: mode.to_string(),
                 msg: "StaticUserProviderOption must be in format `file:<path>` or `cmd:<values>`",
             }
-            .fail(),
+                .fail(),
         };
     }
-}
-
-pub(crate) struct StaticUserProvider {
-    users: HashMap<String, Vec<u8>>,
 }
 
 #[async_trait]
@@ -98,51 +68,8 @@ impl UserProvider for StaticUserProvider {
         STATIC_USER_PROVIDER
     }
 
-    async fn authenticate(
-        &self,
-        input_id: Identity<'_>,
-        input_pwd: Password<'_>,
-    ) -> Result<UserInfoRef> {
-        match input_id {
-            Identity::UserId(username, _) => {
-                ensure!(
-                    !username.is_empty(),
-                    IllegalParamSnafu {
-                        msg: "blank username"
-                    }
-                );
-                let save_pwd = self.users.get(username).context(UserNotFoundSnafu {
-                    username: username.to_string(),
-                })?;
-
-                match input_pwd {
-                    Password::PlainText(pwd) => {
-                        ensure!(
-                            !pwd.expose_secret().is_empty(),
-                            IllegalParamSnafu {
-                                msg: "blank password"
-                            }
-                        );
-                        return if save_pwd == pwd.expose_secret().as_bytes() {
-                            Ok(DefaultUserInfo::with_name(username))
-                        } else {
-                            UserPasswordMismatchSnafu {
-                                username: username.to_string(),
-                            }
-                            .fail()
-                        };
-                    }
-                    Password::MysqlNativePassword(auth_data, salt) => {
-                        auth_mysql(auth_data, salt, username, save_pwd)
-                            .map(|_| DefaultUserInfo::with_name(username))
-                    }
-                    Password::PgMD5(_, _) => UnsupportedPasswordTypeSnafu {
-                        password_type: "pg_md5",
-                    }
-                    .fail(),
-                }
-            }
-        }
+    async fn authenticate(&self, id: Identity<'_>, pwd: Password<'_>) -> Result<UserInfoRef> {
+        authenticate_with_credential(&self.users, id, pwd)
     }
 
     async fn authorize(
@@ -181,7 +108,7 @@ pub mod test {
     #[tokio::test]
     async fn test_authorize() {
         let user_info = DefaultUserInfo::with_name("root");
-        let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
+        let provider = StaticUserProvider::new("cmd:root=123456,admin=654321").unwrap();
         provider
             .authorize("catalog", "schema", &user_info)
             .await
@@ -190,7 +117,7 @@ pub mod test {
 
     #[tokio::test]
     async fn test_inline_provider() {
-        let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
+        let provider = StaticUserProvider::new("cmd:root=123456,admin=654321").unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
     }
@@ -214,7 +141,7 @@ admin=654321",
         }
 
         let param = format!("file:{file_path}");
-        let provider = StaticUserProvider::try_from(param.as_str()).unwrap();
+        let provider = StaticUserProvider::new(param.as_str()).unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
     }

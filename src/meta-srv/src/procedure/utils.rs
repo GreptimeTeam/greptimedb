@@ -93,6 +93,7 @@ pub mod mock {
                     }),
                 }),
                 affected_rows: 0,
+                extension: Default::default(),
             })
         }
     }
@@ -208,7 +209,6 @@ pub mod test_data {
             table_metadata_allocator: Arc::new(TableMetadataAllocator::new(
                 Arc::new(SequenceBuilder::new("test", kv_backend).build()),
                 Arc::new(WalOptionsAllocator::default()),
-                table_metadata_manager.table_name_manager().clone(),
             )),
         }
     }

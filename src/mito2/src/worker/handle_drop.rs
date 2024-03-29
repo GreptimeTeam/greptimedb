@@ -61,7 +61,9 @@ impl<S> RegionWorkerLoop<S> {
         self.compaction_scheduler.on_region_dropped(region_id);
 
         // mark region version as dropped
-        region.version_control.mark_dropped(&self.memtable_builder);
+        region
+            .version_control
+            .mark_dropped(&region.memtable_builder);
         info!(
             "Region {} is dropped logically, but some files are not deleted yet",
             region_id

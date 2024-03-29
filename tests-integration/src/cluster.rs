@@ -20,7 +20,7 @@ use std::time::Duration;
 use api::v1::meta::Role;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
-use catalog::kvbackend::{CachedMetaKvBackendBuilder, MetaKvBackend};
+use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
@@ -77,8 +77,8 @@ pub struct GreptimeDbClusterBuilder {
     store_config: Option<ObjectStoreConfig>,
     store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
-    wal_config: DatanodeWalConfig,
-    meta_wal_config: MetaSrvWalConfig,
+    datanode_wal_config: DatanodeWalConfig,
+    metasrv_wal_config: MetaSrvWalConfig,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
 }
@@ -108,8 +108,8 @@ impl GreptimeDbClusterBuilder {
             store_config: None,
             store_providers: None,
             datanodes: None,
-            wal_config: DatanodeWalConfig::default(),
-            meta_wal_config: MetaSrvWalConfig::default(),
+            datanode_wal_config: DatanodeWalConfig::default(),
+            metasrv_wal_config: MetaSrvWalConfig::default(),
             shared_home_dir: None,
             meta_selector: None,
         }
@@ -134,14 +134,14 @@ impl GreptimeDbClusterBuilder {
     }
 
     #[must_use]
-    pub fn with_wal_config(mut self, wal_config: DatanodeWalConfig) -> Self {
-        self.wal_config = wal_config;
+    pub fn with_datanode_wal_config(mut self, datanode_wal_config: DatanodeWalConfig) -> Self {
+        self.datanode_wal_config = datanode_wal_config;
         self
     }
 
     #[must_use]
-    pub fn with_meta_wal_config(mut self, wal_meta: MetaSrvWalConfig) -> Self {
-        self.meta_wal_config = wal_meta;
+    pub fn with_metasrv_wal_config(mut self, metasrv_wal_config: MetaSrvWalConfig) -> Self {
+        self.metasrv_wal_config = metasrv_wal_config;
         self
     }
 
@@ -174,7 +174,7 @@ impl GreptimeDbClusterBuilder {
                 max_retry_times: 5,
                 retry_delay: Duration::from_secs(1),
             },
-            wal: self.meta_wal_config.clone(),
+            wal: self.metasrv_wal_config.clone(),
             ..Default::default()
         };
 
@@ -249,7 +249,7 @@ impl GreptimeDbClusterBuilder {
                     store_config.clone(),
                     vec![],
                     home_dir,
-                    self.wal_config.clone(),
+                    self.datanode_wal_config.clone(),
                 )
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
@@ -257,7 +257,7 @@ impl GreptimeDbClusterBuilder {
                     StorageType::File,
                     self.store_providers.clone().unwrap_or_default(),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
-                    self.wal_config.clone(),
+                    self.datanode_wal_config.clone(),
                 );
 
                 storage_guards.push(guard.storage_guards);
@@ -353,11 +353,12 @@ impl GreptimeDbClusterBuilder {
         let cached_meta_backend =
             Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
 
+        let catalog_manager =
+            KvBackendCatalogManager::new(cached_meta_backend.clone(), cached_meta_backend.clone());
+
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                cached_meta_backend.clone(),
-            )),
+            Arc::new(InvalidateTableCacheHandler::new(catalog_manager.clone())),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -366,13 +367,17 @@ impl GreptimeDbClusterBuilder {
             Arc::new(handlers_executor),
         );
 
-        let instance =
-            FrontendBuilder::new(cached_meta_backend.clone(), datanode_clients, meta_client)
-                .with_cache_invalidator(cached_meta_backend)
-                .with_heartbeat_task(heartbeat_task)
-                .try_build()
-                .await
-                .unwrap();
+        let instance = FrontendBuilder::new(
+            cached_meta_backend.clone(),
+            catalog_manager.clone(),
+            datanode_clients,
+            meta_client,
+        )
+        .with_cache_invalidator(catalog_manager)
+        .with_heartbeat_task(heartbeat_task)
+        .try_build()
+        .await
+        .unwrap();
 
         Arc::new(instance)
     }

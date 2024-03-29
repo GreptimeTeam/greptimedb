@@ -45,9 +45,11 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use crate::error;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
-use crate::memtable::merge_tree::PkIndex;
-use crate::metrics::{MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED, MERGE_TREE_READ_STAGE_ELAPSED};
+use crate::memtable::partition_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
+use crate::memtable::partition_tree::PkIndex;
+use crate::metrics::{
+    PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED, PARTITION_TREE_READ_STAGE_ELAPSED,
+};
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
 
@@ -255,7 +257,7 @@ impl DataBuffer {
 
     /// Builds a lazily initialized data buffer reader from [DataBuffer]
     pub fn read(&self) -> Result<DataBufferReaderBuilder> {
-        let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+        let _timer = PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["read_data_buffer"])
             .start_timer();
 
@@ -523,7 +525,7 @@ pub(crate) struct DataBufferReader {
 
 impl Drop for DataBufferReader {
     fn drop(&mut self) {
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["read_data_buffer"])
             .observe(self.elapsed_time.as_secs_f64())
     }
@@ -780,7 +782,7 @@ impl<'a> DataPartEncoder<'a> {
         let mut bytes = Vec::with_capacity(1024);
 
         let rb = {
-            let _timer = MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED
+            let _timer = PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED
                 .with_label_values(&["drain_data_buffer_to_batch"])
                 .start_timer();
             drain_data_buffer_to_record_batches(
@@ -793,7 +795,7 @@ impl<'a> DataPartEncoder<'a> {
         };
 
         {
-            let _timer = MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED
+            let _timer = PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED
                 .with_label_values(&["encode"])
                 .start_timer();
             let mut writer =
@@ -837,7 +839,7 @@ pub struct DataPartReader {
 
 impl Drop for DataPartReader {
     fn drop(&mut self) {
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["read_data_part"])
             .observe(self.elapsed.as_secs_f64());
     }
@@ -973,7 +975,7 @@ impl DataParts {
     /// The returned iterator yields a record batch of one primary key at a time.
     /// The order of yielding primary keys is determined by provided weights.
     pub fn read(&self) -> Result<DataPartsReaderBuilder> {
-        let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+        let _timer = PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["build_data_parts_reader"])
             .start_timer();
 
@@ -1030,7 +1032,7 @@ pub struct DataPartsReader {
 
 impl Drop for DataPartsReader {
     fn drop(&mut self) {
-        MERGE_TREE_READ_STAGE_ELAPSED
+        PARTITION_TREE_READ_STAGE_ELAPSED
             .with_label_values(&["read_data_parts"])
             .observe(self.elapsed.as_secs_f64())
     }

@@ -114,7 +114,7 @@ impl MockInstanceBuilder {
                 } = instance;
                 MockInstanceImpl::Standalone(
                     builder
-                        .build_with(kv_backend, procedure_manager, guard, mix_options)
+                        .build_with(kv_backend, guard, mix_options, procedure_manager, false)
                         .await,
                 )
             }
@@ -223,11 +223,11 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
         .collect::<Vec<_>>();
     let test_name = uuid::Uuid::new_v4().to_string();
     let builder = GreptimeDbStandaloneBuilder::new(&test_name)
-        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
+        .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
             num_topics: 3,
@@ -253,11 +253,11 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
     let test_name = uuid::Uuid::new_v4().to_string();
     let builder = GreptimeDbClusterBuilder::new(&test_name)
         .await
-        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
+        .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
             num_topics: 3,
@@ -276,7 +276,7 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
 pub(crate) fn both_instances_cases_with_kafka_wal(
     #[future]
     #[case]
-    instance: Option<Box<dyn RebuildableMockInstance>>,
+    rebuildable_instance: Option<Box<dyn RebuildableMockInstance>>,
 ) {
 }
 

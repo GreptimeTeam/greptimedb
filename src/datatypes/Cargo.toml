@@ -27,7 +27,6 @@ num = "0.4"
 num-traits = "0.2"
 ordered-float = { version = "3.0", features = ["serde"] }
 paste = "1.0"
-rust_decimal = "1.32.0"
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
