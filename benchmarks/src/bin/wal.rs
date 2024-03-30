@@ -78,7 +78,7 @@ async fn run_benchmarker<S: LogStore>(cfg: &Config, topics: &[String], wal: Arc<
             })
         }))
         .await;
-        write_elapsed += timer.elapsed().as_millis() as u64;
+        write_elapsed += timer.elapsed().as_millis();
     }
 
     if !cfg.skip_read {
@@ -95,7 +95,7 @@ async fn run_benchmarker<S: LogStore>(cfg: &Config, topics: &[String], wal: Arc<
             })
         }))
         .await;
-        read_elapsed = timer.elapsed().as_millis() as u64;
+        read_elapsed = timer.elapsed().as_millis();
     }
 
     dump_report(cfg, write_elapsed, read_elapsed);
@@ -138,19 +138,19 @@ fn build_schema(col_types: &[ColumnDataType], mut rng: &mut SmallRng) -> Vec<Col
         .collect()
 }
 
-fn dump_report(cfg: &Config, write_elapsed: u64, read_elapsed: u64) {
+fn dump_report(cfg: &Config, write_elapsed: u128, read_elapsed: u128) {
     let cost_report = format!(
         "write costs: {} ms, read costs: {} ms",
         write_elapsed, read_elapsed,
     );
 
-    let total_written_bytes = metrics::METRIC_WAL_WRITE_BYTES_TOTAL.get();
+    let total_written_bytes = metrics::METRIC_WAL_WRITE_BYTES_TOTAL.get() as u128;
     let write_throughput = if write_elapsed > 0 {
         (total_written_bytes * 1000).div_floor(write_elapsed)
     } else {
         0
     };
-    let total_read_bytes = metrics::METRIC_WAL_READ_BYTES_TOTAL.get();
+    let total_read_bytes = metrics::METRIC_WAL_READ_BYTES_TOTAL.get() as u128;
     let read_throughput = if read_elapsed > 0 {
         (total_read_bytes * 1000).div_floor(read_elapsed)
     } else {
