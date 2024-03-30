@@ -152,6 +152,10 @@ impl TxnService for RaftEngineBackend {
             responses,
         })
     }
+
+    fn max_txn_ops(&self) -> usize {
+        usize::MAX
+    }
 }
 
 #[async_trait::async_trait]

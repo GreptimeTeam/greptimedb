@@ -17,6 +17,8 @@
 #[cfg(test)]
 mod alter_test;
 #[cfg(test)]
+mod append_mode_test;
+#[cfg(test)]
 mod basic_test;
 #[cfg(test)]
 mod catchup_test;
@@ -57,7 +59,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
@@ -112,6 +114,11 @@ impl MitoEngine {
 
     /// Returns a scanner to scan for `request`.
     fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+        self.scan_region(region_id, request)?.scanner()
+    }
+
+    /// Scans a region.
+    fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         self.inner.handle_query(region_id, request)
     }
 
@@ -218,8 +225,8 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
-    /// Handles the scan `request` and returns a [Scanner] for the `request`.
-    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+    /// Handles the scan `request` and returns a [ScanRegion].
+    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self
@@ -244,7 +251,7 @@ impl EngineInner {
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_start_time(query_start);
 
-        scan_region.scanner()
+        Ok(scan_region)
     }
 
     /// Set writable mode for a region.
@@ -290,10 +297,11 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<AffectedRows, BoxedError> {
+    ) -> Result<RegionHandleResult, BoxedError> {
         self.inner
             .handle_request(region_id, request)
             .await
+            .map(RegionHandleResult::new)
             .map_err(BoxedError::new)
     }
 
@@ -373,6 +381,7 @@ impl MitoEngine {
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
+        time_provider: crate::time_provider::TimeProviderRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -385,6 +394,7 @@ impl MitoEngine {
                     object_store_manager,
                     write_buffer_manager,
                     listener,
+                    time_provider,
                 )
                 .await?,
                 config,

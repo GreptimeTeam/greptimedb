@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::NUMBERS_TABLE_ID;
-use common_query::Output;
+use common_query::OutputData;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use futures::Future;
 use once_cell::sync::{Lazy, OnceCell};
@@ -69,9 +69,9 @@ async fn run_compiled(script: &PyScript) {
         .execute(HashMap::default(), EvalContext::default())
         .await
         .unwrap();
-    let _res = match output {
-        Output::Stream(s, _) => common_recordbatch::util::collect_batches(s).await.unwrap(),
-        Output::RecordBatches(rbs) => rbs,
+    let _res = match output.data {
+        OutputData::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
+        OutputData::RecordBatches(rbs) => rbs,
         _ => unreachable!(),
     };
 }

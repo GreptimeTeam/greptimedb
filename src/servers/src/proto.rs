@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::ops::Deref;
+use std::slice;
 
 use api::prom_store::remote::Sample;
 use api::v1::RowInsertRequests;
 use bytes::{Buf, Bytes};
 use prost::encoding::message::merge;
-use prost::encoding::{decode_key, decode_varint, DecodeContext, WireType};
+use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
 
 use crate::prom_row_builder::TablesBuilder;
@@ -26,10 +27,13 @@ use crate::prom_store::METRIC_NAME_LABEL_BYTES;
 use crate::repeated_field::{Clear, RepeatedField};
 
 impl Clear for Sample {
-    fn clear(&mut self) {}
+    fn clear(&mut self) {
+        self.timestamp = 0;
+        self.value = 0.0;
+    }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct PromLabel {
     pub name: Bytes,
     pub value: Bytes,
@@ -43,22 +47,18 @@ impl Clear for PromLabel {
 }
 
 impl PromLabel {
-    pub fn merge_field<B>(
+    pub fn merge_field(
         &mut self,
         tag: u32,
         wire_type: WireType,
-        buf: &mut B,
-        ctx: DecodeContext,
-    ) -> Result<(), DecodeError>
-    where
-        B: Buf,
-    {
+        buf: &mut Bytes,
+    ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromLabel";
         match tag {
             1u32 => {
                 // decode label name
                 let value = &mut self.name;
-                prost::encoding::bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
+                merge_bytes(value, buf).map_err(|mut error| {
                     error.push(STRUCT_NAME, "name");
                     error
                 })
@@ -66,17 +66,70 @@ impl PromLabel {
             2u32 => {
                 // decode label value
                 let value = &mut self.value;
-                prost::encoding::bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
+                merge_bytes(value, buf).map_err(|mut error| {
                     error.push(STRUCT_NAME, "value");
                     error
                 })
             }
-            _ => prost::encoding::skip_field(wire_type, tag, buf, ctx),
+            _ => prost::encoding::skip_field(wire_type, tag, buf, Default::default()),
         }
     }
 }
 
-#[derive(Default)]
+#[inline(always)]
+fn copy_to_bytes(data: &mut Bytes, len: usize) -> Bytes {
+    if len == data.remaining() {
+        std::mem::replace(data, Bytes::new())
+    } else {
+        let ret = split_to(data, len);
+        data.advance(len);
+        ret
+    }
+}
+
+/// Similar to `Bytes::split_to`, but directly operates on underlying memory region.
+/// # Safety
+/// This function is safe as long as `data` is backed by a consecutive region of memory,
+/// for example `Vec<u8>` or `&[u8]`, and caller must ensure that `buf` outlives
+/// the `Bytes` returned.
+#[inline(always)]
+fn split_to(buf: &mut Bytes, end: usize) -> Bytes {
+    let len = buf.len();
+    assert!(
+        end <= len,
+        "range end out of bounds: {:?} <= {:?}",
+        end,
+        len,
+    );
+
+    if end == 0 {
+        return Bytes::new();
+    }
+
+    let ptr = buf.as_ptr();
+    let x = unsafe { slice::from_raw_parts(ptr, end) };
+    // `Bytes::drop` does nothing when it's built via `from_static`.
+    Bytes::from_static(x)
+}
+
+/// Reads a variable-length encoded bytes field from `buf` and assign it to `value`.
+/// # Safety
+/// Callers must ensure `buf` outlives `value`.
+#[inline(always)]
+fn merge_bytes(value: &mut Bytes, buf: &mut Bytes) -> Result<(), DecodeError> {
+    let len = decode_varint(buf)?;
+    if len > buf.remaining() as u64 {
+        return Err(DecodeError::new(format!(
+            "buffer underflow, len: {}, remaining: {}",
+            len,
+            buf.remaining()
+        )));
+    }
+    *value = copy_to_bytes(buf, len as usize);
+    Ok(())
+}
+
+#[derive(Default, Debug)]
 pub struct PromTimeSeries {
     pub table_name: String,
     pub labels: RepeatedField<PromLabel>,
@@ -92,16 +145,12 @@ impl Clear for PromTimeSeries {
 }
 
 impl PromTimeSeries {
-    pub fn merge_field<B>(
+    pub fn merge_field(
         &mut self,
         tag: u32,
         wire_type: WireType,
-        buf: &mut B,
-        ctx: DecodeContext,
-    ) -> Result<(), DecodeError>
-    where
-        B: Buf,
-    {
+        buf: &mut Bytes,
+    ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromTimeSeries";
         match tag {
             1u32 => {
@@ -120,7 +169,7 @@ impl PromTimeSeries {
                 let limit = remaining - len as usize;
                 while buf.remaining() > limit {
                     let (tag, wire_type) = decode_key(buf)?;
-                    label.merge_field(tag, wire_type, buf, ctx.clone())?;
+                    label.merge_field(tag, wire_type, buf)?;
                 }
                 if buf.remaining() != limit {
                     return Err(DecodeError::new("delimited length exceeded"));
@@ -135,15 +184,17 @@ impl PromTimeSeries {
             }
             2u32 => {
                 let sample = self.samples.push_default();
-                merge(WireType::LengthDelimited, sample, buf, ctx).map_err(|mut error| {
-                    error.push(STRUCT_NAME, "samples");
-                    error
-                })?;
+                merge(WireType::LengthDelimited, sample, buf, Default::default()).map_err(
+                    |mut error| {
+                        error.push(STRUCT_NAME, "samples");
+                        error
+                    },
+                )?;
                 Ok(())
             }
-            // skip exemplars
-            3u32 => prost::encoding::skip_field(wire_type, tag, buf, ctx),
-            _ => prost::encoding::skip_field(wire_type, tag, buf, ctx),
+            // todo(hl): exemplars are skipped temporarily
+            3u32 => prost::encoding::skip_field(wire_type, tag, buf, Default::default()),
+            _ => prost::encoding::skip_field(wire_type, tag, buf, Default::default()),
         }
     }
 
@@ -161,7 +212,7 @@ impl PromTimeSeries {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct PromWriteRequest {
     table_data: TablesBuilder,
     series: PromTimeSeries,
@@ -178,13 +229,9 @@ impl PromWriteRequest {
         self.table_data.as_insert_requests()
     }
 
-    pub fn merge<B>(&mut self, mut buf: B) -> Result<(), DecodeError>
-    where
-        B: Buf,
-        Self: Sized,
-    {
+    // todo(hl): maybe use &[u8] can reduce the overhead introduced with Bytes.
+    pub fn merge(&mut self, mut buf: Bytes) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
-        let ctx = DecodeContext::default();
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
             assert_eq!(WireType::LengthDelimited, wire_type);
@@ -203,8 +250,7 @@ impl PromWriteRequest {
                     let limit = remaining - len as usize;
                     while buf.remaining() > limit {
                         let (tag, wire_type) = decode_key(&mut buf)?;
-                        self.series
-                            .merge_field(tag, wire_type, &mut buf, ctx.clone())?;
+                        self.series.merge_field(tag, wire_type, &mut buf)?;
                     }
                     if buf.remaining() != limit {
                         return Err(DecodeError::new("delimited length exceeded"));
@@ -212,10 +258,10 @@ impl PromWriteRequest {
                     self.series.add_to_table_data(&mut self.table_data);
                 }
                 3u32 => {
-                    // we can ignore metadata for now.
-                    prost::encoding::skip_field(wire_type, tag, &mut buf, ctx.clone())?;
+                    // todo(hl): metadata are skipped.
+                    prost::encoding::skip_field(wire_type, tag, &mut buf, Default::default())?;
                 }
-                _ => prost::encoding::skip_field(wire_type, tag, &mut buf, ctx.clone())?,
+                _ => prost::encoding::skip_field(wire_type, tag, &mut buf, Default::default())?,
             }
         }
         Ok(())
@@ -224,16 +270,31 @@ impl PromWriteRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     use api::prom_store::remote::WriteRequest;
-    use api::v1::RowInsertRequests;
+    use api::v1::{Row, RowInsertRequests, Rows};
     use bytes::Bytes;
     use prost::Message;
 
     use crate::prom_store::to_grpc_row_insert_requests;
     use crate::proto::PromWriteRequest;
     use crate::repeated_field::Clear;
+
+    fn sort_rows(rows: Rows) -> Rows {
+        let permutation =
+            permutation::sort_by_key(&rows.schema, |schema| schema.column_name.clone());
+        let schema = permutation.apply_slice(&rows.schema);
+        let mut inner_rows = vec![];
+        for row in rows.rows {
+            let values = permutation.apply_slice(&row.values);
+            inner_rows.push(Row { values });
+        }
+        Rows {
+            schema,
+            rows: inner_rows,
+        }
+    }
 
     fn check_deserialized(
         prom_write_request: &mut PromWriteRequest,
@@ -248,35 +309,16 @@ mod tests {
         assert_eq!(expected_samples, samples);
         assert_eq!(expected_rows.inserts.len(), prom_rows.inserts.len());
 
-        let schemas = expected_rows
+        let expected_rows_map = expected_rows
             .inserts
             .iter()
-            .map(|r| {
-                (
-                    r.table_name.clone(),
-                    r.rows
-                        .as_ref()
-                        .unwrap()
-                        .schema
-                        .iter()
-                        .map(|c| (c.column_name.clone(), c.datatype, c.semantic_type))
-                        .collect::<HashSet<_>>(),
-                )
-            })
+            .map(|insert| (insert.table_name.clone(), insert.rows.clone().unwrap()))
             .collect::<HashMap<_, _>>();
 
         for r in &prom_rows.inserts {
-            let expected = schemas.get(&r.table_name).unwrap();
-            assert_eq!(
-                expected,
-                &r.rows
-                    .as_ref()
-                    .unwrap()
-                    .schema
-                    .iter()
-                    .map(|c| { (c.column_name.clone(), c.datatype, c.semantic_type) })
-                    .collect()
-            );
+            // check value
+            let expected_rows = expected_rows_map.get(&r.table_name).unwrap().clone();
+            assert_eq!(sort_rows(expected_rows), sort_rows(r.rows.clone().unwrap()));
         }
     }
 

@@ -71,7 +71,7 @@ impl KeyValues {
 /// Primary key columns have the same order as region's primary key. Field
 /// columns are ordered by their position in the region schema (The same order
 /// as users defined while creating the region).
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct KeyValue<'a> {
     row: &'a Row,
     schema: &'a Vec<ColumnSchema>,

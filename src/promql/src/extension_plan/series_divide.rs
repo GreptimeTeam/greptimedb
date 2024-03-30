@@ -255,22 +255,23 @@ impl Stream for SeriesDivideStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            if let Some(batch) = self.buffer.clone() {
-                let same_length = self.find_first_diff_row(&batch) + 1;
+            if let Some(batch) = self.buffer.as_ref() {
+                let same_length = self.find_first_diff_row(batch) + 1;
                 if same_length >= batch.num_rows() {
-                    let next_batch = match ready!(self.as_mut().fetch_next_batch(cx)) {
-                        Some(Ok(batch)) => batch,
-                        None => {
-                            self.buffer = None;
-                            self.num_series += 1;
-                            return Poll::Ready(Some(Ok(batch)));
-                        }
-                        error => return Poll::Ready(error),
-                    };
-                    let new_batch =
-                        compute::concat_batches(&batch.schema(), &[batch.clone(), next_batch])?;
-                    self.buffer = Some(new_batch);
-                    continue;
+                    let next_batch = ready!(self.as_mut().fetch_next_batch(cx)).transpose()?;
+                    // SAFETY: if-let guards the buffer is not None;
+                    //   and we cannot change the buffer at this point.
+                    let batch = self.buffer.take().expect("this batch must exist");
+                    if let Some(next_batch) = next_batch {
+                        self.buffer = Some(compute::concat_batches(
+                            &batch.schema(),
+                            &[batch, next_batch],
+                        )?);
+                        continue;
+                    } else {
+                        self.num_series += 1;
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
                 } else {
                     let result_batch = batch.slice(0, same_length);
                     let remaining_batch = batch.slice(same_length, batch.num_rows() - same_length);

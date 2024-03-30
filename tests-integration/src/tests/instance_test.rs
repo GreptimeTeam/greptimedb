@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches::assert_matches;
 use std::env;
 use std::sync::Arc;
 
+use client::OutputData;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
@@ -40,8 +42,8 @@ use crate::tests::test_util::{
 async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let output = execute_sql(&instance, "create database test").await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    let output = execute_sql(&instance, "create database test").await.data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
     let output = execute_sql(
         &instance,
@@ -53,8 +55,9 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
              TIME INDEX(ts)
 )"#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
@@ -63,12 +66,15 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
                            ('host2', 88.8,  333.3, 1655276558000)
                            "#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(2)));
 
-    let query_output = execute_sql(&instance, "select ts from test.demo order by ts limit 1").await;
+    let query_output = execute_sql(&instance, "select ts from test.demo order by ts limit 1")
+        .await
+        .data;
     match query_output {
-        Output::Stream(s, _) => {
+        OutputData::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
@@ -106,10 +112,10 @@ PARTITION ON COLUMNS (n) (
     TIME INDEX(ts)
 )"#
     };
-    let output = execute_sql(&frontend, sql).await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    let output = execute_sql(&frontend, sql).await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&frontend, "show create table demo").await;
+    let output = execute_sql(&frontend, "show create table demo").await.data;
 
     let expected = if instance.is_distributed_mode() {
         r#"+-------+-------------------------------------+
@@ -155,7 +161,7 @@ PARTITION ON COLUMNS (n) (
 }
 
 #[apply(both_instances_cases)]
-async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
+async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let format = "json";
     let location = find_testing_resource("/tests/data/json/various_type.json");
@@ -192,12 +198,14 @@ async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
             r#"create external table {table_name} with (location='{location}', format='{format}');"#,
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&fe_instance, &format!("show create table {table_name};")).await;
+    let output = execute_sql(&fe_instance, &format!("show create table {table_name};"))
+        .await
+        .data;
 
-    let Output::RecordBatches(record_batches) = output else {
+    let OutputData::RecordBatches(record_batches) = output else {
         unreachable!()
     };
 
@@ -232,10 +240,10 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
     let instance = instance.frontend();
 
     // Create database a and b
-    let output = execute_sql(&instance, "create database a").await;
-    assert!(matches!(output, Output::AffectedRows(1)));
-    let output = execute_sql(&instance, "create database b").await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    let output = execute_sql(&instance, "create database a").await.data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
+    let output = execute_sql(&instance, "create database b").await.data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
     // Create table a.demo and b.demo
     let output = execute_sql(
@@ -246,8 +254,9 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
              TIME INDEX(ts)
 )"#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
@@ -257,8 +266,9 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
              TIME INDEX(ts)
 )"#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     // Insert different data into a.demo and b.demo
     let output = execute_sql(
@@ -267,16 +277,18 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
                            ('host1', 1655276557000)
                            "#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
     let output = execute_sql(
         &instance,
         r#"insert into b.demo(host, ts) values
                            ('host2',1655276558000)
                            "#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
     // Query data and assert
     assert_query_result(
@@ -297,9 +309,9 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
 }
 
 async fn assert_query_result(instance: &Arc<Instance>, sql: &str, ts: i64, host: &str) {
-    let query_output = execute_sql(instance, sql).await;
+    let query_output = execute_sql(instance, sql).await.data;
     match query_output {
-        Output::Stream(s, _) => {
+        OutputData::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
             // let columns = batches[0].df_recordbatch.columns();
             assert_eq!(2, batches[0].num_columns());
@@ -326,8 +338,9 @@ async fn test_execute_insert(instance: Arc<dyn MockInstance>) {
             &instance,
             "create table demo(host string, cpu double, memory double, ts timestamp time index);",
         )
-        .await,
-        Output::AffectedRows(0)
+        .await
+        .data,
+        OutputData::AffectedRows(0)
     ));
 
     let output = execute_sql(
@@ -337,8 +350,9 @@ async fn test_execute_insert(instance: Arc<dyn MockInstance>) {
                            ('host2', 88.8,  333.3, 1655276558000)
                            "#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(2)));
 }
 
 #[apply(both_instances_cases)]
@@ -351,16 +365,18 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
             &instance,
             "create table demo1(host string, cpu double, memory double, ts timestamp time index);",
         )
-        .await,
-        Output::AffectedRows(0)
+        .await
+        .data,
+        OutputData::AffectedRows(0)
     ));
     assert!(matches!(
         execute_sql(
             &instance,
             "create table demo2(host string, cpu double, memory double, ts timestamp time index);",
         )
-        .await,
-        Output::AffectedRows(0)
+        .await
+        .data,
+        OutputData::AffectedRows(0)
     ));
 
     let output = execute_sql(
@@ -370,8 +386,9 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
                            ('host2', 88.8,  333.3, 1655276558000)
                            "#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(2)));
 
     assert!(matches!(
         try_execute_sql(&instance, "insert into demo2(host) select * from demo1")
@@ -401,10 +418,14 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
         }
     ));
 
-    let output = execute_sql(&instance, "insert into demo2 select * from demo1").await;
-    assert!(matches!(output, Output::AffectedRows(2)));
+    let output = execute_sql(&instance, "insert into demo2 select * from demo1")
+        .await
+        .data;
+    assert!(matches!(output, OutputData::AffectedRows(2)));
 
-    let output = execute_sql(&instance, "select * from demo2 order by ts").await;
+    let output = execute_sql(&instance, "select * from demo2 order by ts")
+        .await
+        .data;
     let expected = "\
 +-------+------+--------+---------------------+
 | host  | cpu  | memory | ts                  |
@@ -419,9 +440,11 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
 async fn test_execute_query(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let output = execute_sql(&instance, "select sum(number) from numbers limit 20").await;
+    let output = execute_sql(&instance, "select sum(number) from numbers limit 20")
+        .await
+        .data;
     match output {
-        Output::Stream(recordbatch, _) => {
+        OutputData::Stream(recordbatch) => {
             let numbers = util::collect(recordbatch).await.unwrap();
             assert_eq!(1, numbers[0].num_columns());
             assert_eq!(numbers[0].column(0).len(), 1);
@@ -474,7 +497,7 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     assert!(matches!(execute_sql(
         &instance,
         "create table demo(host string, cpu double, memory double, ts timestamp time index, primary key (host));",
-    ).await, Output::AffectedRows(0)));
+    ).await.data, OutputData::AffectedRows(0)));
 
     let output = execute_sql(&instance, "show tables").await;
     let expected = "\
@@ -539,8 +562,9 @@ async fn test_execute_create(instance: Arc<dyn MockInstance>) {
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 }
 
 #[apply(both_instances_cases)]
@@ -561,8 +585,9 @@ async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
                         ) with (location='{location}', format='csv');"#
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
@@ -576,8 +601,9 @@ async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
                         ) with (location='{location}', format='csv');"#
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 }
 
 #[apply(both_instances_cases)]
@@ -591,8 +617,9 @@ async fn test_execute_external_create_infer_format(instance: Arc<dyn MockInstanc
         &instance,
         &format!(r#"create external table test_table with (location='{location}', format='csv');"#),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 }
 
 #[apply(both_instances_cases)]
@@ -613,7 +640,7 @@ async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>
         ),
     )
     .await;
-    assert!(matches!(result, Err(Error::TableOperation { .. })));
+    assert_matches!(result, Err(Error::ParseSql { .. }));
 }
 
 #[apply(both_instances_cases)]
@@ -667,10 +694,12 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
             r#"create external table {table_name} with (location='{location}', format='{format}');"#,
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let output = execute_sql(&instance, &format!("desc table {table_name};"))
+        .await
+        .data;
     let expect = "\
 +--------------------+----------------------+-----+------+--------------------------+---------------+
 | Column             | Type                 | Key | Null | Default                  | Semantic Type |
@@ -685,7 +714,9 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 +--------------------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
-    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let output = execute_sql(&instance, &format!("select * from {table_name};"))
+        .await
+        .data;
     let expect = "\
 +-------+-----------+----------+--------+------------+---------------------+---------------------+
 | c_int | c_float   | c_string | c_bool | c_date     | c_datetime          | greptime_timestamp  |
@@ -704,7 +735,8 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
         &instance,
         &format!("select c_bool,c_int,c_bool as b from {table_name};"),
     )
-    .await;
+    .await
+    .data;
     let expect = "\
 +--------+-------+-------+
 | c_bool | c_int | b     |
@@ -735,10 +767,12 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
             r#"create external table {table_name} with (location='{location}', format='{format}');"#,
         ),
     )
-        .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+        .await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let output = execute_sql(&instance, &format!("desc table {table_name};"))
+        .await
+        .data;
     let expect = "\
 +------------------------+----------------------+-----+------+--------------------------+---------------+
 | Column                 | Type                 | Key | Null | Default                  | Semantic Type |
@@ -767,7 +801,9 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
 +------------------------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
-    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let output = execute_sql(&instance, &format!("select * from {table_name};"))
+        .await
+        .data;
     let expect = "\
 +----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+---------------------+
 | double_a | a   | b     | str_direct | d   | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple           | date_simple | greptime_timestamp  |
@@ -784,7 +820,8 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
         &instance,
         &format!("select double_a,a, str_direct as c, a as another_a from {table_name};"),
     )
-    .await;
+    .await
+    .data;
     let expect = "\
 +----------+-----+--------+-----------+
 | double_a | a   | c      | another_a |
@@ -819,10 +856,13 @@ async fn test_execute_query_external_table_orc_with_schema(instance: Arc<dyn Moc
             ) with (location='{location}', format='{format}');"#,
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let output = execute_sql(&instance, &format!("desc table {table_name};"))
+        .await
+        .data;
     let expect = "\
 +------------------+----------------------+-----+------+---------+---------------+
 | Column           | Type                 | Key | Null | Default | Semantic Type |
@@ -835,7 +875,9 @@ async fn test_execute_query_external_table_orc_with_schema(instance: Arc<dyn Moc
 +------------------+----------------------+-----+------+---------+---------------+";
     check_output_stream(output, expect).await;
 
-    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let output = execute_sql(&instance, &format!("select * from {table_name};"))
+        .await
+        .data;
     let expect = "\
 +-----+-------+-----+---------+-------------------------+
 | a   | b     | d   | missing | timestamp_simple        |
@@ -864,10 +906,12 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
             r#"create external table {table_name} with (location='{location}', format='{format}');"#,
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let output = execute_sql(&instance, &format!("desc table {table_name};"))
+        .await
+        .data;
     let expect = "\
 +--------------------+----------------------+-----+------+--------------------------+---------------+
 | Column             | Type                 | Key | Null | Default                  | Semantic Type |
@@ -882,7 +926,9 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
 +--------------------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
-    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let output = execute_sql(&instance, &format!("select * from {table_name};"))
+        .await
+        .data;
     let expect = "\
 +-------+-----------+----------+--------+------------+---------------------+---------------------+
 | c_int | c_float   | c_string | c_bool | c_date     | c_datetime          | greptime_timestamp  |
@@ -913,10 +959,12 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
             r#"create external table {table_name} with (location='{location}', format='{format}');"#,
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let output = execute_sql(&instance, &format!("desc table {table_name};"))
+        .await
+        .data;
     let expect = "\
 +--------------------+----------------------+-----+------+--------------------------+---------------+
 | Column             | Type                 | Key | Null | Default                  | Semantic Type |
@@ -933,7 +981,9 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
 
     check_output_stream(output, expect).await;
 
-    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let output = execute_sql(&instance, &format!("select * from {table_name};"))
+        .await
+        .data;
     let expect = "\
 +-----------------+------+-------+------+------------+----------------+-------------------------+---------------------+
 | a               | b    | c     | d    | e          | f              | g                       | greptime_timestamp  |
@@ -978,10 +1028,13 @@ async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn Mo
               ) WITH (location='{location}', format='{format}');"#,
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let output = execute_sql(&instance, &format!("desc table {table_name};"))
+        .await
+        .data;
     let expect = "\
 +--------+----------------------+-----+------+--------------------------+---------------+
 | Column | Type                 | Key | Null | Default                  | Semantic Type |
@@ -997,7 +1050,9 @@ async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn Mo
 +--------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
-    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let output = execute_sql(&instance, &format!("select * from {table_name};"))
+        .await
+        .data;
     let expect = "\
 +-----------------+------+-------+------+---------------------+---------------+---------------------+---------------------+
 | a               | b    | c     | d    | e                   | f             | g                   | ts                  |
@@ -1048,10 +1103,13 @@ async fn test_execute_query_external_table_json_type_cast(instance: Arc<dyn Mock
             ) with (location='{location}', format='{format}');"#,
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let output = execute_sql(&instance, &format!("desc table {table_name};"))
+        .await
+        .data;
     let expect = "\
 +------------------+----------------------+-----+------+---------+---------------+
 | Column           | Type                 | Key | Null | Default | Semantic Type |
@@ -1072,7 +1130,9 @@ async fn test_execute_query_external_table_json_type_cast(instance: Arc<dyn Mock
 +------------------+----------------------+-----+------+---------+---------------+";
     check_output_stream(output, expect).await;
 
-    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let output = execute_sql(&instance, &format!("select * from {table_name};"))
+        .await
+        .data;
     let expect = "\
 +----------+-------------+------------+--------------+------------+------------+--------------+-----------+---------------+-------------+-------------+------------------+---------------------+
 | hostname | environment | usage_user | usage_system | usage_idle | usage_nice | usage_iowait | usage_irq | usage_softirq | usage_steal | usage_guest | usage_guest_nice | ts                  |
@@ -1101,10 +1161,12 @@ async fn test_execute_query_external_table_json_default_ts_column(instance: Arc<
             r#"create external table {table_name} with (location='{location}', format='{format}');"#,
         ),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let output = execute_sql(&instance, &format!("desc table {table_name};"))
+        .await
+        .data;
     let expect = "\
 +--------------------+----------------------+-----+------+--------------------------+---------------+
 | Column             | Type                 | Key | Null | Default                  | Semantic Type |
@@ -1125,7 +1187,9 @@ async fn test_execute_query_external_table_json_default_ts_column(instance: Arc<
 +--------------------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
-    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let output = execute_sql(&instance, &format!("select * from {table_name};"))
+        .await
+        .data;
     let expect = "\
 +-------------+---------------------+----------+-------------+------------------+------------+--------------+-----------+------------+---------------+-------------+--------------+------------+
 | environment | greptime_timestamp  | hostname | usage_guest | usage_guest_nice | usage_idle | usage_iowait | usage_irq | usage_nice | usage_softirq | usage_steal | usage_system | usage_user |
@@ -1143,8 +1207,8 @@ async fn test_execute_query_external_table_json_default_ts_column(instance: Arc<
 async fn test_rename_table(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let output = execute_sql(&instance, "create database db").await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    let output = execute_sql(&instance, "create database db").await.data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
     let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db");
     let output = execute_sql_with(
@@ -1152,8 +1216,9 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
         "create table demo(host string, cpu double, memory double, ts timestamp, time index(ts))",
         query_ctx.clone(),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     // make sure table insertion is ok before altering table name
     let output = execute_sql_with(
@@ -1161,8 +1226,8 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
         "insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000), ('host2', 2.2, 200, 2000)",
         query_ctx.clone(),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
+    .await.data;
+    assert!(matches!(output, OutputData::AffectedRows(2)));
 
     // rename table
     let output = execute_sql_with(
@@ -1170,10 +1235,13 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
         "alter table demo rename test_table",
         query_ctx.clone(),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql_with(&instance, "show tables", query_ctx.clone()).await;
+    let output = execute_sql_with(&instance, "show tables", query_ctx.clone())
+        .await
+        .data;
     let expect = "\
 +------------+
 | Tables     |
@@ -1187,7 +1255,8 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
         "select * from test_table order by ts",
         query_ctx.clone(),
     )
-    .await;
+    .await
+    .data;
     let expected = "\
 +-------+-----+--------+---------------------+
 | host  | cpu | memory | ts                  |
@@ -1209,8 +1278,8 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
 async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let output = execute_sql(&instance, "create database db").await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    let output = execute_sql(&instance, "create database db").await.data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
     // create test table
     let table_name = "demo";
@@ -1220,8 +1289,8 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
         &format!("create table {table_name}(host string, cpu double, memory double, ts timestamp, time index(ts))"),
         query_ctx.clone(),
     )
-        .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+        .await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     // rename table
     let new_table_name = "test_table";
@@ -1230,8 +1299,9 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
         &format!("alter table {table_name} rename {new_table_name}"),
         query_ctx.clone(),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     // create table with same name
     // create test table
@@ -1240,8 +1310,8 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
         &format!("create table {table_name}(host string, cpu double, memory double, ts timestamp, time index(ts))"),
         query_ctx.clone(),
     )
-        .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+        .await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     let expect = "\
 +------------+
@@ -1250,7 +1320,9 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
 | demo       |
 | test_table |
 +------------+";
-    let output = execute_sql_with(&instance, "show tables", query_ctx).await;
+    let output = execute_sql_with(&instance, "show tables", query_ctx)
+        .await
+        .data;
     check_output_stream(output, expect).await;
 }
 
@@ -1264,8 +1336,9 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
             &instance,
             "create table demo(host string, cpu double, memory double, ts timestamp time index);",
         )
-        .await,
-        Output::AffectedRows(0)
+        .await
+        .data,
+        OutputData::AffectedRows(0)
     ));
 
     // make sure table insertion is ok before altering table
@@ -1274,28 +1347,35 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
             &instance,
             "insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000)",
         )
-        .await,
-        Output::AffectedRows(1)
+        .await
+        .data,
+        OutputData::AffectedRows(1)
     ));
 
     // Add column
-    let output = execute_sql(&instance, "alter table demo add my_tag string null").await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    let output = execute_sql(&instance, "alter table demo add my_tag string null")
+        .await
+        .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
         "insert into demo(host, cpu, memory, ts, my_tag) values ('host2', 2.2, 200, 2000, 'hello')",
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
     let output = execute_sql(
         &instance,
         "insert into demo(host, cpu, memory, ts) values ('host3', 3.3, 300, 3000)",
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let output = execute_sql(&instance, "select * from demo order by ts").await;
+    let output = execute_sql(&instance, "select * from demo order by ts")
+        .await
+        .data;
     let expected = "\
 +-------+-----+--------+---------------------+--------+
 | host  | cpu | memory | ts                  | my_tag |
@@ -1307,10 +1387,14 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expected).await;
 
     // Drop a column
-    let output = execute_sql(&instance, "alter table demo drop column memory").await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    let output = execute_sql(&instance, "alter table demo drop column memory")
+        .await
+        .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql(&instance, "select * from demo order by ts").await;
+    let output = execute_sql(&instance, "select * from demo order by ts")
+        .await
+        .data;
     let expected = "\
 +-------+-----+---------------------+--------+
 | host  | cpu | ts                  | my_tag |
@@ -1326,10 +1410,13 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
         &instance,
         "insert into demo(host, cpu, ts, my_tag) values ('host4', 400, 4000, 'world')",
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let output = execute_sql(&instance, "select * from demo order by ts").await;
+    let output = execute_sql(&instance, "select * from demo order by ts")
+        .await
+        .data;
     let expected = "\
 +-------+-------+---------------------+--------+
 | host  | cpu   | ts                  | my_tag |
@@ -1353,26 +1440,30 @@ async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_n
         PRIMARY KEY(host)
     ) engine=mito with(regions=1);"#,
     );
-    let output = execute_sql(&instance, &create_sql).await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    let output = execute_sql(&instance, &create_sql).await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     // Insert with ts.
     let output = execute_sql(
         &instance,
         &format!("insert into {table_name}(host, cpu, ts) values ('host1', 1.1, 1000)"),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
     // Insert without ts, so it should be filled by default value.
     let output = execute_sql(
         &instance,
         &format!("insert into {table_name}(host, cpu) values ('host2', 2.2)"),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let output = execute_sql(&instance, &format!("select host, cpu from {table_name}")).await;
+    let output = execute_sql(&instance, &format!("select host, cpu from {table_name}"))
+        .await
+        .data;
     let expected = "\
 +-------+-----+
 | host  | cpu |
@@ -1393,8 +1484,8 @@ async fn test_insert_with_default_value(instance: Arc<dyn MockInstance>) {
 async fn test_use_database(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let output = execute_sql(&instance, "create database db1").await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    let output = execute_sql(&instance, "create database db1").await.data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
     let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db1");
     let output = execute_sql_with(
@@ -1402,10 +1493,13 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
         "create table tb1(col_i32 int, ts timestamp, TIME INDEX(ts))",
         query_ctx.clone(),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
-    let output = execute_sql_with(&instance, "show tables", query_ctx.clone()).await;
+    let output = execute_sql_with(&instance, "show tables", query_ctx.clone())
+        .await
+        .data;
     let expected = "\
 +--------+
 | Tables |
@@ -1419,10 +1513,13 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
         r#"insert into tb1(col_i32, ts) values (1, 1655276557000)"#,
         query_ctx.clone(),
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let output = execute_sql_with(&instance, "select col_i32 from tb1", query_ctx.clone()).await;
+    let output = execute_sql_with(&instance, "select col_i32 from tb1", query_ctx.clone())
+        .await
+        .data;
     let expected = "\
 +---------+
 | col_i32 |
@@ -1433,7 +1530,9 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
 
     // Making a particular database the default by means of the USE statement does not preclude
     // accessing tables in other databases.
-    let output = execute_sql(&instance, "select number from public.numbers limit 1").await;
+    let output = execute_sql(&instance, "select number from public.numbers limit 1")
+        .await
+        .data;
     let expected = "\
 +--------+
 | number |
@@ -1458,8 +1557,9 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
@@ -1469,17 +1569,21 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
                            ('host3', 88.8,  3072, 1655276559000)
                            "#,
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(3)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(3)));
 
     let output = execute_sql(
         &instance,
         "delete from test_table where host = 'host1' and ts = 1655276557000 ",
     )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let output = execute_sql(&instance, "select * from test_table").await;
+    let output = execute_sql(&instance, "select * from test_table")
+        .await
+        .data;
     let expect = "\
 +-------+---------------------+------+--------+
 | host  | ts                  | cpu  | memory |
@@ -1501,7 +1605,7 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
                 &instance,
                 "create table demo(host string, cpu double, memory double, ts timestamp time index);",
             )
-            .await, Output::AffectedRows(0)));
+            .await.data, OutputData::AffectedRows(0)));
 
             let output = execute_sql(
                 &instance,
@@ -1510,8 +1614,9 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
                             ('host2', 88.8,  333.3, 1655276558000)
                             "#,
             )
-            .await;
-            assert!(matches!(output, Output::AffectedRows(2)));
+            .await
+            .data;
+            assert!(matches!(output, OutputData::AffectedRows(2)));
             let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
             let key = env::var("GT_S3_ACCESS_KEY").unwrap();
             let region = env::var("GT_S3_REGION").unwrap();
@@ -1521,8 +1626,8 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
             // exports
             let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')", bucket, root, key_id, key, region);
 
-            let output = execute_sql(&instance, &copy_to_stmt).await;
-            assert!(matches!(output, Output::AffectedRows(2)));
+            let output = execute_sql(&instance, &copy_to_stmt).await.data;
+            assert!(matches!(output, OutputData::AffectedRows(2)));
         }
     }
 }
@@ -1539,7 +1644,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                 &instance,
                 "create table demo(host string, cpu double, memory double, ts timestamp time index);",
             )
-            .await, Output::AffectedRows(0)));
+            .await.data, OutputData::AffectedRows(0)));
 
             let output = execute_sql(
                 &instance,
@@ -1548,8 +1653,9 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                             ('host2', 88.8,  333.3, 1655276558000)
                             "#,
             )
-            .await;
-            assert!(matches!(output, Output::AffectedRows(2)));
+            .await
+            .data;
+            assert!(matches!(output, OutputData::AffectedRows(2)));
 
             // export
             let root = uuid::Uuid::new_v4().to_string();
@@ -1559,8 +1665,8 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 
             let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')", bucket, root, key_id, key, region);
 
-            let output = execute_sql(&instance, &copy_to_stmt).await;
-            assert!(matches!(output, Output::AffectedRows(2)));
+            let output = execute_sql(&instance, &copy_to_stmt).await.data;
+            assert!(matches!(output, OutputData::AffectedRows(2)));
 
             struct Test<'a> {
                 sql: &'a str,
@@ -1597,8 +1703,9 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                 test.table_name
             ),
                     )
-                    .await,
-                    Output::AffectedRows(0)
+                    .await
+                    .data,
+                    OutputData::AffectedRows(0)
                 ));
                 let sql = format!(
                     "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
@@ -1606,14 +1713,15 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                 );
                 logging::info!("Running sql: {}", sql);
 
-                let output = execute_sql(&instance, &sql).await;
-                assert!(matches!(output, Output::AffectedRows(2)));
+                let output = execute_sql(&instance, &sql).await.data;
+                assert!(matches!(output, OutputData::AffectedRows(2)));
 
                 let output = execute_sql(
                     &instance,
                     &format!("select * from {} order by ts", test.table_name),
                 )
-                .await;
+                .await
+                .data;
                 let expected = "\
 +-------+------+--------+---------------------+
 | host  | cpu  | memory | ts                  |
@@ -1637,7 +1745,7 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
         &instance,
         "create table demo(bigint_direct timestamp(9), bigint_neg_direct timestamp(6), bigint_other timestamp(3), timestamp_simple timestamp(9), time index (bigint_other));",
     )
-    .await, Output::AffectedRows(0)));
+    .await.data, OutputData::AffectedRows(0)));
 
     let filepath = find_testing_resource("/src/common/datasource/tests/orc/test.orc");
 
@@ -1645,11 +1753,12 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
         &instance,
         &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
     )
-    .await;
+    .await
+    .data;
 
-    assert!(matches!(output, Output::AffectedRows(5)));
+    assert!(matches!(output, OutputData::AffectedRows(5)));
 
-    let output = execute_sql(&instance, "select * from demo;").await;
+    let output = execute_sql(&instance, "select * from demo;").await.data;
     let expected = r#"+-------------------------------+----------------------------+-------------------------+----------------------------+
 | bigint_direct                 | bigint_neg_direct          | bigint_other            | timestamp_simple           |
 +-------------------------------+----------------------------+-------------------------+----------------------------+
@@ -1670,7 +1779,7 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
         &instance,
         "create table demo(double_a double, a float, b boolean, str_direct string, d string, e string, f string, int_short_repeated int, int_neg_short_repeated int, int_delta int, int_neg_delta int, int_direct int, int_neg_direct int, bigint_direct bigint, bigint_neg_direct bigint, bigint_other bigint, utf8_increase string, utf8_decrease string, timestamp_simple timestamp(9) time index, date_simple date);",
     )
-    .await, Output::AffectedRows(0)));
+    .await.data, OutputData::AffectedRows(0)));
 
     let filepath = find_testing_resource("/src/common/datasource/tests/orc/test.orc");
 
@@ -1678,11 +1787,14 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
         &instance,
         &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
     )
-    .await;
+    .await
+    .data;
 
-    assert!(matches!(output, Output::AffectedRows(5)));
+    assert!(matches!(output, OutputData::AffectedRows(5)));
 
-    let output = execute_sql(&instance, "select * from demo order by double_a;").await;
+    let output = execute_sql(&instance, "select * from demo order by double_a;")
+        .await
+        .data;
     let expected = r#"+----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+
 | double_a | a   | b     | str_direct | d   | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple           | date_simple |
 +----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+
@@ -1704,7 +1816,7 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
         &instance,
         "create table tsbs_cpu(hostname STRING, environment STRING, usage_user DOUBLE, usage_system DOUBLE, usage_idle DOUBLE, usage_nice DOUBLE, usage_iowait DOUBLE, usage_irq DOUBLE, usage_softirq DOUBLE, usage_steal DOUBLE, usage_guest DOUBLE, usage_guest_nice DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(hostname));",
     )
-    .await, Output::AffectedRows(0)));
+    .await.data, OutputData::AffectedRows(0)));
 
     let filepath = find_testing_resource("/src/common/datasource/tests/csv/type_cast.csv");
 
@@ -1714,9 +1826,11 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
     )
     .await;
 
-    assert!(matches!(output, Output::AffectedRows(5)));
+    assert!(matches!(output.data, OutputData::AffectedRows(5)));
 
-    let output = execute_sql(&instance, "select * from tsbs_cpu order by hostname;").await;
+    let output = execute_sql(&instance, "select * from tsbs_cpu order by hostname;")
+        .await
+        .data;
     let expected = "\
 +----------+-------------+------------+--------------+------------+------------+--------------+-----------+---------------+-------------+-------------+------------------+---------------------+
 | hostname | environment | usage_user | usage_system | usage_idle | usage_nice | usage_iowait | usage_irq | usage_softirq | usage_steal | usage_guest | usage_guest_nice | ts                  |
@@ -1736,14 +1850,16 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 
     let sql = "create table another_table(i timestamp time index)";
     let query_ctx = QueryContext::with("another_catalog", "another_schema");
-    let output = execute_sql_with(&instance, sql, query_ctx.clone()).await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    let output = execute_sql_with(&instance, sql, query_ctx.clone())
+        .await
+        .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     // User can only see information schema under current catalog.
     // A necessary requirement to GreptimeCloud.
     let sql = "select table_catalog, table_schema, table_name, table_type, table_id, engine from information_schema.tables where table_type != 'SYSTEM VIEW' and table_name in ('columns', 'numbers', 'tables', 'another_table') order by table_name";
 
-    let output = execute_sql(&instance, sql).await;
+    let output = execute_sql(&instance, sql).await.data;
     let expected = "\
 +---------------+--------------------+------------+-----------------+----------+-------------+
 | table_catalog | table_schema       | table_name | table_type      | table_id | engine      |
@@ -1755,7 +1871,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 
     check_output_stream(output, expected).await;
 
-    let output = execute_sql_with(&instance, sql, query_ctx).await;
+    let output = execute_sql_with(&instance, sql, query_ctx).await.data;
     let expected = "\
 +-----------------+--------------------+---------------+-----------------+----------+--------+
 | table_catalog   | table_schema       | table_name    | table_type      | table_id | engine |
@@ -1774,14 +1890,16 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 
     let sql = "create table another_table(i timestamp time index)";
     let query_ctx = QueryContext::with("another_catalog", "another_schema");
-    let output = execute_sql_with(&instance, sql, query_ctx.clone()).await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    let output = execute_sql_with(&instance, sql, query_ctx.clone())
+        .await
+        .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
 
     // User can only see information schema under current catalog.
     // A necessary requirement to GreptimeCloud.
     let sql = "select table_catalog, table_schema, table_name, column_name, data_type, semantic_type from information_schema.columns where table_name in ('columns', 'numbers', 'tables', 'another_table') order by table_name";
 
-    let output = execute_sql(&instance, sql).await;
+    let output = execute_sql(&instance, sql).await.data;
     let expected = "\
 +---------------+--------------------+------------+----------------+-----------+---------------+
 | table_catalog | table_schema       | table_name | column_name    | data_type | semantic_type |
@@ -1807,7 +1925,7 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 
     check_output_stream(output, expected).await;
 
-    let output = execute_sql_with(&instance, sql, query_ctx).await;
+    let output = execute_sql_with(&instance, sql, query_ctx).await.data;
     let expected = "\
 +-----------------+--------------------+---------------+----------------+----------------------+---------------+
 | table_catalog   | table_schema       | table_name    | column_name    | data_type            | semantic_type |
@@ -1890,8 +2008,8 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
                 )
             };
 
-            let output = execute_sql(&instance.frontend(), &sql).await;
-            assert!(matches!(output, Output::AffectedRows(0)));
+            let output = execute_sql(&instance.frontend(), &sql).await.data;
+            assert!(matches!(output, OutputData::AffectedRows(0)));
             let output = execute_sql(
                 &frontend,
                 r#"insert into test_table(a, ts) values
@@ -1899,10 +2017,13 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
                             (1000, 1655276558000)
                             "#,
             )
-            .await;
-            assert!(matches!(output, Output::AffectedRows(2)));
+            .await
+            .data;
+            assert!(matches!(output, OutputData::AffectedRows(2)));
 
-            let output = execute_sql(&frontend, "select * from test_table").await;
+            let output = execute_sql(&frontend, "select * from test_table")
+                .await
+                .data;
             let expected = "\
 +------+---------------------+
 | a    | ts                  |
@@ -1912,8 +2033,10 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
 +------+---------------------+";
 
             check_output_stream(output, expected).await;
-            let output = execute_sql(&frontend, "show create table test_table").await;
-            let Output::RecordBatches(record_batches) = output else {
+            let output = execute_sql(&frontend, "show create table test_table")
+                .await
+                .data;
+            let OutputData::RecordBatches(record_batches) = output else {
                 unreachable!()
             };
 
@@ -1955,16 +2078,18 @@ WITH(
                 )
             };
             assert_eq!(actual.to_string(), expect);
-            let output = execute_sql(&frontend, "truncate test_table").await;
-            assert!(matches!(output, Output::AffectedRows(0)));
-            let output = execute_sql(&frontend, "select * from test_table").await;
+            let output = execute_sql(&frontend, "truncate test_table").await.data;
+            assert!(matches!(output, OutputData::AffectedRows(0)));
+            let output = execute_sql(&frontend, "select * from test_table")
+                .await
+                .data;
             let expected = "\
 ++
 ++";
 
             check_output_stream(output, expected).await;
-            let output = execute_sql(&frontend, "drop table test_table").await;
-            assert!(matches!(output, Output::AffectedRows(0)));
+            let output = execute_sql(&frontend, "drop table test_table").await.data;
+            assert!(matches!(output, OutputData::AffectedRows(0)));
         }
     }
 }

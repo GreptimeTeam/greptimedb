@@ -15,11 +15,8 @@ workspace = true
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
-byteorder = "1.4"
-bytes.workspace = true
 chrono.workspace = true
 common-base.workspace = true
-common-config.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
@@ -27,7 +24,6 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
-dashmap.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 lazy_static.workspace = true
@@ -40,7 +36,6 @@ serde_json.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
 
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }

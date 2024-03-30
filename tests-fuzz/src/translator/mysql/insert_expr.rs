@@ -22,33 +22,42 @@ impl DslTranslator<InsertIntoExpr, String> for InsertIntoExprTranslator {
     type Error = Error;
 
     fn translate(&self, input: &InsertIntoExpr) -> Result<String> {
-        let columns = input
-            .columns
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-            .to_string();
-
         Ok(format!(
-            "INSERT INTO {} ({})\nVALUES\n{};",
+            "INSERT INTO {} {} VALUES\n{};",
             input.table_name,
-            columns,
+            Self::format_columns(input),
             Self::format_values(input)
         ))
     }
 }
 
 impl InsertIntoExprTranslator {
+    fn format_columns(input: &InsertIntoExpr) -> String {
+        if input.columns.is_empty() {
+            "".to_string()
+        } else {
+            let list = input
+                .columns
+                .iter()
+                .map(|c| c.name.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+                .to_string();
+
+            format!("({})", list)
+        }
+    }
+
     fn format_values(input: &InsertIntoExpr) -> String {
         input
-            .rows
+            .values_list
             .iter()
-            .map(|row| {
+            .map(|value| {
                 format!(
                     "({})",
-                    row.iter()
-                        .map(|v| format!("'{v}'"))
+                    value
+                        .iter()
+                        .map(|v| v.to_string())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -64,7 +73,7 @@ mod tests {
 
     use rand::SeedableRng;
 
-    use super::InsertIntoExprTranslator;
+    use super::*;
     use crate::generator::insert_expr::InsertExprGeneratorBuilder;
     use crate::generator::Generator;
     use crate::test_utils;
@@ -84,10 +93,23 @@ mod tests {
         let insert_expr = insert_expr_generator.generate(&mut rng).unwrap();
 
         let output = InsertIntoExprTranslator.translate(&insert_expr).unwrap();
-        let expected = r#"INSERT INTO test (host, idc, memory_util, ts, cpu_util, disk_util)
-VALUES
-('adipisci', 'debitis', '0.5495312687894465', '15292064470292927036', '0.9354265029131291', '0.8037816422279636'),
-('ut', 'sequi', '0.8807117723618908', '14214208091261382505', '0.5240550121500691', '0.350785883750684');"#;
+        let expected = r#"INSERT INTO test (ts, host, cpu_util) VALUES
+('+199601-11-07 21:32:56.695+0000', 'corrupti', 0.051130243193075464),
+('+40822-03-25 02:17:34.328+0000', NULL, 0.6552502332327004);"#;
+        assert_eq!(output, expected);
+
+        let insert_expr = insert_expr_generator.generate(&mut rng).unwrap();
+        let output = InsertIntoExprTranslator.translate(&insert_expr).unwrap();
+        let expected = r#"INSERT INTO test (cpu_util, disk_util, ts) VALUES
+(0.7074194466620976, 0.661288102315126, '-47252-05-08 07:33:49.567+0000'),
+(0.8266101224213618, 0.7947724277743285, '-224292-12-07 02:51:53.371+0000');"#;
+        assert_eq!(output, expected);
+
+        let insert_expr = insert_expr_generator.generate(&mut rng).unwrap();
+        let output = InsertIntoExprTranslator.translate(&insert_expr).unwrap();
+        let expected = r#"INSERT INTO test  VALUES
+('odio', NULL, 0.48809950435391647, 0.5228925709595407, 0.9091528874275897, '+241156-12-16 20:52:15.185+0000'),
+('dignissimos', 'labore', NULL, 0.12983559048685023, 0.6362040919831425, '-30691-06-17 23:41:09.938+0000');"#;
         assert_eq!(output, expected);
     }
 }

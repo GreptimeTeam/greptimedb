@@ -905,6 +905,29 @@ mod tests {
     }
 
     #[test]
+    fn test_incorrect_default_value_issue_3479() {
+        let opts = vec![ColumnOptionDef {
+            name: None,
+            option: ColumnOption::Default(Expr::Value(SqlValue::Number(
+                "0.047318541668048164".into(),
+                false,
+            ))),
+        }];
+        let constraint = parse_column_default_constraint(
+            "coll",
+            &ConcreteDataType::float64_datatype(),
+            &opts,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!("0.047318541668048164", constraint.to_string());
+        let encoded: Vec<u8> = constraint.clone().try_into().unwrap();
+        let decoded = ColumnDefaultConstraint::try_from(encoded.as_ref()).unwrap();
+        assert_eq!(decoded, constraint);
+    }
+
+    #[test]
     pub fn test_sql_column_def_to_grpc_column_def() {
         // test basic
         let column_def = ColumnDef {

@@ -14,6 +14,7 @@
 
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use client::Output;
 use common_error::ext::BoxedError;
 use servers::error::{AuthSnafu, Error};
 use servers::influxdb::InfluxdbRequest;
@@ -30,7 +31,7 @@ impl InfluxdbLineProtocolHandler for Instance {
         &self,
         request: InfluxdbRequest,
         ctx: QueryContextRef,
-    ) -> servers::error::Result<()> {
+    ) -> servers::error::Result<Output> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -41,11 +42,9 @@ impl InfluxdbLineProtocolHandler for Instance {
         interceptor_ref.pre_execute(&request.lines, ctx.clone())?;
 
         let requests = request.try_into()?;
-        let _ = self
-            .handle_row_inserts(requests, ctx)
+        self.handle_row_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
-            .context(servers::error::ExecuteGrpcQuerySnafu)?;
-        Ok(())
+            .context(servers::error::ExecuteGrpcQuerySnafu)
     }
 }

@@ -15,16 +15,15 @@
 //! Scripts table
 use std::sync::Arc;
 
-use api::helper::ColumnDataTypeWrapper;
 use api::v1::greptime_request::Request;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnSchema as PbColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows,
-    SemanticType,
+    ColumnDataType, ColumnDef, ColumnSchema as PbColumnSchema, Row, RowInsertRequest,
+    RowInsertRequests, Rows, SemanticType,
 };
 use catalog::error::CompileScriptInternalSnafu;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_query::Output;
+use common_query::OutputData;
 use common_recordbatch::{util as record_util, RecordBatch, SendableRecordBatchStream};
 use common_telemetry::logging;
 use common_time::util;
@@ -33,7 +32,6 @@ use datafusion::logical_expr::{and, col, lit};
 use datafusion_common::TableReference;
 use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::ScalarVector;
-use datatypes::schema::{ColumnSchema, RawSchema};
 use datatypes::vectors::{StringVector, Vector};
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
@@ -230,9 +228,9 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             .execute(LogicalPlan::DfPlan(plan), query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
-        let stream = match output {
-            Output::Stream(stream, _) => stream,
-            Output::RecordBatches(record_batches) => record_batches.as_stream(),
+        let stream = match output.data {
+            OutputData::Stream(stream) => stream,
+            OutputData::RecordBatches(record_batches) => record_batches.as_stream(),
             _ => unreachable!(),
         };
 
@@ -285,9 +283,9 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             .execute(LogicalPlan::DfPlan(plan), query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
-        let stream = match output {
-            Output::Stream(stream, _) => stream,
-            Output::RecordBatches(record_batches) => record_batches.as_stream(),
+        let stream = match output.data {
+            OutputData::Stream(stream) => stream,
+            OutputData::RecordBatches(record_batches) => record_batches.as_stream(),
             _ => unreachable!(),
         };
         Ok(stream)
@@ -344,38 +342,35 @@ fn query_ctx(table_info: &TableInfo) -> QueryContextRef {
         .build()
 }
 
-/// Returns the scripts schema's primary key indices
-pub fn get_primary_key_indices() -> Vec<usize> {
-    let mut indices = vec![];
-    for (index, c) in build_insert_column_schemas().into_iter().enumerate() {
-        if c.semantic_type == (SemanticType::Tag as i32) {
-            indices.push(index);
-        }
-    }
+/// Builds scripts schema, returns (time index, primary keys, column defs)
+pub fn build_scripts_schema() -> (String, Vec<String>, Vec<ColumnDef>) {
+    let cols = build_insert_column_schemas();
 
-    indices
-}
+    let time_index = cols
+        .iter()
+        .find_map(|c| {
+            (c.semantic_type == (SemanticType::Timestamp as i32)).then(|| c.column_name.clone())
+        })
+        .unwrap(); // Safety: the column always exists
 
-/// Build scripts table
-pub fn build_scripts_schema() -> RawSchema {
-    let cols = build_insert_column_schemas()
+    let primary_keys = cols
+        .iter()
+        .filter(|c| (c.semantic_type == (SemanticType::Tag as i32)))
+        .map(|c| c.column_name.clone())
+        .collect();
+
+    let column_defs = cols
         .into_iter()
-        .map(|c| {
-            let cs = ColumnSchema::new(
-                c.column_name,
-                // Safety: the type always exists
-                ColumnDataTypeWrapper::try_new(c.datatype, c.datatype_extension)
-                    .unwrap()
-                    .into(),
-                false,
-            );
-            if c.semantic_type == SemanticType::Timestamp as i32 {
-                cs.with_time_index(true)
-            } else {
-                cs
-            }
+        .map(|c| ColumnDef {
+            name: c.column_name,
+            data_type: c.datatype,
+            is_nullable: false,
+            default_constraint: vec![],
+            semantic_type: c.semantic_type,
+            comment: "".to_string(),
+            datatype_extension: None,
         })
         .collect();
 
-    RawSchema::new(cols)
+    (time_index, primary_keys, column_defs)
 }

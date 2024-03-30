@@ -1,5 +1,11 @@
 [default.extend-words]
 ue = "ue"
 datas = "datas"
+
 [files]
-extend-exclude = ["corrupted","tests-fuzz/src/data/lorem_words"]
+extend-exclude = [
+    "corrupted",
+    "tests-fuzz/src/data/lorem_words",
+    "*.sql",
+    "*.result"
+]

@@ -1,0 +1,13 @@
+name: Fuzz Test
+description: 'Fuzz test given setup and service'
+inputs:
+  target:
+    description: "The fuzz target to test"
+runs:
+  using: composite
+  steps:
+  - name: Run Fuzz Test
+    shell: bash
+    run: cargo fuzz run ${{ inputs.target }} --fuzz-dir tests-fuzz -D -s none -- -max_total_time=120
+    env:
+      GT_MYSQL_ADDR: 127.0.0.1:4002

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -24,6 +24,7 @@ use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
+use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::key::NAME_PATTERN;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
@@ -47,6 +48,7 @@ use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, CreateTableLike, Partitions};
 use sql::statements::sql_value_to_value;
 use sqlparser::ast::{Expr, Ident, Value as ParserValue};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions};
@@ -55,8 +57,8 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    CreateLogicalTablesSnafu, CreateTableInfoSnafu, CreateTableWithMultiCatalogsSnafu,
-    CreateTableWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyCreateTableExprSnafu,
+    CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
+    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu,
     InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
     ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, TableAlreadyExistsSnafu,
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
@@ -137,6 +139,22 @@ impl StatementExecutor {
         partitions: Option<Partitions>,
         query_ctx: &QueryContextRef,
     ) -> Result<TableRef> {
+        // Check if is creating logical table
+        if create_table.engine == METRIC_ENGINE_NAME
+            && create_table
+                .table_options
+                .contains_key(LOGICAL_TABLE_METADATA_KEY)
+        {
+            return self
+                .create_logical_tables(&[create_table.clone()])
+                .await?
+                .into_iter()
+                .next()
+                .context(error::UnexpectedSnafu {
+                    violated: "expected to create a logical table",
+                });
+        }
+
         let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
         let schema = self
             .table_metadata_manager
@@ -224,20 +242,18 @@ impl StatementExecutor {
         create_table_exprs: &[CreateTableExpr],
     ) -> Result<Vec<TableRef>> {
         let _timer = crate::metrics::DIST_CREATE_TABLES.start_timer();
-        ensure!(!create_table_exprs.is_empty(), EmptyCreateTableExprSnafu);
+        ensure!(
+            !create_table_exprs.is_empty(),
+            EmptyDdlExprSnafu {
+                name: "create table"
+            }
+        );
         ensure!(
             create_table_exprs
                 .windows(2)
                 .all(|expr| expr[0].catalog_name == expr[1].catalog_name),
-            CreateTableWithMultiCatalogsSnafu {
-                catalog_names: create_table_exprs
-                    .iter()
-                    .map(|x| x.catalog_name.as_str())
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(",")
-                    .to_string()
+            DdlWithMultiCatalogsSnafu {
+                ddl_name: "create tables"
             }
         );
         let catalog_name = create_table_exprs[0].catalog_name.to_string();
@@ -246,15 +262,8 @@ impl StatementExecutor {
             create_table_exprs
                 .windows(2)
                 .all(|expr| expr[0].schema_name == expr[1].schema_name),
-            CreateTableWithMultiSchemasSnafu {
-                schema_names: create_table_exprs
-                    .iter()
-                    .map(|x| x.schema_name.as_str())
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(",")
-                    .to_string()
+            DdlWithMultiSchemasSnafu {
+                ddl_name: "create tables"
             }
         );
         let schema_name = create_table_exprs[0].schema_name.to_string();
@@ -312,6 +321,38 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn alter_logical_tables(&self, alter_table_exprs: Vec<AlterExpr>) -> Result<Output> {
+        let _timer = crate::metrics::DIST_ALTER_TABLES.start_timer();
+        ensure!(
+            !alter_table_exprs.is_empty(),
+            EmptyDdlExprSnafu {
+                name: "alter table"
+            }
+        );
+        ensure!(
+            alter_table_exprs
+                .windows(2)
+                .all(|expr| expr[0].catalog_name == expr[1].catalog_name),
+            DdlWithMultiCatalogsSnafu {
+                ddl_name: "alter tables",
+            }
+        );
+        ensure!(
+            alter_table_exprs
+                .windows(2)
+                .all(|expr| expr[0].schema_name == expr[1].schema_name),
+            DdlWithMultiSchemasSnafu {
+                ddl_name: "alter tables",
+            }
+        );
+
+        self.alter_logical_tables_procedure(alter_table_exprs)
+            .await?;
+
+        Ok(Output::new_with_affected_rows(0))
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn drop_table(&self, table_name: TableName, drop_if_exists: bool) -> Result<Output> {
         if let Some(table) = self
             .catalog_manager
@@ -329,22 +370,51 @@ impl StatementExecutor {
 
             // Invalidates local cache ASAP.
             self.cache_invalidator
-                .invalidate_table_id(&Context::default(), table_id)
+                .invalidate(
+                    &Context::default(),
+                    vec![
+                        CacheIdent::TableId(table_id),
+                        CacheIdent::TableName(table_name.clone()),
+                    ],
+                )
                 .await
                 .context(error::InvalidateTableCacheSnafu)?;
 
-            self.cache_invalidator
-                .invalidate_table_name(&Context::default(), table_name.clone())
-                .await
-                .context(error::InvalidateTableCacheSnafu)?;
-
-            Ok(Output::AffectedRows(0))
+            Ok(Output::new_with_affected_rows(0))
         } else if drop_if_exists {
             // DROP TABLE IF EXISTS meets table not found - ignored
-            Ok(Output::AffectedRows(0))
+            Ok(Output::new_with_affected_rows(0))
         } else {
             Err(TableNotFoundSnafu {
                 table_name: table_name.to_string(),
+            }
+            .into_error(snafu::NoneError))
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn drop_database(
+        &self,
+        catalog: String,
+        schema: String,
+        drop_if_exists: bool,
+    ) -> Result<Output> {
+        if self
+            .catalog_manager
+            .schema_exists(&catalog, &schema)
+            .await
+            .context(CatalogSnafu)?
+        {
+            self.drop_database_procedure(catalog, schema, drop_if_exists)
+                .await?;
+
+            Ok(Output::new_with_affected_rows(0))
+        } else if drop_if_exists {
+            // DROP TABLE IF EXISTS meets table not found - ignored
+            Ok(Output::new_with_affected_rows(0))
+        } else {
+            Err(SchemaNotFoundSnafu {
+                schema_info: schema,
             }
             .into_error(snafu::NoneError))
         }
@@ -367,7 +437,7 @@ impl StatementExecutor {
         let table_id = table.table_info().table_id();
         self.truncate_table_procedure(&table_name, table_id).await?;
 
-        Ok(Output::AffectedRows(0))
+        Ok(Output::new_with_affected_rows(0))
     }
 
     fn verify_alter(
@@ -396,7 +466,7 @@ impl StatementExecutor {
 
         let _ = table_info
             .meta
-            .builder_with_alter_kind(table_name, &request.alter_kind)
+            .builder_with_alter_kind(table_name, &request.alter_kind, false)
             .context(error::TableSnafu)?
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
@@ -417,26 +487,26 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn alter_table_inner(&self, expr: AlterExpr) -> Result<Output> {
         let catalog_name = if expr.catalog_name.is_empty() {
-            DEFAULT_CATALOG_NAME
+            DEFAULT_CATALOG_NAME.to_string()
         } else {
-            expr.catalog_name.as_str()
+            expr.catalog_name.clone()
         };
 
         let schema_name = if expr.schema_name.is_empty() {
-            DEFAULT_SCHEMA_NAME
+            DEFAULT_SCHEMA_NAME.to_string()
         } else {
-            expr.schema_name.as_str()
+            expr.schema_name.clone()
         };
 
-        let table_name = expr.table_name.as_str();
+        let table_name = expr.table_name.clone();
 
         let table = self
             .catalog_manager
-            .table(catalog_name, schema_name, table_name)
+            .table(&catalog_name, &schema_name, &table_name)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format_full_table_name(catalog_name, schema_name, table_name),
+                table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
             })?;
 
         let table_id = table.table_info().ident.table_id;
@@ -448,8 +518,54 @@ impl StatementExecutor {
             expr
         );
 
-        let req = SubmitDdlTaskRequest {
-            task: DdlTask::new_alter_table(expr.clone()),
+        let physical_table_id = self
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_id(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        let (req, invalidate_keys) = if physical_table_id == table_id {
+            // This is physical table
+            let req = SubmitDdlTaskRequest {
+                task: DdlTask::new_alter_table(expr),
+            };
+
+            let invalidate_keys = vec![
+                CacheIdent::TableId(table_id),
+                CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
+            ];
+
+            (req, invalidate_keys)
+        } else {
+            // This is logical table
+            let req = SubmitDdlTaskRequest {
+                task: DdlTask::new_alter_logical_tables(vec![expr]),
+            };
+
+            let mut invalidate_keys = vec![
+                CacheIdent::TableId(physical_table_id),
+                CacheIdent::TableId(table_id),
+                CacheIdent::TableName(TableName::new(catalog_name, schema_name, table_name)),
+            ];
+
+            let physical_table = self
+                .table_metadata_manager
+                .table_info_manager()
+                .get(physical_table_id)
+                .await
+                .context(TableMetadataManagerSnafu)?
+                .map(|x| x.into_inner());
+            if let Some(physical_table) = physical_table {
+                let physical_table_name = TableName::new(
+                    physical_table.table_info.catalog_name,
+                    physical_table.table_info.schema_name,
+                    physical_table.table_info.name,
+                );
+                invalidate_keys.push(CacheIdent::TableName(physical_table_name));
+            }
+
+            (req, invalidate_keys)
         };
 
         self.procedure_executor
@@ -459,19 +575,11 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate_table_id(&Context::default(), table_id)
+            .invalidate(&Context::default(), invalidate_keys)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
-        self.cache_invalidator
-            .invalidate_table_name(
-                &Context::default(),
-                TableName::new(catalog_name, schema_name, table_name),
-            )
-            .await
-            .context(error::InvalidateTableCacheSnafu)?;
-
-        Ok(Output::AffectedRows(0))
+        Ok(Output::new_with_affected_rows(0))
     }
 
     async fn create_table_procedure(
@@ -506,6 +614,20 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)
     }
 
+    async fn alter_logical_tables_procedure(
+        &self,
+        tables_data: Vec<AlterExpr>,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_alter_logical_tables(tables_data),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
     async fn drop_table_procedure(
         &self,
         table_name: &TableName,
@@ -520,6 +642,22 @@ impl StatementExecutor {
                 table_id,
                 drop_if_exists,
             ),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    async fn drop_database_procedure(
+        &self,
+        catalog: String,
+        schema: String,
+        drop_if_exists: bool,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_drop_database(catalog, schema, drop_if_exists),
         };
 
         self.procedure_executor
@@ -580,7 +718,7 @@ impl StatementExecutor {
 
         if exists {
             return if create_if_not_exists {
-                Ok(Output::AffectedRows(1))
+                Ok(Output::new_with_affected_rows(1))
             } else {
                 error::SchemaExistsSnafu { name: database }.fail()
             };
@@ -592,7 +730,7 @@ impl StatementExecutor {
             .await
             .context(TableMetadataManagerSnafu)?;
 
-        Ok(Output::AffectedRows(1))
+        Ok(Output::new_with_affected_rows(1))
     }
 }
 

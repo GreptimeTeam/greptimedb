@@ -370,6 +370,36 @@ impl Value {
     }
 }
 
+pub trait TryAsPrimitive<T: LogicalPrimitiveType> {
+    fn try_as_primitive(&self) -> Option<T::Native>;
+}
+
+macro_rules! impl_try_as_primitive {
+    ($Type: ident, $Variant: ident) => {
+        impl TryAsPrimitive<crate::types::$Type> for Value {
+            fn try_as_primitive(
+                &self,
+            ) -> Option<<crate::types::$Type as crate::types::LogicalPrimitiveType>::Native> {
+                match self {
+                    Value::$Variant(v) => Some((*v).into()),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+impl_try_as_primitive!(Int8Type, Int8);
+impl_try_as_primitive!(Int16Type, Int16);
+impl_try_as_primitive!(Int32Type, Int32);
+impl_try_as_primitive!(Int64Type, Int64);
+impl_try_as_primitive!(UInt8Type, UInt8);
+impl_try_as_primitive!(UInt16Type, UInt16);
+impl_try_as_primitive!(UInt32Type, UInt32);
+impl_try_as_primitive!(UInt64Type, UInt64);
+impl_try_as_primitive!(Float32Type, Float32);
+impl_try_as_primitive!(Float64Type, Float64);
+
 pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValue> {
     Ok(match output_type {
         ConcreteDataType::Null(_) => ScalarValue::Null,
@@ -2386,5 +2416,13 @@ mod tests {
             85,
         );
         check_value_ref_size_eq(&ValueRef::Decimal128(Decimal128::new(1234, 3, 1)), 32)
+    }
+
+    #[test]
+    fn test_incorrect_default_value_issue_3479() {
+        let value = OrderedF64::from(0.047318541668048164);
+        let serialized = serde_json::to_string(&value).unwrap();
+        let deserialized: OrderedF64 = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value, deserialized);
     }
 }

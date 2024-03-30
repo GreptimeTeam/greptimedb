@@ -15,6 +15,7 @@
 use std::marker::PhantomData;
 
 use common_query::AddColumnLocation;
+use datatypes::data_type::ConcreteDataType;
 use derive_builder::Builder;
 use rand::Rng;
 use snafu::ensure;
@@ -24,9 +25,37 @@ use crate::error::{self, Error, Result};
 use crate::fake::WordGenerator;
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Generator, Random};
 use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation};
+use crate::ir::create_expr::ColumnOption;
 use crate::ir::{
-    column_options_generator, droppable_columns, generate_columns, ColumnTypeGenerator,
+    droppable_columns, generate_columns, generate_random_value, ColumnTypeGenerator, Ident,
 };
+
+fn add_column_options_generator<R: Rng>(
+    rng: &mut R,
+    column_type: &ConcreteDataType,
+) -> Vec<ColumnOption> {
+    // 0 -> NULL
+    // 1 -> DEFAULT VALUE
+    // 2 -> PRIMARY KEY + DEFAULT VALUE
+    let idx = rng.gen_range(0..3);
+    match idx {
+        0 => vec![ColumnOption::Null],
+        1 => {
+            vec![ColumnOption::DefaultValue(generate_random_value(
+                rng,
+                column_type,
+                None,
+            ))]
+        }
+        2 => {
+            vec![
+                ColumnOption::PrimaryKey,
+                ColumnOption::DefaultValue(generate_random_value(rng, column_type, None)),
+            ]
+        }
+        _ => unreachable!(),
+    }
+}
 
 /// Generates the [AlterTableOperation::AddColumn] of [AlterTableExpr].
 #[derive(Builder)]
@@ -36,8 +65,8 @@ pub struct AlterExprAddColumnGenerator<R: Rng + 'static> {
     #[builder(default)]
     location: bool,
     #[builder(default = "Box::new(WordGenerator)")]
-    name_generator: Box<dyn Random<String, R>>,
-    #[builder(default = "Box::new(column_options_generator)")]
+    name_generator: Box<dyn Random<Ident, R>>,
+    #[builder(default = "Box::new(add_column_options_generator)")]
     column_options_generator: ColumnOptionGenerator<R>,
     #[builder(default = "Box::new(ColumnTypeGenerator)")]
     column_type_generator: ConcreteDataTypeGenerator<R>,
@@ -65,7 +94,9 @@ impl<R: Rng + 'static> Generator<AlterTableExpr, R> for AlterExprAddColumnGenera
             None
         };
 
-        let name = self.name_generator.gen(rng);
+        let name = self
+            .table_ctx
+            .generate_unique_column_name(rng, self.name_generator.as_ref());
         let column = generate_columns(
             rng,
             vec![name],
@@ -74,7 +105,7 @@ impl<R: Rng + 'static> Generator<AlterTableExpr, R> for AlterExprAddColumnGenera
         )
         .remove(0);
         Ok(AlterTableExpr {
-            table_name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.clone(),
             alter_options: AlterTableOperation::AddColumn { column, location },
         })
     }
@@ -95,11 +126,9 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprDropColumnGenerator<R> {
     fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
         let droppable = droppable_columns(&self.table_ctx.columns);
         ensure!(!droppable.is_empty(), error::DroppableColumnsSnafu);
-        let name = droppable[rng.gen_range(0..droppable.len())]
-            .name
-            .to_string();
+        let name = droppable[rng.gen_range(0..droppable.len())].name.clone();
         Ok(AlterTableExpr {
-            table_name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.clone(),
             alter_options: AlterTableOperation::DropColumn { name },
         })
     }
@@ -111,16 +140,18 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprDropColumnGenerator<R> {
 pub struct AlterExprRenameGenerator<R: Rng> {
     table_ctx: TableContextRef,
     #[builder(default = "Box::new(WordGenerator)")]
-    name_generator: Box<dyn Random<String, R>>,
+    name_generator: Box<dyn Random<Ident, R>>,
 }
 
 impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprRenameGenerator<R> {
     type Error = Error;
 
     fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
-        let new_table_name = self.name_generator.gen(rng);
+        let new_table_name = self
+            .table_ctx
+            .generate_unique_table_name(rng, self.name_generator.as_ref());
         Ok(AlterTableExpr {
-            table_name: self.table_ctx.name.to_string(),
+            table_name: self.table_ctx.name.clone(),
             alter_options: AlterTableOperation::RenameTable { new_table_name },
         })
     }
@@ -155,7 +186,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":"DigNissIMOS","alter_options":{"AddColumn":{"column":{"name":"sit","column_type":{"Boolean":null},"options":["PrimaryKey"]},"location":null}}}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_options":{"AddColumn":{"column":{"name":{"value":"velit","quote_style":null},"column_type":{"Int32":{}},"options":[{"DefaultValue":{"Int32":1606462472}}]},"location":null}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprRenameGeneratorBuilder::default()
@@ -165,7 +196,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":"DigNissIMOS","alter_options":{"RenameTable":{"new_table_name":"excepturi"}}}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_options":{"RenameTable":{"new_table_name":{"value":"nihil","quote_style":null}}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprDropColumnGeneratorBuilder::default()
@@ -175,8 +206,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected =
-            r#"{"table_name":"DigNissIMOS","alter_options":{"DropColumn":{"name":"INVentORE"}}}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_options":{"DropColumn":{"name":{"value":"cUmquE","quote_style":null}}}}"#;
         assert_eq!(expected, serialized);
     }
 }

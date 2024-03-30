@@ -25,10 +25,11 @@ use common_function::function::Function;
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_query::error::{PyUdfSnafu, UdfTempRecordBatchSnafu};
 use common_query::prelude::Signature;
-use common_query::Output;
+use common_query::{Output, OutputData};
+use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{
-    RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
+    OrderOption, RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
 };
 use datafusion_expr::Volatility;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -255,6 +256,14 @@ impl RecordBatchStream for CoprStream {
         // FIXME(discord9): use copr returns for schema
         self.ret_schema.clone()
     }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
+    }
 }
 
 impl Stream for CoprStream {
@@ -311,10 +320,10 @@ impl Script for PyScript {
                 .await
                 .context(DatabaseQuerySnafu)?;
             let copr = self.copr.clone();
-            match res {
-                Output::Stream(stream, _) => Ok(Output::new_stream(Box::pin(CoprStream::try_new(
-                    stream, copr, params, ctx,
-                )?))),
+            match res.data {
+                OutputData::Stream(stream) => Ok(Output::new_with_stream(Box::pin(
+                    CoprStream::try_new(stream, copr, params, ctx)?,
+                ))),
                 _ => unreachable!(),
             }
         } else {
@@ -324,7 +333,7 @@ impl Script for PyScript {
                 .await
                 .context(TokioJoinSnafu)??;
             let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
-            Ok(Output::RecordBatches(batches))
+            Ok(Output::new_with_record_batches(batches))
         }
     }
 }
@@ -410,8 +419,8 @@ def test(number) -> vector[u32]:
             .execute(HashMap::default(), EvalContext::default())
             .await
             .unwrap();
-        let res = common_recordbatch::util::collect_batches(match output {
-            Output::Stream(s, _) => s,
+        let res = common_recordbatch::util::collect_batches(match output.data {
+            OutputData::Stream(s) => s,
             _ => unreachable!(),
         })
         .await
@@ -441,8 +450,8 @@ def test(**params) -> vector[i64]:
             .execute(params, EvalContext::default())
             .await
             .unwrap();
-        let res = match _output {
-            Output::RecordBatches(s) => s,
+        let res = match _output.data {
+            OutputData::RecordBatches(s) => s,
             _ => todo!(),
         };
         let rb = res.iter().next().expect("One and only one recordbatch");
@@ -471,8 +480,8 @@ def test(number) -> vector[u32]:
             .execute(HashMap::new(), EvalContext::default())
             .await
             .unwrap();
-        let res = common_recordbatch::util::collect_batches(match _output {
-            Output::Stream(s, _) => s,
+        let res = common_recordbatch::util::collect_batches(match _output.data {
+            OutputData::Stream(s) => s,
             _ => todo!(),
         })
         .await
@@ -503,8 +512,8 @@ def test(a, b, c) -> vector[f64]:
             .execute(HashMap::new(), EvalContext::default())
             .await
             .unwrap();
-        match output {
-            Output::Stream(stream, _) => {
+        match output.data {
+            OutputData::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());
@@ -541,8 +550,8 @@ def test(a) -> vector[i64]:
             .execute(HashMap::new(), EvalContext::default())
             .await
             .unwrap();
-        match output {
-            Output::Stream(stream, _) => {
+        match output.data {
+            OutputData::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
 
                 assert_eq!(1, numbers.len());

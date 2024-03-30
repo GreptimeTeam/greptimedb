@@ -124,7 +124,7 @@ impl OpenRegion {
 }
 
 /// The instruction of downgrading leader region.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DowngradeRegion {
     /// The [RegionId].
     pub region_id: RegionId,
@@ -137,7 +137,7 @@ impl Display for DowngradeRegion {
 }
 
 /// Upgrades a follower region to leader region.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpgradeRegion {
     /// The [RegionId].
     pub region_id: RegionId,
@@ -151,7 +151,14 @@ pub struct UpgradeRegion {
     pub wait_for_replay_timeout: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Display)]
+#[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq, Eq)]
+/// The identifier of cache.
+pub enum CacheIdent {
+    TableId(TableId),
+    TableName(TableName),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens a region.
     ///
@@ -165,10 +172,8 @@ pub enum Instruction {
     UpgradeRegion(UpgradeRegion),
     /// Downgrades a region.
     DowngradeRegion(DowngradeRegion),
-    /// Invalidates a specified table cache.
-    InvalidateTableIdCache(TableId),
-    /// Invalidates a specified table name index cache.
-    InvalidateTableNameCache(TableName),
+    /// Invalidates batch cache.
+    InvalidateCaches(Vec<CacheIdent>),
 }
 
 /// The reply of [UpgradeRegion].
@@ -198,7 +203,6 @@ pub enum InstructionReply {
     OpenRegion(SimpleReply),
     CloseRegion(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
-    InvalidateTableCache(SimpleReply),
     DowngradeRegion(DowngradeRegionReply),
 }
 
@@ -208,9 +212,6 @@ impl Display for InstructionReply {
             Self::OpenRegion(reply) => write!(f, "InstructionReply::OpenRegion({})", reply),
             Self::CloseRegion(reply) => write!(f, "InstructionReply::CloseRegion({})", reply),
             Self::UpgradeRegion(reply) => write!(f, "InstructionReply::UpgradeRegion({})", reply),
-            Self::InvalidateTableCache(reply) => {
-                write!(f, "InstructionReply::Invalidate({})", reply)
-            }
             Self::DowngradeRegion(reply) => {
                 write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }

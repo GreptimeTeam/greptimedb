@@ -91,7 +91,8 @@ impl Deleter {
         .await?;
 
         let affected_rows = self.do_request(deletes, &ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+
+        Ok(Output::new_with_affected_rows(affected_rows))
     }
 
     pub async fn handle_table_delete(
@@ -143,7 +144,10 @@ impl Deleter {
             });
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
-        let affected_rows = results.into_iter().sum::<Result<AffectedRows>>()?;
+        let affected_rows = results
+            .into_iter()
+            .map(|resp| resp.map(|r| r.affected_rows))
+            .sum::<Result<AffectedRows>>()?;
         crate::metrics::DIST_DELETE_ROW_COUNT.inc_by(affected_rows as u64);
         Ok(affected_rows)
     }

@@ -124,7 +124,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app);
     let res = client.get("/v1/sql").send().await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), 1004);
@@ -252,11 +252,12 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?sql=select cpu, ts from demo limit 1;select cpu, ts from demo2 where ts > 0;")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-    let _body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     // TODO(shuiyisong): fix this when return source err msg to client side
-    // assert!(body.error().contains("Table not found"));
+    assert!(body.error().contains("Table not found"));
+    assert_eq!(body.code(), ErrorCode::PlanQuery as u32);
 
     // test database given
     let res = client
@@ -280,7 +281,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?db=notfound&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
@@ -306,7 +307,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?db=notfound2-schema&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
@@ -315,7 +316,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .get("/v1/sql?db=greptime-schema&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
@@ -401,6 +402,22 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    // instant query 1+1
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=1%2B1&time=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(
+            json!({"resultType":"scalar","result":[1.0,"2"]})
+        )
+        .unwrap()
+    );
 
     // range query
     let res = client
@@ -537,6 +554,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(prom_resp.status, "success");
     assert!(prom_resp.error.is_none());
     assert!(prom_resp.error_type.is_none());
+
+    // buildinfo
+    let res = client
+        .get("/v1/prometheus/api/v1/status/buildinfo")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
 
     guard.remove_all().await;
 }
@@ -786,11 +812,7 @@ mem_threshold_on_create = "64.0MiB"
 intermediate_path = ""
 
 [datanode.region_engine.mito.memtable]
-type = "experimental"
-index_max_keys_per_shard = 8192
-data_freeze_threshold = 32768
-dedup = true
-fork_dictionary_bytes = "1GiB"
+type = "time_series"
 
 [[datanode.region_engine]]
 

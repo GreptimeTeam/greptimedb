@@ -12,7 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use common_plugins::GREPTIME_EXEC_PREFIX;
+use common_query::physical_plan::PhysicalPlan;
+use datafusion::physical_plan::metrics::MetricValue;
 use headers::{Header, HeaderName, HeaderValue};
+use hyper::HeaderMap;
+use serde_json::Value;
 
 pub mod constants {
     // New HTTP headers would better distinguish use cases among:
@@ -36,7 +44,6 @@ pub mod constants {
     pub const GREPTIME_DB_HEADER_NAME: &str = "x-greptime-db-name";
     pub const GREPTIME_TIMEZONE_HEADER_NAME: &str = "x-greptime-timezone";
     pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = common_error::GREPTIME_DB_HEADER_ERROR_CODE;
-    pub const GREPTIME_DB_HEADER_ERROR_MSG: &str = common_error::GREPTIME_DB_HEADER_ERROR_MSG;
 }
 
 pub static GREPTIME_DB_HEADER_FORMAT: HeaderName =
@@ -53,6 +60,9 @@ pub static GREPTIME_DB_HEADER_NAME: HeaderName =
 /// Header key of query specific timezone. Example format of the header value is `Asia/Shanghai` or `+08:00`.
 pub static GREPTIME_TIMEZONE_HEADER_NAME: HeaderName =
     HeaderName::from_static(constants::GREPTIME_TIMEZONE_HEADER_NAME);
+
+pub static CONTENT_TYPE_PROTOBUF: HeaderValue = HeaderValue::from_static("application/x-protobuf");
+pub static CONTENT_ENCODING_SNAPPY: HeaderValue = HeaderValue::from_static("snappy");
 
 pub struct GreptimeDbName(Option<String>);
 
@@ -86,5 +96,58 @@ impl Header for GreptimeDbName {
 impl GreptimeDbName {
     pub fn value(&self) -> Option<&String> {
         self.0.as_ref()
+    }
+}
+
+// collect write
+pub fn write_cost_header_map(cost: usize) -> HeaderMap {
+    let mut header_map = HeaderMap::new();
+    if cost > 0 {
+        let mut map: HashMap<String, Value> = HashMap::new();
+        map.insert(
+            common_plugins::GREPTIME_EXEC_WRITE_COST.to_string(),
+            Value::from(cost),
+        );
+        let _ = serde_json::to_string(&map)
+            .ok()
+            .and_then(|s| HeaderValue::from_str(&s).ok())
+            .and_then(|v| header_map.insert(&GREPTIME_DB_HEADER_METRICS, v));
+    }
+    header_map
+}
+
+fn collect_into_maps(name: &str, value: u64, maps: &mut [&mut HashMap<String, u64>]) {
+    if name.starts_with(GREPTIME_EXEC_PREFIX) && value > 0 {
+        maps.iter_mut().for_each(|map| {
+            map.entry(name.to_string())
+                .and_modify(|v| *v += value)
+                .or_insert(value);
+        });
+    }
+}
+
+pub fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, maps: &mut [&mut HashMap<String, u64>]) {
+    if let Some(m) = plan.metrics() {
+        m.iter().for_each(|m| match m.value() {
+            MetricValue::Count { name, count } => {
+                collect_into_maps(name, count.value() as u64, maps);
+            }
+            MetricValue::Gauge { name, gauge } => {
+                collect_into_maps(name, gauge.value() as u64, maps);
+            }
+            MetricValue::Time { name, time } => {
+                if name.starts_with(GREPTIME_EXEC_PREFIX) {
+                    // override
+                    maps.iter_mut().for_each(|map| {
+                        map.insert(name.to_string(), time.value() as u64);
+                    });
+                }
+            }
+            _ => {}
+        });
+    }
+
+    for c in plan.children() {
+        collect_plan_metrics(c, maps);
     }
 }

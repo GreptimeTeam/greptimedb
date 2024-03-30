@@ -17,7 +17,9 @@ mod show_create_table;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::information_schema::{schemata, tables, SCHEMATA, TABLES};
+use catalog::information_schema::{
+    columns, key_column_usage, schemata, tables, COLUMNS, KEY_COLUMN_USAGE, SCHEMATA, TABLES,
+};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
     INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY,
@@ -34,8 +36,9 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::RecordBatches;
 use common_time::timezone::get_timezone;
 use common_time::Timestamp;
+use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
-use datafusion_expr::{col, lit, Expr};
+use datafusion_expr::{case, col, lit, Expr};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -46,7 +49,9 @@ use session::context::QueryContextRef;
 pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
-use sql::statements::show::{ShowDatabases, ShowKind, ShowTables, ShowVariables};
+use sql::statements::show::{
+    ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
+};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
@@ -57,17 +62,37 @@ use crate::QueryEngineRef;
 
 const SCHEMAS_COLUMN: &str = "Database";
 const TABLES_COLUMN: &str = "Tables";
+const FIELD_COLUMN: &str = "Field";
 const TABLE_TYPE_COLUMN: &str = "Table_type";
 const COLUMN_NAME_COLUMN: &str = "Column";
 const COLUMN_TYPE_COLUMN: &str = "Type";
 const COLUMN_KEY_COLUMN: &str = "Key";
+const COLUMN_EXTRA_COLUMN: &str = "Extra";
+const COLUMN_PRIVILEGES_COLUMN: &str = "Privileges";
+const COLUMN_COLLATION_COLUMN: &str = "Collation";
 const COLUMN_NULLABLE_COLUMN: &str = "Null";
 const COLUMN_DEFAULT_COLUMN: &str = "Default";
+const COLUMN_COMMENT_COLUMN: &str = "Comment";
 const COLUMN_SEMANTIC_TYPE_COLUMN: &str = "Semantic Type";
 
-const NULLABLE_YES: &str = "YES";
-const NULLABLE_NO: &str = "NO";
+const YES_STR: &str = "YES";
+const NO_STR: &str = "NO";
 const PRI_KEY: &str = "PRI";
+const TIME_INDEX: &str = "TIME INDEX";
+
+/// SHOW index columns
+const INDEX_TABLE_COLUMN: &str = "Table";
+const INDEX_NONT_UNIQUE_COLUMN: &str = "Non_unique";
+const INDEX_CARDINALITY_COLUMN: &str = "Cardinality";
+const INDEX_SUB_PART_COLUMN: &str = "Sub_part";
+const INDEX_PACKED_COLUMN: &str = "Packed";
+const INDEX_INDEX_TYPE_COLUMN: &str = "Index_type";
+const INDEX_COMMENT_COLUMN: &str = "Index_comment";
+const INDEX_VISIBLE_COLUMN: &str = "Visible";
+const INDEX_EXPRESSION_COLUMN: &str = "Expression";
+const INDEX_KEY_NAME_COLUMN: &str = "Key_name";
+const INDEX_SEQ_IN_INDEX_COLUMN: &str = "Seq_in_index";
+const INDEX_COLUMN_NAME_COLUMN: &str = "Column_name";
 
 static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
@@ -107,6 +132,10 @@ static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     ]))
 });
 
+fn null() -> Expr {
+    lit(ScalarValue::Null)
+}
+
 pub async fn show_databases(
     stmt: ShowDatabases,
     query_engine: &QueryEngineRef,
@@ -124,6 +153,7 @@ pub async fn show_databases(
         catalog_manager,
         query_ctx,
         SCHEMATA,
+        vec![],
         projects,
         filters,
         like_field,
@@ -146,6 +176,7 @@ async fn query_from_information_schema_table(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
     table_name: &str,
+    select: Vec<Expr>,
     projects: Vec<(&str, &str)>,
     filters: Vec<Expr>,
     like_field: Option<&str>,
@@ -169,6 +200,13 @@ async fn query_from_information_schema_table(
         })?;
 
     let DataFrame::DataFusion(dataframe) = query_engine.read_table(table)?;
+
+    // Apply select
+    let dataframe = if select.is_empty() {
+        dataframe
+    } else {
+        dataframe.select(select).context(error::PlanSqlSnafu)?
+    };
 
     // Apply filters
     let dataframe = filters.into_iter().try_fold(dataframe, |df, expr| {
@@ -237,10 +275,179 @@ async fn query_from_information_schema_table(
         .await
         .context(error::DataFusionSnafu)?;
 
-    Ok(Output::Stream(
-        Box::pin(RecordBatchStreamAdapter::try_new(stream).context(error::CreateRecordBatchSnafu)?),
-        None,
-    ))
+    Ok(Output::new_with_stream(Box::pin(
+        RecordBatchStreamAdapter::try_new(stream).context(error::CreateRecordBatchSnafu)?,
+    )))
+}
+
+/// Execute `SHOW COLUMNS` statement.
+pub async fn show_columns(
+    stmt: ShowColumns,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let schema_name = if let Some(database) = stmt.database {
+        database
+    } else {
+        query_ctx.current_schema().to_owned()
+    };
+
+    let select = vec![
+        // '' as `Extra`
+        lit("").alias(COLUMN_EXTRA_COLUMN),
+        // 'select,insert,update,references' as `Privileges`
+        lit("select,insert,update,references").alias(COLUMN_PRIVILEGES_COLUMN),
+        // case `datatype`
+        //     when 'String' then 'utf8_bin'
+        //     else NULL
+        // end
+        case(col(columns::DATA_TYPE))
+            .when(lit("String"), lit("utf8_bin"))
+            .otherwise(null())
+            .context(error::PlanSqlSnafu)?
+            .alias(COLUMN_COLLATION_COLUMN),
+        // case `semantic_type`
+        //     when 'TAG' then 'PRI'
+        //     when 'TIMESTAMP' then 'TIME INDEX'
+        //     else ''
+        // end as `Key`
+        case(col(columns::SEMANTIC_TYPE))
+            .when(lit(SEMANTIC_TYPE_PRIMARY_KEY), lit(PRI_KEY))
+            .when(lit(SEMANTIC_TYPE_TIME_INDEX), lit(TIME_INDEX))
+            .otherwise(lit(""))
+            .context(error::PlanSqlSnafu)?
+            .alias(COLUMN_KEY_COLUMN),
+        Expr::Wildcard,
+    ];
+
+    let projects = if stmt.full {
+        vec![
+            (columns::COLUMN_NAME, FIELD_COLUMN),
+            (columns::DATA_TYPE, COLUMN_TYPE_COLUMN),
+            (COLUMN_COLLATION_COLUMN, COLUMN_COLLATION_COLUMN),
+            (columns::IS_NULLABLE, COLUMN_NULLABLE_COLUMN),
+            (COLUMN_KEY_COLUMN, COLUMN_KEY_COLUMN),
+            (columns::COLUMN_DEFAULT, COLUMN_DEFAULT_COLUMN),
+            (columns::COLUMN_COMMENT, COLUMN_COMMENT_COLUMN),
+            (COLUMN_PRIVILEGES_COLUMN, COLUMN_PRIVILEGES_COLUMN),
+            (COLUMN_EXTRA_COLUMN, COLUMN_EXTRA_COLUMN),
+        ]
+    } else {
+        vec![
+            (columns::COLUMN_NAME, FIELD_COLUMN),
+            (columns::DATA_TYPE, COLUMN_TYPE_COLUMN),
+            (columns::IS_NULLABLE, COLUMN_NULLABLE_COLUMN),
+            (COLUMN_KEY_COLUMN, COLUMN_KEY_COLUMN),
+            (columns::COLUMN_DEFAULT, COLUMN_DEFAULT_COLUMN),
+            (COLUMN_EXTRA_COLUMN, COLUMN_EXTRA_COLUMN),
+        ]
+    };
+
+    let filters = vec![
+        col(columns::TABLE_NAME).eq(lit(&stmt.table)),
+        col(columns::TABLE_SCHEMA).eq(lit(schema_name.clone())),
+        col(columns::TABLE_CATALOG).eq(lit(query_ctx.current_catalog())),
+    ];
+    let like_field = Some(columns::COLUMN_NAME);
+    let sort = vec![col(columns::COLUMN_NAME).sort(true, true)];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        COLUMNS,
+        select,
+        projects,
+        filters,
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
+}
+
+/// Execute `SHOW INDEX` statement.
+pub async fn show_index(
+    stmt: ShowIndex,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let schema_name = if let Some(database) = stmt.database {
+        database
+    } else {
+        query_ctx.current_schema().to_owned()
+    };
+
+    let select = vec![
+        // 1 as `Non_unique`: contain duplicates
+        lit(1).alias(INDEX_NONT_UNIQUE_COLUMN),
+        // How the column is sorted in the index: A (ascending).
+        lit("A").alias(COLUMN_COLLATION_COLUMN),
+        null().alias(INDEX_CARDINALITY_COLUMN),
+        null().alias(INDEX_SUB_PART_COLUMN),
+        null().alias(INDEX_PACKED_COLUMN),
+        // case `constraint_name`
+        //    when 'TIME INDEX' then 'NO'
+        //    else 'YES'
+        // end as `Null`
+        case(col(key_column_usage::CONSTRAINT_NAME))
+            .when(lit(TIME_INDEX), lit(NO_STR))
+            .otherwise(lit(YES_STR))
+            .context(error::PlanSqlSnafu)?
+            .alias(COLUMN_NULLABLE_COLUMN),
+        // TODO(dennis): maybe 'BTREE'?
+        lit("greptime-inverted-index-v1").alias(INDEX_INDEX_TYPE_COLUMN),
+        lit("").alias(COLUMN_COMMENT_COLUMN),
+        lit("").alias(INDEX_COMMENT_COLUMN),
+        lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
+        null().alias(INDEX_EXPRESSION_COLUMN),
+        Expr::Wildcard,
+    ];
+
+    let projects = vec![
+        (key_column_usage::TABLE_NAME, INDEX_TABLE_COLUMN),
+        (INDEX_NONT_UNIQUE_COLUMN, INDEX_NONT_UNIQUE_COLUMN),
+        (key_column_usage::CONSTRAINT_NAME, INDEX_KEY_NAME_COLUMN),
+        (
+            key_column_usage::ORDINAL_POSITION,
+            INDEX_SEQ_IN_INDEX_COLUMN,
+        ),
+        (key_column_usage::COLUMN_NAME, INDEX_COLUMN_NAME_COLUMN),
+        (COLUMN_COLLATION_COLUMN, COLUMN_COLLATION_COLUMN),
+        (INDEX_CARDINALITY_COLUMN, INDEX_CARDINALITY_COLUMN),
+        (INDEX_SUB_PART_COLUMN, INDEX_SUB_PART_COLUMN),
+        (INDEX_PACKED_COLUMN, INDEX_PACKED_COLUMN),
+        (COLUMN_NULLABLE_COLUMN, COLUMN_NULLABLE_COLUMN),
+        (INDEX_INDEX_TYPE_COLUMN, INDEX_INDEX_TYPE_COLUMN),
+        (COLUMN_COMMENT_COLUMN, COLUMN_COMMENT_COLUMN),
+        (INDEX_COMMENT_COLUMN, INDEX_COMMENT_COLUMN),
+        (INDEX_VISIBLE_COLUMN, INDEX_VISIBLE_COLUMN),
+        (INDEX_EXPRESSION_COLUMN, INDEX_EXPRESSION_COLUMN),
+    ];
+
+    let filters = vec![
+        col(key_column_usage::TABLE_NAME).eq(lit(&stmt.table)),
+        col(key_column_usage::TABLE_SCHEMA).eq(lit(schema_name.clone())),
+        col(key_column_usage::REAL_TABLE_CATALOG).eq(lit(query_ctx.current_catalog())),
+    ];
+    let like_field = None;
+    let sort = vec![col(columns::COLUMN_NAME).sort(true, true)];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        KEY_COLUMN_USAGE,
+        select,
+        projects,
+        filters,
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
 }
 
 pub async fn show_tables(
@@ -277,6 +484,7 @@ pub async fn show_tables(
         catalog_manager,
         query_ctx,
         TABLES,
+        vec![],
         projects,
         filters,
         like_field,
@@ -303,7 +511,7 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
         vec![Arc::new(StringVector::from(vec![value])) as _],
     )
     .context(error::CreateRecordBatchSnafu)?;
-    Ok(Output::RecordBatches(records))
+    Ok(Output::new_with_record_batches(records))
 }
 
 pub fn show_create_table(
@@ -329,7 +537,7 @@ pub fn show_create_table(
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
 
-    Ok(Output::RecordBatches(records))
+    Ok(Output::new_with_record_batches(records))
 }
 
 pub fn describe_table(table: TableRef) -> Result<Output> {
@@ -345,7 +553,7 @@ pub fn describe_table(table: TableRef) -> Result<Output> {
     ];
     let records = RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
-    Ok(Output::RecordBatches(records))
+    Ok(Output::new_with_record_batches(records))
 }
 
 fn describe_column_names(columns_schemas: &[ColumnSchema]) -> VectorRef {
@@ -382,9 +590,9 @@ fn describe_column_nullables(columns_schemas: &[ColumnSchema]) -> VectorRef {
     Arc::new(StringVector::from_iterator(columns_schemas.iter().map(
         |cs| {
             if cs.is_nullable() {
-                NULLABLE_YES
+                YES_STR
             } else {
-                NULLABLE_NO
+                NO_STR
             }
         },
     )))
@@ -572,7 +780,7 @@ fn parse_file_table_format(options: &HashMap<String, String>) -> Result<Box<dyn 
 mod test {
     use std::sync::Arc;
 
-    use common_query::Output;
+    use common_query::{Output, OutputData};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use common_time::timestamp::TimeUnit;
     use common_time::Timezone;
@@ -590,8 +798,8 @@ mod test {
     use crate::error;
     use crate::error::Result;
     use crate::sql::{
-        describe_table, DESCRIBE_TABLE_OUTPUT_SCHEMA, NULLABLE_NO, NULLABLE_YES,
-        SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_TIME_INDEX,
+        describe_table, DESCRIBE_TABLE_OUTPUT_SCHEMA, NO_STR, SEMANTIC_TYPE_FIELD,
+        SEMANTIC_TYPE_TIME_INDEX, YES_STR,
     };
 
     #[test]
@@ -618,7 +826,7 @@ mod test {
             Arc::new(StringVector::from(vec!["t1", "t2"])) as _,
             Arc::new(StringVector::from(vec!["UInt32", "TimestampMillisecond"])) as _,
             Arc::new(StringVector::from(vec!["", "PRI"])) as _,
-            Arc::new(StringVector::from(vec![NULLABLE_YES, NULLABLE_NO])) as _,
+            Arc::new(StringVector::from(vec![YES_STR, NO_STR])) as _,
             Arc::new(StringVector::from(vec!["", "current_timestamp()"])) as _,
             Arc::new(StringVector::from(vec![
                 SEMANTIC_TYPE_FIELD,
@@ -642,7 +850,7 @@ mod test {
             RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), expected_columns)
                 .context(error::CreateRecordBatchSnafu)?;
 
-        if let Output::RecordBatches(res) = describe_table(table)? {
+        if let OutputData::RecordBatches(res) = describe_table(table)?.data {
             assert_eq!(res.take(), expected.take());
         } else {
             panic!("describe table must return record batch");
@@ -690,7 +898,10 @@ mod test {
             .timezone(Arc::new(Timezone::from_tz_string(tz).unwrap()))
             .build();
         match show_variable(stmt, ctx) {
-            Ok(Output::RecordBatches(record)) => {
+            Ok(Output {
+                data: OutputData::RecordBatches(record),
+                ..
+            }) => {
                 let record = record.take().first().cloned().unwrap();
                 let data = record.column(0);
                 Ok(data.get(0).to_string())

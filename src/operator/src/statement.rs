@@ -39,20 +39,22 @@ use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
+use session::session_config::PGByteaOutputValue;
 use session::table_name::table_idents_to_full_name;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use sql::statements::set_variables::SetVariables;
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
-use sqlparser::ast::{Expr, ObjectName, Value};
+use sqlparser::ast::{Expr, Ident, ObjectName, Value};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidConfigValueSnafu,
+    InvalidSqlSnafu, NotSupportedSnafu, PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -122,11 +124,8 @@ impl StatementExecutor {
                     CopyDirection::Export => self
                         .copy_table_to(req, query_ctx)
                         .await
-                        .map(Output::AffectedRows),
-                    CopyDirection::Import => self
-                        .copy_table_from(req, query_ctx)
-                        .await
-                        .map(Output::AffectedRows),
+                        .map(Output::new_with_affected_rows),
+                    CopyDirection::Import => self.copy_table_from(req, query_ctx).await,
                 }
             }
 
@@ -151,15 +150,15 @@ impl StatementExecutor {
 
             Statement::CreateTable(stmt) => {
                 let _ = self.create_table(stmt, query_ctx).await?;
-                Ok(Output::AffectedRows(0))
+                Ok(Output::new_with_affected_rows(0))
             }
             Statement::CreateTableLike(stmt) => {
                 let _ = self.create_table_like(stmt, query_ctx).await?;
-                Ok(Output::AffectedRows(0))
+                Ok(Output::new_with_affected_rows(0))
             }
             Statement::CreateExternalTable(stmt) => {
                 let _ = self.create_external_table(stmt, query_ctx).await?;
-                Ok(Output::AffectedRows(0))
+                Ok(Output::new_with_affected_rows(0))
             }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
@@ -169,6 +168,14 @@ impl StatementExecutor {
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
                 self.drop_table(table_name, stmt.drop_if_exists()).await
+            }
+            Statement::DropDatabase(stmt) => {
+                self.drop_database(
+                    query_ctx.current_catalog().to_string(),
+                    format_raw_object_name(stmt.name()),
+                    stmt.drop_if_exists(),
+                )
+                .await
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
@@ -207,6 +214,21 @@ impl StatementExecutor {
                 let var_name = set_var.variable.to_string().to_uppercase();
                 match var_name.as_str() {
                     "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
+
+                    // Some postgresql client app may submit a "SET bytea_output" stmt upon connection.
+                    // However, currently we lack the support for it (tracked in https://github.com/GreptimeTeam/greptimedb/issues/3438),
+                    // so we just ignore it here instead of returning an error to break the connection.
+                    // Since the "bytea_output" only determines the output format of binary values,
+                    // it won't cause much trouble if we do so.
+                    "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,
+
+                    // Same as "bytea_output", we just ignore it here.
+                    // Not harmful since it only relates to how date is viewed in client app's output.
+                    // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
+                    // TODO(#3442): Remove this temporary workaround after the feature is implemented.
+                    "DATESTYLE" => (),
+
+                    "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
                     _ => {
                         return NotSupportedSnafu {
                             feat: format!("Unsupported set variable {}", var_name),
@@ -214,9 +236,13 @@ impl StatementExecutor {
                         .fail()
                     }
                 }
-                Ok(Output::AffectedRows(0))
+                Ok(Output::new_with_affected_rows(0))
             }
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
+            Statement::ShowColumns(show_columns) => {
+                self.show_columns(show_columns, query_ctx).await
+            }
+            Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
         }
     }
 
@@ -257,6 +283,39 @@ impl StatementExecutor {
     }
 }
 
+fn validate_client_encoding(set: SetVariables) -> Result<()> {
+    let Some((encoding, [])) = set.value.split_first() else {
+        return InvalidSqlSnafu {
+            err_msg: "must provide one and only one client encoding value",
+        }
+        .fail();
+    };
+    let encoding = match encoding {
+        Expr::Value(Value::SingleQuotedString(x))
+        | Expr::Identifier(Ident {
+            value: x,
+            quote_style: _,
+        }) => x.to_uppercase(),
+        _ => {
+            return InvalidSqlSnafu {
+                err_msg: format!("client encoding must be a string, actual: {:?}", encoding),
+            }
+            .fail();
+        }
+    };
+    // For the sake of simplicity, we only support "UTF8" ("UNICODE" is the alias for it,
+    // see https://www.postgresql.org/docs/current/multibyte.html#MULTIBYTE-CHARSET-SUPPORTED).
+    // "UTF8" is universal and sufficient for almost all cases.
+    // GreptimeDB itself is always using "UTF8" as the internal encoding.
+    ensure!(
+        encoding == "UTF8" || encoding == "UNICODE",
+        NotSupportedSnafu {
+            feat: format!("client encoding of '{}'", encoding)
+        }
+    );
+    Ok(())
+}
+
 fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let tz_expr = exprs.first().context(NotSupportedSnafu {
         feat: "No timezone find in set variable statement",
@@ -284,6 +343,25 @@ fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     }
 }
 
+fn set_bytea_output(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let Some((var_value, [])) = exprs.split_first() else {
+        return (NotSupportedSnafu {
+            feat: "Set variable value must have one and only one value for bytea_output",
+        })
+        .fail();
+    };
+    let Expr::Value(value) = var_value else {
+        return (NotSupportedSnafu {
+            feat: "Set variable value must be a value",
+        })
+        .fail();
+    };
+    ctx.configuration_parameter().set_postgres_bytea_output(
+        PGByteaOutputValue::try_from(value.clone()).context(InvalidConfigValueSnafu)?,
+    );
+    Ok(())
+}
+
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
     let direction = match stmt {
         CopyTable::To(_) => CopyDirection::Export,
@@ -305,6 +383,8 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
+    let timestamp_range = timestamp_range_from_option_map(&with, &query_ctx)?;
+
     let pattern = with
         .get(common_datasource::file_format::FILE_PATTERN)
         .cloned();
@@ -318,8 +398,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         connection: connection.map,
         pattern,
         direction,
-        // we copy the whole table by default.
-        timestamp_range: None,
+        timestamp_range,
     })
 }
 
@@ -332,16 +411,7 @@ fn to_copy_database_request(
     let (catalog_name, database_name) = idents_to_full_database_name(&arg.database_name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-
-    let start_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_START_KEY, query_ctx)?;
-    let end_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_END_KEY, query_ctx)?;
-
-    let time_range = match (start_timestamp, end_timestamp) {
-        (Some(start), Some(end)) => TimestampRange::new(start, end),
-        (Some(start), None) => Some(TimestampRange::from_start(start)),
-        (None, Some(end)) => Some(TimestampRange::until_end(end, false)), // exclusive end
-        (None, None) => None,
-    };
+    let time_range = timestamp_range_from_option_map(&arg.with, query_ctx)?;
 
     Ok(CopyDatabaseRequest {
         catalog_name,
@@ -351,6 +421,24 @@ fn to_copy_database_request(
         connection: arg.connection.map,
         time_range,
     })
+}
+
+/// Extracts timestamp range from OptionMap with keys `start_time` and `end_time`.
+/// The timestamp ranges should be a valid timestamp string as defined in [Timestamp::from_str].
+/// The timezone used for conversion will respect that inside `query_ctx`.
+fn timestamp_range_from_option_map(
+    options: &OptionMap,
+    query_ctx: &QueryContextRef,
+) -> Result<Option<TimestampRange>> {
+    let start_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_START_KEY, query_ctx)?;
+    let end_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_END_KEY, query_ctx)?;
+    let time_range = match (start_timestamp, end_timestamp) {
+        (Some(start), Some(end)) => TimestampRange::new(start, end),
+        (Some(start), None) => Some(TimestampRange::from_start(start)),
+        (None, Some(end)) => Some(TimestampRange::until_end(end, false)), // exclusive end
+        (None, None) => None,
+    };
+    Ok(time_range)
 }
 
 /// Extracts timestamp from a [HashMap<String, String>] with given key.
@@ -383,5 +471,46 @@ fn idents_to_full_database_name(
             ),
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use common_time::{Timestamp, Timezone};
+    use session::context::QueryContextBuilder;
+    use sql::statements::OptionMap;
+
+    use crate::statement::copy_database::{
+        COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY,
+    };
+    use crate::statement::timestamp_range_from_option_map;
+
+    #[test]
+    fn test_timestamp_range_from_option_map() {
+        let query_ctx = QueryContextBuilder::default()
+            .timezone(Arc::new(Timezone::from_tz_string("Asia/Shanghai").unwrap()))
+            .build();
+        let map = OptionMap::from(
+            [
+                (
+                    COPY_DATABASE_TIME_START_KEY.to_string(),
+                    "2022-04-11 08:00:00".to_string(),
+                ),
+                (
+                    COPY_DATABASE_TIME_END_KEY.to_string(),
+                    "2022-04-11 16:00:00".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+        let range = timestamp_range_from_option_map(&map, &query_ctx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(Timestamp::new_second(1649635200), range.start().unwrap());
+        assert_eq!(Timestamp::new_second(1649664000), range.end().unwrap());
     }
 }

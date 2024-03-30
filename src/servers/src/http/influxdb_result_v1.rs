@@ -15,8 +15,7 @@
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use common_error::ext::ErrorExt;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::{util, RecordBatch};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -143,56 +142,56 @@ impl InfluxdbV1Response {
         outputs: Vec<crate::error::Result<Output>>,
         epoch: Option<Epoch>,
     ) -> HttpResponse {
-        fn make_error_response(error: impl ErrorExt) -> HttpResponse {
-            HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::InfluxdbV1, error))
-        }
-
         // TODO(sunng87): this api response structure cannot represent error well.
         //  It hides successful execution results from error response
         let mut results = Vec::with_capacity(outputs.len());
         for (statement_id, out) in outputs.into_iter().enumerate() {
             let statement_id = statement_id as u32;
             match out {
-                Ok(Output::AffectedRows(_)) => {
-                    results.push(InfluxdbOutput {
-                        statement_id,
-                        series: vec![],
-                    });
-                }
-                Ok(Output::Stream(stream, _)) => {
-                    // TODO(sunng87): streaming response
-                    match util::collect(stream).await {
-                        Ok(rows) => match InfluxdbRecordsOutput::try_from((epoch, rows)) {
-                            Ok(rows) => {
-                                results.push(InfluxdbOutput {
-                                    statement_id,
-                                    series: vec![rows],
-                                });
-                            }
-                            Err(err) => {
-                                return make_error_response(err);
-                            }
-                        },
-                        Err(err) => {
-                            return make_error_response(err);
-                        }
-                    }
-                }
-                Ok(Output::RecordBatches(rbs)) => {
-                    match InfluxdbRecordsOutput::try_from((epoch, rbs.take())) {
-                        Ok(rows) => {
+                Ok(o) => {
+                    match o.data {
+                        OutputData::AffectedRows(_) => {
                             results.push(InfluxdbOutput {
                                 statement_id,
-                                series: vec![rows],
+                                series: vec![],
                             });
                         }
-                        Err(err) => {
-                            return make_error_response(err);
+                        OutputData::Stream(stream) => {
+                            // TODO(sunng87): streaming response
+                            match util::collect(stream).await {
+                                Ok(rows) => match InfluxdbRecordsOutput::try_from((epoch, rows)) {
+                                    Ok(rows) => {
+                                        results.push(InfluxdbOutput {
+                                            statement_id,
+                                            series: vec![rows],
+                                        });
+                                    }
+                                    Err(err) => {
+                                        return HttpResponse::Error(ErrorResponse::from_error(err));
+                                    }
+                                },
+                                Err(err) => {
+                                    return HttpResponse::Error(ErrorResponse::from_error(err));
+                                }
+                            }
+                        }
+                        OutputData::RecordBatches(rbs) => {
+                            match InfluxdbRecordsOutput::try_from((epoch, rbs.take())) {
+                                Ok(rows) => {
+                                    results.push(InfluxdbOutput {
+                                        statement_id,
+                                        series: vec![rows],
+                                    });
+                                }
+                                Err(err) => {
+                                    return HttpResponse::Error(ErrorResponse::from_error(err));
+                                }
+                            }
                         }
                     }
                 }
                 Err(err) => {
-                    return make_error_response(err);
+                    return HttpResponse::Error(ErrorResponse::from_error(err));
                 }
             }
         }
@@ -218,7 +217,7 @@ impl IntoResponse for InfluxdbV1Response {
         let mut resp = Json(self).into_response();
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_FORMAT,
-            HeaderValue::from_static("influxdb_v1"),
+            HeaderValue::from_static(ResponseFormat::InfluxdbV1.as_str()),
         );
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_EXECUTION_TIME,

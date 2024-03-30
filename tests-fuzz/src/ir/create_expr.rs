@@ -20,9 +20,9 @@ use derive_builder::Builder;
 use partition::partition::PartitionDef;
 use serde::{Deserialize, Serialize};
 
-use crate::ir::Column;
+use crate::ir::{Column, Ident};
 
-// The column options
+/// The column options
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum ColumnOption {
     Null,
@@ -50,7 +50,7 @@ impl Display for ColumnOption {
 #[derive(Debug, Builder, Clone, Serialize, Deserialize)]
 pub struct CreateTableExpr {
     #[builder(setter(into))]
-    pub table_name: String,
+    pub table_name: Ident,
     pub columns: Vec<Column>,
     #[builder(default)]
     pub if_not_exists: bool,

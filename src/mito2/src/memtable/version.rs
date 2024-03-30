@@ -20,26 +20,29 @@ use smallvec::SmallVec;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
+use crate::memtable::time_partition::TimePartitionsRef;
 use crate::memtable::{MemtableId, MemtableRef};
+
+pub(crate) type SmallMemtableVec = SmallVec<[MemtableRef; 2]>;
 
 /// A version of current memtables in a region.
 #[derive(Debug, Clone)]
 pub(crate) struct MemtableVersion {
     /// Mutable memtable.
-    pub(crate) mutable: MemtableRef,
+    pub(crate) mutable: TimePartitionsRef,
     /// Immutable memtables.
     ///
     /// We only allow one flush job per region but if a flush job failed, then we
     /// might need to store more than one immutable memtable on the next time we
     /// flush the region.
-    immutables: SmallVec<[MemtableRef; 2]>,
+    immutables: SmallMemtableVec,
 }
 
 pub(crate) type MemtableVersionRef = Arc<MemtableVersion>;
 
 impl MemtableVersion {
     /// Returns a new [MemtableVersion] with specific mutable memtable.
-    pub(crate) fn new(mutable: MemtableRef) -> MemtableVersion {
+    pub(crate) fn new(mutable: TimePartitionsRef) -> MemtableVersion {
         MemtableVersion {
             mutable,
             immutables: SmallVec::new(),
@@ -53,8 +56,8 @@ impl MemtableVersion {
 
     /// Lists mutable and immutable memtables.
     pub(crate) fn list_memtables(&self) -> Vec<MemtableRef> {
-        let mut mems = Vec::with_capacity(self.immutables.len() + 1);
-        mems.push(self.mutable.clone());
+        let mut mems = Vec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
+        self.mutable.list_memtables(&mut mems);
         mems.extend_from_slice(&self.immutables);
         mems
     }
@@ -76,15 +79,13 @@ impl MemtableVersion {
         // soft limit.
         self.mutable.freeze()?;
         // Fork the memtable.
-        let mutable = self.mutable.fork(self.next_memtable_id(), metadata);
+        let mutable = Arc::new(self.mutable.fork(metadata));
 
         // Pushes the mutable memtable to immutable list.
-        let immutables = self
-            .immutables
-            .iter()
-            .cloned()
-            .chain([self.mutable.clone()])
-            .collect();
+        let mut immutables =
+            SmallVec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
+        self.mutable.list_memtables_to_small_vec(&mut immutables);
+        immutables.extend(self.immutables.iter().cloned());
         Ok(Some(MemtableVersion {
             mutable,
             immutables,
@@ -103,7 +104,7 @@ impl MemtableVersion {
 
     /// Returns the memory usage of the mutable memtable.
     pub(crate) fn mutable_usage(&self) -> usize {
-        self.mutable.stats().estimated_bytes
+        self.mutable.memory_usage()
     }
 
     /// Returns the memory usage of the immutable memtables.
@@ -120,10 +121,5 @@ impl MemtableVersion {
     /// immutable memtables.
     pub(crate) fn is_empty(&self) -> bool {
         self.mutable.is_empty() && self.immutables.is_empty()
-    }
-
-    /// Returns the next memtable id.
-    pub(crate) fn next_memtable_id(&self) -> MemtableId {
-        self.mutable.id() + 1
     }
 }

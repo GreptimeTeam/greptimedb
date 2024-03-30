@@ -28,6 +28,7 @@ use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
+use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
@@ -401,13 +402,13 @@ impl SqlQueryHandler for Instance {
 
 /// Attaches a timer to the output and observes it once the output is exhausted.
 pub fn attach_timer(output: Output, timer: HistogramTimer) -> Output {
-    match output {
-        Output::AffectedRows(_) | Output::RecordBatches(_) => output,
-        Output::Stream(stream, plan) => {
+    match output.data {
+        OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
+        OutputData::Stream(stream) => {
             let stream = OnDone::new(stream, move || {
                 timer.observe_duration();
             });
-            Output::Stream(Box::pin(stream), plan)
+            Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
         }
     }
 }
@@ -454,6 +455,17 @@ impl PrometheusHandler for Instance {
     }
 }
 
+/// Validate `stmt.database` permission if it's presented.
+macro_rules! validate_db_permission {
+    ($stmt: expr, $query_ctx: expr) => {
+        if let Some(database) = &$stmt.database {
+            validate_catalog_and_schema($query_ctx.current_catalog(), database, $query_ctx)
+                .map_err(BoxedError::new)
+                .context(SqlExecInterceptedSnafu)?;
+        }
+    };
+}
+
 pub fn check_permission(
     plugins: Plugins,
     stmt: &Statement,
@@ -472,7 +484,8 @@ pub fn check_permission(
         // These are executed by query engine, and will be checked there.
         Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
         // database ops won't be checked
-        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {}
+        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::DropDatabase(_) => {
+        }
         // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
         }
@@ -493,11 +506,13 @@ pub fn check_permission(
             validate_param(drop_stmt.table_name(), query_ctx)?;
         }
         Statement::ShowTables(stmt) => {
-            if let Some(database) = &stmt.database {
-                validate_catalog_and_schema(query_ctx.current_catalog(), database, query_ctx)
-                    .map_err(BoxedError::new)
-                    .context(SqlExecInterceptedSnafu)?;
-            }
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowColumns(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowIndex(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
         }
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;

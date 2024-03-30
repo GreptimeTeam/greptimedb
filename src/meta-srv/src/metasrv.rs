@@ -43,7 +43,7 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
-    self, InitMetadataSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
+    InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
     StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
@@ -79,6 +79,17 @@ pub struct MetaSrvOptions {
     pub wal: MetaSrvWalConfig,
     pub export_metrics: ExportMetricsOption,
     pub store_key_prefix: String,
+    /// The max operations per txn
+    ///
+    /// This value is usually limited by which store is used for the `KvBackend`.
+    /// For example, if using etcd, this value should ensure that it is less than
+    /// or equal to the `--max-txn-ops` option value of etcd.
+    ///
+    /// TODO(jeremy): Currently, this option only affects the etcd store, but it may
+    /// also affect other stores in the future. In other words, each store needs to
+    /// limit the number of operations in a txn because an infinitely large txn could
+    /// potentially block other operations.
+    pub max_txn_ops: usize,
 }
 
 impl MetaSrvOptions {
@@ -112,6 +123,7 @@ impl Default for MetaSrvOptions {
             wal: MetaSrvWalConfig::default(),
             export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
+            max_txn_ops: 128,
         }
     }
 }
@@ -345,7 +357,7 @@ impl MetaSrv {
             self.leader_cached_kv_backend
                 .load()
                 .await
-                .context(error::KvBackendSnafu)?;
+                .context(KvBackendSnafu)?;
             self.procedure_manager
                 .start()
                 .await

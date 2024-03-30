@@ -43,6 +43,7 @@ use crate::cache_invalidator::Context;
 use crate::ddl::utils::add_peer_context_if_needed;
 use crate::ddl::DdlContext;
 use crate::error::{self, ConvertAlterTableRequestSnafu, Error, InvalidProtoMsgSnafu, Result};
+use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::DeserializedValueWithBytes;
@@ -66,7 +67,6 @@ impl AlterTableProcedure {
         cluster_id: u64,
         task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        physical_table_info: Option<(TableId, TableName)>,
         context: DdlContext,
     ) -> Result<Self> {
         let alter_kind = task
@@ -86,13 +86,7 @@ impl AlterTableProcedure {
 
         Ok(Self {
             context,
-            data: AlterTableData::new(
-                task,
-                table_info_value,
-                physical_table_info,
-                cluster_id,
-                next_column_id,
-            ),
+            data: AlterTableData::new(task, table_info_value, cluster_id, next_column_id),
             kind,
         })
     }
@@ -280,7 +274,7 @@ impl AlterTableProcedure {
 
         let new_meta = table_info
             .meta
-            .builder_with_alter_kind(table_ref.table, &request.alter_kind)
+            .builder_with_alter_kind(table_ref.table, &request.alter_kind, false)
             .context(error::TableSnafu)?
             .build()
             .with_context(|_| error::BuildTableMetaSnafu {
@@ -330,35 +324,24 @@ impl AlterTableProcedure {
     async fn on_broadcast(&mut self) -> Result<Status> {
         let alter_kind = self.alter_kind()?;
         let cache_invalidator = &self.context.cache_invalidator;
-
-        if matches!(alter_kind, Kind::RenameTable { .. }) {
-            cache_invalidator
-                .invalidate_table_name(&Context::default(), self.data.table_ref().into())
-                .await?;
+        let cache_keys = if matches!(alter_kind, Kind::RenameTable { .. }) {
+            vec![CacheIdent::TableName(self.data.table_ref().into())]
         } else {
-            cache_invalidator
-                .invalidate_table_id(&Context::default(), self.data.table_id())
-                .await?;
+            vec![
+                CacheIdent::TableId(self.data.table_id()),
+                CacheIdent::TableName(self.data.table_ref().into()),
+            ]
         };
+
+        cache_invalidator
+            .invalidate(&Context::default(), cache_keys)
+            .await?;
 
         Ok(Status::done())
     }
 
     fn lock_key_inner(&self) -> Vec<StringKey> {
         let mut lock_key = vec![];
-
-        if let Some((physical_table_id, physical_table_name)) = self.data.physical_table_info() {
-            lock_key.push(CatalogLock::Read(&physical_table_name.catalog_name).into());
-            lock_key.push(
-                SchemaLock::read(
-                    &physical_table_name.catalog_name,
-                    &physical_table_name.schema_name,
-                )
-                .into(),
-            );
-            lock_key.push(TableLock::Read(*physical_table_id).into())
-        }
-
         let table_ref = self.data.table_ref();
         let table_id = self.data.table_id();
         lock_key.push(CatalogLock::Read(table_ref.catalog).into());
@@ -436,8 +419,6 @@ pub struct AlterTableData {
     task: AlterTableTask,
     /// Table info value before alteration.
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-    /// Physical table name, if the table to alter is a logical table.
-    physical_table_info: Option<(TableId, TableName)>,
     /// Next column id of the table if the task adds columns to the table.
     next_column_id: Option<ColumnId>,
 }
@@ -446,7 +427,6 @@ impl AlterTableData {
     pub fn new(
         task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        physical_table_info: Option<(TableId, TableName)>,
         cluster_id: u64,
         next_column_id: Option<ColumnId>,
     ) -> Self {
@@ -454,7 +434,6 @@ impl AlterTableData {
             state: AlterTableState::Prepare,
             task,
             table_info_value,
-            physical_table_info,
             cluster_id,
             next_column_id,
         }
@@ -470,10 +449,6 @@ impl AlterTableData {
 
     fn table_info(&self) -> &RawTableInfo {
         &self.table_info_value.table_info
-    }
-
-    fn physical_table_info(&self) -> Option<&(TableId, TableName)> {
-        self.physical_table_info.as_ref()
     }
 }
 

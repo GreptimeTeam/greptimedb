@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
@@ -32,9 +32,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
-use super::handler::collect_plan_metrics;
-use super::header::GREPTIME_DB_HEADER_METRICS;
-use super::prometheus::{PromData, PromSeries, PrometheusResponse};
+use super::header::{collect_plan_metrics, GREPTIME_DB_HEADER_METRICS};
+use super::prometheus::{
+    PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
+};
 use crate::error::{CollectRecordbatchSnafu, InternalSnafu, Result};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -107,40 +108,38 @@ impl PrometheusJsonResponse {
         result_type: ValueType,
     ) -> Self {
         let response: Result<Self> = try {
-            let resp = match result? {
-                Output::RecordBatches(batches) => Self::success(Self::record_batches_to_data(
-                    batches,
-                    metric_name,
-                    result_type,
-                )?),
-                Output::Stream(stream, physical_plan) => {
-                    let record_batches = RecordBatches::try_collect(stream)
-                        .await
-                        .context(CollectRecordbatchSnafu)?;
-                    let mut resp = Self::success(Self::record_batches_to_data(
-                        record_batches,
-                        metric_name,
-                        result_type,
-                    )?);
-
-                    if let Some(physical_plan) = physical_plan {
-                        let mut result_map = HashMap::new();
-                        let mut tmp = vec![&mut result_map];
-                        collect_plan_metrics(physical_plan, &mut tmp);
-
-                        let re = result_map
-                            .into_iter()
-                            .map(|(k, v)| (k, Value::from(v)))
-                            .collect();
-                        resp.resp_metrics = re;
+            let result = result?;
+            let mut resp =
+                match result.data {
+                    OutputData::RecordBatches(batches) => Self::success(
+                        Self::record_batches_to_data(batches, metric_name, result_type)?,
+                    ),
+                    OutputData::Stream(stream) => {
+                        let record_batches = RecordBatches::try_collect(stream)
+                            .await
+                            .context(CollectRecordbatchSnafu)?;
+                        Self::success(Self::record_batches_to_data(
+                            record_batches,
+                            metric_name,
+                            result_type,
+                        )?)
                     }
+                    OutputData::AffectedRows(_) => {
+                        Self::error("Unexpected", "expected data result, but got affected rows")
+                    }
+                };
 
-                    resp
-                }
-                Output::AffectedRows(_) => {
-                    Self::error("Unexpected", "expected data result, but got affected rows")
-                }
-            };
+            if let Some(physical_plan) = result.meta.plan {
+                let mut result_map = HashMap::new();
+                let mut tmp = vec![&mut result_map];
+                collect_plan_metrics(physical_plan, &mut tmp);
+
+                let re = result_map
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::from(v)))
+                    .collect();
+                resp.resp_metrics = re;
+            }
 
             resp
         };
@@ -259,24 +258,35 @@ impl PrometheusJsonResponse {
             }
         }
 
-        let result = buffer
-            .into_iter()
-            .map(|(tags, mut values)| {
-                let metric = tags.into_iter().collect();
-                match result_type {
-                    ValueType::Vector | ValueType::Scalar | ValueType::String => Ok(PromSeries {
+        // initialize result to return
+        let mut result = match result_type {
+            ValueType::Vector => PromQueryResult::Vector(vec![]),
+            ValueType::Matrix => PromQueryResult::Matrix(vec![]),
+            ValueType::Scalar => PromQueryResult::Scalar(None),
+            ValueType::String => PromQueryResult::String(None),
+        };
+
+        // accumulate data into result
+        buffer.into_iter().for_each(|(tags, mut values)| {
+            let metric = tags.into_iter().collect();
+            match result {
+                PromQueryResult::Vector(ref mut v) => {
+                    v.push(PromSeriesVector {
                         metric,
                         value: values.pop(),
-                        ..Default::default()
-                    }),
-                    ValueType::Matrix => Ok(PromSeries {
-                        metric,
-                        values,
-                        ..Default::default()
-                    }),
+                    });
                 }
-            })
-            .collect::<Result<Vec<_>>>()?;
+                PromQueryResult::Matrix(ref mut v) => {
+                    v.push(PromSeriesMatrix { metric, values });
+                }
+                PromQueryResult::Scalar(ref mut v) => {
+                    *v = values.pop();
+                }
+                PromQueryResult::String(ref mut _v) => {
+                    // TODO(ruihang): Not supported yet
+                }
+            }
+        });
 
         let result_type_string = result_type.to_string();
         let data = PrometheusResponse::PromData(PromData {

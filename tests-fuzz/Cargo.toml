@@ -7,15 +7,23 @@ license.workspace = true
 [lints]
 workspace = true
 
+[package.metadata]
+cargo-fuzz = true
+
 [dependencies]
+arbitrary = { version = "1.3.0", features = ["derive"] }
 async-trait = { workspace = true }
 common-error = { workspace = true }
 common-macro = { workspace = true }
 common-query = { workspace = true }
+common-runtime = { workspace = true }
 common-telemetry = { workspace = true }
+common-time = { workspace = true }
 datatypes = { workspace = true }
 derive_builder = { workspace = true }
+dotenv = "0.15"
 lazy_static = { workspace = true }
+libfuzzer-sys = "0.4"
 partition = { workspace = true }
 rand = { workspace = true }
 rand_chacha = "0.3.1"
@@ -33,4 +41,27 @@ sqlx = { version = "0.6", features = [
     "postgres",
     "chrono",
 ] }
+
+[dev-dependencies]
 tokio = { workspace = true }
+
+[[bin]]
+name = "fuzz_create_table"
+path = "targets/fuzz_create_table.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_insert"
+path = "targets/fuzz_insert.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_alter_table"
+path = "targets/fuzz_alter_table.rs"
+test = false
+bench = false
+doc = false

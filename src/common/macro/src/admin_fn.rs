@@ -32,7 +32,7 @@ macro_rules! ok {
     };
 }
 
-/// Internal util macro to to create an error.
+/// Internal util macro to create an error.
 macro_rules! error {
     ($span:expr, $msg: expr) => {
         Err(syn::Error::new($span, $msg))

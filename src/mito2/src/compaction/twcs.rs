@@ -35,6 +35,7 @@ use crate::config::MitoConfig;
 use crate::error::{self, CompactRegionSnafu};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::read::projection::ProjectionMapper;
+use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::{BoxedBatchReader, Source};
 use crate::region::options::IndexOptions;
@@ -188,6 +189,7 @@ impl Picker for TwcsPicker {
             cache_manager,
             storage: current_version.options.storage.clone(),
             index_options: current_version.options.index_options.clone(),
+            append_mode: current_version.options.append_mode,
         };
         Some(Box::new(task))
     }
@@ -255,6 +257,8 @@ pub(crate) struct TwcsCompactionTask {
     pub(crate) storage: Option<String>,
     /// Index options of the region.
     pub(crate) index_options: IndexOptions,
+    /// The region is using append mode.
+    pub(crate) append_mode: bool,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -264,6 +268,7 @@ impl Debug for TwcsCompactionTask {
             .field("outputs", &self.outputs)
             .field("expired_ssts", &self.expired_ssts)
             .field("compaction_time_window", &self.compaction_time_window)
+            .field("append_mode", &self.append_mode)
             .finish()
     }
 }
@@ -332,9 +337,15 @@ impl TwcsCompactionTask {
             let cache_manager = self.cache_manager.clone();
             let storage = self.storage.clone();
             let index_options = self.index_options.clone();
+            let append_mode = self.append_mode;
             futs.push(async move {
-                let reader =
-                    build_sst_reader(metadata.clone(), sst_layer.clone(), &output.inputs).await?;
+                let reader = build_sst_reader(
+                    metadata.clone(),
+                    sst_layer.clone(),
+                    &output.inputs,
+                    append_mode,
+                )
+                .await?;
                 let file_meta_opt = sst_layer
                     .write_sst(
                         SstWriteRequest {
@@ -565,13 +576,14 @@ async fn build_sst_reader(
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
     inputs: &[FileHandle],
+    append_mode: bool,
 ) -> error::Result<BoxedBatchReader> {
-    SeqScan::new(sst_layer, ProjectionMapper::all(&metadata)?)
+    let scan_input = ScanInput::new(sst_layer, ProjectionMapper::all(&metadata)?)
         .with_files(inputs.to_vec())
+        .with_append_mode(append_mode)
         // We ignore file not found error during compaction.
-        .with_ignore_file_not_found(true)
-        .build_reader()
-        .await
+        .with_ignore_file_not_found(true);
+    SeqScan::new(scan_input).build_reader().await
 }
 
 #[cfg(test)]

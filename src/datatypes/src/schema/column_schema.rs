@@ -143,9 +143,20 @@ impl ColumnSchema {
     }
 
     /// Set the nullablity to `true` of the column.
+    /// Similar to [set_nullable] but take the ownership and return a owned value.
+    ///
+    /// [set_nullable]: Self::set_nullable
     pub fn with_nullable_set(mut self) -> Self {
         self.is_nullable = true;
         self
+    }
+
+    /// Set the nullability to `true` of the column.
+    /// Similar to [with_nullable_set] but don't take the ownership
+    ///
+    /// [with_nullable_set]: Self::with_nullable_set
+    pub fn set_nullable(&mut self) {
+        self.is_nullable = true;
     }
 
     /// Creates a new [`ColumnSchema`] with given metadata.

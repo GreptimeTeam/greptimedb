@@ -113,7 +113,7 @@ impl GrpcQueryHandler for Instance {
                             .statement_executor
                             .create_table_inner(&mut expr, None, &ctx)
                             .await?;
-                        Output::AffectedRows(0)
+                        Output::new_with_affected_rows(0)
                     }
                     DdlExpr::Alter(expr) => self.statement_executor.alter_table_inner(expr).await?,
                     DdlExpr::CreateDatabase(expr) => {

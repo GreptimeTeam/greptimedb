@@ -7,3 +7,9 @@ The Alfa Romeo [MiTo](https://en.wikipedia.org/wiki/Alfa_Romeo_MiTo) is a front-
 
 > "You can't be a true petrolhead until you've owned an Alfa Romeo."
 > <div align="right">-- by Jeremy Clarkson</div>
+
+## Benchmarks
+Run benchmarks in this crate:
+```bash
+cargo bench -p mito2 -F test
+```

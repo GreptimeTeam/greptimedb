@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -23,23 +22,23 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_plugins::GREPTIME_EXEC_PREFIX;
-use common_query::physical_plan::PhysicalPlan;
-use common_query::Output;
+use common_plugins::GREPTIME_EXEC_WRITE_COST;
+use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
-use datafusion::physical_plan::metrics::MetricValue;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::QueryContextRef;
 
+use super::header::collect_plan_metrics;
 use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::table_result::TableResponse;
 use crate::http::{
     ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, HttpRecordsOutput,
     HttpResponse, ResponseFormat,
@@ -111,7 +110,7 @@ pub async fn sql(
     let outputs = match result {
         Err((status, msg)) => {
             return HttpResponse::Error(
-                ErrorResponse::from_error_message(format, status, msg)
+                ErrorResponse::from_error_message(status, msg)
                     .with_execution_time(start.elapsed().as_millis() as u64),
             );
         }
@@ -121,6 +120,7 @@ pub async fn sql(
     let resp = match format {
         ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
         ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+        ResponseFormat::Table => TableResponse::from_output(outputs).await,
         ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
         ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
     };
@@ -130,7 +130,6 @@ pub async fn sql(
 
 /// Create a response from query result
 pub async fn from_output(
-    ty: ResponseFormat,
     outputs: Vec<crate::error::Result<Output>>,
 ) -> Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
     // TODO(sunng87): this api response structure cannot represent error well.
@@ -140,48 +139,54 @@ pub async fn from_output(
 
     for out in outputs {
         match out {
-            Ok(Output::AffectedRows(rows)) => {
-                results.push(GreptimeQueryOutput::AffectedRows(rows));
-            }
-            Ok(Output::Stream(stream, physical_plan)) => {
-                let schema = stream.schema().clone();
-                // TODO(sunng87): streaming response
-                let mut http_record_output = match util::collect(stream).await {
-                    Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
-                        Ok(rows) => rows,
+            Ok(o) => match o.data {
+                OutputData::AffectedRows(rows) => {
+                    results.push(GreptimeQueryOutput::AffectedRows(rows));
+                    if o.meta.cost > 0 {
+                        merge_map.insert(GREPTIME_EXEC_WRITE_COST.to_string(), o.meta.cost as u64);
+                    }
+                }
+                OutputData::Stream(stream) => {
+                    let schema = stream.schema().clone();
+                    // TODO(sunng87): streaming response
+                    let mut http_record_output = match util::collect(stream).await {
+                        Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
+                            Ok(rows) => rows,
+                            Err(err) => {
+                                return Err(ErrorResponse::from_error(err));
+                            }
+                        },
                         Err(err) => {
-                            return Err(ErrorResponse::from_error(ty, err));
+                            return Err(ErrorResponse::from_error(err));
                         }
-                    },
-                    Err(err) => {
-                        return Err(ErrorResponse::from_error(ty, err));
-                    }
-                };
-                if let Some(physical_plan) = physical_plan {
-                    let mut result_map = HashMap::new();
+                    };
+                    if let Some(physical_plan) = o.meta.plan {
+                        let mut result_map = HashMap::new();
 
-                    let mut tmp = vec![&mut merge_map, &mut result_map];
-                    collect_plan_metrics(physical_plan, &mut tmp);
-                    let re = result_map
-                        .into_iter()
-                        .map(|(k, v)| (k, Value::from(v)))
-                        .collect();
-                    http_record_output.metrics = re;
-                }
-                results.push(GreptimeQueryOutput::Records(http_record_output))
-            }
-            Ok(Output::RecordBatches(rbs)) => {
-                match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
-                    Ok(rows) => {
-                        results.push(GreptimeQueryOutput::Records(rows));
+                        let mut tmp = vec![&mut merge_map, &mut result_map];
+                        collect_plan_metrics(physical_plan, &mut tmp);
+                        let re = result_map
+                            .into_iter()
+                            .map(|(k, v)| (k, Value::from(v)))
+                            .collect::<HashMap<String, Value>>();
+                        http_record_output.metrics.extend(re);
                     }
-                    Err(err) => {
-                        return Err(ErrorResponse::from_error(ty, err));
+                    results.push(GreptimeQueryOutput::Records(http_record_output))
+                }
+                OutputData::RecordBatches(rbs) => {
+                    match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
+                        Ok(rows) => {
+                            results.push(GreptimeQueryOutput::Records(rows));
+                        }
+                        Err(err) => {
+                            return Err(ErrorResponse::from_error(err));
+                        }
                     }
                 }
-            }
+            },
+
             Err(err) => {
-                return Err(ErrorResponse::from_error(ty, err));
+                return Err(ErrorResponse::from_error(err));
             }
         }
     }
@@ -192,42 +197,6 @@ pub async fn from_output(
         .collect();
 
     Ok((results, merge_map))
-}
-
-fn collect_into_maps(name: &str, value: u64, maps: &mut [&mut HashMap<String, u64>]) {
-    if name.starts_with(GREPTIME_EXEC_PREFIX) && value > 0 {
-        maps.iter_mut().for_each(|map| {
-            map.entry(name.to_string())
-                .and_modify(|v| *v += value)
-                .or_insert(value);
-        });
-    }
-}
-
-pub fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, maps: &mut [&mut HashMap<String, u64>]) {
-    if let Some(m) = plan.metrics() {
-        m.iter().for_each(|m| match m.value() {
-            MetricValue::Count { name, count } => {
-                collect_into_maps(name, count.value() as u64, maps);
-            }
-            MetricValue::Gauge { name, gauge } => {
-                collect_into_maps(name, gauge.value() as u64, maps);
-            }
-            MetricValue::Time { name, time } => {
-                if name.starts_with(GREPTIME_EXEC_PREFIX) {
-                    // override
-                    maps.iter_mut().for_each(|map| {
-                        map.insert(name.to_string(), time.value() as u64);
-                    });
-                }
-            }
-            _ => {}
-        });
-    }
-
-    for c in plan.children() {
-        collect_plan_metrics(c, maps);
-    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -269,7 +238,7 @@ pub async fn promql(
     let resp = if let Some((status, msg)) =
         validate_schema(sql_handler.clone(), query_ctx.clone()).await
     {
-        let resp = ErrorResponse::from_error_message(ResponseFormat::GreptimedbV1, status, msg);
+        let resp = ErrorResponse::from_error_message(status, msg);
         HttpResponse::Error(resp)
     } else {
         let prom_query = params.into();

@@ -152,7 +152,7 @@ impl Runner {
             guard.key_guards.push(key_guard);
         }
 
-        // Execute the procedure. We need to release the lock whenever the the execution
+        // Execute the procedure. We need to release the lock whenever the execution
         // is successful or fail.
         self.execute_procedure_in_loop().await;
 
@@ -385,7 +385,7 @@ impl Runner {
     }
 
     /// Extend the retry time to wait for the next retry.
-    async fn wait_on_err(&self, d: Duration, i: u64) {
+    async fn wait_on_err(&mut self, d: Duration, i: u64) {
         logging::info!(
             "Procedure {}-{} retry for the {} times after {} millis",
             self.procedure.type_name(),
@@ -396,7 +396,7 @@ impl Runner {
         time::sleep(d).await;
     }
 
-    async fn on_suspended(&self, subprocedures: Vec<ProcedureWithId>) {
+    async fn on_suspended(&mut self, subprocedures: Vec<ProcedureWithId>) {
         let has_child = !subprocedures.is_empty();
         for subprocedure in subprocedures {
             logging::info!(
@@ -429,11 +429,15 @@ impl Runner {
     }
 
     async fn persist_procedure(&mut self) -> Result<()> {
+        let type_name = self.procedure.type_name().to_string();
+        let data = self.procedure.dump()?;
+
         self.store
             .store_procedure(
                 self.meta.id,
                 self.step,
-                &self.procedure,
+                type_name,
+                data,
                 self.meta.parent_id,
             )
             .await

@@ -40,6 +40,7 @@ pub mod request;
 pub mod row_converter;
 pub(crate) mod schedule;
 pub mod sst;
+mod time_provider;
 pub mod wal;
 mod worker;
 

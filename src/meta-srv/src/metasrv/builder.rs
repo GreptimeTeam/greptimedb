@@ -225,7 +225,6 @@ impl MetaSrvBuilder {
             Arc::new(TableMetadataAllocator::with_peer_allocator(
                 sequence,
                 wal_options_allocator.clone(),
-                table_metadata_manager.table_name_manager().clone(),
                 peer_allocator,
             ))
         });
@@ -260,6 +259,7 @@ impl MetaSrvBuilder {
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
                         distributed_time_constants::REGION_LEASE_SECS,
                         in_memory.clone(),
+                        kv_backend.clone(),
                         mailbox.clone(),
                         procedure_manager.clone(),
                         (selector.clone(), selector_ctx.clone()),
@@ -415,6 +415,7 @@ fn build_ddl_manager(
             table_metadata_manager.clone(),
             table_metadata_allocator.clone(),
             memory_region_keeper.clone(),
+            true,
         )
         .context(error::InitDdlManagerSnafu)?,
     ))

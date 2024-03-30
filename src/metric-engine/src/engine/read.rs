@@ -143,6 +143,7 @@ impl MetricEngineInner {
             self.default_projection(physical_region_id, logical_region_id)
                 .await?
         };
+
         request.projection = Some(physical_projection);
 
         // add table filter
@@ -186,6 +187,7 @@ impl MetricEngineInner {
             .get_metadata(data_region_id)
             .await
             .context(MitoReadOperationSnafu)?;
+
         for name in projected_logical_names {
             // Safety: logical columns is a strict subset of physical columns
             physical_projection.push(physical_metadata.column_index_by_name(&name).unwrap());
@@ -301,7 +303,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(scan_req.projection.unwrap(), vec![0, 1, 4, 8, 9, 10, 11]);
+        assert_eq!(scan_req.projection.unwrap(), vec![11, 10, 9, 8, 0, 1, 4]);
         assert_eq!(scan_req.filters.len(), 1);
         assert_eq!(
             scan_req.filters[0],
@@ -318,6 +320,6 @@ mod test {
             .transform_request(physical_region_id, logical_region_id, scan_req)
             .await
             .unwrap();
-        assert_eq!(scan_req.projection.unwrap(), vec![0, 1, 4, 8, 9, 10, 11]);
+        assert_eq!(scan_req.projection.unwrap(), vec![11, 10, 9, 8, 0, 1, 4]);
     }
 }

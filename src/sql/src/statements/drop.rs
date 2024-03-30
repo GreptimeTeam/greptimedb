@@ -40,3 +40,29 @@ impl DropTable {
         self.drop_if_exists
     }
 }
+
+/// DROP DATABASE statement.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct DropDatabase {
+    name: ObjectName,
+    /// drop table if exists
+    drop_if_exists: bool,
+}
+
+impl DropDatabase {
+    /// Creates a statement for `DROP DATABASE`
+    pub fn new(name: ObjectName, if_exists: bool) -> Self {
+        Self {
+            name,
+            drop_if_exists: if_exists,
+        }
+    }
+
+    pub fn name(&self) -> &ObjectName {
+        &self.name
+    }
+
+    pub fn drop_if_exists(&self) -> bool {
+        self.drop_if_exists
+    }
+}

@@ -23,6 +23,7 @@ use common_grpc::writer::Precision;
 use common_telemetry::tracing;
 use session::context::QueryContextRef;
 
+use super::header::write_cost_header_map;
 use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
@@ -67,9 +68,11 @@ pub async fn influxdb_write_v2(
     Extension(query_ctx): Extension<QueryContextRef>,
     lines: String,
 ) -> Result<impl IntoResponse> {
-    let db = params
-        .remove("bucket")
-        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+    let db = match (params.remove("db"), params.remove("bucket")) {
+        (_, Some(bucket)) => bucket.clone(),
+        (Some(db), None) => db.clone(),
+        _ => DEFAULT_SCHEMA_NAME.to_string(),
+    };
 
     let precision = params
         .get("precision")
@@ -91,9 +94,12 @@ pub async fn influxdb_write(
         .start_timer();
 
     let request = InfluxdbRequest { precision, lines };
-    handler.exec(request, ctx).await?;
+    let output = handler.exec(request, ctx).await?;
 
-    Ok((StatusCode::NO_CONTENT, ()))
+    Ok((
+        StatusCode::NO_CONTENT,
+        write_cost_header_map(output.meta.cost),
+    ))
 }
 
 fn parse_time_precision(value: &str) -> Result<Precision> {

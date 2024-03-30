@@ -28,7 +28,7 @@ use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
 use common_query::prelude::ScalarUdf;
-use common_query::Output;
+use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
@@ -90,9 +90,9 @@ impl DatafusionQueryEngine {
             optimized_physical_plan
         };
 
-        Ok(Output::Stream(
-            self.execute_stream(&ctx, &physical_plan)?,
-            Some(physical_plan),
+        Ok(Output::new(
+            OutputData::Stream(self.execute_stream(&ctx, &physical_plan)?),
+            OutputMeta::new_with_plan(physical_plan),
         ))
     }
 
@@ -121,13 +121,15 @@ impl DatafusionQueryEngine {
         let output = self
             .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()), query_ctx.clone())
             .await?;
-        let mut stream = match output {
-            Output::RecordBatches(batches) => batches.as_stream(),
-            Output::Stream(stream, _) => stream,
+        let mut stream = match output.data {
+            OutputData::RecordBatches(batches) => batches.as_stream(),
+            OutputData::Stream(stream) => stream,
             _ => unreachable!(),
         };
 
         let mut affected_rows = 0;
+        let mut insert_cost = 0;
+
         while let Some(batch) = stream.next().await {
             let batch = batch.context(CreateRecordBatchSnafu)?;
             let column_vectors = batch
@@ -135,20 +137,27 @@ impl DatafusionQueryEngine {
                 .map_err(BoxedError::new)
                 .context(QueryExecutionSnafu)?;
 
-            let rows = match dml.op {
+            match dml.op {
                 WriteOp::InsertInto => {
-                    self.insert(&table_name, column_vectors, query_ctx.clone())
-                        .await?
+                    let output = self
+                        .insert(&table_name, column_vectors, query_ctx.clone())
+                        .await?;
+                    let (rows, cost) = output.extract_rows_and_cost();
+                    affected_rows += rows;
+                    insert_cost += cost;
                 }
                 WriteOp::Delete => {
-                    self.delete(&table_name, &table, column_vectors, query_ctx.clone())
-                        .await?
+                    affected_rows += self
+                        .delete(&table_name, &table, column_vectors, query_ctx.clone())
+                        .await?;
                 }
                 _ => unreachable!("guarded by the 'ensure!' at the beginning"),
-            };
-            affected_rows += rows;
+            }
         }
-        Ok(Output::AffectedRows(affected_rows))
+        Ok(Output::new(
+            OutputData::AffectedRows(affected_rows),
+            OutputMeta::new_with_cost(insert_cost),
+        ))
     }
 
     #[tracing::instrument(skip_all)]
@@ -201,7 +210,7 @@ impl DatafusionQueryEngine {
         table_name: &ResolvedTableReference<'a>,
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
-    ) -> Result<usize> {
+    ) -> Result<Output> {
         let request = InsertRequest {
             catalog_name: table_name.catalog.to_string(),
             schema_name: table_name.schema.to_string(),
@@ -471,7 +480,6 @@ mod tests {
 
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
-    use common_query::Output;
     use common_recordbatch::util;
     use datafusion::prelude::{col, lit};
     use datatypes::prelude::ConcreteDataType;
@@ -534,8 +542,8 @@ mod tests {
 
         let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
 
-        match output {
-            Output::Stream(recordbatch, _) => {
+        match output.data {
+            OutputData::Stream(recordbatch) => {
                 let numbers = util::collect(recordbatch).await.unwrap();
                 assert_eq!(1, numbers.len());
                 assert_eq!(numbers[0].num_columns(), 1);

@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 api.workspace = true
+chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
 common-decimal.workspace = true
@@ -16,12 +17,15 @@ common-error.workspace = true
 common-macro.workspace = true
 common-query.workspace = true
 common-time.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-physical-expr.workspace = true
 datafusion-sql.workspace = true
 datatypes.workspace = true
 hex = "0.4"
 itertools.workspace = true
 lazy_static.workspace = true
-once_cell.workspace = true
 regex.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true

@@ -47,8 +47,8 @@ impl OpentsdbProtocolHandler for Instance {
             .map_err(BoxedError::new)
             .context(servers::error::ExecuteGrpcQuerySnafu)?;
 
-        Ok(match output {
-            common_query::Output::AffectedRows(rows) => rows,
+        Ok(match output.data {
+            common_query::OutputData::AffectedRows(rows) => rows,
             _ => unreachable!(),
         })
     }

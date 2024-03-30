@@ -38,4 +38,15 @@ pub enum Error {
 
     #[snafu(display("No droppable columns"))]
     DroppableColumns { location: Location },
+
+    #[snafu(display("Failed to execute query: {}", sql))]
+    ExecuteQuery {
+        sql: String,
+        #[snafu(source)]
+        error: sqlx::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to assert: {}", reason))]
+    Assert { reason: String, location: Location },
 }

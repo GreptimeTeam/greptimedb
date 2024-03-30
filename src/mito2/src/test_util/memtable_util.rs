@@ -21,14 +21,16 @@ use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
 use datatypes::arrow::array::UInt64Array;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::scalars::ScalarVector;
 use datatypes::schema::ColumnSchema;
+use datatypes::vectors::TimestampMillisecondVector;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
+use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRef,
     MemtableStats,
@@ -55,6 +57,10 @@ impl Memtable for EmptyMemtable {
     }
 
     fn write(&self, _kvs: &KeyValues) -> Result<()> {
+        Ok(())
+    }
+
+    fn write_one(&self, _key_value: KeyValue) -> Result<()> {
         Ok(())
     }
 
@@ -219,25 +225,14 @@ pub(crate) fn extract_data_batch(batch: &DataBatch) -> (u16, Vec<(i64, u64)>) {
 
 /// Builds key values with timestamps (ms) and sequences for test.
 pub(crate) fn build_key_values_with_ts_seq_values(
-    schema: &RegionMetadataRef,
+    metadata: &RegionMetadataRef,
     k0: String,
     k1: u32,
     timestamps: impl Iterator<Item = i64>,
     values: impl Iterator<Item = Option<f64>>,
     sequence: SequenceNumber,
 ) -> KeyValues {
-    let column_schema = schema
-        .column_metadatas
-        .iter()
-        .map(|c| api::v1::ColumnSchema {
-            column_name: c.column_schema.name.clone(),
-            datatype: ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
-                .unwrap()
-                .datatype() as i32,
-            semantic_type: c.semantic_type as i32,
-            ..Default::default()
-        })
-        .collect();
+    let column_schema = region_metadata_to_row_schema(metadata);
 
     let rows = timestamps
         .zip(values)
@@ -269,7 +264,23 @@ pub(crate) fn build_key_values_with_ts_seq_values(
             rows,
         }),
     };
-    KeyValues::new(schema.as_ref(), mutation).unwrap()
+    KeyValues::new(metadata.as_ref(), mutation).unwrap()
+}
+
+/// Converts the region metadata to column schemas for a row.
+pub fn region_metadata_to_row_schema(metadata: &RegionMetadataRef) -> Vec<api::v1::ColumnSchema> {
+    metadata
+        .column_metadatas
+        .iter()
+        .map(|c| api::v1::ColumnSchema {
+            column_name: c.column_schema.name.clone(),
+            datatype: ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
+                .unwrap()
+                .datatype() as i32,
+            semantic_type: c.semantic_type as i32,
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Encode keys.
@@ -297,4 +308,21 @@ pub(crate) fn encode_key_by_kv(key_value: &KeyValue) -> Vec<u8> {
         SortField::new(ConcreteDataType::uint32_datatype()),
     ]);
     row_codec.encode(key_value.primary_keys()).unwrap()
+}
+
+/// Collects timestamps from the batch iter.
+pub(crate) fn collect_iter_timestamps(iter: BoxedBatchIterator) -> Vec<i64> {
+    iter.flat_map(|batch| {
+        batch
+            .unwrap()
+            .timestamps()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondVector>()
+            .unwrap()
+            .iter_data()
+            .collect::<Vec<_>>()
+            .into_iter()
+    })
+    .map(|v| v.unwrap().0.value())
+    .collect()
 }

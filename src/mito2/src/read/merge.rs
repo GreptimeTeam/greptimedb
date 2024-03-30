@@ -33,7 +33,8 @@ use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 /// The merge reader merges [Batch]es from multiple sources that yield sorted batches.
 /// 1. Batch is ordered by primary key, time index, sequence desc, op type desc (we can
 /// ignore op type as sequence is already unique).
-/// 2. Batch doesn't have duplicate elements (elements with the same primary key and time index).
+/// 2. Batch doesn't have duplicate elements (elements with the same primary key and time index) if
+///    dedup is true.
 /// 3. Batches from sources **must** not be empty.
 pub struct MergeReader {
     /// Holds [Node]s whose key range of current batch **is** overlapped with the merge window.
@@ -48,6 +49,8 @@ pub struct MergeReader {
     cold: BinaryHeap<Node>,
     /// Batch to output.
     output_batch: Option<Batch>,
+    /// Remove duplicate timestamps.
+    dedup: bool,
     /// Local metrics.
     metrics: Metrics,
 }
@@ -98,7 +101,7 @@ impl Drop for MergeReader {
 
 impl MergeReader {
     /// Creates and initializes a new [MergeReader].
-    pub async fn new(sources: Vec<Source>) -> Result<MergeReader> {
+    pub async fn new(sources: Vec<Source>, dedup: bool) -> Result<MergeReader> {
         let start = Instant::now();
         let mut metrics = Metrics::default();
 
@@ -116,6 +119,7 @@ impl MergeReader {
             hot,
             cold,
             output_batch: None,
+            dedup,
             metrics,
         };
         // Initializes the reader.
@@ -150,12 +154,13 @@ impl MergeReader {
 
         let mut hottest = self.hot.pop().unwrap();
         let batch = hottest.fetch_batch(&mut self.metrics).await?;
-        Self::maybe_output_batch(batch, &mut self.output_batch, &mut self.metrics)?;
+        Self::maybe_output_batch(batch, &mut self.output_batch, self.dedup, &mut self.metrics)?;
         self.reheap(hottest)
     }
 
-    /// Fetches non-duplicated rows from the hottest node and skips the timestamp duplicated
-    /// with the first timestamp in the next node.
+    /// Fetches non-duplicated rows from the hottest node.
+    ///
+    /// If `dedup` is true, it skips the timestamp duplicated with the first timestamp in the next node.
     async fn fetch_rows_from_hottest(&mut self) -> Result<()> {
         // Safety: `fetch_batches_to_output()` ensures the hot heap has more than 1 element.
         // Pop hottest node.
@@ -176,36 +181,58 @@ impl MergeReader {
         // Binary searches the timestamp in the top batch.
         // Safety: Batches should have the same timestamp resolution so we can compare the native
         // value directly.
-        match timestamps.binary_search(&next_min_ts.value()) {
-            Ok(pos) => {
-                // They have duplicate timestamps. Outputs timestamps before the duplicated timestamp.
-                // Batch itself doesn't contain duplicate timestamps so timestamps before `pos`
-                // must be less than `next_min_ts`.
-                Self::maybe_output_batch(
-                    top.slice(0, pos),
-                    &mut self.output_batch,
-                    &mut self.metrics,
-                )?;
-                // This keep the duplicate timestamp in the node.
-                top_node.skip_rows(pos, &mut self.metrics).await?;
-                // The merge window should contain this timestamp so only nodes in the hot heap
-                // have this timestamp.
-                self.filter_first_duplicate_timestamp_in_hot(top_node, next_min_ts)
-                    .await?;
-            }
+        let duplicate_pos = match timestamps.binary_search(&next_min_ts.value()) {
+            Ok(pos) => pos,
             Err(pos) => {
                 // No duplicate timestamp. Outputs timestamp before `pos`.
                 Self::maybe_output_batch(
                     top.slice(0, pos),
                     &mut self.output_batch,
+                    self.dedup,
                     &mut self.metrics,
                 )?;
                 top_node.skip_rows(pos, &mut self.metrics).await?;
-                self.reheap(top_node)?;
+                return self.reheap(top_node);
             }
+        };
+
+        if self.dedup {
+            // They have duplicate timestamps. Outputs timestamps before the duplicated timestamp.
+            // Batch itself doesn't contain duplicate timestamps so timestamps before `duplicate_pos`
+            // must be less than `next_min_ts`.
+            Self::maybe_output_batch(
+                top.slice(0, duplicate_pos),
+                &mut self.output_batch,
+                self.dedup,
+                &mut self.metrics,
+            )?;
+            // This keep the duplicate timestamp in the node.
+            top_node.skip_rows(duplicate_pos, &mut self.metrics).await?;
+            // The merge window should contain this timestamp so only nodes in the hot heap
+            // have this timestamp.
+            return self
+                .filter_first_duplicate_timestamp_in_hot(top_node, next_min_ts)
+                .await;
         }
 
-        Ok(())
+        // No need to remove duplicate timestamps.
+        let output_end = if duplicate_pos == 0 {
+            // If the first timestamp of the top node is duplicate. We can simply return the first row
+            // as the heap ensure it is the one with largest sequence.
+            1
+        } else {
+            // We don't know which one has the larger sequence so we use the range before
+            // the duplicate pos.
+            duplicate_pos
+        };
+        Self::maybe_output_batch(
+            top.slice(0, output_end),
+            &mut self.output_batch,
+            self.dedup,
+            &mut self.metrics,
+        )?;
+        top_node.skip_rows(output_end, &mut self.metrics).await?;
+        self.reheap(top_node)
     }
 
     /// Filters the first duplicate `timestamp` in `top_node` and `hot` heap. Only keeps the timestamp
@@ -297,12 +324,17 @@ impl MergeReader {
     fn maybe_output_batch(
         mut batch: Batch,
         output_batch: &mut Option<Batch>,
+        dedup: bool,
         metrics: &mut Metrics,
     ) -> Result<()> {
         debug_assert!(output_batch.is_none());
 
         let num_rows = batch.num_rows();
-        batch.filter_deleted()?;
+        // If dedup is false, we don't expect delete happens and we skip checking whether there
+        // is any deleted entry.
+        if dedup {
+            batch.filter_deleted()?;
+        }
         // Update deleted rows metrics.
         metrics.num_deleted_rows += num_rows - batch.num_rows();
         if batch.is_empty() {
@@ -315,12 +347,13 @@ impl MergeReader {
 }
 
 /// Builder to build and initialize a [MergeReader].
-#[derive(Default)]
 pub struct MergeReaderBuilder {
     /// Input sources.
     ///
     /// All source must yield batches with the same schema.
     sources: Vec<Source>,
+    /// Remove duplicate timestamps. Default is true.
+    dedup: bool,
 }
 
 impl MergeReaderBuilder {
@@ -330,8 +363,8 @@ impl MergeReaderBuilder {
     }
 
     /// Creates a builder from sources.
-    pub fn from_sources(sources: Vec<Source>) -> MergeReaderBuilder {
-        MergeReaderBuilder { sources }
+    pub fn from_sources(sources: Vec<Source>, dedup: bool) -> MergeReaderBuilder {
+        MergeReaderBuilder { sources, dedup }
     }
 
     /// Pushes a batch reader to sources.
@@ -349,7 +382,16 @@ impl MergeReaderBuilder {
     /// Builds and initializes the reader, then resets the builder.
     pub async fn build(&mut self) -> Result<MergeReader> {
         let sources = mem::take(&mut self.sources);
-        MergeReader::new(sources).await
+        MergeReader::new(sources, self.dedup).await
+    }
+}
+
+impl Default for MergeReaderBuilder {
+    fn default() -> Self {
+        MergeReaderBuilder {
+            sources: Vec::new(),
+            dedup: true,
+        }
     }
 }
 
@@ -900,5 +942,41 @@ mod tests {
             .map(|ts| new_batch(b"k1", &[ts], &[9], &[OpType::Put], &[100]))
             .collect();
         check_reader_result(&mut reader, &expect).await;
+    }
+
+    #[tokio::test]
+    async fn test_merge_keep_duplicate() {
+        let reader1 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[1, 2],
+            &[10, 10],
+            &[OpType::Put, OpType::Put],
+            &[21, 22],
+        )]);
+        let reader2 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[2, 3],
+            &[11, 11],
+            &[OpType::Put, OpType::Put],
+            &[32, 33],
+        )]);
+        let sources = vec![
+            Source::Reader(Box::new(reader1)),
+            Source::Iter(Box::new(reader2)),
+        ];
+        let mut reader = MergeReaderBuilder::from_sources(sources, false)
+            .build()
+            .await
+            .unwrap();
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch(b"k1", &[1], &[10], &[OpType::Put], &[21]),
+                new_batch(b"k1", &[2], &[11], &[OpType::Put], &[32]),
+                new_batch(b"k1", &[2], &[10], &[OpType::Put], &[22]),
+                new_batch(b"k1", &[3], &[11], &[OpType::Put], &[33]),
+            ],
+        )
+        .await;
     }
 }
