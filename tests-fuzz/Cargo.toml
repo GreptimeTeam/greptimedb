@@ -32,9 +32,6 @@ serde_json = { workspace = true }
 snafu = { workspace = true }
 sql = { workspace = true }
 sqlparser.workspace = true
-
-[dev-dependencies]
-dotenv.workspace = true
 sqlx = { version = "0.6", features = [
     "runtime-tokio-rustls",
     "mysql",
@@ -43,6 +40,7 @@ sqlx = { version = "0.6", features = [
 ] }
 
 [dev-dependencies]
+dotenv.workspace = true
 tokio = { workspace = true }
 
 [[bin]]
