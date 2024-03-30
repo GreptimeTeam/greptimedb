@@ -96,7 +96,7 @@ mod tests {
 
     use store_api::logstore::entry::Entry;
 
-    use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl};
+    use crate::raft_engine::protos::logstore::EntryImpl;
 
     #[test]
     fn test_estimated_size() {
