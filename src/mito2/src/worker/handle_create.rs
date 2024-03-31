@@ -60,7 +60,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             &request.region_dir,
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
-            self.scheduler.clone(),
+            self.purge_scheduler.clone(),
             self.intermediate_manager.clone(),
         )
         .metadata(metadata)
