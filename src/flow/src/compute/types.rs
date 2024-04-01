@@ -133,14 +133,17 @@ impl CollectionBundle {
 /// A thread local error collector, used to collect errors during the evaluation of the plan
 ///
 /// usually only the first error matters, but store all of them just in case
+/// 
+/// Using a `VecDeque` to preserve the order of errors 
+/// when running dataflow continously and need errors in order
 #[derive(Default, Clone)]
 pub struct ErrCollector {
-    pub inner: Rc<RefCell<Vec<EvalError>>>,
+    pub inner: Rc<RefCell<VecDeque<EvalError>>>,
 }
 
 impl ErrCollector {
     pub fn push_err(&self, err: EvalError) {
-        self.inner.borrow_mut().push(err)
+        self.inner.borrow_mut().push_back(err)
     }
 
     pub fn run<F>(&self, f: F)

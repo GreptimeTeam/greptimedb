@@ -229,6 +229,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 } else {
                     arrange.read().get_updates_in_range(..=now)
                 };
+
                 // the output is expected to be key -> empty val
                 let output = output_kv
                     .into_iter()
@@ -239,6 +240,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     arrange.write().set_compaction(now)?;
                     Ok(())
                 });
+    
                 // schedule the next time this operator should run
                 if let Some(i) = arrange.read().get_next_update_time(&now) {
                     scheduler.schedule_at(i)
