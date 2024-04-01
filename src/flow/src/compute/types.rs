@@ -79,7 +79,7 @@ impl Arranged {
     }
 
     /// Copy the full arrangement, including the future and the current updates.
-    /// 
+    ///
     /// Internally `Rc-ed` so it's cheap to copy
     pub fn try_copy_full(&self) -> Option<Self> {
         self.arrangement
@@ -105,8 +105,8 @@ pub struct CollectionBundle {
     pub collection: Collection<DiffRow>,
     /// the key [`ScalarExpr`] indicate how the keys(also a [`Row`]) used in Arranged is extract from collection's [`Row`]
     /// So it is the "index" of the arrangement
-    /// 
-    /// The `Arranged` is the actual data source, it can be used to read the data from the collection by 
+    ///
+    /// The `Arranged` is the actual data source, it can be used to read the data from the collection by
     /// using the key indicated by the `Vec<ScalarExpr>`
     pub arranged: BTreeMap<Vec<ScalarExpr>, Arranged>,
 }
@@ -133,9 +133,9 @@ impl CollectionBundle {
 /// A thread local error collector, used to collect errors during the evaluation of the plan
 ///
 /// usually only the first error matters, but store all of them just in case
-/// 
-/// Using a `VecDeque` to preserve the order of errors 
-/// when running dataflow continously and need errors in order
+///
+/// Using a `VecDeque` to preserve the order of errors
+/// when running dataflow continuously and need errors in order
 #[derive(Default, Clone)]
 pub struct ErrCollector {
     pub inner: Rc<RefCell<VecDeque<EvalError>>>,

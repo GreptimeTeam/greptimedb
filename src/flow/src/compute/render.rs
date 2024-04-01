@@ -240,7 +240,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     arrange.write().set_compaction(now)?;
                     Ok(())
                 });
-    
+
                 // schedule the next time this operator should run
                 if let Some(i) = arrange.read().get_next_update_time(&now) {
                     scheduler.schedule_at(i)
