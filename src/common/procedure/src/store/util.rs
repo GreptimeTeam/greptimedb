@@ -123,7 +123,7 @@ pub fn multiple_value_stream(
                 None => collecting = Some(CollectingState::new(key, value)),
             }
         }
-        if let Some(current) = collecting.take(){
+        if let Some(current) = collecting.take() {
             yield multiple_values_collector(current)?
         }
     }
