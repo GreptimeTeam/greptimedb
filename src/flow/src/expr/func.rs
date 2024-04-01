@@ -479,7 +479,7 @@ impl BinaryFunc {
 
     /// Reverse the comparison operator, i.e. `a < b` becomes `b > a`,
     /// equal and not equal are unchanged.
-    pub fn reverse_compare(&self) -> Result<Self, EvalError> {
+    pub fn reverse_compare(&self) -> Result<Self, Error> {
         let ret = match &self {
             BinaryFunc::Eq => BinaryFunc::Eq,
             BinaryFunc::NotEq => BinaryFunc::NotEq,
@@ -488,7 +488,7 @@ impl BinaryFunc {
             BinaryFunc::Gt => BinaryFunc::Lt,
             BinaryFunc::Gte => BinaryFunc::Lte,
             _ => {
-                return InternalSnafu {
+                return InvalidQuerySnafu {
                     reason: format!("Expect a comparison operator, found {:?}", self),
                 }
                 .fail();

@@ -60,6 +60,9 @@ pub enum Error {
 
     #[snafu(display("Flow plan error: {reason}"))]
     Plan { reason: String, location: Location },
+
+    #[snafu(display("Unsupported temporal filter: {reason}"))]
+    UnsupportedTemporalFilter { reason: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -72,7 +75,9 @@ impl ErrorExt for Error {
             Self::TableNotFound { .. } => StatusCode::TableNotFound,
             &Self::InvalidQuery { .. } | &Self::Plan { .. } => StatusCode::PlanQuery,
             Self::NoProtoType { .. } => StatusCode::Unexpected,
-            &Self::NotImplemented { .. } => StatusCode::Unsupported,
+            &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
+                StatusCode::Unsupported
+            }
         }
     }
 
