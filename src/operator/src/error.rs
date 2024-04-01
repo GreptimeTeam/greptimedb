@@ -534,6 +534,13 @@ pub enum Error {
         source: session::session_config::Error,
         location: Location,
     },
+
+    #[snafu(display("Invalid timestamp range, start: `{}`, end: `{}`", start, end))]
+    InvalidTimestampRange {
+        start: String,
+        end: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -658,7 +665,8 @@ impl ErrorExt for Error {
             | Error::DdlWithMultiSchemas { .. }
             | Error::EmptyDdlExpr { .. }
             | Error::InvalidPartitionRule { .. }
-            | Error::ParseSqlValue { .. } => StatusCode::InvalidArguments,
+            | Error::ParseSqlValue { .. }
+            | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
 
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
         }

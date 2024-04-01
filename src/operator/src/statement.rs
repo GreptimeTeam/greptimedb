@@ -433,7 +433,12 @@ fn timestamp_range_from_option_map(
     let start_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_START_KEY, query_ctx)?;
     let end_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_END_KEY, query_ctx)?;
     let time_range = match (start_timestamp, end_timestamp) {
-        (Some(start), Some(end)) => TimestampRange::new(start, end),
+        (Some(start), Some(end)) => Some(TimestampRange::new(start, end).with_context(|| {
+            error::InvalidTimestampRangeSnafu {
+                start: start.to_iso8601_string(),
+                end: end.to_iso8601_string(),
+            }
+        })?),
         (Some(start), None) => Some(TimestampRange::from_start(start)),
         (None, Some(end)) => Some(TimestampRange::until_end(end, false)), // exclusive end
         (None, None) => None,
