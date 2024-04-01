@@ -39,7 +39,7 @@ use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::rpc::ddl::AlterTableTask;
-use crate::rpc::router::{find_leader_regions, find_leaders};
+use crate::rpc::router::find_leaders;
 use crate::{cache_invalidator, metrics, ClusterId};
 
 pub struct AlterLogicalTablesProcedure {
@@ -118,20 +118,14 @@ impl AlterLogicalTablesProcedure {
 
         for peer in leaders {
             let requester = self.context.datanode_manager.datanode(&peer).await;
-            let region_numbers = find_leader_regions(&physical_table_route.region_routes, &peer);
+            let request = self.make_request(&peer, &physical_table_route.region_routes)?;
 
-            for region_number in region_numbers {
-                let request = self.make_request(region_number)?;
-                let peer = peer.clone();
-                let requester = requester.clone();
-
-                alter_region_tasks.push(async move {
-                    requester
-                        .handle(request)
-                        .await
-                        .map_err(add_peer_context_if_needed(peer))
-                });
-            }
+            alter_region_tasks.push(async move {
+                requester
+                    .handle(request)
+                    .await
+                    .map_err(add_peer_context_if_needed(peer))
+            });
         }
 
         // Collects responses from all the alter region tasks.
