@@ -143,6 +143,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
         Ok(ret)
     }
 
+    /// Eval `Let` operator, useful for assigning a value to a local variable
     pub fn eval_let(
         &mut self,
         id: LocalId,

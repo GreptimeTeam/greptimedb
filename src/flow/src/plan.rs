@@ -44,12 +44,19 @@ pub enum Plan {
     Get { id: Id },
     /// Create a temporary collection from given `value``, and make this bind only available
     /// in scope of `body`
+    ///
+    /// Similiar to this rust code snippet:
+    /// ```rust, ignore
+    /// {
+    ///    let id = value;
+    ///     body
+    /// }
     Let {
         id: LocalId,
         value: Box<Plan>,
         body: Box<Plan>,
     },
-    /// Map, Filter, and Project operators.
+    /// Map, Filter, and Project operators. Chained together.
     Mfp {
         /// The input collection.
         input: Box<Plan>,
