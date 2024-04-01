@@ -691,30 +691,41 @@ impl StatementExecutor {
             }
         );
 
-        // TODO(weny): considers executing it in the procedures.
-        let schema_key = SchemaNameKey::new(catalog, database);
-        let exists = self
-            .table_metadata_manager
-            .schema_manager()
-            .exists(schema_key)
+        if !self
+            .catalog_manager
+            .schema_exists(catalog, database)
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(CatalogSnafu)?
+        {
+            self.create_database_procedure(
+                catalog.to_string(),
+                database.to_string(),
+                create_if_not_exists,
+            )
+            .await?;
 
-        if exists {
-            return if create_if_not_exists {
-                Ok(Output::new_with_affected_rows(1))
-            } else {
-                error::SchemaExistsSnafu { name: database }.fail()
-            };
+            Ok(Output::new_with_affected_rows(1))
+        } else if create_if_not_exists {
+            Ok(Output::new_with_affected_rows(1))
+        } else {
+            error::SchemaExistsSnafu { name: database }.fail()
         }
+    }
 
-        self.table_metadata_manager
-            .schema_manager()
-            .create(schema_key, None, false)
+    async fn create_database_procedure(
+        &self,
+        catalog: String,
+        database: String,
+        create_if_not_exists: bool,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_create_database(catalog, database, create_if_not_exists),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
             .await
-            .context(TableMetadataManagerSnafu)?;
-
-        Ok(Output::new_with_affected_rows(1))
+            .context(error::ExecuteDdlSnafu)
     }
 }
 

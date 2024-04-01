@@ -44,6 +44,7 @@ pub enum DdlTask {
     CreateLogicalTables(Vec<CreateTableTask>),
     DropLogicalTables(Vec<DropTableTask>),
     AlterLogicalTables(Vec<AlterTableTask>),
+    CreateDatabase(CreateDatabaseTask),
     DropDatabase(DropDatabaseTask),
 }
 
@@ -87,6 +88,18 @@ impl DdlTask {
             table,
             table_id,
             drop_if_exists,
+        })
+    }
+
+    pub fn new_create_database(
+        catalog: String,
+        schema: String,
+        create_if_not_exists: bool,
+    ) -> Self {
+        DdlTask::CreateDatabase(CreateDatabaseTask {
+            catalog,
+            schema,
+            create_if_not_exists,
         })
     }
 
@@ -201,6 +214,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
                 Task::AlterTableTasks(PbAlterTableTasks { tasks })
             }
+            DdlTask::CreateDatabase(_) => todo!(),
             DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
         };
 
@@ -586,6 +600,13 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
             }),
         })
     }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct CreateDatabaseTask {
+    pub catalog: String,
+    pub schema: String,
+    pub create_if_not_exists: bool,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
