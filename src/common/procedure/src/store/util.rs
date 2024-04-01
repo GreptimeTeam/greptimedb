@@ -22,7 +22,7 @@ use super::state_store::KeySet;
 use crate::error;
 use crate::error::Result;
 
-pub struct CollectingState {
+struct CollectingState {
     pairs: Vec<(String, Vec<u8>)>,
 }
 
@@ -100,7 +100,7 @@ impl CollectingState {
     }
 }
 
-pub type Upstream = dyn Stream<Item = Result<(String, Vec<u8>)>> + Send;
+type Upstream = dyn Stream<Item = Result<(String, Vec<u8>)>> + Send;
 
 /// Merges multiple values that have the same prefix of the key
 /// from `upstream` into a single value.
