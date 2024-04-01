@@ -40,11 +40,11 @@ fn parse_segments(segments: Vec<(String, Vec<u8>)>, prefix: &str) -> Result<Vec<
         .collect::<Result<Vec<_>>>()
 }
 
-/// Collects multiple values into a single key-value pair.
+/// Merges multiple values into a single key-value pair.
 /// Returns an error if:
 /// - Part values are lost.
 /// - Failed to parse the key of segment.
-fn multiple_values_collector(
+fn merge_multiple_values(
     CollectingState { mut pairs }: CollectingState,
 ) -> Result<(KeySet, Vec<u8>)> {
     if pairs.len() == 1 {
@@ -119,14 +119,14 @@ pub fn multiple_value_stream(
                     } else {
                         // Starts to collect next key value pair.
                         collecting = Some(CollectingState::new(key, value));
-                        yield multiple_values_collector(current)?;
+                        yield merge_multiple_values(current)?;
                     }
                 }
                 None => collecting = Some(CollectingState::new(key, value)),
             }
         }
         if let Some(current) = collecting.take() {
-            yield multiple_values_collector(current)?
+            yield merge_multiple_values(current)?
         }
     }
 }
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multiple_values_collector() {
+    async fn test_merge_multiple_values() {
         let upstream = stream::iter(vec![
             Ok(("foo".to_string(), vec![0, 1, 2, 3])),
             Ok(("foo/0002".to_string(), vec![6, 7])),
@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multiple_values_collector_err() {
+    async fn test_multiple_values_stream_err() {
         let upstream = stream::iter(vec![
             Err(error::UnexpectedSnafu { err_msg: "mock" }.build()),
             Ok(("foo".to_string(), vec![0, 1, 2, 3])),
