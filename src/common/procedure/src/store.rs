@@ -25,6 +25,7 @@ pub(crate) use crate::store::state_store::StateStoreRef;
 use crate::ProcedureId;
 
 pub mod state_store;
+pub mod util;
 
 /// Key prefix of procedure store.
 const PROC_PATH: &str = "procedure/";
@@ -143,16 +144,17 @@ impl ProcedureStore {
         // 8 should be enough for most procedures.
         let mut step_keys = Vec::with_capacity(8);
         let mut finish_keys = Vec::new();
-        while let Some((key, _)) = key_values.try_next().await? {
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, &key) else {
+        while let Some((key_set, _)) = key_values.try_next().await? {
+            let key = key_set.key();
+            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
                 logging::warn!("Unknown key while deleting procedures, key: {}", key);
                 continue;
             };
             if curr_key.key_type == KeyType::Step {
-                step_keys.push(key);
+                step_keys.extend(key_set.keys());
             } else {
                 // .commit or .rollback
-                finish_keys.push(key);
+                finish_keys.extend(key_set.keys());
             }
         }
 
@@ -184,8 +186,9 @@ impl ProcedureStore {
 
         // Scan all procedures.
         let mut key_values = self.store.walk_top_down(&self.proc_path).await?;
-        while let Some((key, value)) = key_values.try_next().await? {
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, &key) else {
+        while let Some((key_set, value)) = key_values.try_next().await? {
+            let key = key_set.key();
+            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
                 logging::warn!("Unknown key while loading procedures, key: {}", key);
                 continue;
             };
