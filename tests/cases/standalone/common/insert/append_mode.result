@@ -1,4 +1,4 @@
-create table if not exists append_mode1(
+create table if not exists append_mode_on(
     host string,
     ts timestamp,
     cpu double,
@@ -10,15 +10,15 @@ with('append_mode'='true');
 
 Affected Rows: 0
 
-INSERT INTO append_mode1 VALUES ('host1',0, 0), ('host2', 1, 1,);
+INSERT INTO append_mode_on VALUES ('host1',0, 0), ('host2', 1, 1,);
 
 Affected Rows: 2
 
-INSERT INTO append_mode1 VALUES ('host1',0, 0), ('host2', 1, 1,);
+INSERT INTO append_mode_on VALUES ('host1',0, 0), ('host2', 1, 1,);
 
 Affected Rows: 2
 
-SELECT * from append_mode1 ORDER BY host, ts;
+SELECT * from append_mode_on ORDER BY host, ts;
 
 +-------+-------------------------+-----+
 | host  | ts                      | cpu |
@@ -29,7 +29,7 @@ SELECT * from append_mode1 ORDER BY host, ts;
 | host2 | 1970-01-01T00:00:00.001 | 1.0 |
 +-------+-------------------------+-----+
 
-create table if not exists append_mode2(
+create table if not exists append_mode_off(
     host string,
     ts timestamp,
     cpu double,
@@ -41,15 +41,15 @@ with('append_mode'='false');
 
 Affected Rows: 0
 
-INSERT INTO append_mode2 VALUES ('host1',0, 0), ('host2', 1, 1,);
+INSERT INTO append_mode_off VALUES ('host1',0, 0), ('host2', 1, 1,);
 
 Affected Rows: 2
 
-INSERT INTO append_mode2 VALUES ('host1',0, 10), ('host2', 1, 11,);
+INSERT INTO append_mode_off VALUES ('host1',0, 10), ('host2', 1, 11,);
 
 Affected Rows: 2
 
-SELECT * from append_mode2 ORDER BY host, ts;
+SELECT * from append_mode_off ORDER BY host, ts;
 
 +-------+-------------------------+------+
 | host  | ts                      | cpu  |
@@ -58,11 +58,11 @@ SELECT * from append_mode2 ORDER BY host, ts;
 | host2 | 1970-01-01T00:00:00.001 | 11.0 |
 +-------+-------------------------+------+
 
-DROP TABLE append_mode1;
+DROP TABLE append_mode_on;
 
 Affected Rows: 0
 
-DROP TABLE append_mode2;
+DROP TABLE append_mode_off;
 
 Affected Rows: 0
 
