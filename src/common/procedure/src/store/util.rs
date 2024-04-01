@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use std::pin::Pin;
-use std::task::{Context, Poll};
 
-use futures::{ready, Stream, StreamExt};
+use async_stream::try_stream;
+use futures::{Stream, TryStreamExt};
 use snafu::{ensure, ResultExt};
 
 use super::state_store::KeySet;
@@ -100,84 +100,31 @@ impl CollectingState {
     }
 }
 
-#[derive(Debug)]
-enum MultipleValuesStreamState {
-    Idle,
-    Collecting,
-    End,
-}
-
 pub type Upstream = dyn Stream<Item = Result<(String, Vec<u8>)>> + Send;
 
-/// A stream collects multiple values into a single key-value pair.
-pub struct MultipleValuesStream {
-    upstream: Pin<Box<Upstream>>,
-    state: MultipleValuesStreamState,
-    collecting: Option<CollectingState>,
-}
-
-impl MultipleValuesStream {
-    pub fn new(upstream: Pin<Box<Upstream>>) -> Self {
-        Self {
-            upstream,
-            state: MultipleValuesStreamState::Idle,
-            collecting: None,
-        }
-    }
-}
-
-impl Stream for MultipleValuesStream {
-    type Item = Result<(KeySet, Vec<u8>)>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match &mut self.state {
-                MultipleValuesStreamState::Idle => {
-                    match ready!(self.upstream.poll_next_unpin(cx)).transpose()? {
-                        Some((key, value)) => {
-                            self.state = MultipleValuesStreamState::Collecting;
-                            self.collecting = Some(CollectingState::new(key, value));
-                        }
-                        None => {
-                            self.state = MultipleValuesStreamState::End;
-                            return Poll::Ready(None);
-                        }
+pub fn multiple_value_stream(
+    mut upstream: Pin<Box<Upstream>>,
+) -> impl Stream<Item = Result<(KeySet, Vec<u8>)>> {
+    try_stream! {
+        let mut collecting: Option<CollectingState> = None;
+        while let Some((key, value)) = upstream.try_next().await? {
+            match collecting.take() {
+                Some(mut current) => {
+                    if key.starts_with(current.key()) {
+                        // Pushes the key value pair into `collecting`.
+                        current.push(key, value);
+                        collecting = Some(current);
+                    } else {
+                        // Starts to collect next key value pair.
+                        collecting = Some(CollectingState::new(key, value));
+                        yield multiple_values_collector(current)?;
                     }
                 }
-                MultipleValuesStreamState::Collecting => {
-                    match ready!(self.upstream.poll_next_unpin(cx)).transpose() {
-                        Ok(Some((key, value))) => {
-                            let mut collecting =
-                                self.collecting.take().expect("The `collecting` must exist");
-
-                            if key.starts_with(collecting.key()) {
-                                // Pushes the key value pair into `collecting`.
-                                collecting.push(key, value);
-                                self.collecting = Some(collecting);
-                                self.state = MultipleValuesStreamState::Collecting;
-                            } else {
-                                // Starts to collect next key value pair.
-                                self.collecting = Some(CollectingState::new(key, value));
-                                self.state = MultipleValuesStreamState::Collecting;
-                                // Yields the result.
-                                return Poll::Ready(Some(multiple_values_collector(collecting)));
-                            }
-                        }
-                        Ok(None) => {
-                            let collecting =
-                                self.collecting.take().expect("The `collecting` must exist");
-
-                            self.state = MultipleValuesStreamState::Idle;
-                            return Poll::Ready(Some(multiple_values_collector(collecting)));
-                        }
-                        Err(err) => {
-                            self.state = MultipleValuesStreamState::Idle;
-                            return Poll::Ready(Some(Err(err)));
-                        }
-                    }
-                }
-                MultipleValuesStreamState::End => return Poll::Ready(None),
+                None => collecting = Some(CollectingState::new(key, value)),
             }
+        }
+        if let Some(current) = collecting.take(){
+            yield multiple_values_collector(current)?
         }
     }
 }
@@ -214,7 +161,7 @@ mod tests {
             Ok(("baz/0001".to_string(), vec![4, 5])),
             Ok(("baz/0002".to_string(), vec![6, 7])),
         ]);
-        let mut stream = MultipleValuesStream::new(Box::pin(upstream));
+        let mut stream = Box::pin(multiple_value_stream(Box::pin(upstream)));
         let (key, value) = stream.try_next().await.unwrap().unwrap();
         let keys = key.keys();
         assert_eq!(keys[0], "foo");
@@ -238,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_upstream() {
         let upstream = stream::iter(vec![]);
-        let mut stream = MultipleValuesStream::new(Box::pin(upstream));
+        let mut stream = Box::pin(multiple_value_stream(Box::pin(upstream)));
         assert!(stream.try_next().await.unwrap().is_none());
         // Call again
         assert!(stream.try_next().await.unwrap().is_none());
@@ -251,7 +198,7 @@ mod tests {
             Ok(("foo".to_string(), vec![0, 1, 2, 3])),
             Ok(("foo/0001".to_string(), vec![4, 5])),
         ]);
-        let mut stream = MultipleValuesStream::new(Box::pin(upstream));
+        let mut stream = Box::pin(multiple_value_stream(Box::pin(upstream)));
         let err = stream.try_next().await.unwrap_err();
         assert_matches!(err, error::Error::Unexpected { .. });
 
@@ -260,7 +207,7 @@ mod tests {
             Ok(("foo/0001".to_string(), vec![4, 5])),
             Err(error::UnexpectedSnafu { err_msg: "mock" }.build()),
         ]);
-        let mut stream = MultipleValuesStream::new(Box::pin(upstream));
+        let mut stream = Box::pin(multiple_value_stream(Box::pin(upstream)));
         let err = stream.try_next().await.unwrap_err();
         assert_matches!(err, error::Error::Unexpected { .. });
     }

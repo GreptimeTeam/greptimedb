@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{DeleteStatesSnafu, ListStateSnafu, PutStateSnafu};
 use common_procedure::store::state_store::{KeySet, KeyValueStream, StateStore};
-use common_procedure::store::util::MultipleValuesStream;
+use common_procedure::store::util::multiple_value_stream;
 use common_procedure::Result as ProcedureResult;
 use futures::future::try_join_all;
 use futures::StreamExt;
@@ -166,7 +166,7 @@ impl StateStore for KvStateStore {
                 .with_context(|_| ListStateSnafu { path })
         });
 
-        let stream = MultipleValuesStream::new(Box::pin(stream));
+        let stream = multiple_value_stream(Box::pin(stream));
 
         Ok(Box::pin(stream))
     }
