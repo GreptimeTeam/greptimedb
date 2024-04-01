@@ -66,7 +66,9 @@ impl Arranged {
             readers: Default::default(),
         }
     }
-    pub fn try_clone_future(&self) -> Option<Self> {
+
+    /// Copy it's future only updates, internally `Rc-ed` so it's cheap to copy
+    pub fn try_copy_future(&self) -> Option<Self> {
         self.arrangement
             .clone_future_only()
             .map(|arrangement| Arranged {
@@ -75,7 +77,11 @@ impl Arranged {
                 writer: self.writer.clone(),
             })
     }
-    pub fn try_clone_full(&self) -> Option<Self> {
+
+    /// Copy the full arrangement, including the future and the current updates.
+    /// 
+    /// Internally `Rc-ed` so it's cheap to copy
+    pub fn try_copy_full(&self) -> Option<Self> {
         self.arrangement
             .clone_full_arrange()
             .map(|arrangement| Arranged {
@@ -95,9 +101,13 @@ impl Arranged {
 /// source of data, either a collection or at least one arrangement. This is for convenience
 /// of reading the data from the collection.
 pub struct CollectionBundle {
+    /// This is useful for passively reading the new updates from the collection
     pub collection: Collection<DiffRow>,
     /// the key [`ScalarExpr`] indicate how the keys(also a [`Row`]) used in Arranged is extract from collection's [`Row`]
     /// So it is the "index" of the arrangement
+    /// 
+    /// The `Arranged` is the actual data source, it can be used to read the data from the collection by 
+    /// using the key indicated by the `Vec<ScalarExpr>`
     pub arranged: BTreeMap<Vec<ScalarExpr>, Arranged>,
 }
 
@@ -114,7 +124,7 @@ impl CollectionBundle {
             arranged: self
                 .arranged
                 .iter()
-                .map(|(k, v)| (k.clone(), v.try_clone_future().unwrap()))
+                .map(|(k, v)| (k.clone(), v.try_copy_future().unwrap()))
                 .collect(),
         }
     }
@@ -125,13 +135,14 @@ impl CollectionBundle {
 /// usually only the first error matters, but store all of them just in case
 #[derive(Default, Clone)]
 pub struct ErrCollector {
-    pub inner: Rc<RefCell<VecDeque<EvalError>>>,
+    pub inner: Rc<RefCell<Vec<EvalError>>>,
 }
 
 impl ErrCollector {
     pub fn push_err(&self, err: EvalError) {
-        self.inner.borrow_mut().push_back(err)
+        self.inner.borrow_mut().push(err)
     }
+
     pub fn run<F>(&self, f: F)
     where
         F: FnOnce() -> Result<(), EvalError>,

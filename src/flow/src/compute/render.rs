@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! In this file, `render` means convert a static `Plan` into a Executable Dataflow
+//!
+//! And the [`Context`] is the environment for the render process, it contains all the necessary information for the render process
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -25,9 +29,11 @@ use snafu::{OptionExt, ResultExt};
 use crate::adapter::error::{Error, EvalSnafu, InvalidQuerySnafu};
 use crate::compute::state::DataflowState;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
-use crate::expr::{self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, ScalarExpr};
+use crate::expr::{
+    self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, SafeMfpPlan, ScalarExpr,
+};
 use crate::plan::Plan;
-use crate::repr::{self, DiffRow, Row};
+use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::{ArrangeHandler, Arrangement};
 
 /// The Context for build a Operator with id of `GlobalId`
@@ -61,6 +67,21 @@ impl<'referred, 'df> Drop for Context<'referred, 'df> {
     }
 }
 
+impl<'referred, 'df> Context<'referred, 'df> {
+    pub fn insert_global(&mut self, id: GlobalId, collection: CollectionBundle) {
+        self.input_collection.insert(id, collection);
+    }
+
+    pub fn insert_local(&mut self, id: LocalId, collection: CollectionBundle) {
+        if let Some(last) = self.local_scope.last_mut() {
+            last.insert(id, collection);
+        } else {
+            let first = BTreeMap::from([(id, collection)]);
+            self.local_scope.push(first);
+        }
+    }
+}
+
 // There is a false positive in using `Vec<ScalarExpr>` as key
 #[allow(clippy::mutable_key_type)]
 impl<'referred, 'df> Context<'referred, 'df> {
@@ -72,7 +93,9 @@ impl<'referred, 'df> Context<'referred, 'df> {
             Plan::Constant { rows } => Ok(self.render_constant(rows)),
             Plan::Get { id } => self.get_by_id(id),
             Plan::Let { id, value, body } => self.eval_let(id, value, body),
-            Plan::Mfp { input, mfp } => self.render_mfp(input, mfp),
+            Plan::Mfp { input, mfp } => {
+                self.render_map_filter_project_into_executable_dataflow(input, mfp)
+            }
             Plan::Reduce { .. } => todo!(),
             Plan::Join { .. } => todo!(),
             Plan::Union { .. } => todo!(),
@@ -102,15 +125,18 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     .iter()
                     .rev()
                     .find_map(|scope| scope.get(&local))
-                    .context(InvalidQuerySnafu {
+                    .with_context(|| InvalidQuerySnafu {
                         reason: format!("Local variable {:?} not found", local),
                     })?;
                 bundle.clone(self.df)
             }
             expr::Id::Global(id) => {
-                let bundle = self.input_collection.get(&id).context(InvalidQuerySnafu {
-                    reason: format!("Collection {:?} not found", id),
-                })?;
+                let bundle = self
+                    .input_collection
+                    .get(&id)
+                    .with_context(|| InvalidQuerySnafu {
+                        reason: format!("Collection {:?} not found", id),
+                    })?;
                 bundle.clone(self.df)
             }
         };
@@ -137,7 +163,10 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
     /// render MapFilterProject, will only emit the `rows` once. Assume all incoming row's sys time being `now`` and ignore the row's stated sys time
     /// TODO(discord9): schedule mfp operator to run when temporal filter need
-    pub fn render_mfp(
+    ///
+    /// `MapFilterProject`(`mfp` for short) is scheduled to run when there is enough amount of input updates
+    /// ***or*** when a future update in it's output buffer(a `Arrangement`) is supposed to emit now.
+    pub fn render_map_filter_project_into_executable_dataflow(
         &mut self,
         input: Box<Plan>,
         mfp: MapFilterProject,
@@ -157,9 +186,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
         // This closure capture following variables:
         let mfp_plan = MfpPlan::create_from(mfp).context(EvalSnafu)?;
-        let arrange_inner = arrange.clone_future_only().context(InvalidQuerySnafu {
-            reason: "Failed to clone future only arrangement".to_string(),
-        })?;
+        let arrange_inner = arrange
+            .clone_future_only()
+            .with_context(|| InvalidQuerySnafu {
+                reason: "Failed to clone future only arrangement".to_string(),
+            })?;
         let as_of = self.compute_state.as_of.clone();
         let err_collector = self.err_collector.clone();
         // TODO(discord9): better way to schedule future run
@@ -177,27 +208,21 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
                 // mfp only need to passively receive updates from recvs
                 let data = recv.take_inner();
-                for (mut row, _sys_time, diff) in data.into_iter().flat_map(|v| v.into_iter()) {
-                    let updates = mfp_plan.evaluate::<EvalError>(&mut row.inner, now, diff);
-                    // TODO(discord9): refactor error handling
-                    // Expect error in a single row to not interrupt the whole evaluation
-                    let updates = updates
-                        .filter_map(|r| match r {
-                            Ok(r) => Some(((r.0, Row::empty()), r.1, r.2)),
-                            Err(e) => {
-                                err_collector.push_err(e.0);
-                                None
-                            }
-                        })
-                        .collect_vec();
 
-                    err_collector.run(|| {
-                        arrange.write().apply_updates(now, updates)?;
-                        Ok(())
-                    });
-                }
+                // run the core logic of mfp, return a list of updates and apply them to arrange
+                err_collector.run(|| {
+                    let all_updates = eval_mfp_core(
+                        data.into_iter().flat_map(|v| v.into_iter()),
+                        &mfp_plan,
+                        now,
+                        &err_collector,
+                    );
+                    arrange.write().apply_updates(now, all_updates)?;
+                    Ok(())
+                });
 
-                // deal with output
+                // deal with output, first read all updates between last time this arrangement havd emitted updates
+                // and current time, output them, and then truncate all updates of said range
                 let old_now = arrange.read().get_compaction();
                 let output_kv = if let Some(old) = old_now {
                     arrange.read().get_updates_in_range((old + 1)..=now)
@@ -234,6 +259,35 @@ impl<'referred, 'df> Context<'referred, 'df> {
         };
         Ok(bundle)
     }
+}
+
+/// The core of evaluating MFP operator, given a MFP and a input, evaluate the MFP operator,
+/// return the output updates **And** possibly any number of errors that occurred during the evaluation
+fn eval_mfp_core(
+    input: impl IntoIterator<Item = DiffRow>,
+    mfp_plan: &MfpPlan,
+    now: repr::Timestamp,
+    err_collector: &ErrCollector,
+) -> Vec<KeyValDiffRow> {
+    let mut all_updates = Vec::new();
+    for (mut row, _sys_time, diff) in input.into_iter() {
+        // this updates is expected to be only zero to two rows
+        let updates = mfp_plan.evaluate::<EvalError>(&mut row.inner, now, diff);
+        // TODO(discord9): refactor error handling
+        // Expect error in a single row to not interrupt the whole evaluation
+        let updates = updates
+            .filter_map(|r| match r {
+                Ok(r) => Some(((r.0, Row::empty()), r.1, r.2)),
+                Err(e) => {
+                    err_collector.push_err(e.0);
+                    None
+                }
+            })
+            .collect_vec();
+
+        all_updates.extend(updates);
+    }
+    all_updates
 }
 
 #[cfg(test)]
@@ -280,7 +334,7 @@ mod test {
             (Row::new(vec![3i64.into()]), 3, 1),
         ];
         let collection = ctx.render_constant(rows.clone());
-        ctx.input_collection.insert(GlobalId::User(1), collection);
+        ctx.insert_global(GlobalId::User(1), collection);
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
         };
@@ -306,7 +360,9 @@ mod test {
             ])
             .unwrap();
 
-        let mut bundle = ctx.render_mfp(Box::new(input_plan), mfp).unwrap();
+        let mut bundle = ctx
+            .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
+            .unwrap();
         let collection = bundle.collection;
         let _arranged = bundle.arranged.pop_first().unwrap().1;
         let output = Rc::new(RefCell::new(vec![]));
@@ -374,7 +430,7 @@ mod test {
             (Row::new(vec![3.into()]), 3, 1),
         ];
         let collection = ctx.render_constant(rows.clone());
-        ctx.input_collection.insert(GlobalId::User(1), collection);
+        ctx.insert_global(GlobalId::User(1), collection);
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
         };
@@ -385,7 +441,9 @@ mod test {
                 BinaryFunc::Gt,
             )])
             .unwrap();
-        let bundle = ctx.render_mfp(Box::new(input_plan), mfp).unwrap();
+        let bundle = ctx
+            .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
+            .unwrap();
         let collection = bundle.collection.clone(ctx.df);
 
         ctx.df.add_subgraph_sink(

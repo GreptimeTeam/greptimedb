@@ -16,6 +16,8 @@ common-telemetry.workspace = true
 common-time.workspace = true
 datatypes.workspace = true
 enum_dispatch = "0.3"
+# This fork is simply for keeping our dependency in our org, and pin the version
+# it is the same with upstream repo
 hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", rev = "ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94" }
 itertools.workspace = true
 num-traits = "0.2"
