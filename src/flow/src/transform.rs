@@ -9,11 +9,12 @@ use datafusion_substrait::variation_const::{
     TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
     UNSIGNED_INTEGER_TYPE_REF,
 };
+use datatypes::arrow::compute::kernels::window;
 use datatypes::arrow::ipc::Binary;
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::value::Value;
 use itertools::Itertools;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
 use substrait_proto::proto::expression::literal::LiteralType;
 use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
@@ -26,7 +27,8 @@ use substrait_proto::proto::{plan_rel, Expression, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{Error, NotImplementedSnafu, PlanSnafu, TableNotFoundSnafu};
 use crate::expr::{
-    BinaryFunc, GlobalId, ScalarExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
+    BinaryFunc, GlobalId, MapFilterProject, ScalarExpr, UnaryFunc, UnmaterializableFunc,
+    VariadicFunc,
 };
 use crate::plan::{Plan, TypedPlan};
 use crate::repr::{ColumnType, RelationType};
@@ -113,12 +115,71 @@ pub fn from_substrait_plan(ctx: &mut DataflowContext, plan: &SubPlan) -> Result<
     }
 }
 
+/// TODO: aggr func&read
 pub fn from_substrait_rel(
     ctx: &mut DataflowContext,
     rel: &Rel,
     extensions: &HashMap<u32, &String>,
 ) -> Result<TypedPlan, Error> {
-    todo!()
+    match &rel.rel_type {
+        Some(RelType::Project(p)) => {
+            let input = if let Some(input) = p.input.as_ref() {
+                from_substrait_rel(ctx, input, extensions)?
+            } else {
+                return not_impl_err!("Projection without an input is not supported");
+            };
+            let input_arity = input.typ.column_types.len();
+            let mut exprs: Vec<(ScalarExpr, ColumnType)> = vec![];
+            for e in &p.expressions {
+                let expr = from_substrait_rex(e, &input.typ, extensions)?;
+                // TODO(discord9): special treatment of aggregate functions
+                exprs.push(expr);
+            }
+            let (project_exprs, row_type): (Vec<_>, Vec<_>) = exprs.into_iter().unzip();
+            let row_type = RelationType::new(row_type);
+            // TODO(discord9): use Error for mfp's compile time error
+            let output_arity = row_type.column_types.len();
+
+            let mfp = MapFilterProject::new(input_arity)
+                .map(project_exprs)
+                .map(|r| r.project(input_arity..input_arity + output_arity))
+                .and_then(|v| v)?;
+            let final_plan = Plan::Mfp {
+                input: Box::new(input.plan),
+                mfp,
+            };
+            let typed = TypedPlan {
+                typ: row_type,
+                plan: final_plan,
+            };
+            Ok(typed)
+        }
+        Some(RelType::Filter(filter)) => {
+            let input = if let Some(input) = filter.input.as_ref() {
+                from_substrait_rel(ctx, input, extensions)?
+            } else {
+                return not_impl_err!("Filter without an input is not supported");
+            };
+            let input_arity = input.typ.column_types.len();
+
+            let expr = if let Some(condition) = filter.condition.as_ref() {
+                from_substrait_rex(condition, &input.typ, extensions)?
+            } else {
+                return not_impl_err!("Filter without an condition is not valid");
+            };
+
+            let mfp = MapFilterProject::new(input_arity).filter(vec![expr.0])?;
+            let final_plan = Plan::Mfp {
+                input: Box::new(input.plan),
+                mfp,
+            };
+            Ok(TypedPlan {
+                typ: input.typ,
+                plan: final_plan,
+            })
+        }
+        _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
+    }
 }
 
 /// Convert Substrait Rex into Flow's ScalarExpr
@@ -132,11 +193,15 @@ pub fn from_substrait_rex(
             let lit = from_substrait_literal(lit)?;
             Ok((
                 ScalarExpr::Literal(lit.0, lit.1.clone()),
-                ColumnType::new(lit.1, true),
+                ColumnType::new_nullable(lit.1),
             ))
         }
         Some(RexType::SingularOrList(s)) => {
             let substrait_expr = s.value.as_ref().unwrap();
+            // Note that we didn't impl support to in list expr
+            if !s.options.is_empty() {
+                return not_impl_err!("In list expression is not supported");
+            }
             from_substrait_rex(substrait_expr, input_schema, extensions)
         }
         Some(RexType::Selection(field_ref)) => match &field_ref.reference_type {
@@ -183,7 +248,7 @@ pub fn from_substrait_rex(
                     // TODO: deal with cast(col AS type)
                     let func = UnaryFunc::from_str_and_type(fn_name, None)?;
                     let arg = arg_exprs[0].clone();
-                    let ret_type = ColumnType::new(func.signature().output.clone(), true);
+                    let ret_type = ColumnType::new_nullable(func.signature().output.clone());
 
                     Ok((arg.call_unary(func), ret_type))
                 }
@@ -193,7 +258,7 @@ pub fn from_substrait_rex(
                         .map(|t| Some(t.scalar_type.clone()))
                         .collect_vec();
                     let func = BinaryFunc::from_str_and_types(fn_name, &arg_types[0..2])?;
-                    let ret_type = ColumnType::new(func.signature().output.clone(), true);
+                    let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     let ret_expr = arg_exprs[0].clone().call_binary(arg_exprs[1].clone(), func);
                     Ok((ret_expr, ret_type))
                 }
@@ -203,7 +268,7 @@ pub fn from_substrait_rex(
                         .map(|t| Some(t.scalar_type.clone()))
                         .collect_vec();
                     if let Ok(func) = VariadicFunc::from_str_and_types(fn_name, &arg_types) {
-                        let ret_type = ColumnType::new(func.signature().output.clone(), true);
+                        let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                         Ok((
                             ScalarExpr::CallVariadic {
                                 func,
@@ -212,7 +277,7 @@ pub fn from_substrait_rex(
                             ret_type,
                         ))
                     } else if let Ok(func) = UnmaterializableFunc::from_str(fn_name) {
-                        let ret_type = ColumnType::new(func.signature().output.clone(), true);
+                        let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                         Ok((ScalarExpr::CallUnmaterializable(func), ret_type))
                     } else {
                         not_impl_err!("Unsupported function {fn_name} with {arg_len} arguments")
@@ -232,8 +297,55 @@ pub fn from_substrait_rex(
                     Ok((cond, then))
                 })
                 .try_collect()?;
-            todo!()
+            // if no else is presented
+            let els = if_then
+                .r#else
+                .as_ref()
+                .map(|e| from_substrait_rex(e, input_schema, extensions))
+                .transpose()?
+                .unwrap_or_else(|| {
+                    (
+                        ScalarExpr::literal_null(),
+                        ColumnType::new_nullable(CDT::null_datatype()),
+                    )
+                });
+            fn build_if_then(
+                mut next_if_then: impl Iterator<
+                    Item = ((ScalarExpr, ColumnType), (ScalarExpr, ColumnType)),
+                >,
+                els: (ScalarExpr, ColumnType),
+            ) -> (ScalarExpr, ColumnType) {
+                if let Some((cond, then)) = next_if_then.next() {
+                    // always assume the type of `if`` expr is the same with the `then`` expr
+                    (
+                        ScalarExpr::If {
+                            cond: Box::new(cond.0),
+                            then: Box::new(then.0),
+                            els: Box::new(build_if_then(next_if_then, els).0),
+                        },
+                        then.1,
+                    )
+                } else {
+                    els
+                }
+            }
+            let expr_if = build_if_then(ifs.into_iter(), els);
+            Ok(expr_if)
         }
+        Some(RexType::Cast(cast)) => {
+            let input = from_substrait_rex(cast.input.as_ref().unwrap(), input_schema, extensions)?;
+            let cast_type = from_substrait_type(cast.r#type.as_ref().unwrap())?;
+            Ok((
+                input.0.call_unary(UnaryFunc::Cast(cast_type.clone())),
+                ColumnType::new_nullable(cast_type),
+            ))
+        }
+        Some(RexType::WindowFunction(_)) => PlanSnafu {
+            reason:
+                "Window function is not supported yet. Please use aggregation function instead."
+                    .to_string(),
+        }
+        .fail(),
         _ => not_impl_err!("unsupported rex_type"),
     }
 }
@@ -327,13 +439,13 @@ pub fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Error> {
                 CDT::decimal128_datatype(p, s),
             )
         }
-        Some(LiteralType::Null(ntype)) => (Value::Null, from_substrait_null(ntype)?),
+        Some(LiteralType::Null(ntype)) => (Value::Null, from_substrait_type(ntype)?),
         _ => not_impl_err!("unsupported literal_type")?,
     };
     Ok(scalar_value)
 }
 
-fn from_substrait_null(null_type: &substrait_proto::proto::Type) -> Result<CDT, Error> {
+fn from_substrait_type(null_type: &substrait_proto::proto::Type) -> Result<CDT, Error> {
     if let Some(kind) = &null_type.kind {
         match kind {
             Kind::Bool(_) => Ok(CDT::boolean_datatype()),

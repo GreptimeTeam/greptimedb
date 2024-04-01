@@ -57,9 +57,7 @@ impl UnmaterializableFunc {
             },
         }
     }
-    pub fn from_str(
-        name: &str,
-    ) -> Result<Self, Error> {
+    pub fn from_str(name: &str) -> Result<Self, Error> {
         match name {
             "now" => Ok(Self::Now),
             "current_schema" => Ok(Self::CurrentSchema),

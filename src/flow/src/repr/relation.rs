@@ -202,6 +202,17 @@ impl ColumnType {
             nullable,
         }
     }
+
+    /// Constructs a new `ColumnType` from a scalar type, with nullability set to
+    ///
+    /// ***true***
+    pub fn new_nullable(scalar_type: ConcreteDataType) -> Self {
+        ColumnType {
+            scalar_type,
+            nullable: true,
+        }
+    }
+
     /// Returns the scalar type of this column.
     pub fn scalar_type(&self) -> &ConcreteDataType {
         &self.scalar_type

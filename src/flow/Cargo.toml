@@ -14,6 +14,7 @@ common-error.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+datafusion-substrait.workspace = true
 datatypes.workspace = true
 enum_dispatch = "0.3"
 hydroflow = "0.5.0"
@@ -23,10 +24,9 @@ serde.workspace = true
 servers.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
+strum.workspace = true
 tokio.workspace = true
 tonic.workspace = true
-datafusion-substrait.workspace = true
-strum.workspace = true
 
 [dependencies.substrait_proto]
 package = "substrait"

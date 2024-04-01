@@ -43,5 +43,5 @@ pub enum GenericFn {
     Or,
     // unmaterized func
     Now,
-    CurrentSchema
+    CurrentSchema,
 }
