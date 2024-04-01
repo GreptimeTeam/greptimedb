@@ -14,6 +14,9 @@ INSERT INTO append_mode_on VALUES ('host1',0, 0), ('host2', 1, 1,);
 
 SELECT * from append_mode_on ORDER BY host, ts;
 
+-- SQLNESS REPLACE (region\s\d+\(\d+\,\s\d+\)) region
+DELETE FROM append_mode_on WHERE host = 'host1';
+
 create table if not exists append_mode_off(
     host string,
     ts timestamp,
