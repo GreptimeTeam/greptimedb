@@ -348,7 +348,12 @@ fn timestamp_range_from_option_map(
     let start_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_START_KEY, query_ctx)?;
     let end_timestamp = extract_timestamp(options, COPY_DATABASE_TIME_END_KEY, query_ctx)?;
     let time_range = match (start_timestamp, end_timestamp) {
-        (Some(start), Some(end)) => TimestampRange::new(start, end),
+        (Some(start), Some(end)) => Some(TimestampRange::new(start, end).with_context(|| {
+            error::InvalidTimestampRangeSnafu {
+                start: start.to_iso8601_string(),
+                end: end.to_iso8601_string(),
+            }
+        })?),
         (Some(start), None) => Some(TimestampRange::from_start(start)),
         (None, Some(end)) => Some(TimestampRange::until_end(end, false)), // exclusive end
         (None, None) => None,
@@ -391,41 +396,52 @@ fn idents_to_full_database_name(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use common_time::range::TimestampRange;
     use common_time::{Timestamp, Timezone};
     use session::context::QueryContextBuilder;
     use sql::statements::OptionMap;
 
+    use crate::error;
     use crate::statement::copy_database::{
         COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY,
     };
     use crate::statement::timestamp_range_from_option_map;
 
-    #[test]
-    fn test_timestamp_range_from_option_map() {
+    fn check_timestamp_range((start, end): (&str, &str)) -> error::Result<Option<TimestampRange>> {
         let query_ctx = QueryContextBuilder::default()
             .timezone(Arc::new(Timezone::from_tz_string("Asia/Shanghai").unwrap()))
             .build();
         let map = OptionMap::from(
             [
-                (
-                    COPY_DATABASE_TIME_START_KEY.to_string(),
-                    "2022-04-11 08:00:00".to_string(),
-                ),
-                (
-                    COPY_DATABASE_TIME_END_KEY.to_string(),
-                    "2022-04-11 16:00:00".to_string(),
-                ),
+                (COPY_DATABASE_TIME_START_KEY.to_string(), start.to_string()),
+                (COPY_DATABASE_TIME_END_KEY.to_string(), end.to_string()),
             ]
             .into_iter()
             .collect::<HashMap<_, _>>(),
         );
-        let range = timestamp_range_from_option_map(&map, &query_ctx)
-            .unwrap()
-            .unwrap();
-        assert_eq!(Timestamp::new_second(1649635200), range.start().unwrap());
-        assert_eq!(Timestamp::new_second(1649664000), range.end().unwrap());
+        timestamp_range_from_option_map(&map, &query_ctx)
+    }
+
+    #[test]
+    fn test_timestamp_range_from_option_map() {
+        assert_eq!(
+            Some(
+                TimestampRange::new(
+                    Timestamp::new_second(1649635200),
+                    Timestamp::new_second(1649664000),
+                )
+                .unwrap(),
+            ),
+            check_timestamp_range(("2022-04-11 08:00:00", "2022-04-11 16:00:00"),).unwrap()
+        );
+
+        assert_matches!(
+            check_timestamp_range(("2022-04-11 08:00:00", "2022-04-11 07:00:00")).unwrap_err(),
+            error::Error::InvalidTimestampRange { .. }
+        );
     }
 }
