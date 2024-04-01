@@ -44,7 +44,7 @@ fn parse_segments(segments: Vec<(String, Vec<u8>)>, prefix: &str) -> Result<Vec<
 /// Returns an error if:
 /// - Part values are lost.
 /// - Failed to parse the key of segment.
-pub fn multiple_values_collector(
+fn multiple_values_collector(
     CollectingState { mut pairs }: CollectingState,
 ) -> Result<(KeySet, Vec<u8>)> {
     if pairs.len() == 1 {
@@ -76,7 +76,8 @@ pub fn multiple_values_collector(
         );
 
         let segment_values = parsed_segments.into_iter().map(|(_, value)| value);
-        let mut values = vec![value];
+        let mut values = Vec::with_capacity(segment_values.len() + 1);
+        values.push(value);
         values.extend(segment_values);
 
         Ok((KeySet::new(key, segment_num), values.concat()))
@@ -106,7 +107,6 @@ enum MultipleValuesStreamState {
     End,
 }
 
-pub type Collector = dyn Fn(CollectingState) -> Result<(KeySet, Vec<u8>)> + Send;
 pub type Upstream = dyn Stream<Item = Result<(String, Vec<u8>)>> + Send;
 
 /// A stream collects multiple values into a single key-value pair.
@@ -114,16 +114,14 @@ pub struct MultipleValuesStream {
     upstream: Pin<Box<Upstream>>,
     state: MultipleValuesStreamState,
     collecting: Option<CollectingState>,
-    collector: Box<Collector>,
 }
 
 impl MultipleValuesStream {
-    pub fn new(upstream: Pin<Box<Upstream>>, collector: Box<Collector>) -> Self {
+    pub fn new(upstream: Pin<Box<Upstream>>) -> Self {
         Self {
             upstream,
             state: MultipleValuesStreamState::Idle,
             collecting: None,
-            collector,
         }
     }
 }
@@ -162,7 +160,7 @@ impl Stream for MultipleValuesStream {
                                 self.collecting = Some(CollectingState::new(key, value));
                                 self.state = MultipleValuesStreamState::Collecting;
                                 // Yields the result.
-                                return Poll::Ready(Some((self.collector)(collecting)));
+                                return Poll::Ready(Some(multiple_values_collector(collecting)));
                             }
                         }
                         Ok(None) => {
@@ -170,7 +168,7 @@ impl Stream for MultipleValuesStream {
                                 self.collecting.take().expect("The `collecting` must exist");
 
                             self.state = MultipleValuesStreamState::Idle;
-                            return Poll::Ready(Some((self.collector)(collecting)));
+                            return Poll::Ready(Some(multiple_values_collector(collecting)));
                         }
                         Err(err) => {
                             self.state = MultipleValuesStreamState::Idle;
@@ -216,8 +214,7 @@ mod tests {
             Ok(("baz/0001".to_string(), vec![4, 5])),
             Ok(("baz/0002".to_string(), vec![6, 7])),
         ]);
-        let mut stream =
-            MultipleValuesStream::new(Box::pin(upstream), Box::new(multiple_values_collector));
+        let mut stream = MultipleValuesStream::new(Box::pin(upstream));
         let (key, value) = stream.try_next().await.unwrap().unwrap();
         let keys = key.keys();
         assert_eq!(keys[0], "foo");
@@ -241,8 +238,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_upstream() {
         let upstream = stream::iter(vec![]);
-        let mut stream =
-            MultipleValuesStream::new(Box::pin(upstream), Box::new(multiple_values_collector));
+        let mut stream = MultipleValuesStream::new(Box::pin(upstream));
         assert!(stream.try_next().await.unwrap().is_none());
         // Call again
         assert!(stream.try_next().await.unwrap().is_none());
@@ -255,8 +251,7 @@ mod tests {
             Ok(("foo".to_string(), vec![0, 1, 2, 3])),
             Ok(("foo/0001".to_string(), vec![4, 5])),
         ]);
-        let mut stream =
-            MultipleValuesStream::new(Box::pin(upstream), Box::new(multiple_values_collector));
+        let mut stream = MultipleValuesStream::new(Box::pin(upstream));
         let err = stream.try_next().await.unwrap_err();
         assert_matches!(err, error::Error::Unexpected { .. });
 
@@ -265,8 +260,7 @@ mod tests {
             Ok(("foo/0001".to_string(), vec![4, 5])),
             Err(error::UnexpectedSnafu { err_msg: "mock" }.build()),
         ]);
-        let mut stream =
-            MultipleValuesStream::new(Box::pin(upstream), Box::new(multiple_values_collector));
+        let mut stream = MultipleValuesStream::new(Box::pin(upstream));
         let err = stream.try_next().await.unwrap_err();
         assert_matches!(err, error::Error::Unexpected { .. });
     }
