@@ -102,6 +102,8 @@ impl CollectingState {
 
 pub type Upstream = dyn Stream<Item = Result<(String, Vec<u8>)>> + Send;
 
+/// Merges multiple values that have the same prefix of the key
+/// from `upstream` into a single value.
 pub fn multiple_value_stream(
     mut upstream: Pin<Box<Upstream>>,
 ) -> impl Stream<Item = Result<(KeySet, Vec<u8>)>> {
