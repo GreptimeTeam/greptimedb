@@ -45,7 +45,7 @@ pub enum Plan {
     /// Create a temporary collection from given `value``, and make this bind only available
     /// in scope of `body`
     ///
-    /// Similiar to this rust code snippet:
+    /// Similar to this rust code snippet:
     /// ```rust, ignore
     /// {
     ///    let id = value;
