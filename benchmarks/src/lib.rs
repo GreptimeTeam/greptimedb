@@ -13,4 +13,4 @@
 // limitations under the License.
 
 pub mod metrics;
-pub mod wal;
+pub mod wal_bench;
