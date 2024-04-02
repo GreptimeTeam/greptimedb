@@ -300,7 +300,7 @@ mod tests {
         );
         assert_eq!(
             options.procedure.max_metadata_value_size,
-            Some(ReadableSize::kb(1535))
+            Some(ReadableSize::kb(1500))
         );
     }
 
