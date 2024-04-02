@@ -33,13 +33,14 @@ pub type Toff = TeeingHandoff<DiffRow>;
 /// A collection, represent a collections of data that is received from a handoff.
 pub struct Collection<T: 'static> {
     /// represent a stream of updates recv from this port
-    pub stream: RecvPort<TeeingHandoff<T>>,
+    stream: RecvPort<TeeingHandoff<T>>,
 }
 
 impl<T: 'static + Clone> Collection<T> {
     pub fn from_port(port: RecvPort<TeeingHandoff<T>>) -> Self {
         Collection { stream: port }
     }
+
     /// clone a collection, require a mutable reference to the hydroflow instance
     ///
     /// Note: need to be the same hydroflow instance that this collection is created from
@@ -47,6 +48,10 @@ impl<T: 'static + Clone> Collection<T> {
         Collection {
             stream: self.stream.tee(df),
         }
+    }
+
+    pub fn into_inner(self) -> RecvPort<TeeingHandoff<T>> {
+        self.stream
     }
 }
 

@@ -17,15 +17,17 @@
 //! And the [`Context`] is the environment for the render process, it contains all the necessary information for the render process
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use hydroflow::lattices::cc_traits::Get;
 use hydroflow::scheduled::graph::Hydroflow;
 use hydroflow::scheduled::graph_ext::GraphExt;
+use hydroflow::scheduled::port::{PortCtx, SEND};
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 
+use super::state::Scheduler;
 use crate::adapter::error::{Error, EvalSnafu, InvalidQuerySnafu};
 use crate::compute::state::DataflowState;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
@@ -60,7 +62,7 @@ impl<'referred, 'df> Drop for Context<'referred, 'df> {
                     .map(|(_k, v)| v),
             )
         {
-            bundle.collection.stream.drop(self.df);
+            bundle.collection.into_inner().drop(self.df);
             drop(bundle.arranged);
         }
         // The automatically generated "drop glue" which recursively calls the destructors of all the fields (including the now empty `input_collection`)
@@ -180,80 +182,46 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
         // default to have a arrange with only future updates, so it can be empty if no temporal filter is applied
         // as stream only sends current updates and etc.
-        let arrange = {
-            let arrangement = Arrangement::new();
-            ArrangeHandler::from(arrangement)
-        };
+        let arrange = Arrangement::new();
+        let arrange_handler = ArrangeHandler::from(arrange.clone());
+        let arrange_handler_inner = ArrangeHandler::from(arrange);
 
         // This closure capture following variables:
         let mfp_plan = MfpPlan::create_from(mfp).context(EvalSnafu)?;
-        let arrange_inner = arrange
-            .clone_future_only()
-            .with_context(|| InvalidQuerySnafu {
-                reason: "Failed to clone future only arrangement".to_string(),
-            })?;
-        let as_of = self.compute_state.as_of.clone();
+        let now = self.compute_state.current_ts();
+
         let err_collector = self.err_collector.clone();
+
         // TODO(discord9): better way to schedule future run
         let scheduler = self.compute_state.get_scheduler();
-        let cur_subgraph = scheduler.cur_subgraph.clone();
+        let scheduler_inner = scheduler.clone();
 
         let subgraph = self.df.add_subgraph_in_out(
             "mfp",
-            input.collection.stream,
+            input.collection.into_inner(),
             out_send_port,
             move |_ctx, recv, send| {
-                let arrange = &arrange_inner;
-                // get current time everytime this operator runs
-                let now = *as_of.borrow();
-
                 // mfp only need to passively receive updates from recvs
-                let data = recv.take_inner();
+                let data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
 
-                // run the core logic of mfp, return a list of updates and apply them to arrange
-                err_collector.run(|| {
-                    let all_updates = eval_mfp_core(
-                        data.into_iter().flat_map(|v| v.into_iter()),
-                        &mfp_plan,
-                        now,
-                        &err_collector,
-                    );
-                    arrange.write().apply_updates(now, all_updates)?;
-                    Ok(())
-                });
-
-                // deal with output, first read all updates between last time this arrangement havd emitted updates
-                // and current time, output them, and then truncate all updates of said range
-                let old_now = arrange.read().get_compaction();
-                let output_kv = if let Some(old) = old_now {
-                    arrange.read().get_updates_in_range((old + 1)..=now)
-                } else {
-                    arrange.read().get_updates_in_range(..=now)
-                };
-
-                // the output is expected to be key -> empty val
-                let output = output_kv
-                    .into_iter()
-                    .map(|((k, _v), t, d)| (k, t, d))
-                    .collect_vec();
-                send.give(output);
-                err_collector.run(|| {
-                    arrange.write().set_compaction(now)?;
-                    Ok(())
-                });
-
-                // schedule the next time this operator should run
-                if let Some(i) = arrange.read().get_next_update_time(&now) {
-                    scheduler.schedule_at(i)
-                }
+                mfp_subgraph(
+                    &arrange_handler_inner,
+                    data,
+                    &mfp_plan,
+                    now,
+                    &err_collector,
+                    &scheduler_inner,
+                    send,
+                );
             },
         );
+
         // register current subgraph in scheduler for future scheduling
-        cur_subgraph.replace(Some(subgraph));
+        scheduler.set_cur_subgraph(subgraph);
 
         let arranged = BTreeMap::from([(
             (0..input_arity).map(ScalarExpr::Column).collect_vec(),
-            Arranged::new(arrange),
+            Arranged::new(arrange_handler),
         )]);
 
         let bundle = CollectionBundle {
@@ -261,6 +229,50 @@ impl<'referred, 'df> Context<'referred, 'df> {
             arranged,
         };
         Ok(bundle)
+    }
+}
+
+fn mfp_subgraph(
+    arrange: &ArrangeHandler,
+    input: impl IntoIterator<Item = DiffRow>,
+    mfp_plan: &MfpPlan,
+    now: repr::Timestamp,
+    err_collector: &ErrCollector,
+    scheduler: &Scheduler,
+    send: &PortCtx<SEND, Toff>,
+) {
+    let run_mfp = || {
+        let all_updates = eval_mfp_core(input, mfp_plan, now, err_collector);
+        arrange.write().apply_updates(now, all_updates)?;
+        Ok(())
+    };
+    err_collector.run(run_mfp);
+
+    // deal with output, first read all updates between last time this arrangement havd emitted updates
+    // and current time, output them, and then truncate all updates of said range
+    let old_now = arrange.read().get_compaction();
+    let output_kv = if let Some(old) = old_now {
+        arrange.read().get_updates_in_range((old + 1)..=now)
+    } else {
+        arrange.read().get_updates_in_range(..=now)
+    };
+
+    // the output is expected to be key -> empty val
+    let output = output_kv
+        .into_iter()
+        .map(|((k, _v), t, d)| (k, t, d))
+        .collect_vec();
+    send.give(output);
+
+    let run_compaction = || {
+        arrange.write().set_compaction(now)?;
+        Ok(())
+    };
+    err_collector.run(run_compaction);
+
+    // schedule the next time this operator should run
+    if let Some(i) = arrange.read().get_next_update_time(&now) {
+        scheduler.schedule_at(i)
     }
 }
 
@@ -312,7 +324,7 @@ mod test {
         df: &'r mut Hydroflow<'h>,
         state: &'r mut DataflowState,
     ) -> Context<'r, 'h> {
-        let err_collector = state.err_collector.clone();
+        let err_collector = state.get_err_collector();
         Context {
             id: GlobalId::User(0),
             df,
@@ -372,7 +384,7 @@ mod test {
         let output_inner = output.clone();
         let _subgraph = ctx.df.add_subgraph_sink(
             "test_render_constant",
-            collection.stream,
+            collection.into_inner(),
             move |_ctx, recv| {
                 let data = recv.take_inner();
                 let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
@@ -407,9 +419,9 @@ mod test {
         ]);
 
         for now in 0i64..5 {
-            state.as_of.replace(now);
+            state.set_current_ts(now);
             state.run_available_with_schedule(&mut df);
-            assert!(state.err_collector.inner.borrow().is_empty());
+            assert!(state.get_err_collector().inner.borrow().is_empty());
             if let Some(expected) = expected_output.get(&now) {
                 assert_eq!(*output.borrow(), *expected);
             } else {
@@ -451,7 +463,7 @@ mod test {
 
         ctx.df.add_subgraph_sink(
             "test_render_constant",
-            collection.stream,
+            collection.into_inner(),
             move |_ctx, recv| {
                 let data = recv.take_inner();
                 let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
@@ -488,7 +500,7 @@ mod test {
         let cnt_inner = cnt.clone();
         ctx.df.add_subgraph_sink(
             "test_render_constant",
-            collection.stream,
+            collection.into_inner(),
             move |_ctx, recv| {
                 let data = recv.take_inner();
                 *cnt_inner.borrow_mut() += data.iter().map(|v| v.len()).sum::<usize>();

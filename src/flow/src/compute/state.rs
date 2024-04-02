@@ -34,10 +34,10 @@ pub struct DataflowState {
     /// We *must* apply it to sinks, to ensure correct outputs.
     /// We *should* apply it to sources and imported shared state, because it improves performance.
     /// Which means it's also the current time in temporal filter to get current correct result
-    pub as_of: Rc<RefCell<repr::Timestamp>>,
+    as_of: Rc<RefCell<Timestamp>>,
     /// error collector local to this `ComputeState`,
     /// useful for distinguishing errors from different `Hydroflow`
-    pub err_collector: ErrCollector,
+    err_collector: ErrCollector,
 }
 
 impl DataflowState {
@@ -64,11 +64,24 @@ impl DataflowState {
             cur_subgraph: Rc::new(RefCell::new(None)),
         }
     }
+
+    pub fn current_ts(&self) -> Timestamp {
+        *self.as_of.borrow()
+    }
+
+    pub fn set_current_ts(&mut self, ts: Timestamp) {
+        self.as_of.replace(ts);
+    }
+
+    pub fn get_err_collector(&self) -> ErrCollector {
+        self.err_collector.clone()
+    }
 }
 
+#[derive(Clone)]
 pub struct Scheduler {
     schedule_subgraph: Rc<RefCell<BTreeMap<Timestamp, VecDeque<SubgraphId>>>>,
-    pub cur_subgraph: Rc<RefCell<Option<SubgraphId>>>,
+    cur_subgraph: Rc<RefCell<Option<SubgraphId>>>,
 }
 
 impl Scheduler {
@@ -78,5 +91,9 @@ impl Scheduler {
         let subgraph = subgraph.as_ref().expect("Set SubgraphId before schedule");
         let subgraph_queue = schedule_subgraph.entry(next_run_time).or_default();
         subgraph_queue.push_back(*subgraph);
+    }
+
+    pub fn set_cur_subgraph(&self, subgraph: SubgraphId) {
+        self.cur_subgraph.replace(Some(subgraph));
     }
 }
