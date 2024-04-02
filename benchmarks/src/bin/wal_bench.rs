@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use api::v1::{ColumnDataType, ColumnSchema, SemanticType};
 use benchmarks::metrics;
-use benchmarks::wal::{Args, Config, Region, WalProvider};
+use benchmarks::wal_bench::{Args, Config, Region, WalProvider};
 use clap::Parser;
 use common_telemetry::info;
 use common_wal::config::kafka::common::BackoffConfig;
