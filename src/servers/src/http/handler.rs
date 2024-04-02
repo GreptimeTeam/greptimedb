@@ -215,6 +215,7 @@ impl From<PromqlQuery> for PromQuery {
             start: query.start,
             end: query.end,
             step: query.step,
+            lookback: "5m".to_string(),
         }
     }
 }

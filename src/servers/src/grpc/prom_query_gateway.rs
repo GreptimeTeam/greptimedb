@@ -58,6 +58,7 @@ impl PrometheusGateway for PrometheusGatewayService {
                     start: range_query.start,
                     end: range_query.end,
                     step: range_query.step,
+                    lookback: "5m".to_string(),
                 }
             }
             Promql::InstantQuery(instant_query) => {
@@ -71,6 +72,7 @@ impl PrometheusGateway for PrometheusGatewayService {
                     start: time.clone(),
                     end: time,
                     step: String::from("1s"),
+                    lookback: "5m".to_string(),
                 }
             }
         };

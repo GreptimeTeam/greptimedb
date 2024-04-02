@@ -178,6 +178,7 @@ pub async fn instant_query(
         start: time.clone(),
         end: time,
         step: "1s".to_string(),
+        lookback: "5m".to_string(),
     };
 
     let result = handler.do_query(&prom_query, query_ctx).await;
@@ -216,6 +217,7 @@ pub async fn range_query(
         start: params.start.or(form_params.start).unwrap_or_default(),
         end: params.end.or(form_params.end).unwrap_or_default(),
         step: params.step.or(form_params.step).unwrap_or_default(),
+        lookback: "5m".to_string(),
     };
 
     let result = handler.do_query(&prom_query, query_ctx).await;
@@ -320,6 +322,7 @@ pub async fn labels_query(
             start: start.clone(),
             end: end.clone(),
             step: DEFAULT_LOOKBACK_STRING.to_string(),
+            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
@@ -597,6 +600,7 @@ pub async fn label_values_query(
             start: start.clone(),
             end: end.clone(),
             step: DEFAULT_LOOKBACK_STRING.to_string(),
+            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
         if let Err(err) =
@@ -737,6 +741,7 @@ pub async fn series_query(
             end: end.clone(),
             // TODO: find a better value for step
             step: DEFAULT_LOOKBACK_STRING.to_string(),
+            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 

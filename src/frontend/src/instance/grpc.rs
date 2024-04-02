@@ -85,6 +85,7 @@ impl GrpcQueryHandler for Instance {
                             start: promql.start,
                             end: promql.end,
                             step: promql.step,
+                            lookback: "5m".to_string(),
                         };
                         let mut result =
                             SqlQueryHandler::do_promql_query(self, &prom_query, ctx.clone()).await;
