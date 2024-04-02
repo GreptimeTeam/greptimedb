@@ -18,10 +18,11 @@ use snafu::{OptionExt, ResultExt};
 use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
 use substrait_proto::proto::expression::literal::LiteralType;
 use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
-use substrait_proto::proto::expression::{Literal, RexType};
+use substrait_proto::proto::expression::{Literal, MaskExpression, RexType};
 use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::proto::function_argument::ArgType;
 use substrait_proto::proto::r#type::Kind;
+use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{plan_rel, Expression, Plan as SubPlan, Rel};
 
@@ -52,6 +53,7 @@ macro_rules! plan_err {
 pub struct DataflowContext {
     id_to_name: HashMap<GlobalId, Vec<String>>,
     name_to_id: HashMap<Vec<String>, GlobalId>,
+    schema: HashMap<GlobalId, RelationType>,
 }
 
 impl DataflowContext {
@@ -59,6 +61,7 @@ impl DataflowContext {
         Self {
             id_to_name: HashMap::new(),
             name_to_id: HashMap::new(),
+            schema: HashMap::new(),
         }
     }
     pub fn register_table(&mut self, id: GlobalId, name: Vec<String>) {
@@ -70,13 +73,22 @@ impl DataflowContext {
     /// Retrieves a GlobalId representing a table previously registered by calling the [register_table] function.
     ///
     /// Returns an error if no table has been registered with the provided names
-    pub fn table(&self, name: &Vec<String>) -> Result<GlobalId, Error> {
-        self.name_to_id
+    pub fn table(&self, name: &Vec<String>) -> Result<(GlobalId, RelationType), Error> {
+        let id = self
+            .name_to_id
             .get(name)
             .copied()
             .with_context(|| TableNotFoundSnafu {
                 name: name.join("."),
-            })
+            })?;
+        let schema = self
+            .schema
+            .get(&id)
+            .cloned()
+            .with_context(|| TableNotFoundSnafu {
+                name: name.join("."),
+            })?;
+        Ok((id, schema))
     }
 }
 
@@ -128,31 +140,12 @@ pub fn from_substrait_rel(
             } else {
                 return not_impl_err!("Projection without an input is not supported");
             };
-            let input_arity = input.typ.column_types.len();
             let mut exprs: Vec<(ScalarExpr, ColumnType)> = vec![];
             for e in &p.expressions {
                 let expr = from_substrait_rex(e, &input.typ, extensions)?;
-                // TODO(discord9): special treatment of aggregate functions
                 exprs.push(expr);
             }
-            let (project_exprs, row_type): (Vec<_>, Vec<_>) = exprs.into_iter().unzip();
-            let row_type = RelationType::new(row_type);
-            // TODO(discord9): use Error for mfp's compile time error
-            let output_arity = row_type.column_types.len();
-
-            let mfp = MapFilterProject::new(input_arity)
-                .map(project_exprs)
-                .map(|r| r.project(input_arity..input_arity + output_arity))
-                .and_then(|v| v)?;
-            let final_plan = Plan::Mfp {
-                input: Box::new(input.plan),
-                mfp,
-            };
-            let typed = TypedPlan {
-                typ: row_type,
-                plan: final_plan,
-            };
-            Ok(typed)
+            input.projection(exprs)
         }
         Some(RelType::Filter(filter)) => {
             let input = if let Some(input) = filter.input.as_ref() {
@@ -160,24 +153,46 @@ pub fn from_substrait_rel(
             } else {
                 return not_impl_err!("Filter without an input is not supported");
             };
-            let input_arity = input.typ.column_types.len();
 
             let expr = if let Some(condition) = filter.condition.as_ref() {
                 from_substrait_rex(condition, &input.typ, extensions)?
             } else {
                 return not_impl_err!("Filter without an condition is not valid");
             };
-
-            let mfp = MapFilterProject::new(input_arity).filter(vec![expr.0])?;
-            let final_plan = Plan::Mfp {
-                input: Box::new(input.plan),
-                mfp,
-            };
-            Ok(TypedPlan {
-                typ: input.typ,
-                plan: final_plan,
-            })
+            input.filter(expr)
         }
+        Some(RelType::Read(read)) => match &read.as_ref().read_type {
+            Some(ReadType::NamedTable(nt)) => {
+                let table_reference = nt.names.clone();
+                let table = ctx.table(&table_reference)?;
+                let get_table = Plan::Get {
+                    id: crate::expr::Id::Global(table.0),
+                };
+                let get_table = TypedPlan {
+                    typ: table.1,
+                    plan: get_table,
+                };
+
+                match &read.projection {
+                    Some(MaskExpression {
+                        select: Some(projection),
+                        ..
+                    }) => {
+                        let column_indices: Vec<usize> = projection
+                            .struct_items
+                            .iter()
+                            .map(|item| item.field as usize)
+                            .collect();
+                        let input_arity = get_table.typ.column_types.len();
+                        let mfp =
+                            MapFilterProject::new(input_arity).project(column_indices.clone())?;
+                        get_table.mfp(mfp)
+                    }
+                    _ => Ok(get_table),
+                }
+            }
+            _ => not_impl_err!("Only NamedTable reads are supported"),
+        },
         _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
     }
 }
