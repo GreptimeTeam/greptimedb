@@ -305,6 +305,9 @@ impl MapFilterProject {
 }
 
 impl MapFilterProject {
+    pub fn into_safe(self) -> SafeMfpPlan {
+        SafeMfpPlan { mfp: self }
+    }
     pub fn optimize(&mut self) {
         // TODO(discord9): optimize
     }
@@ -369,14 +372,20 @@ impl MapFilterProject {
         // We mirror `self.permute(&remap)` but we specifically want to remap columns
         // that are produced by `self.expressions` after the input columns.
         let (expressions, predicates, projection) = self.as_map_filter_project();
-        let new_expressions: Vec<ScalarExpr> = expressions.into_iter().map(|mut e| {
-            e.permute_map(&remap)?;
-            Ok(e)
-        }).try_collect()?;
-        let new_predicates: Vec<ScalarExpr> = predicates.into_iter().map(|mut p| {
-            p.permute_map(&remap)?;
-            Ok(p)
-        }).try_collect()?;
+        let new_expressions: Vec<ScalarExpr> = expressions
+            .into_iter()
+            .map(|mut e| {
+                e.permute_map(&remap)?;
+                Ok(e)
+            })
+            .try_collect()?;
+        let new_predicates: Vec<ScalarExpr> = predicates
+            .into_iter()
+            .map(|mut p| {
+                p.permute_map(&remap)?;
+                Ok(p)
+            })
+            .try_collect()?;
         *self = Self::new(self.input_arity)
             .map(new_expressions)?
             .filter(new_predicates)?

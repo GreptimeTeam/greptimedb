@@ -12,12 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use common_time::{Date, DateTime};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
+use strum::{EnumIter, IntoEnumIterator};
 
+use crate::adapter::error::{Error, InvalidQuerySnafu};
 use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
 use crate::expr::relation::accum::{Accum, Accumulator};
 use crate::expr::signature::{GenericFn, Signature};
@@ -34,7 +39,7 @@ use crate::repr::Diff;
 /// `count()->i64`
 ///
 /// `min/max(T)->T`
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash, EnumIter)]
 pub enum AggregateFunc {
     MaxInt16,
     MaxInt32,
@@ -143,7 +148,51 @@ macro_rules! generate_signature {
     };
 }
 
+static SPECIALIZAITION: OnceLock<HashMap<(GenericFn, ConcreteDataType), AggregateFunc>> =
+    OnceLock::new();
+
 impl AggregateFunc {
+    pub fn from_str_and_type(
+        name: &str,
+        arg_type: Option<ConcreteDataType>,
+    ) -> Result<Self, Error> {
+        let rule = SPECIALIZAITION.get_or_init(|| {
+            let mut spec = HashMap::new();
+            for func in Self::iter() {
+                let sig = func.signature();
+                spec.insert((sig.generic_fn, sig.input[0].clone()), func);
+            }
+            spec
+        });
+
+        let generic_fn = match name {
+            "max" => GenericFn::Max,
+            "min" => GenericFn::Min,
+            "sum" => GenericFn::Sum,
+            "count" => GenericFn::Count,
+            "any" => GenericFn::Any,
+            "all" => GenericFn::All,
+            _ => {
+                return InvalidQuerySnafu {
+                    reason: format!("Unknown binary function: {}", name),
+                }
+                .fail();
+            }
+        };
+        let input_type = arg_type.unwrap_or_else(ConcreteDataType::null_datatype);
+        rule.get(&(generic_fn.clone(), input_type.clone()))
+            .cloned()
+            .ok_or_else(|| {
+                InvalidQuerySnafu {
+                    reason: format!(
+                        "No specialization found for binary function {:?} with input type {:?}",
+                        generic_fn, input_type
+                    ),
+                }
+                .build()
+            })
+    }
+
     /// all concrete datatypes with precision types will be returned with largest possible variant
     /// as a exception, count have a signature of `null -> i64`, but it's actually `anytype -> i64`
     pub fn signature(&self) -> Signature {

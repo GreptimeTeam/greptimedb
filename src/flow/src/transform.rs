@@ -15,6 +15,7 @@ use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::value::Value;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
+use substrait_proto::proto::aggregate_function::AggregationInvocation;
 use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
 use substrait_proto::proto::expression::literal::LiteralType;
 use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
@@ -24,14 +25,14 @@ use substrait_proto::proto::function_argument::ArgType;
 use substrait_proto::proto::r#type::Kind;
 use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
-use substrait_proto::proto::{plan_rel, Expression, Plan as SubPlan, Rel};
+use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{Error, NotImplementedSnafu, PlanSnafu, TableNotFoundSnafu};
 use crate::expr::{
-    BinaryFunc, GlobalId, MapFilterProject, ScalarExpr, UnaryFunc, UnmaterializableFunc,
-    VariadicFunc,
+    AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
+    UnaryFunc, UnmaterializableFunc, VariadicFunc,
 };
-use crate::plan::{Plan, TypedPlan};
+use crate::plan::{KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{ColumnType, RelationType};
 
 macro_rules! not_impl_err {
@@ -127,7 +128,7 @@ pub fn from_substrait_plan(ctx: &mut DataflowContext, plan: &SubPlan) -> Result<
     }
 }
 
-/// TODO: aggr func&read
+/// TODO: SELECT DISTINCT(does it get compile with something else?)
 pub fn from_substrait_rel(
     ctx: &mut DataflowContext,
     rel: &Rel,
@@ -193,8 +194,117 @@ pub fn from_substrait_rel(
             }
             _ => not_impl_err!("Only NamedTable reads are supported"),
         },
+        Some(RelType::Aggregate(agg)) => {
+            let input = if let Some(input) = agg.input.as_ref() {
+                from_substrait_rel(ctx, input, extensions)?
+            } else {
+                return not_impl_err!("Aggregate without an input is not supported");
+            };
+            let mut group_expr = vec![];
+            let mut aggr_expr = vec![];
+
+            match agg.groupings.len() {
+                1 => {
+                    for e in &agg.groupings[0].grouping_expressions {
+                        let x = from_substrait_rex(e, &input.typ, extensions)?;
+                        group_expr.push(x);
+                    }
+                }
+                _ => {
+                    return not_impl_err!(
+                        "Grouping sets not support yet, use union all with group by instead."
+                    );
+                }
+            };
+
+            {
+                let (group_expr_val, group_expr_type): (Vec<_>, Vec<_>) =
+                    group_expr.iter().cloned().unzip();
+                let input_arity = input.typ.column_types.len();
+                let output_arity = group_expr_val.len();
+                let key_plan = MapFilterProject::new(input_arity)
+                    .map(group_expr_val)?
+                    .project(input_arity..input_arity + output_arity)?;
+                let key_used = key_plan.demand();
+                // find out all the columns that are not used in the key plan
+                let mut value_indices = (0..input_arity)
+                    .filter(|i| !key_used.contains(i))
+                    .collect::<Vec<_>>();
+                let val_plan = MapFilterProject::new(input_arity).project(value_indices.clone())?;
+                let key_val_plan = KeyValPlan {
+                    key_plan: key_plan.into_safe(),
+                    val_plan: val_plan.into_safe(),
+                };
+            }
+
+            for m in &agg.measures {
+                let filter = match &m.filter {
+                    Some(fil) => Some(from_substrait_rex(fil, &input.typ, extensions)?),
+                    None => None,
+                };
+
+                let agg_func = match &m.measure {
+                    Some(f) => {
+                        let distinct = match f.invocation {
+                            _ if f.invocation == AggregationInvocation::Distinct as i32 => true,
+                            _ if f.invocation == AggregationInvocation::All as i32 => false,
+                            _ => false,
+                        };
+                        from_substrait_agg_func(
+                            f, &input.typ, extensions, filter,
+                            // TODO: Add parsing of order_by also
+                            None, distinct,
+                        )
+                    }
+                    None => not_impl_err!("Aggregate without aggregate function is not supported"),
+                };
+                aggr_expr.push(agg_func?.clone());
+            }
+
+            todo!()
+        }
         _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
     }
+}
+
+// TODO: impl filter
+pub fn from_substrait_agg_func(
+    f: &proto::AggregateFunction,
+    input_schema: &RelationType,
+    extensions: &HashMap<u32, &String>,
+    filter: Option<(ScalarExpr, ColumnType)>,
+    order_by: Option<Vec<(ScalarExpr, ColumnType)>>,
+    distinct: bool,
+) -> Result<AggregateExpr, Error> {
+    let mut args = vec![];
+    for arg in &f.arguments {
+        let arg_expr = match &arg.arg_type {
+            Some(ArgType::Value(e)) => from_substrait_rex(e, input_schema, extensions),
+            _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
+        }?;
+        args.push(arg_expr);
+    }
+
+    let arg = if let Some(first) = args.first() {
+        first
+    } else {
+        return not_impl_err!("Aggregated function without arguments is not supported");
+    };
+
+    let func = match extensions.get(&f.function_reference) {
+        Some(function_name) => {
+            AggregateFunc::from_str_and_type(function_name, Some(arg.1.scalar_type.clone()))
+        }
+        None => not_impl_err!(
+            "Aggregated function not found: function anchor = {:?}",
+            f.function_reference
+        ),
+    }?;
+    Ok(AggregateExpr {
+        func,
+        expr: arg.0.clone(),
+        distinct,
+    })
 }
 
 /// Convert Substrait Rex into Flow's ScalarExpr
