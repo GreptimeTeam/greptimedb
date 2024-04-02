@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use datatypes::value::Value;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 
@@ -306,6 +307,81 @@ impl MapFilterProject {
 impl MapFilterProject {
     pub fn optimize(&mut self) {
         // TODO(discord9): optimize
+    }
+
+    /// This method inlines expressions with a single use.
+    ///
+    /// This method only inlines expressions; it does not delete expressions
+    /// that are no longer referenced. The `remove_undemanded()` method does
+    /// that, and should likely be used after this method.
+    ///
+    /// Inlining replaces column references when the referred-to item is either
+    /// another column reference, or the only referrer of its referent. This
+    /// is most common after memoization has atomized all expressions to seek
+    /// out re-use: inlining re-assembles expressions that were not helpfully
+    /// shared with other expressions.
+    fn inline_expressions(&mut self) {
+        // TODO: impl inline expressions
+    }
+
+    /// Removes unused expressions from `self.expressions`.
+    ///
+    /// Expressions are "used" if they are relied upon by any output columns
+    /// or any predicates, even transitively. Any expressions that are not
+    /// relied upon in this way can be discarded.
+    fn optimize_remove_unused(&mut self) -> Result<(), Error> {
+        // Determine the demanded expressions to remove irrelevant ones.
+        let mut demand = BTreeSet::new();
+        for (_index, pred) in self.predicates.iter() {
+            demand.extend(pred.get_all_ref_columns());
+        }
+        // Start from the output columns as presumed demanded.
+        // If this is not the case, the caller should project some away.
+        demand.extend(self.projection.iter().cloned());
+        // Proceed in *reverse* order, as expressions may depend on other
+        // expressions that precede them.
+        for index in (0..self.expressions.len()).rev() {
+            if demand.contains(&(self.input_arity + index)) {
+                demand.extend(self.expressions[index].get_all_ref_columns());
+            }
+        }
+
+        // Maintain a map from initial column identifiers to locations
+        // once we have removed undemanded expressions.
+        let mut remap = BTreeMap::new();
+        // This map only needs to map elements of `demand` to a new location,
+        // but the logic is easier if we include all input columns (as the
+        // new position is then determined by the size of the map).
+        for index in 0..self.input_arity {
+            remap.insert(index, index);
+        }
+        // Retain demanded expressions, and record their new locations.
+        let mut new_expressions = Vec::new();
+        for (index, expr) in self.expressions.drain(..).enumerate() {
+            if demand.contains(&(index + self.input_arity)) {
+                remap.insert(index + self.input_arity, remap.len());
+                new_expressions.push(expr);
+            }
+        }
+        self.expressions = new_expressions;
+
+        // Update column identifiers; rebuild `Self` to re-establish any invariants.
+        // We mirror `self.permute(&remap)` but we specifically want to remap columns
+        // that are produced by `self.expressions` after the input columns.
+        let (expressions, predicates, projection) = self.as_map_filter_project();
+        let new_expressions: Vec<ScalarExpr> = expressions.into_iter().map(|mut e| {
+            e.permute_map(&remap)?;
+            Ok(e)
+        }).try_collect()?;
+        let new_predicates: Vec<ScalarExpr> = predicates.into_iter().map(|mut p| {
+            p.permute_map(&remap)?;
+            Ok(p)
+        }).try_collect()?;
+        *self = Self::new(self.input_arity)
+            .map(new_expressions)?
+            .filter(new_predicates)?
+            .project(projection.into_iter().map(|c| remap[&c]))?;
+        Ok(())
     }
 
     /// Convert the `MapFilterProject` into a staged evaluation plan.
