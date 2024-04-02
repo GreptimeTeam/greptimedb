@@ -28,7 +28,7 @@ use opendal::raw::*;
 use opendal::ErrorKind;
 use prometheus::{
     exponential_buckets, histogram_opts, register_histogram_vec, register_int_counter_vec,
-    HistogramVec, IntCounterVec,
+    Histogram, HistogramVec, IntCounterVec,
 };
 
 type Result<T> = std::result::Result<T, opendal::Error>;
@@ -154,13 +154,25 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
             .with_label_values(&[&self.scheme, Operation::Read.into_static()])
             .inc();
 
-        self.inner
-            .read(path, args)
+        let timer = REQUESTS_DURATION_SECONDS
+            .with_label_values(&[&self.scheme, Operation::Read.into_static()])
+            .start_timer();
+        let read_res = self.inner.read(path, args);
+        timer.observe_duration();
+
+        read_res
             .map(|v| {
                 v.map(|(rp, r)| {
                     (
                         rp,
-                        PrometheusMetricWrapper::new(r, Operation::Read, &self.scheme),
+                        PrometheusMetricWrapper::new(
+                            r,
+                            Operation::Read,
+                            BYTES_TOTAL
+                                .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
+                            REQUESTS_DURATION_SECONDS
+                                .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
+                        ),
                     )
                 })
                 .map_err(|e| {
@@ -176,13 +188,25 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
             .with_label_values(&[&self.scheme, Operation::Write.into_static()])
             .inc();
 
-        self.inner
-            .write(path, args)
+        let timer = REQUESTS_DURATION_SECONDS
+            .with_label_values(&[&self.scheme, Operation::Write.into_static()])
+            .start_timer();
+        let write_res = self.inner.write(path, args);
+        timer.observe_duration();
+
+        write_res
             .map(|v| {
                 v.map(|(rp, r)| {
                     (
                         rp,
-                        PrometheusMetricWrapper::new(r, Operation::Write, &self.scheme),
+                        PrometheusMetricWrapper::new(
+                            r,
+                            Operation::Write,
+                            BYTES_TOTAL
+                                .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
+                            REQUESTS_DURATION_SECONDS
+                                .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
+                        ),
                     )
                 })
                 .map_err(|e| {
@@ -301,12 +325,28 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
             .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
             .inc();
 
-        self.inner
-            .blocking_read(path, args)
+        let timer = REQUESTS_DURATION_SECONDS
+            .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
+            .start_timer();
+        let result = self.inner.blocking_read(path, args);
+        timer.observe_duration();
+
+        result
             .map(|(rp, r)| {
                 (
                     rp,
-                    PrometheusMetricWrapper::new(r, Operation::BlockingRead, &self.scheme),
+                    PrometheusMetricWrapper::new(
+                        r,
+                        Operation::BlockingRead,
+                        BYTES_TOTAL.with_label_values(&[
+                            &self.scheme,
+                            Operation::BlockingRead.into_static(),
+                        ]),
+                        REQUESTS_DURATION_SECONDS.with_label_values(&[
+                            &self.scheme,
+                            Operation::BlockingRead.into_static(),
+                        ]),
+                    ),
                 )
             })
             .map_err(|e| {
@@ -320,12 +360,28 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
             .with_label_values(&[&self.scheme, Operation::BlockingWrite.into_static()])
             .inc();
 
-        self.inner
-            .blocking_write(path, args)
+        let timer = REQUESTS_DURATION_SECONDS
+            .with_label_values(&[&self.scheme, Operation::BlockingWrite.into_static()])
+            .start_timer();
+        let result = self.inner.blocking_write(path, args);
+        timer.observe_duration();
+
+        result
             .map(|(rp, r)| {
                 (
                     rp,
-                    PrometheusMetricWrapper::new(r, Operation::BlockingWrite, &self.scheme),
+                    PrometheusMetricWrapper::new(
+                        r,
+                        Operation::BlockingWrite,
+                        BYTES_TOTAL.with_label_values(&[
+                            &self.scheme,
+                            Operation::BlockingWrite.into_static(),
+                        ]),
+                        REQUESTS_DURATION_SECONDS.with_label_values(&[
+                            &self.scheme,
+                            Operation::BlockingWrite.into_static(),
+                        ]),
+                    ),
                 )
             })
             .map_err(|e| {
@@ -389,32 +445,45 @@ pub struct PrometheusMetricWrapper<R> {
     inner: R,
 
     op: Operation,
-    scheme: String,
+    bytes_counter: Histogram,
+    requests_duration_seconds: Histogram,
+
+    start: Instant,
+    bytes: u64,
+}
+
+impl<R> Drop for PrometheusMetricWrapper<R> {
+    fn drop(&mut self) {
+        self.bytes_counter.observe(self.bytes as f64);
+        let dur = self.start.elapsed().as_secs_f64();
+        self.requests_duration_seconds.observe(dur);
+    }
 }
 
 impl<R> PrometheusMetricWrapper<R> {
-    fn new(inner: R, op: Operation, scheme: &String) -> Self {
+    fn new(
+        inner: R,
+        op: Operation,
+        bytes_counter: Histogram,
+        requests_duration_seconds: Histogram,
+    ) -> Self {
         Self {
             inner,
             op,
-            scheme: scheme.to_string(),
+            bytes_counter,
+            requests_duration_seconds,
+            start: Instant::now(),
+            bytes: 0,
         }
     }
 }
 
 impl<R: oio::Read> oio::Read for PrometheusMetricWrapper<R> {
     fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize>> {
-        let start = Instant::now();
-
         self.inner.poll_read(cx, buf).map(|res| match res {
-            Ok(n) => {
-                BYTES_TOTAL
-                    .with_label_values(&[&self.scheme, Operation::Read.into_static()])
-                    .observe(n as f64);
-                REQUESTS_DURATION_SECONDS
-                    .with_label_values(&[&self.scheme, Operation::Read.into_static()])
-                    .observe(start.elapsed().as_secs_f64());
-                Ok(n)
+            Ok(bytes) => {
+                self.bytes += bytes as u64;
+                Ok(bytes)
             }
             Err(e) => {
                 increment_errors_total(self.op, e.kind());
@@ -434,16 +503,9 @@ impl<R: oio::Read> oio::Read for PrometheusMetricWrapper<R> {
     }
 
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes>>> {
-        let start = Instant::now();
-
         self.inner.poll_next(cx).map(|res| match res {
             Some(Ok(bytes)) => {
-                BYTES_TOTAL
-                    .with_label_values(&[&self.scheme, Operation::Read.into_static()])
-                    .observe(bytes.len() as f64);
-                REQUESTS_DURATION_SECONDS
-                    .with_label_values(&[&self.scheme, Operation::Read.into_static()])
-                    .observe(start.elapsed().as_secs_f64());
+                self.bytes += bytes.len() as u64;
                 Some(Ok(bytes))
             }
             Some(Err(e)) => {
@@ -457,17 +519,10 @@ impl<R: oio::Read> oio::Read for PrometheusMetricWrapper<R> {
 
 impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let start = Instant::now();
-
         self.inner
             .read(buf)
             .map(|n| {
-                BYTES_TOTAL
-                    .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
-                    .observe(n as f64);
-                REQUESTS_DURATION_SECONDS
-                    .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
-                    .observe(start.elapsed().as_secs_f64());
+                self.bytes += n as u64;
                 n
             })
             .map_err(|e| {
@@ -484,16 +539,9 @@ impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
     }
 
     fn next(&mut self) -> Option<Result<Bytes>> {
-        let start = Instant::now();
-
         self.inner.next().map(|res| match res {
             Ok(bytes) => {
-                BYTES_TOTAL
-                    .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
-                    .observe(bytes.len() as f64);
-                REQUESTS_DURATION_SECONDS
-                    .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
-                    .observe(start.elapsed().as_secs_f64());
+                self.bytes += bytes.len() as u64;
                 Ok(bytes)
             }
             Err(e) => {
@@ -507,17 +555,10 @@ impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
 #[async_trait]
 impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
     fn poll_write(&mut self, cx: &mut Context<'_>, bs: &dyn oio::WriteBuf) -> Poll<Result<usize>> {
-        let start = Instant::now();
-
         self.inner
             .poll_write(cx, bs)
             .map_ok(|n| {
-                BYTES_TOTAL
-                    .with_label_values(&[&self.scheme, Operation::Write.into_static()])
-                    .observe(n as f64);
-                REQUESTS_DURATION_SECONDS
-                    .with_label_values(&[&self.scheme, Operation::Write.into_static()])
-                    .observe(start.elapsed().as_secs_f64());
+                self.bytes += n as u64;
                 n
             })
             .map_err(|err| {
@@ -543,17 +584,10 @@ impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
 
 impl<R: oio::BlockingWrite> oio::BlockingWrite for PrometheusMetricWrapper<R> {
     fn write(&mut self, bs: &dyn oio::WriteBuf) -> Result<usize> {
-        let start = Instant::now();
-
         self.inner
             .write(bs)
             .map(|n| {
-                BYTES_TOTAL
-                    .with_label_values(&[&self.scheme, Operation::BlockingWrite.into_static()])
-                    .observe(n as f64);
-                REQUESTS_DURATION_SECONDS
-                    .with_label_values(&[&self.scheme, Operation::BlockingWrite.into_static()])
-                    .observe(start.elapsed().as_secs_f64());
+                self.bytes += n as u64;
                 n
             })
             .map_err(|err| {
