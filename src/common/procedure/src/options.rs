@@ -18,9 +18,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, NoneAsEmptyString};
 
-#[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProcedureConfig {
@@ -30,7 +28,6 @@ pub struct ProcedureConfig {
     #[serde(with = "humantime_serde")]
     pub retry_delay: Duration,
     /// `None` stands for no limit.
-    #[serde_as(as = "NoneAsEmptyString")]
     pub max_metadata_value_size: Option<ReadableSize>,
 }
 

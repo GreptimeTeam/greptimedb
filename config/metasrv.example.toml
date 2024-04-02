@@ -33,7 +33,7 @@ retry_delay = "500ms"
 # GreptimeDB procedure uses etcd as the default metadata storage backend.
 # The etcd the maximum size of any request is 1.5 MiB
 # 1535KiB = 1536KiB (1.5MiB) - 1KiB (reserved size of key)
-# If it's empty, it stands for no limit.
+# Comments out the `max_metadata_value_size`, for don't split large value (no limit).
 max_metadata_value_size = "1535KiB"
 
 # Failure detectors options.
