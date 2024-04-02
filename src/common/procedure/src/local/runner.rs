@@ -180,6 +180,10 @@ impl Runner {
     async fn execute_once_with_retry(&mut self, ctx: &Context) {
         let mut retry = self.exponential_builder.build();
         let mut retry_times = 0;
+
+        let mut rollback = self.exponential_builder.build();
+        let mut rollback_times = 0;
+
         loop {
             // Don't store state if `ProcedureManager` is stopped.
             if !self.running() {
@@ -188,8 +192,8 @@ impl Runner {
                 });
                 return;
             }
-            self.execute_once(ctx).await;
-            match self.meta.state() {
+            let state = self.meta.state();
+            match state {
                 ProcedureState::Running => {}
                 ProcedureState::Retrying { error } => {
                     retry_times += 1;
@@ -205,93 +209,119 @@ impl Runner {
                         return;
                     }
                 }
-                ProcedureState::Done { .. } => return,
-                ProcedureState::Failed { .. } => return,
-            }
-        }
-    }
-
-    async fn rollback(&mut self, error: Arc<Error>) {
-        if let Err(e) = self.rollback_procedure().await {
-            self.rolling_back = true;
-            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-        }
-        self.meta.set_state(ProcedureState::failed(error));
-    }
-
-    async fn execute_once(&mut self, ctx: &Context) {
-        // if rolling_back, there is no need to execute again.
-        if self.rolling_back {
-            // We can definitely get the previous error here.
-            let state = self.meta.state();
-            let err = state.error().unwrap();
-            self.rollback(err.clone()).await;
-        }
-        match self.procedure.execute(ctx).await {
-            Ok(status) => {
-                logging::debug!(
-                    "Execute procedure {}-{} once, status: {:?}, need_persist: {}",
-                    self.procedure.type_name(),
-                    self.meta.id,
-                    status,
-                    status.need_persist(),
-                );
-
-                // Don't store state if `ProcedureManager` is stopped.
-                if !self.running() {
-                    self.meta.set_state(ProcedureState::Failed {
-                        error: Arc::new(error::ManagerNotStartSnafu {}.build()),
-                    });
-                    return;
-                }
-
-                if status.need_persist() {
-                    if let Err(err) = self.persist_procedure().await {
-                        self.meta.set_state(ProcedureState::retrying(Arc::new(err)));
+                ProcedureState::CommitRollback { error }
+                | ProcedureState::RollingBack { error } => {
+                    rollback_times += 1;
+                    if let Some(d) = rollback.next() {
+                        self.wait_on_err(d, rollback_times).await;
+                    } else {
+                        self.meta.set_state(ProcedureState::failed(Arc::new(
+                            Error::RetryTimesExceeded {
+                                source: error.clone(),
+                                procedure_id: self.meta.id,
+                            },
+                        )));
                         return;
                     }
                 }
+                ProcedureState::Done { .. } => return,
+                ProcedureState::Failed { .. } => return,
+            }
+            self.execute_once(ctx).await;
+        }
+    }
 
-                match status {
-                    Status::Executing { .. } => (),
-                    Status::Suspended { subprocedures, .. } => {
-                        self.on_suspended(subprocedures).await;
+    async fn rollback(&mut self, ctx: &Context, err: Arc<Error>) {
+        if let Err(e) = self.procedure.rollback(ctx).await {
+            self.meta
+                .set_state(ProcedureState::rolling_back(Arc::new(e)));
+            return;
+        }
+        self.meta.set_state(ProcedureState::failed(err));
+    }
+
+    async fn commit_rollback(&mut self, err: Arc<Error>) {
+        if let Err(e) = self.rollback_procedure().await {
+            self.meta
+                .set_state(ProcedureState::commit_rollback(Arc::new(e)));
+            return;
+        }
+        self.meta.set_state(ProcedureState::rolling_back(err));
+    }
+
+    async fn execute_once(&mut self, ctx: &Context) {
+        match self.meta.state() {
+            ProcedureState::Running | ProcedureState::Retrying { .. } => {
+                match self.procedure.execute(ctx).await {
+                    Ok(status) => {
+                        logging::debug!(
+                            "Execute procedure {}-{} once, status: {:?}, need_persist: {}",
+                            self.procedure.type_name(),
+                            self.meta.id,
+                            status,
+                            status.need_persist(),
+                        );
+
+                        // Don't store state if `ProcedureManager` is stopped.
+                        if !self.running() {
+                            self.meta.set_state(ProcedureState::Failed {
+                                error: Arc::new(error::ManagerNotStartSnafu {}.build()),
+                            });
+                            return;
+                        }
+
+                        if status.need_persist() {
+                            if let Err(err) = self.persist_procedure().await {
+                                self.meta.set_state(ProcedureState::retrying(Arc::new(err)));
+                                return;
+                            }
+                        }
+
+                        match status {
+                            Status::Executing { .. } => (),
+                            Status::Suspended { subprocedures, .. } => {
+                                self.on_suspended(subprocedures).await;
+                            }
+                            Status::Done { output } => {
+                                if let Err(e) = self.commit_procedure().await {
+                                    self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                                    return;
+                                }
+
+                                self.done(output);
+                            }
+                        }
                     }
-                    Status::Done { output } => {
-                        if let Err(e) = self.commit_procedure().await {
+                    Err(e) => {
+                        logging::error!(
+                            e;
+                            "Failed to execute procedure {}-{}, retry: {}",
+                            self.procedure.type_name(),
+                            self.meta.id,
+                            e.is_retry_later(),
+                        );
+
+                        // Don't store state if `ProcedureManager` is stopped.
+                        if !self.running() {
+                            self.meta.set_state(ProcedureState::Failed {
+                                error: Arc::new(error::ManagerNotStartSnafu {}.build()),
+                            });
+                            return;
+                        }
+
+                        if e.is_retry_later() {
                             self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                             return;
                         }
 
-                        self.done(output);
+                        self.meta
+                            .set_state(ProcedureState::commit_rollback(Arc::new(e)));
                     }
                 }
             }
-            Err(e) => {
-                logging::error!(
-                    e;
-                    "Failed to execute procedure {}-{}, retry: {}",
-                    self.procedure.type_name(),
-                    self.meta.id,
-                    e.is_retry_later(),
-                );
-
-                // Don't store state if `ProcedureManager` is stopped.
-                if !self.running() {
-                    self.meta.set_state(ProcedureState::Failed {
-                        error: Arc::new(error::ManagerNotStartSnafu {}.build()),
-                    });
-                    return;
-                }
-
-                if e.is_retry_later() {
-                    self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-                    return;
-                }
-
-                // Write rollback key so we can skip this procedure while recovering procedures.
-                self.rollback(Arc::new(e)).await
-            }
+            ProcedureState::CommitRollback { error } => self.commit_rollback(error).await,
+            ProcedureState::RollingBack { error } => self.rollback(ctx, error).await,
+            ProcedureState::Failed { .. } | ProcedureState::Done { .. } => (),
         }
     }
 
@@ -879,8 +909,15 @@ mod tests {
 
         runner.execute_once(&ctx).await;
         let state = runner.meta.state();
+        assert!(state.is_commit_rollback(), "{state:?}");
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_rolling_back(), "{state:?}");
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
         assert!(state.is_failed(), "{state:?}");
-        assert!(meta.state().is_failed());
         check_files(
             &object_store,
             &procedure_store,

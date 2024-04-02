@@ -296,6 +296,10 @@ pub enum ProcedureState {
     Done { output: Option<Output> },
     /// The procedure is failed and can be retried.
     Retrying { error: Arc<Error> },
+    /// The procedure is failed and commits state before rolling back the procedure.
+    CommitRollback { error: Arc<Error> },
+    /// The procedure is failed and can be rollback.
+    RollingBack { error: Arc<Error> },
     /// The procedure is failed and cannot proceed anymore.
     Failed { error: Arc<Error> },
 }
@@ -304,6 +308,16 @@ impl ProcedureState {
     /// Returns a [ProcedureState] with failed state.
     pub fn failed(error: Arc<Error>) -> ProcedureState {
         ProcedureState::Failed { error }
+    }
+
+    /// Returns a [ProcedureState] with commit rollback state.
+    pub fn commit_rollback(error: Arc<Error>) -> ProcedureState {
+        ProcedureState::CommitRollback { error }
+    }
+
+    /// Returns a [ProcedureState] with rolling back state.
+    pub fn rolling_back(error: Arc<Error>) -> ProcedureState {
+        ProcedureState::RollingBack { error }
     }
 
     /// Returns a [ProcedureState] with retrying state.
@@ -331,11 +345,22 @@ impl ProcedureState {
         matches!(self, ProcedureState::Retrying { .. })
     }
 
+    /// Returns true if the procedure state is rolling back.
+    pub fn is_rolling_back(&self) -> bool {
+        matches!(self, ProcedureState::RollingBack { .. })
+    }
+
+    /// Returns true if the procedure state is commit rollback.
+    pub fn is_commit_rollback(&self) -> bool {
+        matches!(self, ProcedureState::CommitRollback { .. })
+    }
+
     /// Returns the error.
     pub fn error(&self) -> Option<&Arc<Error>> {
         match self {
             ProcedureState::Failed { error } => Some(error),
             ProcedureState::Retrying { error } => Some(error),
+            ProcedureState::RollingBack { error } => Some(error),
             _ => None,
         }
     }

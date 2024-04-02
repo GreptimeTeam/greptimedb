@@ -56,6 +56,9 @@ pub fn procedure_state_to_pb_response(state: &ProcedureState) -> PbProcedureStat
         ProcedureState::Done { .. } => (PbProcedureStatus::Done, String::default()),
         ProcedureState::Retrying { error } => (PbProcedureStatus::Retrying, error.to_string()),
         ProcedureState::Failed { error } => (PbProcedureStatus::Failed, error.to_string()),
+        // TODO(weny): implement it
+        ProcedureState::CommitRollback { .. } => todo!(),
+        ProcedureState::RollingBack { .. } => todo!(),
     };
 
     PbProcedureStateResponse {

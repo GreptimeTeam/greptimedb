@@ -923,24 +923,29 @@ mod tests {
             }
         }
 
-        let check_procedure = |procedure| {
-            async {
-                let procedure_id = ProcedureId::random();
-                let mut watcher = manager
-                    .submit(ProcedureWithId {
-                        id: procedure_id,
-                        procedure: Box::new(procedure),
-                    })
-                    .await
-                    .unwrap();
-                // Wait for the notification.
-                watcher.changed().await.unwrap();
-                assert!(watcher.borrow().is_failed());
-            }
+        let check_procedure = |procedure| async {
+            let procedure_id = ProcedureId::random();
+            manager
+                .submit(ProcedureWithId {
+                    id: procedure_id,
+                    procedure: Box::new(procedure),
+                })
+                .await
+                .unwrap()
         };
 
-        check_procedure(MockProcedure { panic: false }).await;
-        check_procedure(MockProcedure { panic: true }).await;
+        let mut watcher = check_procedure(MockProcedure { panic: false }).await;
+        // Wait for the notification.
+        watcher.changed().await.unwrap();
+        assert!(watcher.borrow().is_commit_rollback());
+        watcher.changed().await.unwrap();
+        assert!(watcher.borrow().is_rolling_back());
+        watcher.changed().await.unwrap();
+        assert!(watcher.borrow().is_failed());
+        // The runner won't rollback a panicked procedure.
+        let mut watcher = check_procedure(MockProcedure { panic: true }).await;
+        watcher.changed().await.unwrap();
+        assert!(watcher.borrow().is_failed());
     }
 
     #[tokio::test]

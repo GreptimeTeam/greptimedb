@@ -110,6 +110,15 @@ pub enum Error {
         procedure_id: ProcedureId,
     },
 
+    #[snafu(display(
+        "Procedure rollback exceeded max times, procedure_id: {}",
+        procedure_id
+    ))]
+    RollbackTimesExceeded {
+        source: Arc<Error>,
+        procedure_id: ProcedureId,
+    },
+
     #[snafu(display("Corrupted data, error: "))]
     CorruptedData {
         #[snafu(source)]
@@ -161,6 +170,7 @@ impl ErrorExt for Error {
             | Error::DeleteState { .. }
             | Error::FromJson { .. }
             | Error::RetryTimesExceeded { .. }
+            | Error::RollbackTimesExceeded { .. }
             | Error::RetryLater { .. }
             | Error::WaitWatcher { .. }
             | Error::ManagerNotStart { .. } => StatusCode::Internal,
