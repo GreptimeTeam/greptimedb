@@ -46,6 +46,8 @@ pub struct Context<'referred, 'df> {
     /// a list of all collections being used in the operator
     pub input_collection: BTreeMap<GlobalId, CollectionBundle>,
     /// used by `Get`/`Let` Plan for getting/setting local variables
+    ///
+    /// TODO(discord9): consider if use Vec<(LocalId, CollectionBundle)> instead
     local_scope: Vec<BTreeMap<LocalId, CollectionBundle>>,
     // Collect all errors in this operator's evaluation
     err_collector: ErrCollector,
@@ -153,12 +155,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
         body: Box<Plan>,
     ) -> Result<CollectionBundle, Error> {
         let value = self.render_plan(*value)?;
-        let local_scope = if let Some(last) = self.local_scope.last_mut() {
-            last
-        } else {
-            self.local_scope.push(Default::default());
-            self.local_scope.last_mut().unwrap()
-        };
+
+        self.local_scope.push(Default::default());
         self.insert_local(id, value);
         let ret = self.render_plan(*body)?;
         Ok(ret)
