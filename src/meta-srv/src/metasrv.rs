@@ -118,7 +118,7 @@ impl Default for MetaSrvOptions {
                 retry_delay: Duration::from_millis(500),
                 // The etcd the maximum size of any request is 1.5 MiB
                 // 1535KiB = 1536KiB (1.5MiB) - 1KiB (reserved size of key)
-                max_value_size: Some(ReadableSize::kb(1535)),
+                max_metadata_value_size: Some(ReadableSize::kb(1535)),
             },
             failure_detector: PhiAccrualFailureDetectorOptions::default(),
             datanode: DatanodeOptions::default(),

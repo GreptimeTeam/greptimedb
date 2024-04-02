@@ -299,7 +299,7 @@ mod tests {
                 .as_millis()
         );
         assert_eq!(
-            options.procedure.max_value_size,
+            options.procedure.max_metadata_value_size,
             Some(ReadableSize::kb(1535))
         );
     }

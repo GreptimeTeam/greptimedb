@@ -31,7 +31,7 @@ pub struct ProcedureConfig {
     pub retry_delay: Duration,
     /// `None` stands for no limit.
     #[serde_as(as = "NoneAsEmptyString")]
-    pub max_value_size: Option<ReadableSize>,
+    pub max_metadata_value_size: Option<ReadableSize>,
 }
 
 impl Default for ProcedureConfig {
@@ -39,7 +39,7 @@ impl Default for ProcedureConfig {
         ProcedureConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
-            max_value_size: None,
+            max_metadata_value_size: None,
         }
     }
 }

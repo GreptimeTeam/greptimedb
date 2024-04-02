@@ -379,7 +379,7 @@ fn build_procedure_manager(
     let state_store = KvStateStore::new(kv_backend.clone()).with_max_value_size(
         options
             .procedure
-            .max_value_size
+            .max_metadata_value_size
             .map(|v| v.as_bytes() as usize),
     );
     Arc::new(LocalManager::new(manager_config, Arc::new(state_store)))
