@@ -188,7 +188,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
         // This closure capture following variables:
         let mfp_plan = MfpPlan::create_from(mfp).context(EvalSnafu)?;
-        let now = self.compute_state.current_ts();
+        let now = self.compute_state.current_time_ref();
 
         let err_collector = self.err_collector.clone();
 
@@ -208,7 +208,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     &arrange_handler_inner,
                     data,
                     &mfp_plan,
-                    now,
+                    *now.borrow(),
                     &err_collector,
                     &scheduler_inner,
                     send,

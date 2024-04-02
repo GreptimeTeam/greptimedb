@@ -65,6 +65,13 @@ impl DataflowState {
         }
     }
 
+    /// return a handle to the current time, will update when `as_of` is updated
+    ///
+    /// so it can keep track of the current time even in a closure that is called later
+    pub fn current_time_ref(&self) -> Rc<RefCell<Timestamp>> {
+        self.as_of.clone()
+    }
+
     pub fn current_ts(&self) -> Timestamp {
         *self.as_of.borrow()
     }
