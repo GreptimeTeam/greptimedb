@@ -18,9 +18,12 @@ mod load_balance;
 mod lock;
 mod procedure;
 
+mod cluster;
 mod store;
+mod util;
 
 use api::v1::meta::Role;
+use cluster::Client as ClusterClient;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
@@ -50,6 +53,7 @@ pub type Id = (u64, u64);
 
 const DEFAULT_ASK_LEADER_MAX_RETRY: usize = 3;
 const DEFAULT_SUBMIT_DDL_MAX_RETRY: usize = 3;
+const DEFAULT_CLUSTER_CLIENT_MAX_RETRY: usize = 3;
 
 #[derive(Clone, Debug, Default)]
 pub struct MetaClientBuilder {
@@ -60,6 +64,7 @@ pub struct MetaClientBuilder {
     enable_store: bool,
     enable_lock: bool,
     enable_procedure: bool,
+    enable_access_cluster_info: bool,
     channel_manager: Option<ChannelManager>,
     ddl_channel_manager: Option<ChannelManager>,
     heartbeat_channel_manager: Option<ChannelManager>,
@@ -105,6 +110,13 @@ impl MetaClientBuilder {
     pub fn enable_procedure(self) -> Self {
         Self {
             enable_procedure: true,
+            ..self
+        }
+    }
+
+    pub fn enable_access_cluster_info(self) -> Self {
+        Self {
+            enable_access_cluster_info: true,
             ..self
         }
     }
@@ -159,13 +171,21 @@ impl MetaClientBuilder {
             client.lock = Some(LockClient::new(self.id, self.role, mgr.clone()));
         }
         if self.enable_procedure {
-            let mgr = self.ddl_channel_manager.unwrap_or(mgr);
+            let mgr = self.ddl_channel_manager.unwrap_or(mgr.clone());
             client.procedure = Some(ProcedureClient::new(
                 self.id,
                 self.role,
                 mgr,
                 DEFAULT_SUBMIT_DDL_MAX_RETRY,
             ));
+        }
+        if self.enable_access_cluster_info {
+            client.cluster = Some(ClusterClient::new(
+                self.id,
+                self.role,
+                mgr,
+                DEFAULT_CLUSTER_CLIENT_MAX_RETRY,
+            ))
         }
 
         client
@@ -180,6 +200,7 @@ pub struct MetaClient {
     store: Option<StoreClient>,
     lock: Option<LockClient>,
     procedure: Option<ProcedureClient>,
+    cluster: Option<ClusterClient>,
 }
 
 #[async_trait::async_trait]
@@ -254,8 +275,12 @@ impl MetaClient {
             info!("Lock client started");
         }
         if let Some(client) = &mut self.procedure {
-            client.start(urls).await?;
+            client.start(urls.clone()).await?;
             info!("DDL client started");
+        }
+        if let Some(client) = &mut self.cluster {
+            client.start(urls).await?;
+            info!("Cluster client started");
         }
 
         Ok(())

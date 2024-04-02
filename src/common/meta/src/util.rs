@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::meta::ResponseHeader;
+
+use crate::error::{IllegalServerStateSnafu, Result};
+
 /// Get prefix end key of `key`.
 #[inline]
 pub fn get_prefix_end_key(key: &[u8]) -> Vec<u8> {
@@ -25,6 +29,19 @@ pub fn get_prefix_end_key(key: &[u8]) -> Vec<u8> {
 
     // next prefix does not exist (e.g., 0xffff);
     vec![0]
+}
+
+#[inline]
+pub fn check_response_header(header: Option<&ResponseHeader>) -> Result<()> {
+    if let Some(header) = header {
+        if let Some(error) = &header.error {
+            let code = error.code;
+            let err_msg = &error.err_msg;
+            return IllegalServerStateSnafu { code, err_msg }.fail();
+        }
+    }
+
+    Ok(())
 }
 
 /// Get next prefix key of `key`.
