@@ -218,6 +218,7 @@ impl StartCommand {
 mod tests {
     use std::io::Write;
 
+    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
     use meta_srv::selector::SelectorType;
 
@@ -296,6 +297,10 @@ mod tests {
                 .failure_detector
                 .first_heartbeat_estimate
                 .as_millis()
+        );
+        assert_eq!(
+            options.procedure.max_metadata_value_size,
+            Some(ReadableSize::kb(1500))
         );
     }
 

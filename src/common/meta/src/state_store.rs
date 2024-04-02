@@ -45,20 +45,29 @@ fn strip_prefix(key: &str) -> String {
 pub struct KvStateStore {
     kv_backend: KvBackendRef,
     // The max num of keys to be returned in a range scan request
-    // `None` stands no limit.
-    max_num_per_range: Option<usize>,
+    // `None` stands for no limit.
+    max_num_per_range_request: Option<usize>,
     // The max bytes of value.
-    // `None` stands no limit.
-    max_size_per_value: Option<usize>,
+    // `None` stands for no limit.
+    max_value_size: Option<usize>,
 }
 
 impl KvStateStore {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             kv_backend,
-            max_num_per_range: None,
-            max_size_per_value: None,
+            max_num_per_range_request: None,
+            max_value_size: None,
         }
+    }
+
+    /// Sets the `max_value_size`. `None` stands for no limit.
+    ///
+    /// If a value is larger than the `max_value_size`,
+    /// the [`KvStateStore`] will automatically split the large value into multiple values.
+    pub fn with_max_value_size(mut self, max_value_size: Option<usize>) -> Self {
+        self.max_value_size = max_value_size;
+        self
     }
 }
 
@@ -75,12 +84,12 @@ enum SplitValue<'a> {
     Multiple(Vec<&'a [u8]>),
 }
 
-fn split_value(value: &[u8], max_size_per_value: Option<usize>) -> SplitValue<'_> {
-    if let Some(max_size_per_value) = max_size_per_value {
-        if value.len() <= max_size_per_value {
+fn split_value(value: &[u8], max_value_size: Option<usize>) -> SplitValue<'_> {
+    if let Some(max_value_size) = max_value_size {
+        if value.len() <= max_value_size {
             SplitValue::Single(value)
         } else {
-            SplitValue::Multiple(value.chunks(max_size_per_value).collect::<Vec<_>>())
+            SplitValue::Multiple(value.chunks(max_value_size).collect::<Vec<_>>())
         }
     } else {
         SplitValue::Single(value)
@@ -90,7 +99,7 @@ fn split_value(value: &[u8], max_size_per_value: Option<usize>) -> SplitValue<'_
 #[async_trait]
 impl StateStore for KvStateStore {
     async fn put(&self, key: &str, value: Vec<u8>) -> ProcedureResult<()> {
-        let split = split_value(&value, self.max_size_per_value);
+        let split = split_value(&value, self.max_value_size);
         let key = with_prefix(key);
         match split {
             SplitValue::Single(_) => {
@@ -156,7 +165,7 @@ impl StateStore for KvStateStore {
         let stream = PaginationStream::new(
             self.kv_backend.clone(),
             req,
-            self.max_num_per_range.unwrap_or_default(),
+            self.max_num_per_range_request.unwrap_or_default(),
             Arc::new(decode_kv),
         );
 
@@ -214,8 +223,8 @@ mod tests {
     async fn test_meta_state_store() {
         let store = &KvStateStore {
             kv_backend: Arc::new(MemoryKvBackend::new()),
-            max_num_per_range: Some(1), // for testing "more" in range
-            max_size_per_value: None,
+            max_num_per_range_request: Some(1), // for testing "more" in range
+            max_value_size: None,
         };
 
         let walk_top_down = async move |path: &str| -> Vec<KeyValue> {
@@ -294,8 +303,8 @@ mod tests {
         }
         let store = &KvStateStore {
             kv_backend: kv_backend.clone(),
-            max_num_per_range: Some(num_per_range as usize), // for testing "more" in range
-            max_size_per_value: Some(size_limit as usize),
+            max_num_per_range_request: Some(num_per_range as usize), // for testing "more" in range
+            max_value_size: Some(size_limit as usize),
         };
         let walk_top_down = async move |path: &str| -> Vec<KeyValue> {
             let mut data = store
@@ -366,11 +375,11 @@ mod tests {
             Arc::new(ChrootKvBackend::new(chroot.into(), backend))
         };
 
-        let key_preserve_size = 1024;
+        let key_size = 1024;
         // The etcd default size limit of any requests is 1.5MiB.
         // However, some KvBackends, the `ChrootKvBackend`, will add the prefix to `key`;
         // we don't know the exact size of the key.
-        let size_limit = 1536 * 1024 - key_preserve_size;
+        let size_limit = 1536 * 1024 - key_size;
         let page_size = rand::thread_rng().gen_range(1..10);
         test_meta_state_store_split_value_with_size_limit(
             kv_backend,
