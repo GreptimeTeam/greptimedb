@@ -1949,6 +1949,7 @@ dependencies = [
  "object-store",
  "serde",
  "serde_json",
+ "serde_with",
  "smallvec",
  "snafu",
  "tokio",
