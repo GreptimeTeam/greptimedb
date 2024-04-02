@@ -403,6 +403,9 @@ pub enum Error {
 
     #[snafu(display("Alter logical tables invalid arguments: {}", err_msg))]
     AlterLogicalTablesInvalidArguments { err_msg: String, location: Location },
+
+    #[snafu(display("Create logical tables invalid arguments: {}", err_msg))]
+    CreateLogicalTablesInvalidArguments { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -463,7 +466,8 @@ impl ErrorExt for Error {
             | PrimaryKeyNotFound { .. }
             | EmptyKey { .. }
             | InvalidEngineType { .. }
-            | AlterLogicalTablesInvalidArguments { .. } => StatusCode::InvalidArguments,
+            | AlterLogicalTablesInvalidArguments { .. }
+            | CreateLogicalTablesInvalidArguments { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,

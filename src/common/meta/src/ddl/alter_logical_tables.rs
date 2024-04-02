@@ -23,7 +23,6 @@ use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSn
 use common_procedure::{Context, LockKey, Procedure, Status};
 use common_telemetry::{info, warn};
 use futures_util::future;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::ColumnMetadata;
@@ -32,11 +31,10 @@ use strum::AsRefStr;
 use table::metadata::TableId;
 
 use crate::ddl::utils::add_peer_context_if_needed;
-use crate::ddl::{physical_table_metadata, DdlContext};
+use crate::ddl::DdlContext;
 use crate::error::{DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
-use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::find_leaders;
@@ -128,7 +126,7 @@ impl AlterLogicalTablesProcedure {
             });
         }
 
-        // Collects responses from all the alter region tasks.
+        // Collects responses from datanodes.
         let phy_raw_schemas = future::join_all(alter_region_tasks)
             .await
             .into_iter()
@@ -163,44 +161,8 @@ impl AlterLogicalTablesProcedure {
     }
 
     pub(crate) async fn on_update_metadata(&mut self) -> Result<Status> {
-        if !self.data.physical_columns.is_empty() {
-            let physical_table_info = self.data.physical_table_info.as_ref().unwrap();
-
-            // Generates new table info
-            let old_raw_table_info = physical_table_info.table_info.clone();
-            let new_raw_table_info = physical_table_metadata::build_new_physical_table_info(
-                old_raw_table_info,
-                &self.data.physical_columns,
-            );
-
-            // Updates physical table's metadata
-            self.context
-                .table_metadata_manager
-                .update_table_info(
-                    DeserializedValueWithBytes::from_inner(physical_table_info.clone()),
-                    new_raw_table_info,
-                )
-                .await?;
-        }
-
-        let table_info_values = self.build_update_metadata()?;
-        let manager = &self.context.table_metadata_manager;
-        let chunk_size = manager.batch_update_table_info_value_chunk_size();
-        if table_info_values.len() > chunk_size {
-            let chunks = table_info_values
-                .into_iter()
-                .chunks(chunk_size)
-                .into_iter()
-                .map(|check| check.collect::<Vec<_>>())
-                .collect::<Vec<_>>();
-            for chunk in chunks {
-                manager.batch_update_table_info_values(chunk).await?;
-            }
-        } else {
-            manager
-                .batch_update_table_info_values(table_info_values)
-                .await?;
-        }
+        self.update_physical_table_metadata().await?;
+        self.update_logical_tables_metadata().await?;
 
         self.data.state = AlterTablesState::InvalidateTableCache;
         Ok(Status::executing(true))
