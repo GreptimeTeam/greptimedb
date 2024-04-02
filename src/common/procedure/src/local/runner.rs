@@ -24,35 +24,7 @@ use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::procedure::{Output, StringKey};
 use crate::store::ProcedureStore;
-use crate::ProcedureState::Retrying;
 use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
-
-#[derive(Debug)]
-enum ExecResult {
-    Continue,
-    Done,
-    RetryLater,
-    Failed,
-}
-
-#[cfg(test)]
-impl ExecResult {
-    fn is_continue(&self) -> bool {
-        matches!(self, ExecResult::Continue)
-    }
-
-    fn is_done(&self) -> bool {
-        matches!(self, ExecResult::Done)
-    }
-
-    fn is_retry_later(&self) -> bool {
-        matches!(self, ExecResult::RetryLater)
-    }
-
-    fn is_failed(&self) -> bool {
-        matches!(self, ExecResult::Failed)
-    }
-}
 
 /// A guard to cleanup procedure state.
 struct ProcedureGuard {
@@ -216,47 +188,44 @@ impl Runner {
                 });
                 return;
             }
-            match self.execute_once(ctx).await {
-                ExecResult::Done | ExecResult::Failed => return,
-                ExecResult::Continue => (),
-                ExecResult::RetryLater => {
+            self.execute_once(ctx).await;
+            match self.meta.state() {
+                ProcedureState::Running => {}
+                ProcedureState::Retrying { error } => {
                     retry_times += 1;
                     if let Some(d) = retry.next() {
                         self.wait_on_err(d, retry_times).await;
                     } else {
-                        assert!(self.meta.state().is_retrying());
-                        if let Retrying { error } = self.meta.state() {
-                            self.meta.set_state(ProcedureState::failed(Arc::new(
-                                Error::RetryTimesExceeded {
-                                    source: error,
-                                    procedure_id: self.meta.id,
-                                },
-                            )))
-                        }
+                        self.meta.set_state(ProcedureState::failed(Arc::new(
+                            Error::RetryTimesExceeded {
+                                source: error.clone(),
+                                procedure_id: self.meta.id,
+                            },
+                        )));
                         return;
                     }
                 }
+                ProcedureState::Done { .. } => return,
+                ProcedureState::Failed { .. } => return,
             }
         }
     }
 
-    async fn rollback(&mut self, error: Arc<Error>) -> ExecResult {
+    async fn rollback(&mut self, error: Arc<Error>) {
         if let Err(e) = self.rollback_procedure().await {
             self.rolling_back = true;
             self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-            return ExecResult::RetryLater;
         }
         self.meta.set_state(ProcedureState::failed(error));
-        ExecResult::Failed
     }
 
-    async fn execute_once(&mut self, ctx: &Context) -> ExecResult {
+    async fn execute_once(&mut self, ctx: &Context) {
         // if rolling_back, there is no need to execute again.
         if self.rolling_back {
             // We can definitely get the previous error here.
             let state = self.meta.state();
             let err = state.error().unwrap();
-            return self.rollback(err.clone()).await;
+            self.rollback(err.clone()).await;
         }
         match self.procedure.execute(ctx).await {
             Ok(status) => {
@@ -273,13 +242,13 @@ impl Runner {
                     self.meta.set_state(ProcedureState::Failed {
                         error: Arc::new(error::ManagerNotStartSnafu {}.build()),
                     });
-                    return ExecResult::Failed;
+                    return;
                 }
 
                 if status.need_persist() {
                     if let Err(err) = self.persist_procedure().await {
                         self.meta.set_state(ProcedureState::retrying(Arc::new(err)));
-                        return ExecResult::RetryLater;
+                        return;
                     }
                 }
 
@@ -291,15 +260,12 @@ impl Runner {
                     Status::Done { output } => {
                         if let Err(e) = self.commit_procedure().await {
                             self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-                            return ExecResult::RetryLater;
+                            return;
                         }
 
                         self.done(output);
-                        return ExecResult::Done;
                     }
                 }
-
-                ExecResult::Continue
             }
             Err(e) => {
                 logging::error!(
@@ -315,12 +281,12 @@ impl Runner {
                     self.meta.set_state(ProcedureState::Failed {
                         error: Arc::new(error::ManagerNotStartSnafu {}.build()),
                     });
-                    return ExecResult::Failed;
+                    return;
                 }
 
                 if e.is_retry_later() {
                     self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-                    return ExecResult::RetryLater;
+                    return;
                 }
 
                 // Write rollback key so we can skip this procedure while recovering procedures.
@@ -633,8 +599,9 @@ mod tests {
         let mut runner = new_runner(meta, Box::new(normal), procedure_store.clone());
         runner.manager_ctx.start();
 
-        let res = runner.execute_once(&ctx).await;
-        assert!(res.is_continue(), "{res:?}");
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
         check_files(
             &object_store,
             &procedure_store,
@@ -643,8 +610,9 @@ mod tests {
         )
         .await;
 
-        let res = runner.execute_once(&ctx).await;
-        assert!(res.is_done(), "{res:?}");
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_done(), "{state:?}");
         check_files(
             &object_store,
             &procedure_store,
@@ -694,8 +662,9 @@ mod tests {
         let mut runner = new_runner(meta, Box::new(suspend), procedure_store);
         runner.manager_ctx.start();
 
-        let res = runner.execute_once(&ctx).await;
-        assert!(res.is_continue(), "{res:?}");
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
     }
 
     fn new_child_procedure(procedure_id: ProcedureId, keys: &[&str]) -> ProcedureWithId {
@@ -840,8 +809,9 @@ mod tests {
         let mut runner = new_runner(meta, Box::new(normal), procedure_store.clone());
         runner.manager_ctx.start();
 
-        let res = runner.execute_once(&ctx).await;
-        assert!(res.is_continue(), "{res:?}");
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
         check_files(
             &object_store,
             &procedure_store,
@@ -851,8 +821,9 @@ mod tests {
         .await;
 
         runner.manager_ctx.stop();
-        let res = runner.execute_once(&ctx).await;
-        assert!(res.is_failed());
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_failed(), "{state:?}");
         // Shouldn't write any files
         check_files(
             &object_store,
@@ -881,8 +852,9 @@ mod tests {
         let mut runner = new_runner(meta, Box::new(normal), procedure_store.clone());
         runner.manager_ctx.stop();
 
-        let res = runner.execute_once(&ctx).await;
-        assert!(res.is_failed(), "{res:?}");
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_failed(), "{state:?}");
         // Shouldn't write any files
         check_files(&object_store, &procedure_store, ctx.procedure_id, &[]).await;
     }
@@ -905,8 +877,9 @@ mod tests {
         let mut runner = new_runner(meta.clone(), Box::new(fail), procedure_store.clone());
         runner.manager_ctx.start();
 
-        let res = runner.execute_once(&ctx).await;
-        assert!(res.is_failed(), "{res:?}");
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_failed(), "{state:?}");
         assert!(meta.state().is_failed());
         check_files(
             &object_store,
@@ -946,13 +919,13 @@ mod tests {
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(retry_later), procedure_store.clone());
         runner.manager_ctx.start();
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_retrying(), "{state:?}");
 
-        let res = runner.execute_once(&ctx).await;
-        assert!(res.is_retry_later(), "{res:?}");
-        assert!(meta.state().is_retrying());
-
-        let res = runner.execute_once(&ctx).await;
-        assert!(res.is_done(), "{res:?}");
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_done(), "{state:?}");
         assert!(meta.state().is_done());
         check_files(
             &object_store,
