@@ -60,6 +60,15 @@ impl KvStateStore {
             max_size_per_value: None,
         }
     }
+
+    /// Sets the `max_size_per_value`.
+    ///
+    /// If a value is larger than the `max_size_per_value`,
+    /// the [`KvStateStore`] will automatically split the large value into multiple values.
+    pub fn with_max_size_per_value(mut self, max_size_per_value: usize) -> Self {
+        self.max_num_per_range = Some(max_size_per_value);
+        self
+    }
 }
 
 fn decode_kv(kv: KeyValue) -> Result<(String, Vec<u8>)> {

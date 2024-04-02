@@ -29,6 +29,11 @@ store_key_prefix = ""
 max_retry_times = 12
 # Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
+# Auto split large value
+# The etcd the maximum size of any request is 1.5 MiB
+# 1535KiB = 1536KiB (1.5MiB) - 1KiB (reserved size of key)
+# If it's empty, it stands for no limit.
+max_value_size = "1535KiB"
 
 # Failure detectors options.
 [failure_detector]

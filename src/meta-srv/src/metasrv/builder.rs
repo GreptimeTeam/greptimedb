@@ -376,8 +376,11 @@ fn build_procedure_manager(
         retry_delay: options.procedure.retry_delay,
         ..Default::default()
     };
-    let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
-    Arc::new(LocalManager::new(manager_config, state_store))
+    let mut state_store = KvStateStore::new(kv_backend.clone());
+    if let Some(max_value_size) = options.procedure.max_value_size {
+        state_store = state_store.with_max_size_per_value(max_value_size.as_bytes() as usize);
+    }
+    Arc::new(LocalManager::new(manager_config, Arc::new(state_store)))
 }
 
 fn build_ddl_manager(
