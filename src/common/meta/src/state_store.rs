@@ -366,11 +366,11 @@ mod tests {
             Arc::new(ChrootKvBackend::new(chroot.into(), backend))
         };
 
-        let key_preserve_size = 1024;
+        let key_size = 1024;
         // The etcd default size limit of any requests is 1.5MiB.
         // However, some KvBackends, the `ChrootKvBackend`, will add the prefix to `key`;
         // we don't know the exact size of the key.
-        let size_limit = 1536 * 1024 - key_preserve_size;
+        let size_limit = 1536 * 1024 - key_size;
         let page_size = rand::thread_rng().gen_range(1..10);
         test_meta_state_store_split_value_with_size_limit(
             kv_backend,
