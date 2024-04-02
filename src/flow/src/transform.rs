@@ -27,12 +27,14 @@ use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
-use crate::adapter::error::{Error, NotImplementedSnafu, PlanSnafu, TableNotFoundSnafu};
+use crate::adapter::error::{
+    Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, TableNotFoundSnafu,
+};
 use crate::expr::{
     AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
     UnaryFunc, UnmaterializableFunc, VariadicFunc,
 };
-use crate::plan::{KeyValPlan, Plan, ReducePlan, TypedPlan};
+use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{ColumnType, RelationType};
 
 macro_rules! not_impl_err {
@@ -217,7 +219,7 @@ pub fn from_substrait_rel(
                 }
             };
 
-            {
+            let key_val_plan = {
                 let (group_expr_val, group_expr_type): (Vec<_>, Vec<_>) =
                     group_expr.iter().cloned().unzip();
                 let input_arity = input.typ.column_types.len();
@@ -227,15 +229,15 @@ pub fn from_substrait_rel(
                     .project(input_arity..input_arity + output_arity)?;
                 let key_used = key_plan.demand();
                 // find out all the columns that are not used in the key plan
-                let mut value_indices = (0..input_arity)
+                let value_indices = (0..input_arity)
                     .filter(|i| !key_used.contains(i))
                     .collect::<Vec<_>>();
                 let val_plan = MapFilterProject::new(input_arity).project(value_indices.clone())?;
-                let key_val_plan = KeyValPlan {
+                KeyValPlan {
                     key_plan: key_plan.into_safe(),
                     val_plan: val_plan.into_safe(),
-                };
-            }
+                }
+            };
 
             for m in &agg.measures {
                 let filter = match &m.filter {
@@ -261,7 +263,47 @@ pub fn from_substrait_rel(
                 aggr_expr.push(agg_func?.clone());
             }
 
-            todo!()
+            let output_type = {
+                let mut output_types = Vec::new();
+                for aggr in &aggr_expr {
+                    output_types.push(ColumnType::new_nullable(
+                        aggr.func.signature().output.clone(),
+                    ));
+                }
+                RelationType::new(output_types)
+            };
+            let full_aggrs = aggr_expr;
+            let mut simple_aggrs = Vec::new();
+            let mut distinct_aggrs = Vec::new();
+            for (output_column, aggr_expr) in full_aggrs.iter().enumerate() {
+                // TODO: support using literal as argument
+                let input_column =
+                    aggr_expr
+                        .expr
+                        .as_column()
+                        .with_context(|| InvalidQuerySnafu {
+                            reason: "Aggregate argument must be a column",
+                        })?;
+                if aggr_expr.distinct {
+                    distinct_aggrs.push((output_column, input_column, aggr_expr.clone()));
+                } else {
+                    simple_aggrs.push((output_column, input_column, aggr_expr.clone()));
+                }
+            }
+            let accum_plan = AccumulablePlan {
+                full_aggrs,
+                simple_aggrs,
+                distinct_aggrs,
+            };
+            let plan = Plan::Reduce {
+                input: Box::new(input.plan),
+                key_val_plan,
+                reduce_plan: ReducePlan::Accumulable(accum_plan),
+            };
+            Ok(TypedPlan {
+                typ: output_type,
+                plan,
+            })
         }
         _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
     }

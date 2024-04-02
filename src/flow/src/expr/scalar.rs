@@ -167,6 +167,14 @@ impl ScalarExpr {
         support
     }
 
+    pub fn as_column(&self) -> Option<usize> {
+        if let ScalarExpr::Column(i) = self {
+            Some(*i)
+        } else {
+            None
+        }
+    }
+
     pub fn as_literal(&self) -> Option<Value> {
         if let ScalarExpr::Literal(lit, _column_type) = self {
             Some(lit.clone())
