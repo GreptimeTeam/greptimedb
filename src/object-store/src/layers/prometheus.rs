@@ -22,7 +22,6 @@ use std::time::Instant;
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_telemetry::debug;
-use futures::FutureExt;
 use lazy_static::lazy_static;
 use opendal::raw::*;
 use opendal::ErrorKind;
@@ -157,30 +156,27 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
         let timer = REQUESTS_DURATION_SECONDS
             .with_label_values(&[&self.scheme, Operation::Read.into_static()])
             .start_timer();
-        let read_res = self.inner.read(path, args);
+        let read_res = self.inner.read(path, args).await;
         timer.observe_duration();
 
         read_res
-            .map(|v| {
-                v.map(|(rp, r)| {
-                    (
-                        rp,
-                        PrometheusMetricWrapper::new(
-                            r,
-                            Operation::Read,
-                            BYTES_TOTAL
-                                .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
-                            REQUESTS_DURATION_SECONDS
-                                .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
-                        ),
-                    )
-                })
-                .map_err(|e| {
-                    increment_errors_total(Operation::Read, e.kind());
-                    e
-                })
+            .map(|(rp, r)| {
+                (
+                    rp,
+                    PrometheusMetricWrapper::new(
+                        r,
+                        Operation::Read,
+                        BYTES_TOTAL
+                            .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
+                        REQUESTS_DURATION_SECONDS
+                            .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
+                    ),
+                )
             })
-            .await
+            .map_err(|e| {
+                increment_errors_total(Operation::Read, e.kind());
+                e
+            })
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -191,30 +187,27 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
         let timer = REQUESTS_DURATION_SECONDS
             .with_label_values(&[&self.scheme, Operation::Write.into_static()])
             .start_timer();
-        let write_res = self.inner.write(path, args);
+        let write_res = self.inner.write(path, args).await;
         timer.observe_duration();
 
         write_res
-            .map(|v| {
-                v.map(|(rp, r)| {
-                    (
-                        rp,
-                        PrometheusMetricWrapper::new(
-                            r,
-                            Operation::Write,
-                            BYTES_TOTAL
-                                .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
-                            REQUESTS_DURATION_SECONDS
-                                .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
-                        ),
-                    )
-                })
-                .map_err(|e| {
-                    increment_errors_total(Operation::Write, e.kind());
-                    e
-                })
+            .map(|(rp, r)| {
+                (
+                    rp,
+                    PrometheusMetricWrapper::new(
+                        r,
+                        Operation::Write,
+                        BYTES_TOTAL
+                            .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
+                        REQUESTS_DURATION_SECONDS
+                            .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
+                    ),
+                )
             })
-            .await
+            .map_err(|e| {
+                increment_errors_total(Operation::Write, e.kind());
+                e
+            })
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
