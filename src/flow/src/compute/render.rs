@@ -159,7 +159,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
             self.local_scope.push(Default::default());
             self.local_scope.last_mut().unwrap()
         };
-        local_scope.insert(id, value);
+        self.insert_local(id, value);
         let ret = self.render_plan(*body)?;
         Ok(ret)
     }
