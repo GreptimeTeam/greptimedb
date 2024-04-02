@@ -125,6 +125,13 @@ pub trait Procedure: Send {
     /// The implementation must be idempotent.
     async fn execute(&mut self, ctx: &Context) -> Result<Status>;
 
+    /// Rollback the failed procedure.
+    ///
+    /// The implementation must be idempotent.
+    async fn rollback(&mut self, _: &Context) -> Result<()> {
+        Ok(())
+    }
+
     /// Dump the state of the procedure to a string.
     fn dump(&self) -> Result<String>;
 
