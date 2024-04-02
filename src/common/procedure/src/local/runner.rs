@@ -200,13 +200,13 @@ impl Runner {
                     if let Some(d) = retry.next() {
                         self.wait_on_err(d, retry_times).await;
                     } else {
-                        self.meta.set_state(ProcedureState::failed(Arc::new(
-                            Error::RetryTimesExceeded {
-                                source: error.clone(),
-                                procedure_id: self.meta.id,
-                            },
-                        )));
-                        return;
+                        self.meta
+                            .set_state(ProcedureState::commit_rollback(Arc::new(
+                                Error::RetryTimesExceeded {
+                                    source: error.clone(),
+                                    procedure_id: self.meta.id,
+                                },
+                            )));
                     }
                 }
                 ProcedureState::CommitRollback { error }
@@ -216,7 +216,7 @@ impl Runner {
                         self.wait_on_err(d, rollback_times).await;
                     } else {
                         self.meta.set_state(ProcedureState::failed(Arc::new(
-                            Error::RetryTimesExceeded {
+                            Error::RollbackTimesExceeded {
                                 source: error.clone(),
                                 procedure_id: self.meta.id,
                             },
@@ -506,6 +506,7 @@ mod tests {
     use futures_util::future::BoxFuture;
     use futures_util::FutureExt;
     use object_store::ObjectStore;
+    use tokio::sync::mpsc;
 
     use super::*;
     use crate::local::test_util;
@@ -562,11 +563,13 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
+    type RollbackFn = Box<dyn FnMut(Context) -> BoxFuture<'static, Result<()>> + Send>;
+
     struct ProcedureAdapter<F> {
         data: String,
         lock_key: LockKey,
         exec_fn: F,
+        rollback_fn: Option<RollbackFn>,
     }
 
     impl<F> ProcedureAdapter<F> {
@@ -591,6 +594,13 @@ mod tests {
         async fn execute(&mut self, ctx: &Context) -> Result<Status> {
             let f = (self.exec_fn)(ctx.clone());
             f.await
+        }
+
+        async fn rollback(&mut self, ctx: &Context) -> Result<()> {
+            if let Some(f) = &mut self.rollback_fn {
+                return (f)(ctx.clone()).await;
+            }
+            Ok(())
         }
 
         fn dump(&self) -> Result<String> {
@@ -619,6 +629,7 @@ mod tests {
             data: "normal".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
+            rollback_fn: None,
         };
 
         let dir = create_temp_dir("normal");
@@ -682,6 +693,7 @@ mod tests {
             data: "suspend".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
+            rollback_fn: None,
         };
 
         let dir = create_temp_dir("suspend");
@@ -715,6 +727,7 @@ mod tests {
             data: "child".to_string(),
             lock_key: LockKey::new_exclusive(keys.iter().map(|k| k.to_string())),
             exec_fn,
+            rollback_fn: None,
         };
 
         ProcedureWithId {
@@ -783,6 +796,7 @@ mod tests {
             data: "parent".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
+            rollback_fn: None,
         };
 
         let dir = create_temp_dir("parent");
@@ -829,6 +843,7 @@ mod tests {
             data: "normal".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
+            rollback_fn: None,
         };
 
         let dir = create_temp_dir("test_running_is_stopped");
@@ -872,6 +887,7 @@ mod tests {
             data: "fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
+            rollback_fn: None,
         };
 
         let dir = create_temp_dir("test_running_is_stopped_on_error");
@@ -897,6 +913,7 @@ mod tests {
             data: "fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
+            rollback_fn: None,
         };
 
         let dir = create_temp_dir("fail");
@@ -947,6 +964,7 @@ mod tests {
             data: "retry_later".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
+            rollback_fn: None,
         };
 
         let dir = create_temp_dir("retry_later");
@@ -982,6 +1000,7 @@ mod tests {
             data: "exceed_max_retry_later".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
+            rollback_fn: None,
         };
 
         let dir = create_temp_dir("exceed_max_retry_later");
@@ -1006,6 +1025,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rollback_exceed_max_retry_later() {
+        let exec_fn =
+            |_| async { Err(Error::retry_later(MockError::new(StatusCode::Unexpected))) }.boxed();
+        let rollback_fn = move |_| {
+            async move { Err(Error::retry_later(MockError::new(StatusCode::Unexpected))) }.boxed()
+        };
+        let exceed_max_retry_later = ProcedureAdapter {
+            data: "exceed_max_rollback".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            exec_fn,
+            rollback_fn: Some(Box::new(rollback_fn)),
+        };
+
+        let dir = create_temp_dir("exceed_max_rollback");
+        let meta = exceed_max_retry_later.new_meta(ROOT_ID);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(
+            meta.clone(),
+            Box::new(exceed_max_retry_later),
+            procedure_store,
+        );
+        runner.manager_ctx.start();
+        runner.exponential_builder = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(1))
+            .with_max_times(3);
+
+        // Run the runner and execute the procedure.
+        runner.execute_procedure_in_loop().await;
+        let err = meta.state().error().unwrap().to_string();
+        assert!(err.contains("Procedure rollback exceeded max times"));
+    }
+
+    #[tokio::test]
+    async fn test_rollback_after_retry_fail() {
+        let exec_fn = move |_| {
+            async move { Err(Error::retry_later(MockError::new(StatusCode::Unexpected))) }.boxed()
+        };
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let rollback_fn = move |_| {
+            let tx = tx.clone();
+            async move {
+                tx.send(()).await.unwrap();
+                Ok(())
+            }
+            .boxed()
+        };
+        let retry_later = ProcedureAdapter {
+            data: "rollback_after_retry_fail".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            exec_fn,
+            rollback_fn: Some(Box::new(rollback_fn)),
+        };
+
+        let dir = create_temp_dir("retry_later");
+        let meta = retry_later.new_meta(ROOT_ID);
+        let ctx = context_without_provider(meta.id);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta.clone(), Box::new(retry_later), procedure_store.clone());
+        runner.manager_ctx.start();
+        runner.exponential_builder = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(1))
+            .with_max_times(3);
+        // Run the runner and execute the procedure.
+        runner.execute_procedure_in_loop().await;
+        rx.recv().await.unwrap();
+        assert_eq!(rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
+        check_files(
+            &object_store,
+            &procedure_store,
+            ctx.procedure_id,
+            &["0000000000.rollback"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_child_error() {
         let mut times = 0;
         let child_id = ProcedureId::random();
@@ -1023,6 +1121,7 @@ mod tests {
                         data: "fail".to_string(),
                         lock_key: LockKey::single_exclusive("catalog.schema.table.region-0"),
                         exec_fn,
+                        rollback_fn: None,
                     };
 
                     Ok(Status::Suspended {
@@ -1057,6 +1156,7 @@ mod tests {
             data: "parent".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
+            rollback_fn: None,
         };
 
         let dir = create_temp_dir("child_err");
