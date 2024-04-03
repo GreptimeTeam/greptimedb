@@ -31,6 +31,7 @@ pub type SendableEntryStream<'a, I, E> = Pin<Box<dyn Stream<Item = Result<Vec<I>
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::mem::size_of;
     use std::task::{Context, Poll};
 
     use common_error::ext::StackError;
@@ -86,6 +87,10 @@ mod tests {
 
         fn namespace(&self) -> Self::Namespace {
             Namespace {}
+        }
+
+        fn estimated_size(&self) -> usize {
+            self.data.capacity() * size_of::<u8>()
         }
     }
 

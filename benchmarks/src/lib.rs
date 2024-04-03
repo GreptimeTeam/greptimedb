@@ -12,14 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains)]
-#![feature(io_error_more)]
-
-pub mod error;
-pub mod kafka;
 pub mod metrics;
-mod noop;
-pub mod raft_engine;
-pub mod test_util;
-
-pub use noop::NoopLogStore;
+pub mod wal_bench;

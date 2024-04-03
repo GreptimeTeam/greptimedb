@@ -36,7 +36,7 @@ common-test-util.workspace = true
 common-wal.workspace = true
 datanode = { workspace = true }
 datatypes.workspace = true
-dotenv = "0.15"
+dotenv.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 meta-client.workspace = true

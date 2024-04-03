@@ -99,11 +99,13 @@ datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.g
 datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 derive_builder = "0.12"
+dotenv = "0.15"
 etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "06f6297ff3cab578a1589741b504342fbad70453" }
+humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
