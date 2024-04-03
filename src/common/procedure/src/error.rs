@@ -104,6 +104,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Procedure recovered after the system fails"))]
+    ProcedureRecoveredAfterFails { location: Location },
+
     #[snafu(display("Procedure retry exceeded max times, procedure_id: {}", procedure_id))]
     RetryTimesExceeded {
         source: Arc<Error>,
@@ -173,7 +176,8 @@ impl ErrorExt for Error {
             | Error::RollbackTimesExceeded { .. }
             | Error::RetryLater { .. }
             | Error::WaitWatcher { .. }
-            | Error::ManagerNotStart { .. } => StatusCode::Internal,
+            | Error::ManagerNotStart { .. }
+            | Error::ProcedureRecoveredAfterFails { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }

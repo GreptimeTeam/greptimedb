@@ -22,7 +22,7 @@ use tokio::time;
 use super::rwlock::OwnedKeyRwLockGuard;
 use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
-use crate::procedure::{Output, StringKey};
+use crate::procedure::{InitProcedureState, Output, StringKey};
 use crate::store::ProcedureStore;
 use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
 
@@ -187,9 +187,9 @@ impl Runner {
         loop {
             // Don't store state if `ProcedureManager` is stopped.
             if !self.running() {
-                self.meta.set_state(ProcedureState::Failed {
-                    error: Arc::new(error::ManagerNotStartSnafu {}.build()),
-                });
+                self.meta.set_state(ProcedureState::failed(Arc::new(
+                    error::ManagerNotStartSnafu {}.build(),
+                )));
                 return;
             }
             let state = self.meta.state();
@@ -264,9 +264,9 @@ impl Runner {
 
                         // Don't store state if `ProcedureManager` is stopped.
                         if !self.running() {
-                            self.meta.set_state(ProcedureState::Failed {
-                                error: Arc::new(error::ManagerNotStartSnafu {}.build()),
-                            });
+                            self.meta.set_state(ProcedureState::failed(Arc::new(
+                                error::ManagerNotStartSnafu {}.build(),
+                            )));
                             return;
                         }
 
@@ -303,9 +303,9 @@ impl Runner {
 
                         // Don't store state if `ProcedureManager` is stopped.
                         if !self.running() {
-                            self.meta.set_state(ProcedureState::Failed {
-                                error: Arc::new(error::ManagerNotStartSnafu {}.build()),
-                            });
+                            self.meta.set_state(ProcedureState::failed(Arc::new(
+                                error::ManagerNotStartSnafu {}.build(),
+                            )));
                             return;
                         }
 
@@ -326,7 +326,12 @@ impl Runner {
     }
 
     /// Submit a subprocedure with specific `procedure_id`.
-    fn submit_subprocedure(&self, procedure_id: ProcedureId, mut procedure: BoxedProcedure) {
+    fn submit_subprocedure(
+        &self,
+        procedure_id: ProcedureId,
+        init_state: InitProcedureState,
+        mut procedure: BoxedProcedure,
+    ) {
         if self.manager_ctx.contains_procedure(procedure_id) {
             // If the parent has already submitted this procedure, don't submit it again.
             return;
@@ -346,6 +351,7 @@ impl Runner {
 
         let meta = Arc::new(ProcedureMeta::new(
             procedure_id,
+            init_state,
             Some(self.meta.id),
             procedure.lock_key(),
         ));
@@ -403,7 +409,11 @@ impl Runner {
                 subprocedure.id,
             );
 
-            self.submit_subprocedure(subprocedure.id, subprocedure.procedure);
+            self.submit_subprocedure(
+                subprocedure.id,
+                InitProcedureState::Running,
+                subprocedure.procedure,
+            );
         }
 
         logging::info!(

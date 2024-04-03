@@ -23,7 +23,7 @@ use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
 
-use crate::error::{Error, Result};
+use crate::error::{self, Error, Result};
 use crate::watcher::Watcher;
 
 pub type Output = Arc<dyn Any + Send + Sync>;
@@ -364,6 +364,24 @@ impl ProcedureState {
             _ => None,
         }
     }
+}
+
+impl From<InitProcedureState> for ProcedureState {
+    fn from(value: InitProcedureState) -> Self {
+        match value {
+            InitProcedureState::Running => ProcedureState::Running,
+            InitProcedureState::RollingBack => ProcedureState::RollingBack {
+                error: Arc::new(error::ProcedureRecoveredAfterFailsSnafu {}.build()),
+            },
+        }
+    }
+}
+
+/// The initial procedure state.
+#[derive(Debug, Clone, Copy)]
+pub enum InitProcedureState {
+    Running,
+    RollingBack,
 }
 
 // TODO(yingwen): Shutdown

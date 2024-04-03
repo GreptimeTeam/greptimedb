@@ -35,7 +35,7 @@ use crate::error::{
     StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
 };
 use crate::local::runner::Runner;
-use crate::procedure::BoxedProcedureLoader;
+use crate::procedure::{BoxedProcedureLoader, InitProcedureState};
 use crate::store::{ProcedureMessage, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
@@ -72,8 +72,13 @@ pub(crate) struct ProcedureMeta {
 }
 
 impl ProcedureMeta {
-    fn new(id: ProcedureId, parent_id: Option<ProcedureId>, lock_key: LockKey) -> ProcedureMeta {
-        let (state_sender, state_receiver) = watch::channel(ProcedureState::Running);
+    fn new(
+        id: ProcedureId,
+        init_state: InitProcedureState,
+        parent_id: Option<ProcedureId>,
+        lock_key: LockKey,
+    ) -> ProcedureMeta {
+        let (state_sender, state_receiver) = watch::channel(init_state.into());
         ProcedureMeta {
             id,
             parent_id,
@@ -424,12 +429,18 @@ impl LocalManager {
     fn submit_root(
         &self,
         procedure_id: ProcedureId,
+        init_state: InitProcedureState,
         step: u32,
         procedure: BoxedProcedure,
     ) -> Result<Watcher> {
         ensure!(self.manager_ctx.running(), ManagerNotStartSnafu);
 
-        let meta = Arc::new(ProcedureMeta::new(procedure_id, None, procedure.lock_key()));
+        let meta = Arc::new(ProcedureMeta::new(
+            procedure_id,
+            init_state,
+            None,
+            procedure.lock_key(),
+        ));
         let runner = Runner {
             meta: meta.clone(),
             procedure,
@@ -468,13 +479,11 @@ impl LocalManager {
         Ok(watcher)
     }
 
-    /// Recovers unfinished procedures and reruns them.
-    async fn recover(&self) -> Result<()> {
-        logging::info!("LocalManager start to recover");
-        let recover_start = Instant::now();
-
-        let (messages, finished_ids) = self.procedure_store.load_messages().await?;
-
+    fn submit_recovered_messages(
+        &self,
+        messages: HashMap<ProcedureId, ProcedureMessage>,
+        init_state: InitProcedureState,
+    ) {
         for (procedure_id, message) in &messages {
             if message.parent_id.is_none() {
                 // This is the root procedure. We only submit the root procedure as it will
@@ -496,6 +505,7 @@ impl LocalManager {
 
                 if let Err(e) = self.submit_root(
                     *procedure_id,
+                    init_state,
                     loaded_procedure.step,
                     loaded_procedure.procedure,
                 ) {
@@ -503,6 +513,18 @@ impl LocalManager {
                 }
             }
         }
+    }
+
+    /// Recovers unfinished procedures and reruns them.
+    async fn recover(&self) -> Result<()> {
+        logging::info!("LocalManager start to recover");
+        let recover_start = Instant::now();
+
+        let (messages, rollback_messages, finished_ids) =
+            self.procedure_store.load_messages().await?;
+        // Submits recovered messages first.
+        self.submit_recovered_messages(rollback_messages, InitProcedureState::RollingBack);
+        self.submit_recovered_messages(messages, InitProcedureState::Running);
 
         if !finished_ids.is_empty() {
             logging::info!(
@@ -587,7 +609,12 @@ impl ProcedureManager for LocalManager {
             DuplicateProcedureSnafu { procedure_id }
         );
 
-        self.submit_root(procedure.id, 0, procedure.procedure)
+        self.submit_root(
+            procedure.id,
+            InitProcedureState::Running,
+            0,
+            procedure.procedure,
+        )
     }
 
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
@@ -626,7 +653,12 @@ pub(crate) mod test_util {
     use super::*;
 
     pub(crate) fn procedure_meta_for_test() -> ProcedureMeta {
-        ProcedureMeta::new(ProcedureId::random(), None, LockKey::default())
+        ProcedureMeta::new(
+            ProcedureId::random(),
+            InitProcedureState::Running,
+            None,
+            LockKey::default(),
+        )
     }
 
     pub(crate) fn new_object_store(dir: &TempDir) -> ObjectStore {
