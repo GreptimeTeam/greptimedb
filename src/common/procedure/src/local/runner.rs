@@ -466,8 +466,18 @@ impl Runner {
     }
 
     async fn rollback_procedure(&mut self) -> Result<()> {
+        // Persists procedure state
+        let type_name = self.procedure.type_name().to_string();
+        let data = self.procedure.dump()?;
+
         self.store
-            .rollback_procedure(self.meta.id, self.step)
+            .rollback_procedure(
+                self.meta.id,
+                self.step,
+                type_name,
+                data,
+                self.meta.parent_id,
+            )
             .await
             .map_err(|e| {
                 logging::error!(
