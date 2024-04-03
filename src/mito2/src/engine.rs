@@ -401,6 +401,11 @@ impl MitoEngine {
             }),
         })
     }
+
+    /// Returns the purge scheduler.
+    pub fn purge_scheduler(&self) -> &crate::schedule::scheduler::SchedulerRef {
+        self.inner.workers.purge_scheduler()
+    }
 }
 
 #[cfg(test)]
