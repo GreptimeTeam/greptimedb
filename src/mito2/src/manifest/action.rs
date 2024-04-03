@@ -22,13 +22,14 @@ use snafu::{OptionExt, ResultExt};
 use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
+use strum::Display;
 
 use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
 use crate::sst::file::{FileId, FileMeta};
 use crate::wal::EntryId;
 
 /// Actions that can be applied to region manifest.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Display)]
 pub enum RegionMetaAction {
     /// Change region's metadata for request like ALTER
     Change(RegionChange),

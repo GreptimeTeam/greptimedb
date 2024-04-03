@@ -29,6 +29,7 @@ use crate::manifest::action::{
     RegionMetaActionList,
 };
 use crate::manifest::storage::{file_version, is_delta_file, ManifestObjectStore};
+use crate::metrics::{MANIFEST_CHECKPOINT_ELAPSED, MANIFEST_UPDATE_ELAPSED};
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
@@ -339,6 +340,10 @@ impl RegionManifestManagerInner {
         let mut manifest_builder =
             RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
         for action in action_list.actions {
+            let _ = MANIFEST_UPDATE_ELAPSED
+                .with_label_values(&[&action.to_string()])
+                .start_timer();
+
             match action {
                 RegionMetaAction::Change(action) => {
                     manifest_builder.apply_change(version, action);
@@ -395,6 +400,8 @@ impl RegionManifestManagerInner {
 
     /// Makes a new checkpoint. Return the fresh one if there are some actions to compact.
     async fn do_checkpoint(&mut self) -> Result<Option<RegionCheckpoint>> {
+        let _ = MANIFEST_CHECKPOINT_ELAPSED.start_timer();
+
         let last_checkpoint = Self::last_checkpoint(&mut self.store).await?;
         let current_version = self.last_version;
 
