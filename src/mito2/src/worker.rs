@@ -292,6 +292,11 @@ impl WorkerGroup {
             cache_manager,
         })
     }
+
+    /// Returns the purge scheduler.
+    pub(crate) fn purge_scheduler(&self) -> &SchedulerRef {
+        &self.purge_scheduler
+    }
 }
 
 fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
@@ -818,6 +823,15 @@ impl WorkerListener {
         // Avoid compiler warning.
         let _ = region_id;
         let _ = removed;
+    }
+
+    pub(crate) async fn on_handle_compaction_finished(&self, region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_handle_compaction_finished(region_id).await;
+        }
+        // Avoid compiler warning.
+        let _ = region_id;
     }
 }
 

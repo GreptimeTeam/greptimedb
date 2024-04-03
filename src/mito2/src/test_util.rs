@@ -157,7 +157,7 @@ impl TestEnv {
             .unwrap()
     }
 
-    /// Creates a new engine with specific config and manager/listener under this env.
+    /// Creates a new engine with specific config and manager/listener/purge_scheduler under this env.
     pub async fn create_engine_with(
         &mut self,
         config: MitoConfig,
