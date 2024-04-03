@@ -17,17 +17,17 @@
 use std::fmt::{Debug, Formatter};
 use std::io;
 use std::task::{Context, Poll};
-use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_telemetry::debug;
+use futures::FutureExt;
 use lazy_static::lazy_static;
 use opendal::raw::*;
 use opendal::ErrorKind;
 use prometheus::{
     exponential_buckets, histogram_opts, register_histogram_vec, register_int_counter_vec,
-    Histogram, HistogramVec, IntCounterVec,
+    Histogram, HistogramTimer, HistogramVec, IntCounterVec,
 };
 
 type Result<T> = std::result::Result<T, opendal::Error>;
@@ -156,23 +156,24 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
         let timer = REQUESTS_DURATION_SECONDS
             .with_label_values(&[&self.scheme, Operation::Read.into_static()])
             .start_timer();
-        let read_res = self.inner.read(path, args).await;
-        timer.observe_duration();
 
-        read_res
-            .map(|(rp, r)| {
-                (
-                    rp,
-                    PrometheusMetricWrapper::new(
-                        r,
-                        Operation::Read,
-                        BYTES_TOTAL
-                            .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
-                        REQUESTS_DURATION_SECONDS
-                            .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
-                    ),
-                )
+        self.inner
+            .read(path, args)
+            .map(|v| {
+                v.map(|(rp, r)| {
+                    (
+                        rp,
+                        PrometheusMetricWrapper::new(
+                            r,
+                            Operation::Read,
+                            BYTES_TOTAL
+                                .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
+                            timer,
+                        ),
+                    )
+                })
             })
+            .await
             .map_err(|e| {
                 increment_errors_total(Operation::Read, e.kind());
                 e
@@ -187,23 +188,24 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
         let timer = REQUESTS_DURATION_SECONDS
             .with_label_values(&[&self.scheme, Operation::Write.into_static()])
             .start_timer();
-        let write_res = self.inner.write(path, args).await;
-        timer.observe_duration();
 
-        write_res
-            .map(|(rp, r)| {
-                (
-                    rp,
-                    PrometheusMetricWrapper::new(
-                        r,
-                        Operation::Write,
-                        BYTES_TOTAL
-                            .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
-                        REQUESTS_DURATION_SECONDS
-                            .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
-                    ),
-                )
+        self.inner
+            .write(path, args)
+            .map(|v| {
+                v.map(|(rp, r)| {
+                    (
+                        rp,
+                        PrometheusMetricWrapper::new(
+                            r,
+                            Operation::Write,
+                            BYTES_TOTAL
+                                .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
+                            timer,
+                        ),
+                    )
+                })
             })
+            .await
             .map_err(|e| {
                 increment_errors_total(Operation::Write, e.kind());
                 e
@@ -321,10 +323,9 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
         let timer = REQUESTS_DURATION_SECONDS
             .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
             .start_timer();
-        let result = self.inner.blocking_read(path, args);
-        timer.observe_duration();
 
-        result
+        self.inner
+            .blocking_read(path, args)
             .map(|(rp, r)| {
                 (
                     rp,
@@ -335,10 +336,7 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
                             &self.scheme,
                             Operation::BlockingRead.into_static(),
                         ]),
-                        REQUESTS_DURATION_SECONDS.with_label_values(&[
-                            &self.scheme,
-                            Operation::BlockingRead.into_static(),
-                        ]),
+                        timer,
                     ),
                 )
             })
@@ -356,10 +354,9 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
         let timer = REQUESTS_DURATION_SECONDS
             .with_label_values(&[&self.scheme, Operation::BlockingWrite.into_static()])
             .start_timer();
-        let result = self.inner.blocking_write(path, args);
-        timer.observe_duration();
 
-        result
+        self.inner
+            .blocking_write(path, args)
             .map(|(rp, r)| {
                 (
                     rp,
@@ -370,10 +367,7 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
                             &self.scheme,
                             Operation::BlockingWrite.into_static(),
                         ]),
-                        REQUESTS_DURATION_SECONDS.with_label_values(&[
-                            &self.scheme,
-                            Operation::BlockingWrite.into_static(),
-                        ]),
+                        timer,
                     ),
                 )
             })
@@ -439,17 +433,17 @@ pub struct PrometheusMetricWrapper<R> {
 
     op: Operation,
     bytes_counter: Histogram,
-    requests_duration_seconds: Histogram,
+    requests_duration_timer: Option<HistogramTimer>,
 
-    start: Instant,
     bytes: u64,
 }
 
 impl<R> Drop for PrometheusMetricWrapper<R> {
     fn drop(&mut self) {
+        if let Some(timer) = self.requests_duration_timer.take() {
+            timer.observe_duration();
+        }
         self.bytes_counter.observe(self.bytes as f64);
-        let dur = self.start.elapsed().as_secs_f64();
-        self.requests_duration_seconds.observe(dur);
     }
 }
 
@@ -458,14 +452,13 @@ impl<R> PrometheusMetricWrapper<R> {
         inner: R,
         op: Operation,
         bytes_counter: Histogram,
-        requests_duration_seconds: Histogram,
+        requests_duration_timer: HistogramTimer,
     ) -> Self {
         Self {
             inner,
             op,
             bytes_counter,
-            requests_duration_seconds,
-            start: Instant::now(),
+            requests_duration_timer: Some(requests_duration_timer),
             bytes: 0,
         }
     }
