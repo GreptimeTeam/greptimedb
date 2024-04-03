@@ -433,16 +433,12 @@ pub struct PrometheusMetricWrapper<R> {
 
     op: Operation,
     bytes_counter: Histogram,
-    requests_duration_timer: Option<HistogramTimer>,
-
+    _requests_duration_timer: HistogramTimer,
     bytes: u64,
 }
 
 impl<R> Drop for PrometheusMetricWrapper<R> {
     fn drop(&mut self) {
-        if let Some(timer) = self.requests_duration_timer.take() {
-            timer.observe_duration();
-        }
         self.bytes_counter.observe(self.bytes as f64);
     }
 }
@@ -458,7 +454,7 @@ impl<R> PrometheusMetricWrapper<R> {
             inner,
             op,
             bytes_counter,
-            requests_duration_timer: Some(requests_duration_timer),
+            _requests_duration_timer: requests_duration_timer,
             bytes: 0,
         }
     }
