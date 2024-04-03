@@ -23,6 +23,7 @@ use api::v1::{
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use hashbrown::hash_map::Entry;
 use hashbrown::HashMap;
+use prost::DecodeError;
 
 use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
@@ -118,13 +119,31 @@ impl TableBuilder {
     }
 
     /// Adds a set of labels and samples to table builder.
-    pub(crate) fn add_labels_and_samples(&mut self, labels: &[PromLabel], samples: &[Sample]) {
+    pub(crate) fn add_labels_and_samples(
+        &mut self,
+        labels: &[PromLabel],
+        samples: &[Sample],
+        strict_mode: bool,
+    ) -> Result<(), DecodeError> {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
-            // safety: we expect all labels are UTF-8 encoded strings.
-            let tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
-            let tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
+            let tag_name;
+            let tag_value;
+            if strict_mode {
+                tag_name = match String::from_utf8(name.to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => return Err(DecodeError::new("invalid utf-8")),
+                };
+                tag_value = match String::from_utf8(value.to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => return Err(DecodeError::new("invalid utf-8")),
+                };
+            } else {
+                tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
+                tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
+            }
+
             let tag_value = Some(ValueData::StringValue(tag_value));
             let tag_num = self.col_indexes.len();
 
@@ -153,7 +172,7 @@ impl TableBuilder {
             row[0].value_data = Some(ValueData::TimestampMillisecondValue(sample.timestamp));
             row[1].value_data = Some(ValueData::F64Value(sample.value));
             self.rows.push(Row { values: row });
-            return;
+            return Ok(());
         }
         for sample in samples {
             row[0].value_data = Some(ValueData::TimestampMillisecondValue(sample.timestamp));
@@ -162,6 +181,8 @@ impl TableBuilder {
                 values: row.clone(),
             });
         }
+
+        Ok(())
     }
 
     /// Converts [TableBuilder] to [RowInsertRequest] and clears buffered data.

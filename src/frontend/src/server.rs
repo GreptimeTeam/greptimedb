@@ -101,7 +101,11 @@ where
 
         if opts.prom_store.enable {
             builder = builder
-                .with_prom_handler(self.instance.clone(), opts.prom_store.with_metric_engine)
+                .with_prom_handler(
+                    self.instance.clone(),
+                    opts.prom_store.with_metric_engine,
+                    opts.http.strict_mode,
+                )
                 .with_prometheus_handler(self.instance.clone());
         }
 

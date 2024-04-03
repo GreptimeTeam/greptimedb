@@ -127,6 +127,8 @@ pub struct HttpOptions {
     pub disable_dashboard: bool,
 
     pub body_limit: ReadableSize,
+
+    pub strict_mode: bool,
 }
 
 impl Default for HttpOptions {
@@ -136,6 +138,7 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(30),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
+            strict_mode: false,
         }
     }
 }
@@ -502,11 +505,12 @@ impl HttpServerBuilder {
         self,
         handler: PromStoreProtocolHandlerRef,
         prom_store_with_metric_engine: bool,
+        strict_mode: bool,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus"),
-                HttpServer::route_prom(handler, prom_store_with_metric_engine),
+                HttpServer::route_prom(handler, prom_store_with_metric_engine, strict_mode),
             ),
             ..self
         }
@@ -698,14 +702,25 @@ impl HttpServer {
     fn route_prom<S>(
         prom_handler: PromStoreProtocolHandlerRef,
         prom_store_with_metric_engine: bool,
+        strict_mode: bool,
     ) -> Router<S> {
         let mut router = Router::new().route("/read", routing::post(prom_store::remote_read));
-        if prom_store_with_metric_engine {
+        if prom_store_with_metric_engine && strict_mode {
             router = router.route("/write", routing::post(prom_store::remote_write));
-        } else {
+        } else if prom_store_with_metric_engine && !strict_mode {
+            router = router.route(
+                "/write",
+                routing::post(prom_store::remote_write_without_strict_mode),
+            );
+        } else if !prom_store_with_metric_engine && strict_mode {
             router = router.route(
                 "/write",
                 routing::post(prom_store::route_write_without_metric_engine),
+            );
+        } else {
+            router = router.route(
+                "/write",
+                routing::post(prom_store::route_write_without_metric_engine_and_strict_mode),
             );
         }
         router.with_state(prom_handler)
