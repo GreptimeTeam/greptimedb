@@ -312,11 +312,12 @@ impl DdlManager {
             catalog,
             schema,
             create_if_not_exists,
+            options,
         }: CreateDatabaseTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure =
-            CreateDatabaseProcedure::new(catalog, schema, create_if_not_exists, context);
+            CreateDatabaseProcedure::new(catalog, schema, create_if_not_exists, options, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await

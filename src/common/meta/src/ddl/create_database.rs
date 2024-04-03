@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
@@ -22,8 +24,8 @@ use strum::AsRefStr;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
-use crate::key::schema_name::SchemaNameKey;
-use crate::lock_key::CatalogLock;
+use crate::key::schema_name::{SchemaNameKey, SchemaNameValue};
+use crate::lock_key::{CatalogLock, SchemaLock};
 
 pub struct CreateDatabaseProcedure {
     pub context: DdlContext,
@@ -37,6 +39,7 @@ impl CreateDatabaseProcedure {
         catalog: String,
         schema: String,
         create_if_not_exists: bool,
+        options: Option<HashMap<String, String>>,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -46,6 +49,7 @@ impl CreateDatabaseProcedure {
                 catalog,
                 schema,
                 create_if_not_exists,
+                options,
             },
         }
     }
@@ -81,13 +85,20 @@ impl CreateDatabaseProcedure {
     }
 
     pub async fn on_create_metadata(&mut self) -> Result<Status> {
+        let value: Option<SchemaNameValue> = self
+            .data
+            .options
+            .as_ref()
+            .map(|hash_map_ref| hash_map_ref.try_into())
+            .transpose()?;
+
         self.context
             .table_metadata_manager
             .schema_manager()
             .create(
                 SchemaNameKey::new(&self.data.catalog, &self.data.schema),
-                None,
-                false,
+                value,
+                self.data.create_if_not_exists,
             )
             .await?;
 
@@ -116,7 +127,10 @@ impl Procedure for CreateDatabaseProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        let lock_key = vec![CatalogLock::Read(&self.data.catalog).into()];
+        let lock_key = vec![
+            CatalogLock::Read(&self.data.catalog).into(),
+            SchemaLock::write(&self.data.catalog, &self.data.schema).into(),
+        ];
 
         LockKey::new(lock_key)
     }
@@ -134,4 +148,5 @@ pub struct CreateDatabaseData {
     pub catalog: String,
     pub schema: String,
     pub create_if_not_exists: bool,
+    pub options: Option<HashMap<String, String>>,
 }

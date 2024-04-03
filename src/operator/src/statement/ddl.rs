@@ -719,7 +719,7 @@ impl StatementExecutor {
         create_if_not_exists: bool,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
-            task: DdlTask::new_create_database(catalog, database, create_if_not_exists),
+            task: DdlTask::new_create_database(catalog, database, create_if_not_exists, None),
         };
 
         self.procedure_executor

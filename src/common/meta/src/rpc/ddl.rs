@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::result;
 
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
     AlterTableTask as PbAlterTableTask, AlterTableTasks as PbAlterTableTasks,
-    CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
-    DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
-    DropDatabaseTask as PbDropDatabaseTask, DropTableTask as PbDropTableTask,
-    DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
+    CreateDatabaseTask as PbCreateDatabaseTask, CreateTableTask as PbCreateTableTask,
+    CreateTableTasks as PbCreateTableTasks, DdlTaskRequest as PbDdlTaskRequest,
+    DdlTaskResponse as PbDdlTaskResponse, DropDatabaseTask as PbDropDatabaseTask,
+    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
-use api::v1::{AlterExpr, CreateTableExpr, DropDatabaseExpr, DropTableExpr, TruncateTableExpr};
+use api::v1::{
+    AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropDatabaseExpr, DropTableExpr,
+    TruncateTableExpr,
+};
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
@@ -95,11 +99,13 @@ impl DdlTask {
         catalog: String,
         schema: String,
         create_if_not_exists: bool,
+        options: Option<HashMap<String, String>>,
     ) -> Self {
         DdlTask::CreateDatabase(CreateDatabaseTask {
             catalog,
             schema,
             create_if_not_exists,
+            options,
         })
     }
 
@@ -169,6 +175,9 @@ impl TryFrom<Task> for DdlTask {
 
                 Ok(DdlTask::AlterLogicalTables(tasks))
             }
+            Task::CreateDatabaseTask(create_database) => {
+                Ok(DdlTask::CreateDatabase(create_database.try_into()?))
+            }
             Task::DropDatabaseTask(drop_database) => {
                 Ok(DdlTask::DropDatabase(drop_database.try_into()?))
             }
@@ -214,7 +223,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
                 Task::AlterTableTasks(PbAlterTableTasks { tasks })
             }
-            DdlTask::CreateDatabase(_) => todo!(),
+            DdlTask::CreateDatabase(task) => Task::CreateDatabaseTask(task.try_into()?),
             DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
         };
 
@@ -607,6 +616,51 @@ pub struct CreateDatabaseTask {
     pub catalog: String,
     pub schema: String,
     pub create_if_not_exists: bool,
+    pub options: Option<HashMap<String, String>>,
+}
+
+impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCreateDatabaseTask) -> Result<Self> {
+        let CreateDatabaseExpr {
+            catalog_name,
+            database_name,
+            create_if_not_exists,
+            options,
+        } = pb.create_database.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected create database",
+        })?;
+
+        Ok(CreateDatabaseTask {
+            catalog: catalog_name,
+            schema: database_name,
+            create_if_not_exists,
+            options: Some(options),
+        })
+    }
+}
+
+impl TryFrom<CreateDatabaseTask> for PbCreateDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(
+        CreateDatabaseTask {
+            catalog,
+            schema,
+            create_if_not_exists,
+            options,
+        }: CreateDatabaseTask,
+    ) -> Result<Self> {
+        Ok(PbCreateDatabaseTask {
+            create_database: Some(CreateDatabaseExpr {
+                catalog_name: catalog,
+                database_name: schema,
+                create_if_not_exists,
+                options: options.unwrap_or_default(),
+            }),
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
