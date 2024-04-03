@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn test_table_builder() {
         let mut builder = TableBuilder::default();
-        builder.add_labels_and_samples(
+        let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
                     name: Bytes::from("tag0"),
@@ -230,9 +230,10 @@ mod tests {
                 value: 0.0,
                 timestamp: 0,
             }],
+            true,
         );
 
-        builder.add_labels_and_samples(
+        let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
                     name: Bytes::from("tag0"),
@@ -247,6 +248,7 @@ mod tests {
                 value: 0.1,
                 timestamp: 1,
             }],
+            true
         );
 
         let request = builder.as_row_insert_request("test".to_string());

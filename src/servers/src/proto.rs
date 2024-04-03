@@ -316,7 +316,7 @@ mod tests {
         expected_rows: &RowInsertRequests,
     ) {
         prom_write_request.clear();
-        prom_write_request.merge(data.clone()).unwrap();
+        prom_write_request.merge(data.clone(), true).unwrap();
         let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
 
         assert_eq!(expected_samples, samples);
