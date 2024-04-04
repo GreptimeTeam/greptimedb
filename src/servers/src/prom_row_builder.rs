@@ -130,7 +130,7 @@ impl TableBuilder {
         for PromLabel { name, value } in labels {
             let tag_name;
             let tag_value;
-            if strict_mode {
+            let (tag_name, tag_value) = if strict_mode {
                 tag_name = match String::from_utf8(name.to_vec()) {
                     Ok(s) => s,
                     Err(_) => return Err(DecodeError::new("invalid utf-8")),
@@ -139,10 +139,12 @@ impl TableBuilder {
                     Ok(s) => s,
                     Err(_) => return Err(DecodeError::new("invalid utf-8")),
                 };
+                (tag_name, tag_value)
             } else {
                 tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
                 tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
-            }
+                (tag_name, tag_value)
+            };
 
             let tag_value = Some(ValueData::StringValue(tag_value));
             let tag_num = self.col_indexes.len();
@@ -215,6 +217,7 @@ mod tests {
     #[test]
     fn test_table_builder() {
         let mut builder = TableBuilder::default();
+        let with_strict_mode = true;
         let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
@@ -230,7 +233,7 @@ mod tests {
                 value: 0.0,
                 timestamp: 0,
             }],
-            true,
+            with_strict_mode,
         );
 
         let _ = builder.add_labels_and_samples(
@@ -248,7 +251,7 @@ mod tests {
                 value: 0.1,
                 timestamp: 1,
             }],
-            true
+            with_strict_mode,
         );
 
         let request = builder.as_row_insert_request("test".to_string());
