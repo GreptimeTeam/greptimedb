@@ -17,60 +17,60 @@ Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement: SHOW C
 
 SHOW COLUMNS FROM system_metrics;
 
-+-------------+----------------------+------+------------+---------------------+-------+
-| Field       | Type                 | Null | Key        | Default             | Extra |
-+-------------+----------------------+------+------------+---------------------+-------+
-| cpu_util    | Float64              | Yes  |            |                     |       |
-| disk_util   | Float64              | Yes  |            |                     |       |
-| host        | String               | Yes  | PRI        |                     |       |
-| idc         | String               | Yes  | PRI        |                     |       |
-| memory_util | Float64              | Yes  |            |                     |       |
-| ts          | TimestampMillisecond | No   | TIME INDEX | current_timestamp() |       |
-+-------------+----------------------+------+------------+---------------------+-------+
++-------------+--------------+------+------------+---------------------+-------+----------------------+
+| Field       | Type         | Null | Key        | Default             | Extra | Greptime_Type        |
++-------------+--------------+------+------------+---------------------+-------+----------------------+
+| cpu_util    | double       | Yes  |            |                     |       | Float64              |
+| disk_util   | double       | Yes  |            |                     |       | Float64              |
+| host        | string       | Yes  | PRI        |                     |       | String               |
+| idc         | string       | Yes  | PRI        |                     |       | String               |
+| memory_util | double       | Yes  |            |                     |       | Float64              |
+| ts          | timestamp(3) | No   | TIME INDEX | current_timestamp() |       | TimestampMillisecond |
++-------------+--------------+------+------------+---------------------+-------+----------------------+
 
 SHOW COLUMNS FROM system_metrics in public;
 
-+-------------+----------------------+------+------------+---------------------+-------+
-| Field       | Type                 | Null | Key        | Default             | Extra |
-+-------------+----------------------+------+------------+---------------------+-------+
-| cpu_util    | Float64              | Yes  |            |                     |       |
-| disk_util   | Float64              | Yes  |            |                     |       |
-| host        | String               | Yes  | PRI        |                     |       |
-| idc         | String               | Yes  | PRI        |                     |       |
-| memory_util | Float64              | Yes  |            |                     |       |
-| ts          | TimestampMillisecond | No   | TIME INDEX | current_timestamp() |       |
-+-------------+----------------------+------+------------+---------------------+-------+
++-------------+--------------+------+------------+---------------------+-------+----------------------+
+| Field       | Type         | Null | Key        | Default             | Extra | Greptime_Type        |
++-------------+--------------+------+------------+---------------------+-------+----------------------+
+| cpu_util    | double       | Yes  |            |                     |       | Float64              |
+| disk_util   | double       | Yes  |            |                     |       | Float64              |
+| host        | string       | Yes  | PRI        |                     |       | String               |
+| idc         | string       | Yes  | PRI        |                     |       | String               |
+| memory_util | double       | Yes  |            |                     |       | Float64              |
+| ts          | timestamp(3) | No   | TIME INDEX | current_timestamp() |       | TimestampMillisecond |
++-------------+--------------+------+------------+---------------------+-------+----------------------+
 
 SHOW FULL COLUMNS FROM `system_metrics`;
 
-+-------------+----------------------+-----------+------+------------+---------------------+---------+---------------------------------+-------+
-| Field       | Type                 | Collation | Null | Key        | Default             | Comment | Privileges                      | Extra |
-+-------------+----------------------+-----------+------+------------+---------------------+---------+---------------------------------+-------+
-| cpu_util    | Float64              |           | Yes  |            |                     |         | select,insert,update,references |       |
-| disk_util   | Float64              |           | Yes  |            |                     |         | select,insert,update,references |       |
-| host        | String               | utf8_bin  | Yes  | PRI        |                     |         | select,insert,update,references |       |
-| idc         | String               | utf8_bin  | Yes  | PRI        |                     |         | select,insert,update,references |       |
-| memory_util | Float64              |           | Yes  |            |                     |         | select,insert,update,references |       |
-| ts          | TimestampMillisecond |           | No   | TIME INDEX | current_timestamp() |         | select,insert,update,references |       |
-+-------------+----------------------+-----------+------+------------+---------------------+---------+---------------------------------+-------+
++-------------+--------------+-----------+------+------------+---------------------+---------+---------------+-------+----------------------+
+| Field       | Type         | Collation | Null | Key        | Default             | Comment | Privileges    | Extra | Greptime_Type        |
++-------------+--------------+-----------+------+------------+---------------------+---------+---------------+-------+----------------------+
+| cpu_util    | double       |           | Yes  |            |                     |         | select,insert |       | Float64              |
+| disk_util   | double       |           | Yes  |            |                     |         | select,insert |       | Float64              |
+| host        | string       | utf8_bin  | Yes  | PRI        |                     |         | select,insert |       | String               |
+| idc         | string       | utf8_bin  | Yes  | PRI        |                     |         | select,insert |       | String               |
+| memory_util | double       |           | Yes  |            |                     |         | select,insert |       | Float64              |
+| ts          | timestamp(3) |           | No   | TIME INDEX | current_timestamp() |         | select,insert |       | TimestampMillisecond |
++-------------+--------------+-----------+------+------------+---------------------+---------+---------------+-------+----------------------+
 
 SHOW COLUMNS FROM system_metrics like '%util%';
 
-+-------------+---------+------+-----+---------+-------+
-| Field       | Type    | Null | Key | Default | Extra |
-+-------------+---------+------+-----+---------+-------+
-| cpu_util    | Float64 | Yes  |     |         |       |
-| disk_util   | Float64 | Yes  |     |         |       |
-| memory_util | Float64 | Yes  |     |         |       |
-+-------------+---------+------+-----+---------+-------+
++-------------+--------+------+-----+---------+-------+---------------+
+| Field       | Type   | Null | Key | Default | Extra | Greptime_Type |
++-------------+--------+------+-----+---------+-------+---------------+
+| cpu_util    | double | Yes  |     |         |       | Float64       |
+| disk_util   | double | Yes  |     |         |       | Float64       |
+| memory_util | double | Yes  |     |         |       | Float64       |
++-------------+--------+------+-----+---------+-------+---------------+
 
 SHOW COLUMNS FROM system_metrics WHERE Field = 'cpu_util';
 
-+----------+---------+------+-----+---------+-------+
-| Field    | Type    | Null | Key | Default | Extra |
-+----------+---------+------+-----+---------+-------+
-| cpu_util | Float64 | Yes  |     |         |       |
-+----------+---------+------+-----+---------+-------+
++----------+--------+------+-----+---------+-------+---------------+
+| Field    | Type   | Null | Key | Default | Extra | Greptime_Type |
++----------+--------+------+-----+---------+-------+---------------+
+| cpu_util | double | Yes  |     |         |       | Float64       |
++----------+--------+------+-----+---------+-------+---------------+
 
 DROP TABLE system_metrics;
 

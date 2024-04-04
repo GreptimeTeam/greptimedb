@@ -65,6 +65,7 @@ const TABLES_COLUMN: &str = "Tables";
 const FIELD_COLUMN: &str = "Field";
 const TABLE_TYPE_COLUMN: &str = "Table_type";
 const COLUMN_NAME_COLUMN: &str = "Column";
+const COLUMN_GREPTIME_TYPE_COLUMN: &str = "Greptime_Type";
 const COLUMN_TYPE_COLUMN: &str = "Type";
 const COLUMN_KEY_COLUMN: &str = "Key";
 const COLUMN_EXTRA_COLUMN: &str = "Extra";
@@ -293,54 +294,28 @@ pub async fn show_columns(
         query_ctx.current_schema().to_owned()
     };
 
-    let select = vec![
-        // '' as `Extra`
-        lit("").alias(COLUMN_EXTRA_COLUMN),
-        // 'select,insert,update,references' as `Privileges`
-        lit("select,insert,update,references").alias(COLUMN_PRIVILEGES_COLUMN),
-        // case `datatype`
-        //     when 'String' then 'utf8_bin'
-        //     else NULL
-        // end
-        case(col(columns::DATA_TYPE))
-            .when(lit("String"), lit("utf8_bin"))
-            .otherwise(null())
-            .context(error::PlanSqlSnafu)?
-            .alias(COLUMN_COLLATION_COLUMN),
-        // case `semantic_type`
-        //     when 'TAG' then 'PRI'
-        //     when 'TIMESTAMP' then 'TIME INDEX'
-        //     else ''
-        // end as `Key`
-        case(col(columns::SEMANTIC_TYPE))
-            .when(lit(SEMANTIC_TYPE_PRIMARY_KEY), lit(PRI_KEY))
-            .when(lit(SEMANTIC_TYPE_TIME_INDEX), lit(TIME_INDEX))
-            .otherwise(lit(""))
-            .context(error::PlanSqlSnafu)?
-            .alias(COLUMN_KEY_COLUMN),
-        Expr::Wildcard,
-    ];
-
     let projects = if stmt.full {
         vec![
             (columns::COLUMN_NAME, FIELD_COLUMN),
             (columns::DATA_TYPE, COLUMN_TYPE_COLUMN),
-            (COLUMN_COLLATION_COLUMN, COLUMN_COLLATION_COLUMN),
+            (columns::COLLATION_NAME, COLUMN_COLLATION_COLUMN),
             (columns::IS_NULLABLE, COLUMN_NULLABLE_COLUMN),
-            (COLUMN_KEY_COLUMN, COLUMN_KEY_COLUMN),
+            (columns::COLUMN_KEY, COLUMN_KEY_COLUMN),
             (columns::COLUMN_DEFAULT, COLUMN_DEFAULT_COLUMN),
             (columns::COLUMN_COMMENT, COLUMN_COMMENT_COLUMN),
-            (COLUMN_PRIVILEGES_COLUMN, COLUMN_PRIVILEGES_COLUMN),
-            (COLUMN_EXTRA_COLUMN, COLUMN_EXTRA_COLUMN),
+            (columns::PRIVILEGES, COLUMN_PRIVILEGES_COLUMN),
+            (columns::EXTRA, COLUMN_EXTRA_COLUMN),
+            (columns::GREPTIME_DATA_TYPE, COLUMN_GREPTIME_TYPE_COLUMN),
         ]
     } else {
         vec![
             (columns::COLUMN_NAME, FIELD_COLUMN),
             (columns::DATA_TYPE, COLUMN_TYPE_COLUMN),
             (columns::IS_NULLABLE, COLUMN_NULLABLE_COLUMN),
-            (COLUMN_KEY_COLUMN, COLUMN_KEY_COLUMN),
+            (columns::COLUMN_KEY, COLUMN_KEY_COLUMN),
             (columns::COLUMN_DEFAULT, COLUMN_DEFAULT_COLUMN),
-            (COLUMN_EXTRA_COLUMN, COLUMN_EXTRA_COLUMN),
+            (columns::EXTRA, COLUMN_EXTRA_COLUMN),
+            (columns::GREPTIME_DATA_TYPE, COLUMN_GREPTIME_TYPE_COLUMN),
         ]
     };
 
@@ -357,7 +332,7 @@ pub async fn show_columns(
         catalog_manager,
         query_ctx,
         COLUMNS,
-        select,
+        vec![],
         projects,
         filters,
         like_field,
