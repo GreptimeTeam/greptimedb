@@ -47,6 +47,7 @@ lazy_static! {
 
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
+pub const VM_PROTO_VERSION: &str = "1";
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteWriteQuery {
@@ -79,7 +80,7 @@ pub async fn route_write_without_metric_engine(
 ) -> Result<impl IntoResponse> {
     // VictoriaMetrics handshake
     if let Some(_vm_handshake) = params.get_vm_proto_version {
-        return Ok("1".into_response());
+        return Ok(VM_PROTO_VERSION.into_response());
     }
 
     let db = params.db.clone().unwrap_or_default();
@@ -117,7 +118,7 @@ pub async fn remote_write(
 ) -> Result<impl IntoResponse> {
     // VictoriaMetrics handshake
     if let Some(_vm_handshake) = params.get_vm_proto_version {
-        return Ok("1".into_response());
+        return Ok(VM_PROTO_VERSION.into_response());
     }
 
     let db = params.db.clone().unwrap_or_default();

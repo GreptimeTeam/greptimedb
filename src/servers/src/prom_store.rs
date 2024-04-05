@@ -393,16 +393,16 @@ pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[inline]
-pub fn zstd_decompress(buf: &[u8]) -> Result<Vec<u8>> {
-    zstd::stream::decode_all(buf).context(error::DecompressZstdPromRemoteRequestSnafu)
-}
-
-#[inline]
 pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = Encoder::new();
     encoder
         .compress_vec(buf)
         .context(error::CompressPromRemoteRequestSnafu)
+}
+
+#[inline]
+pub fn zstd_decompress(buf: &[u8]) -> Result<Vec<u8>> {
+    zstd::stream::decode_all(buf).context(error::DecompressZstdPromRemoteRequestSnafu)
 }
 
 /// Mock timeseries for test, it is both used in servers and frontend crate

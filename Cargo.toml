@@ -155,6 +155,7 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.10", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
+zstd = "0.13"
 
 ## workspaces members
 api = { path = "src/api" }

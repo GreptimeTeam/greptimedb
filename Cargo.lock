@@ -10166,6 +10166,7 @@ dependencies = [
  "tonic 0.10.2",
  "tower",
  "uuid",
+ "zstd 0.13.0",
 ]
 
 [[package]]
