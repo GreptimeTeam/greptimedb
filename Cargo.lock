@@ -9121,6 +9121,7 @@ dependencies = [
  "tower",
  "tower-http",
  "urlencoding",
+ "zstd 0.13.0",
 ]
 
 [[package]]

@@ -19,7 +19,7 @@ use api::v1::RowInsertRequests;
 use axum::extract::{Query, RawBody, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::Extension;
+use axum::{Extension, TypedHeader};
 use bytes::Bytes;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
@@ -35,7 +35,7 @@ use snafu::prelude::*;
 
 use super::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::error::{self, Result, UnexpectedPhysicalTableSnafu};
-use crate::prom_store::snappy_decompress;
+use crate::prom_store::{snappy_decompress, zstd_decompress};
 use crate::proto::PromWriteRequest;
 use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
 
@@ -45,19 +45,25 @@ lazy_static! {
         Pool::new(256, PromWriteRequest::default);
 }
 
+pub const DEFAULT_ENCODING: &str = "snappy";
+pub const VM_ENCODING: &str = "zstd";
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct DatabaseQuery {
+pub struct RemoteWriteQuery {
     pub db: Option<String>,
     /// Specify which physical table to use for storing metrics.
     /// This only works on remote write requests.
     pub physical_table: Option<String>,
+    /// For VictoriaMetrics modified remote write protocol
+    pub get_vm_proto_version: Option<String>,
 }
 
-impl Default for DatabaseQuery {
-    fn default() -> DatabaseQuery {
+impl Default for RemoteWriteQuery {
+    fn default() -> RemoteWriteQuery {
         Self {
             db: Some(DEFAULT_SCHEMA_NAME.to_string()),
             physical_table: Some(GREPTIME_PHYSICAL_TABLE.to_string()),
+            get_vm_proto_version: None,
         }
     }
 }
@@ -66,16 +72,23 @@ impl Default for DatabaseQuery {
 #[axum_macros::debug_handler]
 pub async fn route_write_without_metric_engine(
     State(handler): State<PromStoreProtocolHandlerRef>,
-    Query(params): Query<DatabaseQuery>,
+    Query(params): Query<RemoteWriteQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
+    content_encoding: TypedHeader<headers::ContentEncoding>,
     RawBody(body): RawBody,
 ) -> Result<impl IntoResponse> {
+    // VictoriaMetrics handshake
+    if let Some(_vm_handshake) = params.get_vm_proto_version {
+        return Ok("1".into_response());
+    }
+
     let db = params.db.clone().unwrap_or_default();
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    let (request, samples) = decode_remote_write_request(body).await?;
+    let is_zstd = content_encoding.contains(VM_ENCODING);
+    let (request, samples) = decode_remote_write_request(is_zstd, body).await?;
     // reject if physical table is specified when metric engine is disabled
     if params.physical_table.is_some() {
         return UnexpectedPhysicalTableSnafu {}.fail();
@@ -86,7 +99,8 @@ pub async fn route_write_without_metric_engine(
     Ok((
         StatusCode::NO_CONTENT,
         write_cost_header_map(output.meta.cost),
-    ))
+    )
+        .into_response())
 }
 
 #[axum_macros::debug_handler]
@@ -96,16 +110,23 @@ pub async fn route_write_without_metric_engine(
 )]
 pub async fn remote_write(
     State(handler): State<PromStoreProtocolHandlerRef>,
-    Query(params): Query<DatabaseQuery>,
+    Query(params): Query<RemoteWriteQuery>,
     Extension(mut query_ctx): Extension<QueryContextRef>,
+    content_encoding: TypedHeader<headers::ContentEncoding>,
     RawBody(body): RawBody,
 ) -> Result<impl IntoResponse> {
+    // VictoriaMetrics handshake
+    if let Some(_vm_handshake) = params.get_vm_proto_version {
+        return Ok("1".into_response());
+    }
+
     let db = params.db.clone().unwrap_or_default();
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    let (request, samples) = decode_remote_write_request_to_row_inserts(body).await?;
+    let is_zstd = content_encoding.contains(VM_ENCODING);
+    let (request, samples) = decode_remote_write_request_to_row_inserts(is_zstd, body).await?;
 
     if let Some(physical_table) = params.physical_table {
         let mut new_query_ctx = query_ctx.as_ref().clone();
@@ -118,7 +139,8 @@ pub async fn remote_write(
     Ok((
         StatusCode::NO_CONTENT,
         write_cost_header_map(output.meta.cost),
-    ))
+    )
+        .into_response())
 }
 
 impl IntoResponse for PromStoreResponse {
@@ -147,7 +169,7 @@ impl IntoResponse for PromStoreResponse {
 )]
 pub async fn remote_read(
     State(handler): State<PromStoreProtocolHandlerRef>,
-    Query(params): Query<DatabaseQuery>,
+    Query(params): Query<RemoteWriteQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<PromStoreResponse> {
@@ -162,6 +184,7 @@ pub async fn remote_read(
 }
 
 async fn decode_remote_write_request_to_row_inserts(
+    is_zstd: bool,
     body: Body,
 ) -> Result<(RowInsertRequests, usize)> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
@@ -169,7 +192,11 @@ async fn decode_remote_write_request_to_row_inserts(
         .await
         .context(error::HyperSnafu)?;
 
-    let buf = Bytes::from(snappy_decompress(&body[..])?);
+    let buf = Bytes::from(if is_zstd {
+        zstd_decompress(&body[..])?
+    } else {
+        snappy_decompress(&body[..])?
+    });
 
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
     request
@@ -178,13 +205,20 @@ async fn decode_remote_write_request_to_row_inserts(
     Ok(request.as_row_insert_requests())
 }
 
-async fn decode_remote_write_request(body: Body) -> Result<(RowInsertRequests, usize)> {
+async fn decode_remote_write_request(
+    is_zstd: bool,
+    body: Body,
+) -> Result<(RowInsertRequests, usize)> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
     let body = hyper::body::to_bytes(body)
         .await
         .context(error::HyperSnafu)?;
 
-    let buf = Bytes::from(snappy_decompress(&body[..])?);
+    let buf = Bytes::from(if is_zstd {
+        zstd_decompress(&body[..])?
+    } else {
+        snappy_decompress(&body[..])?
+    });
 
     let mut request = PromWriteRequest::default();
     request

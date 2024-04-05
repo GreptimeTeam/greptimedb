@@ -389,7 +389,12 @@ pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = Decoder::new();
     decoder
         .decompress_vec(buf)
-        .context(error::DecompressPromRemoteRequestSnafu)
+        .context(error::DecompressSnappyPromRemoteRequestSnafu)
+}
+
+#[inline]
+pub fn zstd_decompress(buf: &[u8]) -> Result<Vec<u8>> {
+    zstd::stream::decode_all(buf).context(error::DecompressZstdPromRemoteRequestSnafu)
 }
 
 #[inline]
