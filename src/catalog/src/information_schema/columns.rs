@@ -26,11 +26,13 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::prelude::{ConcreteDataType, DataType, MutableVector};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{Int64VectorBuilder, StringVectorBuilder, VectorRef};
+use datatypes::vectors::{
+    ConstantVector, Int64Vector, Int64VectorBuilder, StringVector, StringVectorBuilder, VectorRef,
+};
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use sql::statements;
@@ -73,6 +75,7 @@ pub const COLUMN_DEFAULT: &str = "column_default";
 pub const IS_NULLABLE: &str = "is_nullable";
 const COLUMN_TYPE: &str = "column_type";
 pub const COLUMN_COMMENT: &str = "column_comment";
+const SRS_ID: &str = "srs_id";
 const INIT_CAPACITY: usize = 42;
 
 // The maximum length of string type
@@ -138,6 +141,7 @@ impl InformationSchemaColumns {
             ColumnSchema::new(IS_NULLABLE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(COLUMN_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(COLUMN_COMMENT, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(SRS_ID, ConcreteDataType::int64_datatype(), true),
         ]))
     }
 
@@ -202,9 +206,6 @@ struct InformationSchemaColumnsBuilder {
     character_set_names: StringVectorBuilder,
     collation_names: StringVectorBuilder,
     column_keys: StringVectorBuilder,
-    extras: StringVectorBuilder,
-    privileges: StringVectorBuilder,
-    generation_expressions: StringVectorBuilder,
     greptime_data_types: StringVectorBuilder,
     data_types: StringVectorBuilder,
     semantic_types: StringVectorBuilder,
@@ -237,9 +238,6 @@ impl InformationSchemaColumnsBuilder {
             character_set_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             collation_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             column_keys: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            extras: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            privileges: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            generation_expressions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             greptime_data_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             data_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             semantic_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -332,7 +330,7 @@ impl InformationSchemaColumnsBuilder {
         self.schema_names.push(Some(schema_name));
         self.table_names.push(Some(table_name));
         self.column_names.push(Some(&column_schema.name));
-
+        // Starts from 1
         self.ordinal_positions.push(Some((index + 1) as i64));
 
         if column_schema.data_type.is_string() {
@@ -347,42 +345,14 @@ impl InformationSchemaColumnsBuilder {
             self.character_maximum_lengths.push(None);
             self.character_octet_lengths.push(None);
 
-            match &column_schema.data_type {
-                ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => {
-                    self.numeric_precisions.push(Some(3));
-                    self.numeric_scales.push(Some(0));
-                }
-                ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => {
-                    self.numeric_precisions.push(Some(5));
-                    self.numeric_scales.push(Some(0));
-                }
-                ConcreteDataType::Int32(_) | ConcreteDataType::UInt32(_) => {
-                    self.numeric_precisions.push(Some(10));
-                    self.numeric_scales.push(Some(0));
-                }
-                ConcreteDataType::Int64(_) => {
-                    self.numeric_precisions.push(Some(19));
-                    self.numeric_scales.push(Some(0));
-                }
-                ConcreteDataType::UInt64(_) => {
-                    self.numeric_precisions.push(Some(20));
-                    self.numeric_scales.push(Some(0));
-                }
-                ConcreteDataType::Float32(_) => {
-                    self.numeric_precisions.push(Some(12));
-                    self.numeric_scales.push(None);
-                }
-                ConcreteDataType::Float64(_) => {
-                    self.numeric_precisions.push(Some(22));
-                    self.numeric_scales.push(None);
-                }
-                ConcreteDataType::Decimal128(decimal_type) => {
-                    self.numeric_precisions
-                        .push(Some(decimal_type.precision() as i64));
-                    self.numeric_scales.push(Some(decimal_type.scale() as i64));
-                }
-                _ => unreachable!(),
-            }
+            self.numeric_precisions.push(
+                column_schema
+                    .data_type
+                    .numeric_precision()
+                    .map(|x| x as i64),
+            );
+            self.numeric_scales
+                .push(column_schema.data_type.numeric_scale().map(|x| x as i64));
 
             self.datetime_precisions.push(None);
             self.character_set_names.push(None);
@@ -414,9 +384,6 @@ impl InformationSchemaColumnsBuilder {
         }
 
         self.column_keys.push(Some(column_key));
-        self.extras.push(Some(EMPTY_STR));
-        self.privileges.push(Some(DEFAULT_PRIVILEGES));
-        self.generation_expressions.push(Some(EMPTY_STR));
         self.greptime_data_types
             .push(Some(&column_schema.data_type.name()));
         self.data_types.push(Some(&data_type));
@@ -438,6 +405,21 @@ impl InformationSchemaColumnsBuilder {
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
+        let rows_num = self.collation_names.len();
+
+        let privileges = Arc::new(ConstantVector::new(
+            Arc::new(StringVector::from(vec![DEFAULT_PRIVILEGES])),
+            rows_num,
+        ));
+        let empty_string = Arc::new(ConstantVector::new(
+            Arc::new(StringVector::from(vec![EMPTY_STR])),
+            rows_num,
+        ));
+        let srs_ids = Arc::new(ConstantVector::new(
+            Arc::new(Int64Vector::from(vec![None])),
+            rows_num,
+        ));
+
         let columns: Vec<VectorRef> = vec![
             Arc::new(self.catalog_names.finish()),
             Arc::new(self.schema_names.finish()),
@@ -452,9 +434,9 @@ impl InformationSchemaColumnsBuilder {
             Arc::new(self.character_set_names.finish()),
             Arc::new(self.collation_names.finish()),
             Arc::new(self.column_keys.finish()),
-            Arc::new(self.extras.finish()),
-            Arc::new(self.privileges.finish()),
-            Arc::new(self.generation_expressions.finish()),
+            empty_string.clone(),
+            privileges,
+            empty_string,
             Arc::new(self.greptime_data_types.finish()),
             Arc::new(self.data_types.finish()),
             Arc::new(self.semantic_types.finish()),
@@ -462,6 +444,7 @@ impl InformationSchemaColumnsBuilder {
             Arc::new(self.is_nullables.finish()),
             Arc::new(self.column_types.finish()),
             Arc::new(self.column_comments.finish()),
+            srs_ids,
         ];
 
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
