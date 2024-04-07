@@ -46,8 +46,8 @@ impl MemTableWrapper {
             inner: data_source,
             filter,
         });
-        let thin_table = Table::new(table_info, FilterPushDownType::Exact, data_source);
-        Arc::new(thin_table)
+        let table = Table::new(table_info, FilterPushDownType::Exact, data_source);
+        Arc::new(table)
     }
 }
 
