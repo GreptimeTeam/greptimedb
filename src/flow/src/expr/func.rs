@@ -22,7 +22,7 @@ use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::adapter::error::{Error, InvalidQuerySnafu, PlanSnafu};
@@ -352,8 +352,10 @@ impl BinaryFunc {
             })
     }
 
-    pub fn from_str_and_types(
+    /// choose the appropriate specialization based on the input types
+    pub fn from_str_expr_and_type(
         name: &str,
+        arg_exprs: &[ScalarExpr],
         arg_types: &[Option<ConcreteDataType>],
     ) -> Result<Self, Error> {
         // get first arg type and make sure if both is some, they are the same
@@ -382,6 +384,14 @@ impl BinaryFunc {
             generic_fn,
             GenericFn::Add | GenericFn::Sub | GenericFn::Mul | GenericFn::Div | GenericFn::Mod
         );
+
+        ensure!(
+            arg_exprs.len() == 2 && arg_types.len() == 2,
+            PlanSnafu {
+                reason: "Binary function requires exactly 2 arguments".to_string()
+            }
+        );
+
         let arg_type = {
             if arg_types[0].is_some() && arg_types[1].is_some() {
                 if arg_types[0] != arg_types[1] {
@@ -395,13 +405,22 @@ impl BinaryFunc {
                 }
 
                 arg_types[0].clone()
+            } else if let Some(inferred) = arg_types[0].clone().or_else(|| arg_types[1].clone()) {
+                Some(inferred)
             } else {
-                arg_types[0].clone().or_else(|| arg_types[1].clone())
+                arg_exprs[0]
+                    .as_literal()
+                    .map(|lit| lit.data_type())
+                    .or_else(|| arg_exprs[1].as_literal().map(|lit| lit.data_type()))
             }
         };
+
         if need_type && arg_type.is_none() {
             return InvalidQuerySnafu {
-                reason: format!("Binary function {} requires a type argument", name),
+                reason: format!(
+                    "Binary function {} requires at least one argument with known type",
+                    name
+                ),
             }
             .fail();
         }

@@ -28,7 +28,8 @@ use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{
-    DatatypesSnafu, Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, TableNotFoundSnafu,
+    DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
+    TableNotFoundSnafu,
 };
 use crate::expr::{
     AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
@@ -447,7 +448,7 @@ pub fn from_substrait_rex(
                 .build()
             })?;
             let arg_len = f.arguments.len();
-            let arg_exprs: Vec<_> = f
+            let arg_exprs: Vec<(ScalarExpr, ColumnType)> = f
                 .arguments
                 .iter()
                 .map(|arg| match &arg.arg_type {
@@ -478,9 +479,20 @@ pub fn from_substrait_rex(
                     Ok((arg.call_unary(func), ret_type))
                 }
                 2 => {
-                    let func = BinaryFunc::from_str_and_types(fn_name, &arg_types[0..2])?;
+                    let func =
+                        BinaryFunc::from_str_expr_and_type(fn_name, &arg_exprs, &arg_types[0..2])?;
 
-                    // TODO: cast literal to the type of the other arg
+                    // constant folding here
+                    let is_all_literal = arg_exprs.iter().all(|arg| arg.is_literal());
+                    if is_all_literal {
+                        let res = func
+                            .eval(&[], &arg_exprs[0], &arg_exprs[1])
+                            .context(EvalSnafu)?;
+                        let con_typ = func.signature().output.clone();
+                        let typ = ColumnType::new_nullable(con_typ.clone());
+                        return Ok((ScalarExpr::Literal(res, con_typ), typ));
+                    }
+
                     let mut arg_exprs = arg_exprs;
                     for (idx, arg_expr) in arg_exprs.iter_mut().enumerate() {
                         if let ScalarExpr::Literal(val, typ) = arg_expr {
@@ -803,6 +815,29 @@ mod test {
             plan: Plan::Constant {
                 rows: vec![(
                     repr::Row::new(vec![Value::Int64(1)]),
+                    repr::Timestamp::MIN,
+                    1,
+                )],
+            },
+        };
+
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_literal_imp_cast_and_constant_folding() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT 1+1 FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)]),
+            plan: Plan::Constant {
+                rows: vec![(
+                    repr::Row::new(vec![Value::Int64(2)]),
                     repr::Timestamp::MIN,
                     1,
                 )],
