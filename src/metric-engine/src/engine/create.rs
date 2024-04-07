@@ -609,7 +609,7 @@ mod test {
         assert_eq!(data_region_request.column_metadatas.len(), 4);
         assert_eq!(
             data_region_request.primary_key,
-            vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()]
+            vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 1]
         );
     }
 }
