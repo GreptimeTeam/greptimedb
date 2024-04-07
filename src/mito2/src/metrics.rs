@@ -301,16 +301,10 @@ lazy_static! {
 
     // Manifest related metrics:
 
-    /// Elapsed time of manifest update. Labeled with "action".
-    pub static ref MANIFEST_UPDATE_ELAPSED: HistogramVec = register_histogram_vec!(
-        "greptime_manifest_update_elapsed",
-        "mito manifest update elapsed",
-        &["action"]
-    ).unwrap();
-
-    /// Elapsed time of checkpointing manifest.
-    pub static ref MANIFEST_CHECKPOINT_ELAPSED: Histogram = register_histogram!(
-        "greptime_manifest_checkpoint_elapsed",
-        "mito manifest checkpoint elapsed",
+    /// Elapsed time of manifest operation. Labeled with "op".
+    pub static ref MANIFEST_OP_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_manifest_op_elapsed",
+        "mito manifest operation elapsed",
+        &["op"]
     ).unwrap();
 }
