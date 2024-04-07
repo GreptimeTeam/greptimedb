@@ -41,7 +41,7 @@ use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
 use table::metadata::{
     FilterPushDownType, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
 };
-use table::thin_table::ThinTable;
+use table::table::Table;
 use table::TableRef;
 pub use table_names::*;
 
@@ -188,7 +188,7 @@ impl InformationSchemaProvider {
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
             let filter_pushdown = FilterPushDownType::Inexact;
             let data_source = Arc::new(InformationTableDataSource::new(table));
-            let thin_table = ThinTable::new(table_info, filter_pushdown, data_source);
+            let thin_table = Table::new(table_info, filter_pushdown, data_source);
             Arc::new(thin_table)
         })
     }

@@ -21,7 +21,7 @@ use store_api::storage::ScanRequest;
 
 use crate::error::UnsupportedSnafu;
 use crate::metadata::{FilterPushDownType, TableInfoRef};
-use crate::thin_table::ThinTable;
+use crate::table::Table;
 use crate::TableRef;
 
 #[derive(Clone)]
@@ -30,7 +30,7 @@ pub struct DistTable;
 impl DistTable {
     pub fn table(table_info: TableInfoRef) -> TableRef {
         let data_source = Arc::new(DummyDataSource);
-        let thin_table = ThinTable::new(table_info, FilterPushDownType::Inexact, data_source);
+        let thin_table = Table::new(table_info, FilterPushDownType::Inexact, data_source);
         Arc::new(thin_table)
     }
 }

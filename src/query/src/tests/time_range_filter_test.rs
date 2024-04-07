@@ -30,8 +30,8 @@ use store_api::data_source::{DataSource, DataSourceRef};
 use store_api::storage::ScanRequest;
 use table::metadata::FilterPushDownType;
 use table::predicate::TimeRangePredicateBuilder;
+use table::table::Table;
 use table::test_util::MemTable;
-use table::thin_table::ThinTable;
 use table::TableRef;
 
 use crate::tests::exec_selection;
@@ -47,7 +47,7 @@ impl MemTableWrapper {
             inner: data_source,
             filter,
         });
-        let thin_table = ThinTable::new(table_info, FilterPushDownType::Exact, data_source);
+        let thin_table = Table::new(table_info, FilterPushDownType::Exact, data_source);
         Arc::new(thin_table)
     }
 }

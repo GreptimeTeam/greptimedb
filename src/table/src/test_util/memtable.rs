@@ -33,7 +33,7 @@ use crate::error::{SchemaConversionSnafu, TableProjectionSnafu, TablesRecordBatc
 use crate::metadata::{
     FilterPushDownType, TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion,
 };
-use crate::thin_table::ThinTable;
+use crate::table::Table;
 use crate::TableRef;
 
 pub struct MemTable;
@@ -95,7 +95,7 @@ impl MemTable {
         );
 
         let data_source = Arc::new(MemtableDataSource { recordbatch });
-        let thin_table = ThinTable::new(info, FilterPushDownType::Unsupported, data_source);
+        let thin_table = Table::new(info, FilterPushDownType::Unsupported, data_source);
         Arc::new(thin_table)
     }
 
