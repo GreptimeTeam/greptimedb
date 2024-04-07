@@ -14,10 +14,12 @@
 
 use std::collections::BTreeMap;
 
+use api::prom_store::remote::WriteRequest;
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, StatusCode};
 use axum_test_helper::TestClient;
 use common_error::status_code::StatusCode as ErrorCode;
+use prost::Message;
 use serde_json::json;
 use servers::http::error_result::ErrorResponse;
 use servers::http::greptime_result_v1::GreptimedbV1Response;
@@ -26,6 +28,7 @@ use servers::http::header::GREPTIME_TIMEZONE_HEADER_NAME;
 use servers::http::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
 use servers::http::GreptimeQueryOutput;
+use servers::prom_store;
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
@@ -71,6 +74,8 @@ macro_rules! http_tests {
                 test_status_api,
                 test_config_api,
                 test_dashboard_path,
+                test_prometheus_remote_write,
+                test_vm_proto_remote_write,
             );
         )*
     };
@@ -896,3 +901,63 @@ pub async fn test_dashboard_path(store_type: StorageType) {
 
 #[cfg(not(feature = "dashboard"))]
 pub async fn test_dashboard_path(_: StorageType) {}
+
+pub async fn test_prometheus_remote_write(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "prometheus_remote_write").await;
+    let client = TestClient::new(app);
+
+    // write snappy encoded data
+    let write_request = WriteRequest {
+        timeseries: prom_store::mock_timeseries(),
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_vm_proto_remote_write(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "vm_proto_remote_write").await;
+
+    // handshake
+    let client = TestClient::new(app);
+    let res = client
+        .post("/v1/prometheus/write?get_vm_proto_version=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.text().await, "1");
+
+    // write zstd encoded data
+    let write_request = WriteRequest {
+        timeseries: prom_store::mock_timeseries(),
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        zstd::stream::encode_all(&serialized_request[..], 1).expect("Failed to encode zstd");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "zstd")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}

@@ -9121,6 +9121,7 @@ dependencies = [
  "tower",
  "tower-http",
  "urlencoding",
+ "zstd 0.13.0",
 ]
 
 [[package]]
@@ -10165,6 +10166,7 @@ dependencies = [
  "tonic 0.10.2",
  "tower",
  "uuid",
+ "zstd 0.13.0",
 ]
 
 [[package]]

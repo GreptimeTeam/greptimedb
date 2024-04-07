@@ -46,6 +46,7 @@ mysql_async = { version = "0.33", default-features = false, features = [
 ] }
 object-store.workspace = true
 operator.workspace = true
+prost.workspace = true
 query.workspace = true
 rstest = "0.17"
 rstest_reuse = "0.5"
@@ -68,6 +69,7 @@ tokio.workspace = true
 tonic.workspace = true
 tower = "0.4"
 uuid.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 datafusion.workspace = true
