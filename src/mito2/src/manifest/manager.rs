@@ -400,7 +400,7 @@ impl RegionManifestManagerInner {
 
     /// Makes a new checkpoint. Return the fresh one if there are some actions to compact.
     async fn do_checkpoint(&mut self) -> Result<Option<RegionCheckpoint>> {
-        let _ = MANIFEST_CHECKPOINT_ELAPSED.start_timer();
+        let _timer = MANIFEST_CHECKPOINT_ELAPSED.start_timer();
 
         let last_checkpoint = Self::last_checkpoint(&mut self.store).await?;
         let current_version = self.last_version;
