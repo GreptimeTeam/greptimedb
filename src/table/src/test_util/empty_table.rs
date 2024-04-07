@@ -21,18 +21,22 @@ use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
 
 use crate::metadata::{FilterPushDownType, TableInfo};
-use crate::thin_table::{ThinTable, ThinTableAdapter};
+use crate::thin_table::ThinTable;
 use crate::TableRef;
 
 pub struct EmptyTable;
 
 impl EmptyTable {
     pub fn from_table_info(info: &TableInfo) -> TableRef {
-        let thin_table = ThinTable::new(Arc::new(info.clone()), FilterPushDownType::Unsupported);
         let data_source = Arc::new(EmptyDataSource {
             schema: info.meta.schema.clone(),
         });
-        Arc::new(ThinTableAdapter::new(thin_table, data_source))
+        let thin_table = ThinTable::new(
+            Arc::new(info.clone()),
+            FilterPushDownType::Unsupported,
+            data_source,
+        );
+        Arc::new(thin_table)
     }
 }
 

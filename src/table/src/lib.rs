@@ -27,4 +27,5 @@ pub mod thin_table;
 
 pub use crate::error::{Error, Result};
 pub use crate::stats::{ColumnStatistics, TableStatistics};
-pub use crate::table::{Table, TableRef};
+pub use crate::table::TableRef;
+pub use crate::thin_table::ThinTable;

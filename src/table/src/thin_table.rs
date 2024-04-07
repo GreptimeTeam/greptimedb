@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-
-use async_trait::async_trait;
 use common_query::prelude::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
@@ -24,64 +21,51 @@ use store_api::storage::ScanRequest;
 
 use crate::error::{Result, TablesRecordBatchSnafu};
 use crate::metadata::{FilterPushDownType, TableInfoRef, TableType};
-use crate::Table;
 
 /// The `ThinTable` struct will replace the `Table` trait.
 /// TODO(zhongzc): After completion, perform renaming and documentation work.
 pub struct ThinTable {
     table_info: TableInfoRef,
     filter_pushdown: FilterPushDownType,
-}
-
-impl ThinTable {
-    pub fn new(table_info: TableInfoRef, filter_pushdown: FilterPushDownType) -> Self {
-        Self {
-            table_info,
-            filter_pushdown,
-        }
-    }
-}
-
-pub struct ThinTableAdapter {
-    table: ThinTable,
     data_source: DataSourceRef,
 }
 
-impl ThinTableAdapter {
-    pub fn new(table: ThinTable, data_source: DataSourceRef) -> Self {
-        Self { table, data_source }
+impl ThinTable {
+    pub fn new(
+        table_info: TableInfoRef,
+        filter_pushdown: FilterPushDownType,
+        data_source: DataSourceRef,
+    ) -> Self {
+        Self {
+            table_info,
+            filter_pushdown,
+            data_source,
+        }
     }
 
     pub fn data_source(&self) -> DataSourceRef {
         self.data_source.clone()
     }
-}
 
-#[async_trait]
-impl Table for ThinTableAdapter {
-    fn as_any(&self) -> &dyn Any {
-        self
+    pub fn schema(&self) -> SchemaRef {
+        self.table_info.meta.schema.clone()
     }
 
-    fn schema(&self) -> SchemaRef {
-        self.table.table_info.meta.schema.clone()
+    pub fn table_info(&self) -> TableInfoRef {
+        self.table_info.clone()
     }
 
-    fn table_info(&self) -> TableInfoRef {
-        self.table.table_info.clone()
+    pub fn table_type(&self) -> TableType {
+        self.table_info.table_type
     }
 
-    fn table_type(&self) -> TableType {
-        self.table.table_info.table_type
-    }
-
-    async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
+    pub async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         self.data_source
             .get_stream(request)
             .context(TablesRecordBatchSnafu)
     }
 
-    fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
-        Ok(vec![self.table.filter_pushdown; filters.len()])
+    pub fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
+        Ok(vec![self.filter_pushdown; filters.len()])
     }
 }
