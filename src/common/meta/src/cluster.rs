@@ -56,6 +56,21 @@ pub struct NodeInfoKey {
     pub node_id: u64,
 }
 
+impl NodeInfoKey {
+    pub fn key_prefix_with_cluster_id(cluster_id: u64) -> String {
+        format!("{}-{}", CLUSTER_NODE_INFO_PREFIX, cluster_id)
+    }
+
+    pub fn key_prefix_with_role(cluster_id: u64, role: Role) -> String {
+        format!(
+            "{}-{}-{}",
+            CLUSTER_NODE_INFO_PREFIX,
+            cluster_id,
+            i32::from(role)
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub peer: Peer,
@@ -242,7 +257,12 @@ mod tests {
                 addr: "127.0.0.1".to_string(),
             },
             last_activity_ts: 123,
-            status: NodeStatus::Datanode(DatanodeStatus {}),
+            status: NodeStatus::Datanode(DatanodeStatus {
+                rcus: 1,
+                wcus: 2,
+                leader_regions: 3,
+                follower_regions: 4,
+            }),
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
@@ -253,7 +273,12 @@ mod tests {
             NodeInfo {
                 peer: Peer { id: 1, .. },
                 last_activity_ts: 123,
-                status: NodeStatus::Datanode(_),
+                status: NodeStatus::Datanode(DatanodeStatus {
+                    rcus: 1,
+                    wcus: 2,
+                    leader_regions: 3,
+                    follower_regions: 4,
+                }),
             }
         );
     }

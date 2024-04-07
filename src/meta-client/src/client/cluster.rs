@@ -20,7 +20,7 @@ use api::v1::meta::cluster_client::ClusterClient;
 use api::v1::meta::{ResponseHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::cluster;
-use common_meta::cluster::{ClusterInfo, NodeInfo};
+use common_meta::cluster::{ClusterInfo, NodeInfo, NodeInfoKey};
 use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse, RangeRequest, RangeResponse};
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
@@ -82,8 +82,21 @@ impl Client {
 impl ClusterInfo for Client {
     type Error = Error;
 
-    async fn list_nodes(&self, _role: Option<cluster::Role>) -> Result<Vec<NodeInfo>> {
-        todo!()
+    async fn list_nodes(&self, role: Option<cluster::Role>) -> Result<Vec<NodeInfo>> {
+        let cluster_id = self.inner.read().await.id.0;
+        let key_prefix = match role {
+            None => NodeInfoKey::key_prefix_with_cluster_id(cluster_id),
+            Some(role) => NodeInfoKey::key_prefix_with_role(cluster_id, role),
+        };
+
+        let req = RangeRequest::new().with_prefix(key_prefix);
+
+        let res = self.range(req).await?;
+
+        res.kvs
+            .into_iter()
+            .map(|kv| NodeInfo::try_from(kv.value).context(ConvertMetaResponseSnafu))
+            .collect::<Result<Vec<_>>>()
     }
 }
 
