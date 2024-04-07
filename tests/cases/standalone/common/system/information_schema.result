@@ -501,14 +501,12 @@ desc table schemata;
 
 select * from schemata where catalog_name = 'greptime' and schema_name != 'public' order by catalog_name, schema_name;
 
-+--------------+-----------------------+----------------------------+------------------------+----------+
-| catalog_name | schema_name           | default_character_set_name | default_collation_name | sql_path |
-+--------------+-----------------------+----------------------------+------------------------+----------+
-| greptime     | greptime_private      | utf8                       | utf8_bin               |          |
-| greptime     | illegal-database      | utf8                       | utf8_bin               |          |
-| greptime     | information_schema    | utf8                       | utf8_bin               |          |
-| greptime     | upper_case_table_name | utf8                       | utf8_bin               |          |
-+--------------+-----------------------+----------------------------+------------------------+----------+
++--------------+--------------------+----------------------------+------------------------+----------+
+| catalog_name | schema_name        | default_character_set_name | default_collation_name | sql_path |
++--------------+--------------------+----------------------------+------------------------+----------+
+| greptime     | greptime_private   | utf8                       | utf8_bin               |          |
+| greptime     | information_schema | utf8                       | utf8_bin               |          |
++--------------+--------------------+----------------------------+------------------------+----------+
 
 -- test engines
 select * from engines;
