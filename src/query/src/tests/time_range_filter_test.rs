@@ -30,9 +30,8 @@ use store_api::data_source::{DataSource, DataSourceRef};
 use store_api::storage::ScanRequest;
 use table::metadata::FilterPushDownType;
 use table::predicate::TimeRangePredicateBuilder;
-use table::table::Table;
 use table::test_util::MemTable;
-use table::TableRef;
+use table::{Table, TableRef};
 
 use crate::tests::exec_selection;
 use crate::{QueryEngineFactory, QueryEngineRef};
