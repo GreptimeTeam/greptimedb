@@ -391,7 +391,7 @@ impl ManifestObjectStore {
                 path: &path,
             })?;
         let checkpoint_size = data.len();
-        let checksum = checkpoint_checksum(&data);
+        let checksum = checkpoint_checksum(bytes);
         self.object_store
             .write(&path, data)
             .await
@@ -748,7 +748,7 @@ mod tests {
         assert_eq!(v, 5);
         assert_eq!(checkpoint, "checkpoint_uncompressed".as_bytes());
 
-        // write compressed data to stimulate compress alogorithom take effect
+        // write compressed data to stimulate compress algorithm take effect
         for v in 5..10 {
             log_store
                 .save(v, format!("hello, {v}").as_bytes())
