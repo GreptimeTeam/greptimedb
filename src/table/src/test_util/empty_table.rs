@@ -21,8 +21,7 @@ use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
 
 use crate::metadata::{FilterPushDownType, TableInfo};
-use crate::table::Table;
-use crate::TableRef;
+use crate::{Table, TableRef};
 
 pub struct EmptyTable;
 
@@ -31,12 +30,12 @@ impl EmptyTable {
         let data_source = Arc::new(EmptyDataSource {
             schema: info.meta.schema.clone(),
         });
-        let thin_table = Table::new(
+        let table = Table::new(
             Arc::new(info.clone()),
             FilterPushDownType::Unsupported,
             data_source,
         );
-        Arc::new(thin_table)
+        Arc::new(table)
     }
 }
 

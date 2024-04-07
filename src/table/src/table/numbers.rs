@@ -32,8 +32,7 @@ use store_api::storage::ScanRequest;
 use crate::metadata::{
     FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
 };
-use crate::table::Table;
-use crate::TableRef;
+use crate::{Table, TableRef};
 
 const NUMBER_COLUMN: &str = "number";
 
@@ -50,12 +49,12 @@ impl NumbersTable {
 
     pub fn table_with_name(table_id: TableId, name: String) -> TableRef {
         let data_source = Arc::new(NumbersDataSource::new(Self::schema()));
-        let thin_table = Table::new(
+        let table = Table::new(
             Self::table_info(table_id, name, "test_engine".to_string()),
             FilterPushDownType::Unsupported,
             data_source,
         );
-        Arc::new(thin_table)
+        Arc::new(table)
     }
 
     pub fn schema() -> SchemaRef {
