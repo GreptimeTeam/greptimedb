@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
-    DdlTaskRequest, DdlTaskResponse, ErrorCode, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureId, ProcedureStateResponse, QueryProcedureRequest, ResponseHeader, Role,
+    DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureId,
+    ProcedureStateResponse, QueryProcedureRequest, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
@@ -27,7 +27,7 @@ use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
-use tonic::{Code, Status};
+use tonic::Status;
 
 use crate::client::ask_leader::AskLeader;
 use crate::client::{util, Id};

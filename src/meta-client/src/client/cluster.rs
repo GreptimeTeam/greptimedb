@@ -17,13 +17,10 @@ use std::sync::Arc;
 
 use api::greptime_proto::v1;
 use api::v1::meta::cluster_client::ClusterClient;
-use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{ResponseHeader, Role};
-use async_trait::async_trait;
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::cluster;
 use common_meta::cluster::{ClusterInfo, NodeInfo};
-use common_meta::peer::Peer;
 use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse, RangeRequest, RangeResponse};
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
@@ -33,7 +30,6 @@ use tonic::Status;
 
 use crate::client::ask_leader::AskLeader;
 use crate::client::{util, Id};
-use crate::error;
 use crate::error::{
     ConvertMetaResponseSnafu, CreateChannelSnafu, Error, IllegalGrpcClientStateSnafu, Result,
     RetryTimesExceededSnafu,

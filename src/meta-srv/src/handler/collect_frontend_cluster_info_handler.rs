@@ -14,29 +14,28 @@
 
 use api::v1::meta::{HeartbeatRequest, Role};
 use common_meta::cluster;
-use common_meta::cluster::{DatanodeStatus, NodeInfo, NodeInfoKey, NodeStatus};
+use common_meta::cluster::{FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus};
 use common_meta::rpc::store::PutRequest;
 use common_telemetry::warn;
 use snafu::ResultExt;
-use store_api::region_engine::RegionRole;
 
 use crate::error::{Result, SaveClusterInfoSnafu};
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
-pub struct CollectDatanodeClusterInfoHandler;
+pub struct CollectFrontendClusterInfoHandler;
 
 #[async_trait::async_trait]
-impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
+impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
     fn is_acceptable(&self, role: Role) -> bool {
-        role == Role::Datanode
+        role == Role::Frontend
     }
 
     async fn handle(
         &self,
         req: &HeartbeatRequest,
         ctx: &mut Context,
-        acc: &mut HeartbeatAccumulator,
+        _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
         let HeartbeatRequest { header, peer, .. } = req;
         let Some(header) = &header else {
@@ -45,32 +44,17 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
         let Some(peer) = &peer else {
             return Ok(HandleControl::Continue);
         };
-        let Some(stat) = &acc.stat else {
-            return Ok(HandleControl::Continue);
-        };
 
         let key = NodeInfoKey {
             cluster_id: header.cluster_id,
-            role: cluster::Role::Datanode,
+            role: cluster::Role::Frontend,
             node_id: peer.id,
         };
 
-        let leader_regions = stat
-            .region_stats
-            .iter()
-            .filter(|s| s.role == RegionRole::Leader)
-            .count();
-        let follower_regions = stat.region_stats.len() - leader_regions;
-
         let value = NodeInfo {
             peer: peer.clone().into(),
-            last_activity_ts: stat.timestamp_millis,
-            status: NodeStatus::Datanode(DatanodeStatus {
-                rcus: stat.rcus,
-                wcus: stat.wcus,
-                leader_regions,
-                follower_regions,
-            }),
+            last_activity_ts: common_time::util::current_time_millis(),
+            status: NodeStatus::Frontend(FrontendStatus {}),
         };
 
         let key = key.try_into().context(SaveClusterInfoSnafu)?;

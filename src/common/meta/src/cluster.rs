@@ -79,13 +79,24 @@ pub enum NodeStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DatanodeStatus {}
+pub struct DatanodeStatus {
+    /// The read capacity units during this period.
+    pub rcus: i64,
+    /// The write capacity units during this period.
+    pub wcus: i64,
+    /// How many leader regions on this node.
+    pub leader_regions: usize,
+    /// How many follower regions on this node.
+    pub follower_regions: usize,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FrontendStatus {}
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct MetasrvStatus {}
+pub struct MetasrvStatus {
+    pub is_leader: bool,
+}
 
 impl FromStr for NodeInfoKey {
     type Err = Error;

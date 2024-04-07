@@ -654,6 +654,12 @@ pub enum Error {
         err_msg: String,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to save cluster info"))]
+    SaveClusterInfo {
+        location: Location,
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -744,6 +750,7 @@ impl ErrorExt for Error {
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
+            | Error::SaveClusterInfo { .. }
             | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
