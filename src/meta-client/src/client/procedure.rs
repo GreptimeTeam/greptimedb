@@ -61,11 +61,6 @@ impl Client {
         inner.start(urls).await
     }
 
-    pub async fn is_started(&self) -> bool {
-        let inner = self.inner.read().await;
-        inner.is_started()
-    }
-
     pub async fn submit_ddl_task(&self, req: DdlTaskRequest) -> Result<DdlTaskResponse> {
         let inner = self.inner.read().await;
         inner.submit_ddl_task(req).await

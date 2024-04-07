@@ -16,7 +16,6 @@ use api::v1::meta::{HeartbeatRequest, Role};
 use common_meta::cluster;
 use common_meta::cluster::{DatanodeStatus, NodeInfo, NodeInfoKey, NodeStatus};
 use common_meta::rpc::store::PutRequest;
-use common_telemetry::warn;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 
@@ -81,11 +80,10 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             ..Default::default()
         };
 
-        let res = ctx.in_memory.put(put_req).await;
-
-        if let Err(err) = res {
-            warn!("Failed to save datanode's cluster info, peer: {peer:?}, {err}");
-        }
+        ctx.in_memory
+            .put(put_req)
+            .await
+            .context(SaveClusterInfoSnafu)?;
 
         Ok(HandleControl::Continue)
     }

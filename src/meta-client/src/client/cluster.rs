@@ -62,16 +62,12 @@ impl Client {
         inner.start(urls).await
     }
 
-    pub async fn is_started(&self) -> bool {
-        let inner = self.inner.read().await;
-        inner.is_started()
-    }
-
     pub async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         let inner = self.inner.read().await;
         inner.range(req).await
     }
 
+    #[allow(dead_code)]
     pub async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
         let inner = self.inner.read().await;
         inner.batch_get(req).await

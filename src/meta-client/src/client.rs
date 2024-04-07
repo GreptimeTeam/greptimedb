@@ -518,7 +518,6 @@ mod tests {
         let _ = meta_client.heartbeat_client().unwrap();
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
-        assert!(meta_client.heartbeat_client().unwrap().is_started().await);
 
         let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
             .enable_router()
@@ -533,7 +532,6 @@ mod tests {
         assert!(meta_client.heartbeat_client().is_err());
         let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
-        assert!(meta_client.store_client().unwrap().is_started().await);
 
         let mut meta_client = MetaClientBuilder::new(1, 2, Role::Datanode)
             .enable_heartbeat()
@@ -545,8 +543,6 @@ mod tests {
         let _ = meta_client.heartbeat_client().unwrap();
         let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
-        assert!(meta_client.heartbeat_client().unwrap().is_started().await);
-        assert!(meta_client.store_client().unwrap().is_started().await);
     }
 
     #[tokio::test]
