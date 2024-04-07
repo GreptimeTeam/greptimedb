@@ -23,7 +23,7 @@ use core::fmt;
 
 pub use alter_expr::AlterTableExpr;
 use common_time::{Date, DateTime, Timestamp};
-pub use create_expr::CreateTableExpr;
+pub use create_expr::{CreateDatabaseExpr, CreateTableExpr};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::TimestampType;
 use datatypes::value::Value;
