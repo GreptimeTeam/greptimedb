@@ -246,24 +246,22 @@ fn mfp_subgraph(
     };
     err_collector.run(run_mfp);
 
-    // deal with output, first read all updates between last time this arrangement havd emitted updates
-    // and current time, output them, and then truncate all updates of said range
-    let old_now = arrange.read().get_compaction();
-    let output_kv = if let Some(old) = old_now {
-        arrange.read().get_updates_in_range((old + 1)..=now)
-    } else {
-        arrange.read().get_updates_in_range(..=now)
-    };
+    // Deal with output:
+    // 1. Read all updates that were emitted between the last time this arrangement had updates and the current time.
+    // 2. Output the updates.
+    // 3. Truncate all updates within that range.
 
+    let from = arrange.read().last_compaction_time().map(|n| n + 1);
+    let from = from.unwrap_or(repr::Timestamp::MIN);
+    let output_kv = arrange.read().get_updates_in_range(from..=now);
     // the output is expected to be key -> empty val
     let output = output_kv
         .into_iter()
-        .map(|((k, _v), t, d)| (k, t, d))
+        .map(|((key, _v), ts, diff)| (key, ts, diff))
         .collect_vec();
     send.give(output);
-
     let run_compaction = || {
-        arrange.write().set_compaction(now)?;
+        arrange.write().compaction_to(now)?;
         Ok(())
     };
     err_collector.run(run_compaction);
@@ -290,9 +288,9 @@ fn eval_mfp_core(
         // Expect error in a single row to not interrupt the whole evaluation
         let updates = updates
             .filter_map(|r| match r {
-                Ok(r) => Some(((r.0, Row::empty()), r.1, r.2)),
-                Err(e) => {
-                    err_collector.push_err(e.0);
+                Ok((key, ts, diff)) => Some(((key, Row::empty()), ts, diff)),
+                Err((err, _ts, _diff)) => {
+                    err_collector.push_err(err);
                     None
                 }
             })
