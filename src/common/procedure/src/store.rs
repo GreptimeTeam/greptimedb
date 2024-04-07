@@ -122,24 +122,16 @@ impl ProcedureStore {
     pub(crate) async fn rollback_procedure(
         &self,
         procedure_id: ProcedureId,
-        step: u32,
-        type_name: String,
-        data: String,
-        parent_id: Option<ProcedureId>,
+        message: ProcedureMessage,
     ) -> Result<()> {
         let key = ParsedKey {
             prefix: &self.proc_path,
             procedure_id,
-            step,
+            step: message.step,
             key_type: KeyType::Rollback,
         }
         .to_string();
-        let message = ProcedureMessage {
-            type_name,
-            data,
-            parent_id,
-            step,
-        };
+
         self.store
             .put(&key, serde_json::to_vec(&message).context(ToJsonSnafu)?)
             .await?;
@@ -574,8 +566,14 @@ mod tests {
             )
             .await
             .unwrap();
+        let message = ProcedureMessage {
+            type_name,
+            data,
+            parent_id: None,
+            step: 1,
+        };
         store
-            .rollback_procedure(procedure_id, 1, type_name, data, None)
+            .rollback_procedure(procedure_id, message)
             .await
             .unwrap();
 

@@ -969,7 +969,7 @@ mod tests {
         let mut watcher = check_procedure(MockProcedure { panic: false }).await;
         // Wait for the notification.
         watcher.changed().await.unwrap();
-        assert!(watcher.borrow().is_commit_rollback());
+        assert!(watcher.borrow().is_prepare_rollback());
         watcher.changed().await.unwrap();
         assert!(watcher.borrow().is_rolling_back());
         watcher.changed().await.unwrap();

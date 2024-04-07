@@ -32,7 +32,7 @@ pub async fn wait(watcher: &mut Watcher) -> Result<Option<Output>> {
                 return Ok(output.clone());
             }
             ProcedureState::Failed { error } => {
-                return Err(error.clone()).context(ProcedureExecSnafu)
+                return Err(error.clone()).context(ProcedureExecSnafu);
             }
             ProcedureState::Retrying { error } => {
                 debug!("retrying, source: {}", error)
@@ -40,7 +40,7 @@ pub async fn wait(watcher: &mut Watcher) -> Result<Option<Output>> {
             ProcedureState::RollingBack { error } => {
                 debug!("rolling back, source: {:?}", error)
             }
-            ProcedureState::CommitRollback { error } => {
+            ProcedureState::PrepareRollback { error } => {
                 debug!("commit rollback, source: {}", error)
             }
         }

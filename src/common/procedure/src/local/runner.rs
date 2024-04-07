@@ -23,7 +23,7 @@ use super::rwlock::OwnedKeyRwLockGuard;
 use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::procedure::{InitProcedureState, Output, StringKey};
-use crate::store::ProcedureStore;
+use crate::store::{ProcedureMessage, ProcedureStore};
 use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
 
 /// A guard to cleanup procedure state.
@@ -201,7 +201,7 @@ impl Runner {
                         self.wait_on_err(d, retry_times).await;
                     } else {
                         self.meta
-                            .set_state(ProcedureState::commit_rollback(Arc::new(
+                            .set_state(ProcedureState::prepare_rollback(Arc::new(
                                 Error::RetryTimesExceeded {
                                     source: error.clone(),
                                     procedure_id: self.meta.id,
@@ -209,7 +209,7 @@ impl Runner {
                             )));
                     }
                 }
-                ProcedureState::CommitRollback { error }
+                ProcedureState::PrepareRollback { error }
                 | ProcedureState::RollingBack { error } => {
                     rollback_times += 1;
                     if let Some(d) = rollback.next() {
@@ -240,10 +240,10 @@ impl Runner {
         self.meta.set_state(ProcedureState::failed(err));
     }
 
-    async fn commit_rollback(&mut self, err: Arc<Error>) {
-        if let Err(e) = self.rollback_procedure().await {
+    async fn prepare_rollback(&mut self, err: Arc<Error>) {
+        if let Err(e) = self.write_procedure_state().await {
             self.meta
-                .set_state(ProcedureState::commit_rollback(Arc::new(e)));
+                .set_state(ProcedureState::prepare_rollback(Arc::new(e)));
             return;
         }
         self.meta.set_state(ProcedureState::rolling_back(err));
@@ -315,11 +315,11 @@ impl Runner {
                         }
 
                         self.meta
-                            .set_state(ProcedureState::commit_rollback(Arc::new(e)));
+                            .set_state(ProcedureState::prepare_rollback(Arc::new(e)));
                     }
                 }
             }
-            ProcedureState::CommitRollback { error } => self.commit_rollback(error).await,
+            ProcedureState::PrepareRollback { error } => self.prepare_rollback(error).await,
             ProcedureState::RollingBack { error } => self.rollback(ctx, error).await,
             ProcedureState::Failed { .. } | ProcedureState::Done { .. } => (),
         }
@@ -475,19 +475,18 @@ impl Runner {
         Ok(())
     }
 
-    async fn rollback_procedure(&mut self) -> Result<()> {
+    async fn write_procedure_state(&mut self) -> Result<()> {
         // Persists procedure state
         let type_name = self.procedure.type_name().to_string();
         let data = self.procedure.dump()?;
-
+        let message = ProcedureMessage {
+            type_name,
+            data,
+            parent_id: self.meta.parent_id,
+            step: self.step,
+        };
         self.store
-            .rollback_procedure(
-                self.meta.id,
-                self.step,
-                type_name,
-                data,
-                self.meta.parent_id,
-            )
+            .rollback_procedure(self.meta.id, message)
             .await
             .map_err(|e| {
                 logging::error!(
@@ -946,7 +945,7 @@ mod tests {
 
         runner.execute_once(&ctx).await;
         let state = runner.meta.state();
-        assert!(state.is_commit_rollback(), "{state:?}");
+        assert!(state.is_prepare_rollback(), "{state:?}");
 
         runner.execute_once(&ctx).await;
         let state = runner.meta.state();

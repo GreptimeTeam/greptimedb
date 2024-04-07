@@ -128,7 +128,8 @@ pub trait Procedure: Send {
     /// Rollback the failed procedure.
     ///
     /// The implementation must be idempotent.
-    async fn rollback(&mut self, _: &Context) -> Result<()> {
+    async fn rollback(&mut self, ctx: &Context) -> Result<()> {
+        let _ = ctx;
         Ok(())
     }
 
@@ -297,7 +298,7 @@ pub enum ProcedureState {
     /// The procedure is failed and can be retried.
     Retrying { error: Arc<Error> },
     /// The procedure is failed and commits state before rolling back the procedure.
-    CommitRollback { error: Arc<Error> },
+    PrepareRollback { error: Arc<Error> },
     /// The procedure is failed and can be rollback.
     RollingBack { error: Arc<Error> },
     /// The procedure is failed and cannot proceed anymore.
@@ -310,9 +311,9 @@ impl ProcedureState {
         ProcedureState::Failed { error }
     }
 
-    /// Returns a [ProcedureState] with commit rollback state.
-    pub fn commit_rollback(error: Arc<Error>) -> ProcedureState {
-        ProcedureState::CommitRollback { error }
+    /// Returns a [ProcedureState] with prepare rollback state.
+    pub fn prepare_rollback(error: Arc<Error>) -> ProcedureState {
+        ProcedureState::PrepareRollback { error }
     }
 
     /// Returns a [ProcedureState] with rolling back state.
@@ -350,9 +351,9 @@ impl ProcedureState {
         matches!(self, ProcedureState::RollingBack { .. })
     }
 
-    /// Returns true if the procedure state is commit rollback.
-    pub fn is_commit_rollback(&self) -> bool {
-        matches!(self, ProcedureState::CommitRollback { .. })
+    /// Returns true if the procedure state is prepare rollback.
+    pub fn is_prepare_rollback(&self) -> bool {
+        matches!(self, ProcedureState::PrepareRollback { .. })
     }
 
     /// Returns the error.
