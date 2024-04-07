@@ -18,6 +18,7 @@ use std::str::FromStr;
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
+use crc32fast::Hasher;
 use futures::future::try_join_all;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
@@ -29,8 +30,8 @@ use store_api::manifest::ManifestVersion;
 use tokio::sync::Semaphore;
 
 use crate::error::{
-    CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu, OpenDalSnafu, Result,
-    SerdeJsonSnafu, Utf8Snafu,
+    ChecksumMismatchSnafu, CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu,
+    OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
 };
 
 lazy_static! {
@@ -72,6 +73,28 @@ pub fn gen_path(path: &str, file: &str, compress_type: CompressionType) -> Strin
     } else {
         format!("{}{}.{}", path, file, compress_type.file_extension())
     }
+}
+
+#[inline]
+fn checkpoint_checksum(data: &[u8]) -> u32 {
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    hasher.finalize()
+}
+
+#[inline]
+fn verify_checksum(data: &[u8], wanted: Option<u32>) -> Result<()> {
+    if let Some(checksum) = wanted {
+        let calculated_checksum = checkpoint_checksum(&data);
+        ensure!(
+            checksum == calculated_checksum,
+            ChecksumMismatchSnafu {
+                got: calculated_checksum,
+                wanted: checksum,
+            }
+        );
+    }
+    Ok(())
 }
 
 /// Return's the file manifest version from path
@@ -368,6 +391,7 @@ impl ManifestObjectStore {
                 path: &path,
             })?;
         let checkpoint_size = data.len();
+        let checksum = checkpoint_checksum(&data);
         self.object_store
             .write(&path, data)
             .await
@@ -380,7 +404,7 @@ impl ManifestObjectStore {
         let checkpoint_metadata = CheckpointMetadata {
             size: bytes.len(),
             version,
-            checksum: None,
+            checksum: Some(checksum),
             extend_metadata: HashMap::new(),
         };
 
@@ -400,8 +424,9 @@ impl ManifestObjectStore {
 
     pub async fn load_checkpoint(
         &mut self,
-        version: ManifestVersion,
+        metadata: CheckpointMetadata,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+        let version = metadata.version;
         let path = self.checkpoint_file_path(version);
         // Due to backward compatibility, it is possible that the user's checkpoint not compressed,
         // so if we don't find file by compressed type. fall back to checkpoint not compressed find again.
@@ -415,6 +440,7 @@ impl ManifestObjectStore {
                             path,
                         },
                     )?;
+                    verify_checksum(&decompress_data, metadata.checksum)?;
                     // set the checkpoint size
                     self.set_checkpoint_file_size(version, checkpoint_size as u64);
                     Ok(Some(decompress_data))
@@ -441,6 +467,7 @@ impl ManifestObjectStore {
                                             compress_type: FALL_BACK_COMPRESS_TYPE,
                                             path,
                                         })?;
+                                    verify_checksum(&decompress_data, metadata.checksum)?;
                                     self.set_checkpoint_file_size(version, checkpoint_size as u64);
                                     Ok(Some(decompress_data))
                                 }
@@ -479,7 +506,7 @@ impl ManifestObjectStore {
             last_checkpoint_path, checkpoint_metadata
         );
 
-        self.load_checkpoint(checkpoint_metadata.version).await
+        self.load_checkpoint(checkpoint_metadata).await
     }
 
     #[cfg(test)]
@@ -509,7 +536,7 @@ struct CheckpointMetadata {
     pub size: usize,
     /// The latest version this checkpoint contains.
     pub version: ManifestVersion,
-    pub checksum: Option<String>,
+    pub checksum: Option<u32>,
     pub extend_metadata: HashMap<String, String>,
 }
 
@@ -542,6 +569,15 @@ mod tests {
         let _ = builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
         ManifestObjectStore::new("/", object_store, CompressionType::Uncompressed)
+    }
+
+    fn new_checkpoint_metadata_with_version(version: ManifestVersion) -> CheckpointMetadata {
+        CheckpointMetadata {
+            size: 0,
+            version,
+            checksum: None,
+            extend_metadata: Default::default(),
+        }
     }
 
     #[test]
@@ -608,7 +644,11 @@ mod tests {
 
         //delete (,4) logs and keep checkpoint 3.
         let _ = log_store.delete_until(4, true).await.unwrap();
-        let _ = log_store.load_checkpoint(3).await.unwrap().unwrap();
+        let _ = log_store
+            .load_checkpoint(new_checkpoint_metadata_with_version(3))
+            .await
+            .unwrap()
+            .unwrap();
         let _ = log_store.load_last_checkpoint().await.unwrap().unwrap();
         let manifests = log_store.scan(0, 11).await.unwrap();
         let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
@@ -621,7 +661,11 @@ mod tests {
 
         // delete all logs and checkpoints
         let _ = log_store.delete_until(11, false).await.unwrap();
-        assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
+        assert!(log_store
+            .load_checkpoint(new_checkpoint_metadata_with_version(3))
+            .await
+            .unwrap()
+            .is_none());
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
         let manifests = log_store.scan(0, 11).await.unwrap();
         let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
@@ -678,7 +722,11 @@ mod tests {
             assert_eq!(v, version);
             assert_eq!(format!("hello, {v}").as_bytes(), bytes);
         }
-        let (v, checkpoint) = log_store.load_checkpoint(5).await.unwrap().unwrap();
+        let (v, checkpoint) = log_store
+            .load_checkpoint(new_checkpoint_metadata_with_version(5))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(v, 5);
         assert_eq!(checkpoint, "checkpoint_uncompressed".as_bytes());
         let (v, checkpoint) = log_store.load_last_checkpoint().await.unwrap().unwrap();
