@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches::assert_matches;
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
 use store_api::storage::RegionId;
 use strum::IntoEnumIterator;
 
+use crate::error::Error::ChecksumMismatch;
 use crate::manifest::action::{
     RegionCheckpoint, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
@@ -150,13 +152,61 @@ async fn manager_with_checkpoint_distance_1() {
         .await
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
-    let expected_json = "{\"size\":846,\"version\":9,\"checksum\":null,\"extend_metadata\":{}}";
+    let expected_json =
+        "{\"size\":846,\"version\":9,\"checksum\":1218259706,\"extend_metadata\":{}}";
     assert_eq!(expected_json, raw_json);
 
     // reopen the manager
     manager.stop().await.unwrap();
     let manager = reopen_manager(&env, 1, CompressionType::Uncompressed).await;
     assert_eq!(10, manager.manifest().await.manifest_version);
+}
+
+#[tokio::test]
+async fn test_corrupted_data_causing_checksum_error() {
+    // Initialize manager
+    common_telemetry::init_default_ut_logging();
+    let (_env, manager) = build_manager(1, CompressionType::Uncompressed).await;
+
+    // Apply actions
+    for _ in 0..10 {
+        manager.update(nop_action()).await.unwrap();
+    }
+
+    // Check if there is a checkpoint
+    assert!(manager
+        .store()
+        .await
+        .load_last_checkpoint()
+        .await
+        .unwrap()
+        .is_some());
+
+    // Corrupt the last checkpoint data
+    let mut corrupted_bytes = manager
+        .store()
+        .await
+        .read_file(&manager.store().await.last_checkpoint_path())
+        .await
+        .unwrap();
+    corrupted_bytes[0] ^= 1;
+
+    // Overwrite the latest checkpoint data
+    let _ = manager
+        .store()
+        .await
+        .write_last_checkpoint(9, &corrupted_bytes)
+        .await
+        .unwrap();
+
+    // Attempt to load the corrupted checkpoint
+    let load_corrupted_result = manager.store().await.load_last_checkpoint().await;
+
+    // Print load_corrupted_result for debugging
+    println!("Load Corrupted Result: {load_corrupted_result:?}");
+
+    // Check if the result is an error and if it's of type VerifyChecksum
+    assert_matches!(load_corrupted_result, Err(ChecksumMismatch { .. }));
 }
 
 #[tokio::test]

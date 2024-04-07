@@ -422,7 +422,7 @@ impl ManifestObjectStore {
         Ok(())
     }
 
-    pub async fn load_checkpoint(
+    async fn load_checkpoint(
         &mut self,
         metadata: CheckpointMetadata,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
@@ -512,6 +512,54 @@ impl ManifestObjectStore {
     #[cfg(test)]
     pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         self.object_store.read(path).await.context(OpenDalSnafu)
+    }
+
+    #[cfg(test)]
+    pub async fn write_last_checkpoint(
+        &mut self,
+        version: ManifestVersion,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let path = self.checkpoint_file_path(version);
+        let data = self
+            .compress_type
+            .encode(bytes)
+            .await
+            .context(CompressObjectSnafu {
+                compress_type: self.compress_type,
+                path: &path,
+            })?;
+
+        let checkpoint_size = data.len();
+
+        self.object_store
+            .write(&path, data)
+            .await
+            .context(OpenDalSnafu)?;
+
+        self.set_checkpoint_file_size(version, checkpoint_size as u64);
+
+        let last_checkpoint_path = self.last_checkpoint_path();
+        let checkpoint_metadata = CheckpointMetadata {
+            size: bytes.len(),
+            version,
+            checksum: Some(1218259706),
+            extend_metadata: HashMap::new(),
+        };
+
+        debug!(
+            "Rewrite checkpoint in path: {},  metadata: {:?}",
+            last_checkpoint_path, checkpoint_metadata
+        );
+
+        let bytes = checkpoint_metadata.encode()?;
+
+        // Overwrite the last checkpoint with the modified content
+        self.object_store
+            .write(&last_checkpoint_path, bytes.to_vec())
+            .await
+            .context(OpenDalSnafu)?;
+        Ok(())
     }
 
     /// Compute the size(Byte) in manifest size map.

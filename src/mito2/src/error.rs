@@ -683,6 +683,7 @@ impl ErrorExt for Error {
             Upload { .. } => StatusCode::StorageUnavailable,
             BiError { .. } => StatusCode::Internal,
             EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
+            ChecksumMismatch { .. } => StatusCode::Unexpected,
         }
     }
 
