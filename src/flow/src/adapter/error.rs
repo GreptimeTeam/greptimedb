@@ -63,6 +63,13 @@ pub enum Error {
 
     #[snafu(display("Unsupported temporal filter: {reason}"))]
     UnsupportedTemporalFilter { reason: String, location: Location },
+
+    #[snafu(display("Datatypes error: {source} with extra message: {extra}"))]
+    Datatypes {
+        source: datatypes::Error,
+        extra: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -73,7 +80,9 @@ impl ErrorExt for Error {
             Self::Eval { .. } | &Self::JoinTask { .. } => StatusCode::Internal,
             &Self::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. } => StatusCode::TableNotFound,
-            &Self::InvalidQuery { .. } | &Self::Plan { .. } => StatusCode::PlanQuery,
+            &Self::InvalidQuery { .. } | &Self::Plan { .. } | &Self::Datatypes { .. } => {
+                StatusCode::PlanQuery
+            }
             Self::NoProtoType { .. } => StatusCode::Unexpected,
             &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported

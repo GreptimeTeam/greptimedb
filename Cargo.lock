@@ -3405,6 +3405,8 @@ name = "flow"
 version = "0.7.1"
 dependencies = [
  "api",
+ "catalog",
+ "common-catalog",
  "common-decimal",
  "common-error",
  "common-macro",
@@ -3416,13 +3418,18 @@ dependencies = [
  "hydroflow",
  "itertools 0.10.5",
  "num-traits",
+ "prost 0.12.3",
+ "query",
  "serde",
  "serde_json",
  "servers",
+ "session",
  "smallvec",
  "snafu",
  "strum 0.25.0",
  "substrait 0.17.1",
+ "substrait 0.7.1",
+ "table",
  "tokio",
  "tonic 0.10.2",
 ]

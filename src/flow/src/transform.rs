@@ -28,14 +28,14 @@ use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{
-    Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, TableNotFoundSnafu,
+    DatatypesSnafu, Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, TableNotFoundSnafu,
 };
 use crate::expr::{
     AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
     UnaryFunc, UnmaterializableFunc, VariadicFunc,
 };
 use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan, TypedPlan};
-use crate::repr::{ColumnType, RelationType};
+use crate::repr::{self, ColumnType, RelationType};
 
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -73,7 +73,7 @@ impl DataflowContext {
         todo!("Table provider etc.")
     }
 
-    /// Retrieves a GlobalId representing a table previously registered by calling the [register_table] function.
+    /// Retrieves a GlobalId and table schema representing a table previously registered by calling the [register_table] function.
     ///
     /// Returns an error if no table has been registered with the provided names
     pub fn table(&self, name: &Vec<String>) -> Result<(GlobalId, RelationType), Error> {
@@ -108,6 +108,7 @@ pub fn from_substrait_plan(ctx: &mut DataflowContext, plan: &SubPlan) -> Result<
             None => not_impl_err!("Cannot parse empty extension"),
         })
         .collect::<Result<HashMap<_, _>, Error>>()?;
+
     // Parse relations
     match plan.relations.len() {
         1 => {
@@ -145,10 +146,26 @@ pub fn from_substrait_rel(
             };
             let mut exprs: Vec<(ScalarExpr, ColumnType)> = vec![];
             for e in &p.expressions {
+                // TODO（discord9): deal with declare a constant
                 let expr = from_substrait_rex(e, &input.typ, extensions)?;
                 exprs.push(expr);
             }
-            input.projection(exprs)
+            let is_literal = exprs.iter().all(|(expr, _)| expr.is_literal());
+            if is_literal {
+                let (literals, lit_types): (Vec<_>, Vec<_>) = exprs.into_iter().unzip();
+                let typ = RelationType::new(lit_types);
+                let row = literals
+                    .into_iter()
+                    .map(|lit| lit.as_literal().expect("A literal"))
+                    .collect_vec();
+                let row = repr::Row::new(row);
+                let plan = Plan::Constant {
+                    rows: vec![(row, repr::Timestamp::MIN, 1)],
+                };
+                Ok(TypedPlan { typ, plan })
+            } else {
+                input.projection(exprs)
+            }
         }
         Some(RelType::Filter(filter)) => {
             let input = if let Some(input) = filter.input.as_ref() {
@@ -196,120 +213,147 @@ pub fn from_substrait_rel(
             }
             _ => not_impl_err!("Only NamedTable reads are supported"),
         },
-        Some(RelType::Aggregate(agg)) => {
-            let input = if let Some(input) = agg.input.as_ref() {
-                from_substrait_rel(ctx, input, extensions)?
-            } else {
-                return not_impl_err!("Aggregate without an input is not supported");
-            };
-            let mut group_expr = vec![];
-            let mut aggr_expr = vec![];
-
-            match agg.groupings.len() {
-                1 => {
-                    for e in &agg.groupings[0].grouping_expressions {
-                        let x = from_substrait_rex(e, &input.typ, extensions)?;
-                        group_expr.push(x);
-                    }
-                }
-                _ => {
-                    return not_impl_err!(
-                        "Grouping sets not support yet, use union all with group by instead."
-                    );
-                }
-            };
-
-            let key_val_plan = {
-                let (group_expr_val, group_expr_type): (Vec<_>, Vec<_>) =
-                    group_expr.iter().cloned().unzip();
-                let input_arity = input.typ.column_types.len();
-                let output_arity = group_expr_val.len();
-                let key_plan = MapFilterProject::new(input_arity)
-                    .map(group_expr_val)?
-                    .project(input_arity..input_arity + output_arity)?;
-                let key_used = key_plan.demand();
-                // find out all the columns that are not used in the key plan
-                let value_indices = (0..input_arity)
-                    .filter(|i| !key_used.contains(i))
-                    .collect::<Vec<_>>();
-                let val_plan = MapFilterProject::new(input_arity).project(value_indices.clone())?;
-                KeyValPlan {
-                    key_plan: key_plan.into_safe(),
-                    val_plan: val_plan.into_safe(),
-                }
-            };
-
-            for m in &agg.measures {
-                let filter = match &m.filter {
-                    Some(fil) => Some(from_substrait_rex(fil, &input.typ, extensions)?),
-                    None => None,
-                };
-
-                let agg_func = match &m.measure {
-                    Some(f) => {
-                        let distinct = match f.invocation {
-                            _ if f.invocation == AggregationInvocation::Distinct as i32 => true,
-                            _ if f.invocation == AggregationInvocation::All as i32 => false,
-                            _ => false,
-                        };
-                        from_substrait_agg_func(
-                            f, &input.typ, extensions, filter,
-                            // TODO: Add parsing of order_by also
-                            None, distinct,
-                        )
-                    }
-                    None => not_impl_err!("Aggregate without aggregate function is not supported"),
-                };
-                aggr_expr.push(agg_func?.clone());
-            }
-
-            let output_type = {
-                let mut output_types = Vec::new();
-                for aggr in &aggr_expr {
-                    output_types.push(ColumnType::new_nullable(
-                        aggr.func.signature().output.clone(),
-                    ));
-                }
-                RelationType::new(output_types)
-            };
-            let full_aggrs = aggr_expr;
-            let mut simple_aggrs = Vec::new();
-            let mut distinct_aggrs = Vec::new();
-            for (output_column, aggr_expr) in full_aggrs.iter().enumerate() {
-                // TODO: support using literal as argument
-                let input_column =
-                    aggr_expr
-                        .expr
-                        .as_column()
-                        .with_context(|| InvalidQuerySnafu {
-                            reason: "Aggregate argument must be a column",
-                        })?;
-                if aggr_expr.distinct {
-                    distinct_aggrs.push((output_column, input_column, aggr_expr.clone()));
-                } else {
-                    simple_aggrs.push((output_column, input_column, aggr_expr.clone()));
-                }
-            }
-            let accum_plan = AccumulablePlan {
-                full_aggrs,
-                simple_aggrs,
-                distinct_aggrs,
-            };
-            let plan = Plan::Reduce {
-                input: Box::new(input.plan),
-                key_val_plan,
-                reduce_plan: ReducePlan::Accumulable(accum_plan),
-            };
-            Ok(TypedPlan {
-                typ: output_type,
-                plan,
-            })
-        }
+        Some(RelType::Aggregate(agg)) => from_substrait_agg_rel(ctx, agg, extensions),
         _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
     }
 }
 
-// TODO: impl filter
+fn from_substrait_agg_rel(
+    ctx: &mut DataflowContext,
+    agg: &proto::AggregateRel,
+    extensions: &HashMap<u32, &String>,
+) -> Result<TypedPlan, Error> {
+    let input = if let Some(input) = agg.input.as_ref() {
+        from_substrait_rel(ctx, input, extensions)?
+    } else {
+        return not_impl_err!("Aggregate without an input is not supported");
+    };
+    let mut group_expr = vec![];
+    let mut aggr_exprs = vec![];
+
+    match agg.groupings.len() {
+        1 => {
+            for e in &agg.groupings[0].grouping_expressions {
+                let x = from_substrait_rex(e, &input.typ, extensions)?;
+                group_expr.push(x);
+            }
+        }
+        _ => {
+            return not_impl_err!(
+                "Grouping sets not support yet, use union all with group by instead."
+            );
+        }
+    };
+
+    let key_val_plan = {
+        let (group_expr_val, _group_expr_type): (Vec<_>, Vec<_>) =
+            group_expr.iter().cloned().unzip();
+        let input_arity = input.typ.column_types.len();
+        let output_arity = group_expr_val.len();
+        let key_plan = MapFilterProject::new(input_arity)
+            .map(group_expr_val)?
+            .project(input_arity..input_arity + output_arity)?;
+        let key_used = key_plan.demand();
+
+        // find out all the columns that are not used in the key plan
+        let value_indices = (0..input_arity)
+            .filter(|i| !key_used.contains(i))
+            .collect::<Vec<_>>();
+        let val_plan = MapFilterProject::new(input_arity).project(value_indices.clone())?;
+        KeyValPlan {
+            key_plan: key_plan.into_safe(),
+            val_plan: val_plan.into_safe(),
+        }
+    };
+
+    for m in &agg.measures {
+        let filter = match &m.filter {
+            Some(fil) => Some(from_substrait_rex(fil, &input.typ, extensions)?),
+            None => None,
+        };
+
+        let agg_func = match &m.measure {
+            Some(f) => {
+                let distinct = match f.invocation {
+                    _ if f.invocation == AggregationInvocation::Distinct as i32 => true,
+                    _ if f.invocation == AggregationInvocation::All as i32 => false,
+                    _ => false,
+                };
+                from_substrait_agg_func(
+                    f, &input.typ, extensions, filter, // TODO(discord9): impl order_by
+                    None, distinct,
+                )
+            }
+            None => not_impl_err!("Aggregate without aggregate function is not supported"),
+        };
+        aggr_exprs.push(agg_func?.clone());
+    }
+    // add another layer of mfp if aggr_expr's arg is not a direct column ref
+    // to input.plan
+    let need_mfp = aggr_exprs.iter().any(|agg| agg.expr.as_column().is_none());
+    let input_plan = if need_mfp {
+        // create mfp from aggr_expr, and modify aggr_expr to use the output column of mfp
+        let input_arity = input.typ.column_types.len();
+        let input_exprs = aggr_exprs
+            .iter_mut()
+            .enumerate()
+            .map(|(idx, aggr)| {
+                let ret = aggr.expr.clone();
+                aggr.expr = ScalarExpr::Column(idx);
+                ret
+            })
+            .collect_vec();
+        let aggr_arity = aggr_exprs.len();
+        let mfp = MapFilterProject::new(input.typ.column_types.len())
+            .map(input_exprs.clone())?
+            .project(input_arity..input_arity + aggr_arity)?;
+        Plan::Mfp {
+            input: Box::new(input.plan),
+            mfp,
+        }
+    } else {
+        input.plan
+    };
+
+    let output_type = {
+        let mut output_types = Vec::new();
+        for aggr in &aggr_exprs {
+            output_types.push(ColumnType::new_nullable(
+                aggr.func.signature().output.clone(),
+            ));
+        }
+        RelationType::new(output_types)
+    };
+    let full_aggrs = aggr_exprs;
+    let mut simple_aggrs = Vec::new();
+    let mut distinct_aggrs = Vec::new();
+    for (output_column, aggr_expr) in full_aggrs.iter().enumerate() {
+        // TODO: support using literal as argument
+        let input_column = aggr_expr.expr.as_column().with_context(|| PlanSnafu {
+            reason: "Expect aggregate argument to be transformed into a column at this point",
+        })?;
+        if aggr_expr.distinct {
+            distinct_aggrs.push((output_column, input_column, aggr_expr.clone()));
+        } else {
+            simple_aggrs.push((output_column, input_column, aggr_expr.clone()));
+        }
+    }
+    let accum_plan = AccumulablePlan {
+        full_aggrs,
+        simple_aggrs,
+        distinct_aggrs,
+    };
+    let plan = Plan::Reduce {
+        input: Box::new(input_plan),
+        key_val_plan,
+        reduce_plan: ReducePlan::Accumulable(accum_plan),
+    };
+    Ok(TypedPlan {
+        typ: output_type,
+        plan,
+    })
+}
+
 pub fn from_substrait_agg_func(
     f: &proto::AggregateFunction,
     input_schema: &RelationType,
@@ -318,6 +362,9 @@ pub fn from_substrait_agg_func(
     order_by: Option<Vec<(ScalarExpr, ColumnType)>>,
     distinct: bool,
 ) -> Result<AggregateExpr, Error> {
+    // TODO(discord9): impl filter
+    let _ = filter;
+    let _ = order_by;
     let mut args = vec![];
     for arg in &f.arguments {
         let arg_expr = match &arg.arg_type {
@@ -408,7 +455,18 @@ pub fn from_substrait_rex(
                     _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
                 })
                 .try_collect()?;
-            let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_exprs.into_iter().unzip();
+
+            // literal's type is determined by the function and type of other args
+            let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_exprs
+                .into_iter()
+                .map(|(arg_val, arg_type)| {
+                    if arg_val.is_literal() {
+                        (arg_val, None)
+                    } else {
+                        (arg_val, Some(arg_type.scalar_type))
+                    }
+                })
+                .unzip();
 
             match arg_len {
                 1 => {
@@ -420,20 +478,29 @@ pub fn from_substrait_rex(
                     Ok((arg.call_unary(func), ret_type))
                 }
                 2 => {
-                    let arg_types = arg_types[0..2]
-                        .iter()
-                        .map(|t| Some(t.scalar_type.clone()))
-                        .collect_vec();
                     let func = BinaryFunc::from_str_and_types(fn_name, &arg_types[0..2])?;
+
+                    // TODO: cast literal to the type of the other arg
+                    let mut arg_exprs = arg_exprs;
+                    for (idx, arg_expr) in arg_exprs.iter_mut().enumerate() {
+                        if let ScalarExpr::Literal(val, typ) = arg_expr {
+                            let dest_type = func.signature().input[idx].clone();
+                            // cast val to target_type
+                            let dest_val = datatypes::types::cast(val.clone(), &dest_type)
+                            .with_context(|_|
+                                DatatypesSnafu{
+                                    extra: format!("Failed to implicitly cast literal {val:?} to type {dest_type:?}")
+                                })?;
+                            *val = dest_val;
+                            *typ = dest_type;
+                        }
+                    }
+
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     let ret_expr = arg_exprs[0].clone().call_binary(arg_exprs[1].clone(), func);
                     Ok((ret_expr, ret_type))
                 }
                 _var => {
-                    let arg_types = arg_types[0..2]
-                        .iter()
-                        .map(|t| Some(t.scalar_type.clone()))
-                        .collect_vec();
                     if let Ok(func) = VariadicFunc::from_str_and_types(fn_name, &arg_types) {
                         let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                         Ok((
@@ -502,8 +569,9 @@ pub fn from_substrait_rex(
         Some(RexType::Cast(cast)) => {
             let input = from_substrait_rex(cast.input.as_ref().unwrap(), input_schema, extensions)?;
             let cast_type = from_substrait_type(cast.r#type.as_ref().unwrap())?;
+            let func = UnaryFunc::from_str_and_type("cast", Some(cast_type.clone()))?;
             Ok((
-                input.0.call_unary(UnaryFunc::Cast(cast_type.clone())),
+                input.0.call_unary(func),
                 ColumnType::new_nullable(cast_type),
             ))
         }
@@ -657,5 +725,303 @@ fn from_substrait_type(null_type: &substrait_proto::proto::Type) -> Result<CDT, 
         }
     } else {
         not_impl_err!("Null type without kind is not supported")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use catalog::RegisterTableRequest;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
+    use prost::Message;
+    use query::parser::QueryLanguageParser;
+    use query::plan::LogicalPlan;
+    use query::QueryEngine;
+    use session::context::QueryContext;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+
+    use super::*;
+
+    fn create_test_ctx() -> DataflowContext {
+        let gid = GlobalId::User(0);
+        let name = vec!["numbers".to_string()];
+        let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
+
+        DataflowContext {
+            id_to_name: HashMap::from([(gid, name.clone())]),
+            name_to_id: HashMap::from([(name.clone(), gid)]),
+            schema: HashMap::from([(gid, schema)]),
+        }
+    }
+
+    fn create_test_query_engine() -> Arc<dyn QueryEngine> {
+        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+        let req = RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: NUMBERS_TABLE_NAME.to_string(),
+            table_id: NUMBERS_TABLE_ID,
+            table: NumbersTable::table(NUMBERS_TABLE_ID),
+        };
+        catalog_list.register_table_sync(req).unwrap();
+        let factory = query::QueryEngineFactory::new(catalog_list, None, None, None, false);
+
+        let engine = factory.query_engine();
+
+        assert_eq!("datafusion", engine.name());
+        engine
+    }
+
+    async fn sql_to_substrait(engine: Arc<dyn QueryEngine>, sql: &str) -> proto::Plan {
+        // let engine = create_test_query_engine();
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
+        let plan = engine
+            .planner()
+            .plan(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        let LogicalPlan::DfPlan(plan) = plan;
+        // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
+        let bytes = DFLogicalSubstraitConvertor {}.encode(&plan).unwrap();
+
+        proto::Plan::decode(bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_literal() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT 1 FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)]),
+            plan: Plan::Constant {
+                rows: vec![(
+                    repr::Row::new(vec![Value::Int64(1)]),
+                    repr::Timestamp::MIN,
+                    1,
+                )],
+            },
+        };
+
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    /// test if the type of the literal is correctly inferred, i.e. in here literal is decoded to be int64, but need to be uint32,
+    #[tokio::test]
+    async fn test_implicitly_cast() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT number+1 FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Get {
+                    id: crate::expr::Id::Global(GlobalId::User(0)),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0).call_binary(
+                        ScalarExpr::Literal(Value::from(1u32), CDT::uint32_datatype()),
+                        BinaryFunc::AddUInt32,
+                    )])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_cast() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT CAST(1 AS INT16) FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Get {
+                    id: crate::expr::Id::Global(GlobalId::User(0)),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Literal(
+                        Value::Int64(1),
+                        CDT::int64_datatype(),
+                    )
+                    .call_unary(UnaryFunc::Cast(CDT::int16_datatype()))])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_select() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT number FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Get {
+                    id: crate::expr::Id::Global(GlobalId::User(0)),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0)])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_select_add() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT number+number FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Get {
+                    id: crate::expr::Id::Global(GlobalId::User(0)),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0)
+                        .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_sum() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT sum(number) FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Reduce {
+                    input: Box::new(Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }),
+                    key_val_plan: KeyValPlan {
+                        key_plan: MapFilterProject::new(1)
+                            .project(vec![])
+                            .unwrap()
+                            .into_safe(),
+                        val_plan: MapFilterProject::new(1)
+                            .project(vec![0])
+                            .unwrap()
+                            .into_safe(),
+                    },
+                    reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                        full_aggrs: vec![aggr_expr.clone()],
+                        simple_aggrs: vec![(0, 0, aggr_expr.clone())],
+                        distinct_aggrs: vec![],
+                    }),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0)])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_sum_add() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT sum(number+number) FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Reduce {
+                    input: Box::new(Plan::Mfp {
+                        input: Box::new(Plan::Get {
+                            id: crate::expr::Id::Global(GlobalId::User(0)),
+                        }),
+                        mfp: MapFilterProject::new(1)
+                            .map(vec![ScalarExpr::Column(0)
+                                .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)])
+                            .unwrap()
+                            .project(vec![1])
+                            .unwrap(),
+                    }),
+                    key_val_plan: KeyValPlan {
+                        key_plan: MapFilterProject::new(1)
+                            .project(vec![])
+                            .unwrap()
+                            .into_safe(),
+                        val_plan: MapFilterProject::new(1)
+                            .project(vec![0])
+                            .unwrap()
+                            .into_safe(),
+                    },
+                    reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                        full_aggrs: vec![aggr_expr.clone()],
+                        simple_aggrs: vec![(0, 0, aggr_expr.clone())],
+                        distinct_aggrs: vec![],
+                    }),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0)])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan.unwrap(), expected);
     }
 }

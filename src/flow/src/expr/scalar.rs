@@ -167,6 +167,10 @@ impl ScalarExpr {
         support
     }
 
+    pub fn is_column(&self) -> bool {
+        matches!(self, ScalarExpr::Column(_))
+    }
+
     pub fn as_column(&self) -> Option<usize> {
         if let ScalarExpr::Column(i) = self {
             Some(*i)

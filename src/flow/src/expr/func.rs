@@ -25,7 +25,7 @@ use smallvec::smallvec;
 use snafu::ResultExt;
 use strum::{EnumIter, IntoEnumIterator};
 
-use crate::adapter::error::{Error, InvalidQuerySnafu};
+use crate::adapter::error::{Error, InvalidQuerySnafu, PlanSnafu};
 use crate::expr::error::{
     CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, TryFromValueSnafu,
     TypeMismatchSnafu,
