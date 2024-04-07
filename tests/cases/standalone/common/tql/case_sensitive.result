@@ -75,3 +75,7 @@ drop table "AnotherSchema"."MemTotal";
 
 Affected Rows: 0
 
+drop schema "AnotherSchema";
+
+Affected Rows: 0
+

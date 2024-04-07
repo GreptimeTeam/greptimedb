@@ -37,3 +37,5 @@ tql eval (0,10,'5s') sum(MemAvailable / 4) + sum({__name__="AnotherSchema.MemTot
 drop table "MemAvailable";
 
 drop table "AnotherSchema"."MemTotal";
+
+drop schema "AnotherSchema";
