@@ -192,7 +192,7 @@ async fn test_corrupted_data_causing_checksum_error() {
     corrupted_bytes[0] ^= 1;
 
     // Overwrite the latest checkpoint data
-    let _ = manager
+    manager
         .store()
         .await
         .write_last_checkpoint(9, &corrupted_bytes)
@@ -201,9 +201,6 @@ async fn test_corrupted_data_causing_checksum_error() {
 
     // Attempt to load the corrupted checkpoint
     let load_corrupted_result = manager.store().await.load_last_checkpoint().await;
-
-    // Print load_corrupted_result for debugging
-    println!("Load Corrupted Result: {load_corrupted_result:?}");
 
     // Check if the result is an error and if it's of type VerifyChecksum
     assert_matches!(load_corrupted_result, Err(ChecksumMismatch { .. }));

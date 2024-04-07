@@ -85,7 +85,7 @@ fn checkpoint_checksum(data: &[u8]) -> u32 {
 #[inline]
 fn verify_checksum(data: &[u8], wanted: Option<u32>) -> Result<()> {
     if let Some(checksum) = wanted {
-        let calculated_checksum = checkpoint_checksum(&data);
+        let calculated_checksum = checkpoint_checksum(data);
         ensure!(
             checksum == calculated_checksum,
             ChecksumMismatchSnafu {
@@ -556,7 +556,7 @@ impl ManifestObjectStore {
 
         // Overwrite the last checkpoint with the modified content
         self.object_store
-            .write(&last_checkpoint_path, bytes.to_vec())
+            .write(&last_checkpoint_path, bytes.clone())
             .await
             .context(OpenDalSnafu)?;
         Ok(())
