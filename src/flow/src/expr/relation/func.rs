@@ -20,6 +20,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
+use snafu::OptionExt;
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::adapter::error::{Error, InvalidQuerySnafu};
@@ -186,14 +187,11 @@ impl AggregateFunc {
         let input_type = arg_type.unwrap_or_else(ConcreteDataType::null_datatype);
         rule.get(&(generic_fn, input_type.clone()))
             .cloned()
-            .ok_or_else(|| {
-                InvalidQuerySnafu {
-                    reason: format!(
-                        "No specialization found for binary function {:?} with input type {:?}",
-                        generic_fn, input_type
-                    ),
-                }
-                .build()
+            .with_context(|| InvalidQuerySnafu {
+                reason: format!(
+                    "No specialization found for binary function {:?} with input type {:?}",
+                    generic_fn, input_type
+                ),
             })
     }
 

@@ -431,27 +431,24 @@ impl BinaryFunc {
             }
         );
 
-        let arg_type = {
-            if arg_types[0].is_some() && arg_types[1].is_some() {
-                if arg_types[0] != arg_types[1] {
-                    return InvalidQuerySnafu {
+        let arg_type = match (arg_types[0].as_ref(), arg_types[1].as_ref()) {
+            (Some(t1), Some(t2)) => {
+                ensure!(
+                    t1 == t2,
+                    InvalidQuerySnafu {
                         reason: format!(
                             "Binary function {} requires both arguments to have the same type",
                             name
                         ),
                     }
-                    .fail();
-                }
-
-                arg_types[0].clone()
-            } else if let Some(inferred) = arg_types[0].clone().or_else(|| arg_types[1].clone()) {
-                Some(inferred)
-            } else {
-                arg_exprs[0]
-                    .as_literal()
-                    .map(|lit| lit.data_type())
-                    .or_else(|| arg_exprs[1].as_literal().map(|lit| lit.data_type()))
+                );
+                Some(t1.clone())
             }
+            (Some(t), None) | (None, Some(t)) => Some(t.clone()),
+            _ => arg_exprs[0]
+                .as_literal()
+                .map(|lit| lit.data_type())
+                .or_else(|| arg_exprs[1].as_literal().map(|lit| lit.data_type())),
         };
 
         ensure!(
@@ -740,4 +737,72 @@ fn test_num_ops() {
     assert_eq!(res, Value::from(false));
     let res = or(&values, &exprs).unwrap();
     assert_eq!(res, Value::from(true));
+}
+
+#[test]
+fn test_binary_func_spec() {
+    assert_eq!(
+        BinaryFunc::from_str_expr_and_type(
+            "add",
+            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+            &[
+                Some(ConcreteDataType::int32_datatype()),
+                Some(ConcreteDataType::int32_datatype())
+            ]
+        )
+        .unwrap(),
+        BinaryFunc::AddInt32
+    );
+
+    assert_eq!(
+        BinaryFunc::from_str_expr_and_type(
+            "add",
+            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+            &[Some(ConcreteDataType::int32_datatype()), None]
+        )
+        .unwrap(),
+        BinaryFunc::AddInt32
+    );
+
+    assert_eq!(
+        BinaryFunc::from_str_expr_and_type(
+            "add",
+            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+            &[Some(ConcreteDataType::int32_datatype()), None]
+        )
+        .unwrap(),
+        BinaryFunc::AddInt32
+    );
+
+    assert_eq!(
+        BinaryFunc::from_str_expr_and_type(
+            "add",
+            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+            &[Some(ConcreteDataType::int32_datatype()), None]
+        )
+        .unwrap(),
+        BinaryFunc::AddInt32
+    );
+
+    assert_eq!(
+        BinaryFunc::from_str_expr_and_type(
+            "add",
+            &[
+                ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
+                ScalarExpr::Column(0)
+            ],
+            &[None, None]
+        )
+        .unwrap(),
+        BinaryFunc::AddInt32
+    );
+
+    matches!(
+        BinaryFunc::from_str_expr_and_type(
+            "add",
+            &[ScalarExpr::Column(0), ScalarExpr::Column(0)],
+            &[None, None]
+        ),
+        Err(Error::InvalidQuery { .. })
+    );
 }
