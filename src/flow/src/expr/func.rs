@@ -392,6 +392,9 @@ impl BinaryFunc {
     }
 
     /// choose the appropriate specialization based on the input types
+    ///
+    /// will try it best to extract from `arg_types` and `arg_exprs` to get the input types
+    /// if `arg_types` is not enough, it will try to extract from `arg_exprs` if `arg_exprs` is literal with known type
     pub fn from_str_expr_and_type(
         name: &str,
         arg_exprs: &[ScalarExpr],
@@ -739,6 +742,8 @@ fn test_num_ops() {
     assert_eq!(res, Value::from(true));
 }
 
+/// test if the binary function specialization works
+/// whether from direct type or from the expression that is literal
 #[test]
 fn test_binary_func_spec() {
     assert_eq!(
