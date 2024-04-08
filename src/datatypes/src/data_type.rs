@@ -281,7 +281,7 @@ impl ConcreteDataType {
         }
     }
 
-    /// Try to get numeric scale, returns `None` if it's not numeric type
+    /// Try to get numeric scale, returns `None` if it's float or not numeric type
     pub fn numeric_scale(&self) -> Option<i8> {
         match self {
             ConcreteDataType::Int8(_)
