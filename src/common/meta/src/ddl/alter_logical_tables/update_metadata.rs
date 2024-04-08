@@ -46,7 +46,7 @@ impl AlterLogicalTablesProcedure {
         // Updates physical table's metadata
         self.context
             .table_metadata_manager
-            .update_table_info(physical_table_info.clone(), new_raw_table_info)
+            .update_table_info(physical_table_info, new_raw_table_info)
             .await?;
 
         Ok(())

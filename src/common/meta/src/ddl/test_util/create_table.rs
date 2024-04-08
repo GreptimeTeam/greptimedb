@@ -43,6 +43,7 @@ pub struct TestCreateTableExpr {
     primary_keys: Vec<String>,
     create_if_not_exists: bool,
     table_options: HashMap<String, String>,
+    #[builder(setter(into, strip_option))]
     table_id: Option<TableId>,
     #[builder(setter(into), default = "MITO2_ENGINE.to_string()")]
     engine: String,
