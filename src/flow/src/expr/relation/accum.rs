@@ -549,7 +549,7 @@ pub enum Accum {
 }
 
 impl Accum {
-    /// create a new accumlator from given aggregate function
+    /// create a new accumulator from given aggregate function
     pub fn new_accum(aggr_fn: &AggregateFunc) -> Result<Self, EvalError> {
         Ok(match aggr_fn {
             AggregateFunc::Any
@@ -593,7 +593,7 @@ impl Accum {
         })
     }
 
-    /// try to convert a vector of value into given aggregate function's accumlator
+    /// try to convert a vector of value into given aggregate function's accumulator
     pub fn try_into_accum(aggr_fn: &AggregateFunc, state: Vec<Value>) -> Result<Self, EvalError> {
         match aggr_fn {
             AggregateFunc::Any

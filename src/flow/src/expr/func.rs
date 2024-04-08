@@ -24,7 +24,7 @@ use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::adapter::error::{Error, InvalidQuerySnafu, PlanSnafu};
@@ -130,11 +130,8 @@ impl UnaryFunc {
             "is_false" => Ok(Self::IsFalse),
             "step_timestamp" => Ok(Self::StepTimestamp),
             "cast" => {
-                let arg_type = arg_type.ok_or_else(|| {
-                    InvalidQuerySnafu {
-                        reason: "cast function requires a type argument".to_string(),
-                    }
-                    .build()
+                let arg_type = arg_type.with_context(|| InvalidQuerySnafu {
+                    reason: "cast function requires a type argument".to_string(),
                 })?;
                 Ok(UnaryFunc::Cast(arg_type))
             }
@@ -151,7 +148,7 @@ impl UnaryFunc {
     ///
     /// - `values`: The values to be used in the evaluation
     ///
-    /// - `expr`: The expression to be evaluated and use as arguement, will extract the value from the `values` and evaluate the expression
+    /// - `expr`: The expression to be evaluated and use as argument, will extract the value from the `values` and evaluate the expression
     pub fn eval(&self, values: &[Value], expr: &ScalarExpr) -> Result<Value, EvalError> {
         let arg = expr.eval(values)?;
         match self {
@@ -384,14 +381,11 @@ impl BinaryFunc {
         });
         rule.get(&(generic.clone(), input_type.clone()))
             .cloned()
-            .ok_or_else(|| {
-                InvalidQuerySnafu {
-                    reason: format!(
-                        "No specialization found for binary function {:?} with input type {:?}",
-                        generic, input_type
-                    ),
-                }
-                .build()
+            .with_context(|| InvalidQuerySnafu {
+                reason: format!(
+                    "No specialization found for binary function {:?} with input type {:?}",
+                    generic, input_type
+                ),
             })
     }
 
@@ -458,15 +452,16 @@ impl BinaryFunc {
             }
         };
 
-        if need_type && arg_type.is_none() {
-            return InvalidQuerySnafu {
+        ensure!(
+            !need_type || arg_type.is_some(),
+            InvalidQuerySnafu {
                 reason: format!(
                     "Binary function {} requires at least one argument with known type",
                     name
                 ),
             }
-            .fail();
-        }
+        );
+
         let spec_fn = Self::specialization(
             generic_fn,
             arg_type
