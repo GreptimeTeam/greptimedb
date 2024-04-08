@@ -30,7 +30,7 @@ pub struct Signature {
 }
 
 /// Generic function category
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum GenericFn {
     // aggregate func
     Max,

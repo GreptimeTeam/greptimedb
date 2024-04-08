@@ -215,7 +215,9 @@ impl UnaryFunc {
 /// Also notice this enum doesn't contain function arguments, since the arguments are stored in the expression.
 ///
 /// TODO(discord9): support more binary functions for more types
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash, EnumIter)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash, EnumIter,
+)]
 pub enum BinaryFunc {
     Eq,
     NotEq,
@@ -379,7 +381,7 @@ impl BinaryFunc {
             }
             spec
         });
-        rule.get(&(generic.clone(), input_type.clone()))
+        rule.get(&(generic, input_type.clone()))
             .cloned()
             .with_context(|| InvalidQuerySnafu {
                 reason: format!(
@@ -563,7 +565,7 @@ impl BinaryFunc {
 }
 
 /// VariadicFunc is a function that takes a variable number of arguments.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum VariadicFunc {
     And,
     Or,

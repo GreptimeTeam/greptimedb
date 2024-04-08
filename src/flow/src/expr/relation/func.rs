@@ -184,7 +184,7 @@ impl AggregateFunc {
             }
         };
         let input_type = arg_type.unwrap_or_else(ConcreteDataType::null_datatype);
-        rule.get(&(generic_fn.clone(), input_type.clone()))
+        rule.get(&(generic_fn, input_type.clone()))
             .cloned()
             .ok_or_else(|| {
                 InvalidQuerySnafu {
