@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    DeserializeFromJsonSnafu, Error, FromUtf8Snafu, InvalidNodeInfoKeySnafu, InvalidRoleSnafu,
-    ParseNumSnafu, Result, SerializeToJsonSnafu,
+    DecodeJsonSnafu, EncodeJsonSnafu, Error, FromUtf8Snafu, InvalidNodeInfoKeySnafu,
+    InvalidRoleSnafu, ParseNumSnafu, Result,
 };
 use crate::peer::Peer;
 
@@ -184,7 +184,7 @@ impl FromStr for NodeInfo {
     type Err = Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        serde_json::from_str(value).context(DeserializeFromJsonSnafu { input: value })
+        serde_json::from_str(value).context(DecodeJsonSnafu)
     }
 }
 
@@ -203,9 +203,7 @@ impl TryFrom<NodeInfo> for Vec<u8> {
 
     fn try_from(info: NodeInfo) -> Result<Self> {
         Ok(serde_json::to_string(&info)
-            .context(SerializeToJsonSnafu {
-                input: format!("{info:?}"),
-            })?
+            .context(EncodeJsonSnafu)?
             .into_bytes())
     }
 }

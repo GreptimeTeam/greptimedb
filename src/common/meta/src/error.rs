@@ -428,22 +428,6 @@ pub enum Error {
         error: std::string::FromUtf8Error,
         location: Location,
     },
-
-    #[snafu(display("Failed to serialize to json: {}", input))]
-    SerializeToJson {
-        input: String,
-        #[snafu(source)]
-        error: serde_json::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to deserialize from json: {}", input))]
-    DeserializeFromJson {
-        input: String,
-        #[snafu(source)]
-        error: serde_json::error::Error,
-        location: Location,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -456,8 +440,6 @@ impl ErrorExt for Error {
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
             | EtcdTxnFailed { .. }
-            | SerializeToJson { .. }
-            | DeserializeFromJson { .. }
             | ConnectEtcd { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
