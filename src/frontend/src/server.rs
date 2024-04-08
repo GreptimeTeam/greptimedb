@@ -18,7 +18,6 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
-use servers::error::InternalIoSnafu;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
@@ -29,7 +28,8 @@ use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
-use servers::server::{Server, ServerHandler, ServerHandlers};
+use servers::server::{Server, ServerHandlers};
+use servers::tls::{maybe_watch_tls_config, ReloadableTlsServerConfig};
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu};
@@ -164,14 +164,14 @@ where
         Ok(http_server)
     }
 
-    pub fn build(mut self) -> Result<ServerHandlers> {
+    pub async fn build(mut self) -> Result<ServerHandlers> {
         let opts = self.opts.clone();
         let instance = self.instance.clone();
 
         let toml = opts.to_toml()?;
         let opts: FrontendOptions = opts.into();
 
-        let mut result = Vec::<ServerHandler>::new();
+        let handlers = ServerHandlers::default();
 
         let user_provider = self.plugins.get::<UserProviderRef>();
 
@@ -179,7 +179,7 @@ where
             // Always init GRPC server
             let grpc_addr = parse_addr(&opts.grpc.addr)?;
             let grpc_server = self.build_grpc_server(&opts)?;
-            result.push((Box::new(grpc_server), grpc_addr));
+            handlers.insert((Box::new(grpc_server), grpc_addr)).await;
         }
 
         {
@@ -187,13 +187,20 @@ where
             let http_options = &opts.http;
             let http_addr = parse_addr(&http_options.addr)?;
             let http_server = self.build_http_server(&opts, toml)?;
-            result.push((Box::new(http_server), http_addr));
+            handlers.insert((Box::new(http_server), http_addr)).await;
         }
 
         if opts.mysql.enable {
             // Init MySQL server
             let opts = &opts.mysql;
             let mysql_addr = parse_addr(&opts.addr)?;
+
+            let tls_server_config = Arc::new(
+                ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
+            );
+
+            // will not watch if watch is disabled in tls option
+            maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let mysql_io_runtime = Arc::new(
                 RuntimeBuilder::default()
@@ -210,21 +217,23 @@ where
                 )),
                 Arc::new(MysqlSpawnConfig::new(
                     opts.tls.should_force_tls(),
-                    opts.tls
-                        .setup()
-                        .context(InternalIoSnafu)
-                        .context(StartServerSnafu)?
-                        .map(Arc::new),
+                    tls_server_config,
                     opts.reject_no_database.unwrap_or(false),
                 )),
             );
-            result.push((mysql_server, mysql_addr));
+            handlers.insert((mysql_server, mysql_addr)).await;
         }
 
         if opts.postgres.enable {
             // Init PosgresSQL Server
             let opts = &opts.postgres;
             let pg_addr = parse_addr(&opts.addr)?;
+
+            let tls_server_config = Arc::new(
+                ReloadableTlsServerConfig::try_new(opts.tls.clone()).context(StartServerSnafu)?,
+            );
+
+            maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let pg_io_runtime = Arc::new(
                 RuntimeBuilder::default()
@@ -236,12 +245,13 @@ where
 
             let pg_server = Box::new(PostgresServer::new(
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),
-                opts.tls.clone(),
+                opts.tls.should_force_tls(),
+                tls_server_config,
                 pg_io_runtime,
                 user_provider.clone(),
             )) as Box<dyn Server>;
 
-            result.push((pg_server, pg_addr));
+            handlers.insert((pg_server, pg_addr)).await;
         }
 
         if opts.opentsdb.enable {
@@ -259,13 +269,10 @@ where
 
             let server = OpentsdbServer::create_server(instance.clone(), io_runtime);
 
-            result.push((server, addr));
+            handlers.insert((server, addr)).await;
         }
 
-        Ok(result
-            .into_iter()
-            .map(|(server, addr)| (server.name().to_string(), (server, addr)))
-            .collect())
+        Ok(handlers)
     }
 }
 

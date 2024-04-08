@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use client::Database;
-use common_query::Output;
+use common_query::OutputData;
 use common_recordbatch::util;
 
 pub enum ExpectedOutput<'a> {
@@ -23,22 +23,24 @@ pub enum ExpectedOutput<'a> {
 
 pub async fn execute_and_check_output(db: &Database, sql: &str, expected: ExpectedOutput<'_>) {
     let output = db.sql(sql).await.unwrap();
+    let output = output.data;
+
     match (&output, expected) {
-        (Output::AffectedRows(x), ExpectedOutput::AffectedRows(y)) => {
+        (OutputData::AffectedRows(x), ExpectedOutput::AffectedRows(y)) => {
             assert_eq!(*x, y, "actual: \n{}", x)
         }
-        (Output::RecordBatches(_), ExpectedOutput::QueryResult(x))
-        | (Output::Stream(_), ExpectedOutput::QueryResult(x)) => {
+        (OutputData::RecordBatches(_), ExpectedOutput::QueryResult(x))
+        | (OutputData::Stream(_), ExpectedOutput::QueryResult(x)) => {
             check_output_stream(output, x).await
         }
         _ => panic!(),
     }
 }
 
-pub async fn check_output_stream(output: Output, expected: &str) {
+pub async fn check_output_stream(output: OutputData, expected: &str) {
     let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
-        Output::RecordBatches(recordbatches) => recordbatches,
+        OutputData::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(recordbatches) => recordbatches,
         _ => unreachable!(),
     };
     let pretty_print = recordbatches.pretty_print().unwrap();

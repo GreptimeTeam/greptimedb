@@ -21,7 +21,7 @@ use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::datanode_manager::DatanodeManagerRef;
-use common_meta::ddl::table_meta::TableMetadataAllocator;
+use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -40,6 +40,9 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
+use crate::handler::collect_cluster_info_handler::{
+    CollectDatanodeClusterInfoHandler, CollectFrontendClusterInfoHandler,
+};
 use crate::handler::collect_stats_handler::CollectStatsHandler;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
@@ -78,7 +81,7 @@ pub struct MetaSrvBuilder {
     lock: Option<DistLockRef>,
     datanode_manager: Option<DatanodeManagerRef>,
     plugins: Option<Plugins>,
-    table_metadata_allocator: Option<TableMetadataAllocator>,
+    table_metadata_allocator: Option<TableMetadataAllocatorRef>,
 }
 
 impl MetaSrvBuilder {
@@ -150,7 +153,7 @@ impl MetaSrvBuilder {
 
     pub fn table_metadata_allocator(
         mut self,
-        table_metadata_allocator: TableMetadataAllocator,
+        table_metadata_allocator: TableMetadataAllocatorRef,
     ) -> Self {
         self.table_metadata_allocator = Some(table_metadata_allocator);
         self
@@ -222,12 +225,11 @@ impl MetaSrvBuilder {
                 selector_ctx.clone(),
                 selector.clone(),
             ));
-            TableMetadataAllocator::with_peer_allocator(
+            Arc::new(TableMetadataAllocator::with_peer_allocator(
                 sequence,
                 wal_options_allocator.clone(),
-                table_metadata_manager.clone(),
                 peer_allocator,
-            )
+            ))
         });
 
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
@@ -238,7 +240,7 @@ impl MetaSrvBuilder {
             &procedure_manager,
             &mailbox,
             &table_metadata_manager,
-            table_metadata_allocator,
+            &table_metadata_allocator,
             &opening_region_keeper,
         )?;
 
@@ -260,6 +262,7 @@ impl MetaSrvBuilder {
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
                         distributed_time_constants::REGION_LEASE_SECS,
                         in_memory.clone(),
+                        kv_backend.clone(),
                         mailbox.clone(),
                         procedure_manager.clone(),
                         (selector.clone(), selector_ctx.clone()),
@@ -298,6 +301,8 @@ impl MetaSrvBuilder {
                 group.add_handler(CheckLeaderHandler).await;
                 group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler).await;
+                group.add_handler(CollectDatanodeClusterInfoHandler).await;
+                group.add_handler(CollectFrontendClusterInfoHandler).await;
                 group.add_handler(MailboxHandler).await;
                 group.add_handler(region_lease_handler).await;
                 group.add_handler(FilterInactiveRegionStatsHandler).await;
@@ -329,7 +334,7 @@ impl MetaSrvBuilder {
             lock,
             procedure_manager,
             mailbox,
-            ddl_executor: ddl_manager,
+            procedure_executor: ddl_manager,
             wal_options_allocator,
             table_metadata_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
@@ -376,8 +381,13 @@ fn build_procedure_manager(
         retry_delay: options.procedure.retry_delay,
         ..Default::default()
     };
-    let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
-    Arc::new(LocalManager::new(manager_config, state_store))
+    let state_store = KvStateStore::new(kv_backend.clone()).with_max_value_size(
+        options
+            .procedure
+            .max_metadata_value_size
+            .map(|v| v.as_bytes() as usize),
+    );
+    Arc::new(LocalManager::new(manager_config, Arc::new(state_store)))
 }
 
 fn build_ddl_manager(
@@ -386,7 +396,7 @@ fn build_ddl_manager(
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
-    table_metadata_allocator: TableMetadataAllocator,
+    table_metadata_allocator: &TableMetadataAllocatorRef,
     memory_region_keeper: &MemoryRegionKeeperRef,
 ) -> Result<DdlManagerRef> {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {
@@ -413,8 +423,9 @@ fn build_ddl_manager(
             datanode_clients,
             cache_invalidator,
             table_metadata_manager.clone(),
-            table_metadata_allocator,
+            table_metadata_allocator.clone(),
             memory_region_keeper.clone(),
+            true,
         )
         .context(error::InitDdlManagerSnafu)?,
     ))

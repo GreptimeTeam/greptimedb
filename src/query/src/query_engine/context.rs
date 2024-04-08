@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_telemetry::tracing_context::TracingContext;
 use datafusion::execution::context::{SessionState, TaskContext};
 use session::context::QueryContextRef;
 
@@ -41,9 +42,14 @@ impl QueryEngineContext {
     pub fn build_task_ctx(&self) -> Arc<TaskContext> {
         let dbname = self.query_ctx.get_db_string();
         let state = &self.state;
+        let tracing_context = TracingContext::from_current_span();
+
+        // pass tracing context in session_id
+        let session_id = tracing_context.to_json();
+
         Arc::new(TaskContext::new(
             Some(dbname),
-            state.session_id().to_string(),
+            session_id,
             state.config().clone(),
             state.scalar_functions().clone(),
             state.aggregate_functions().clone(),
@@ -62,6 +68,7 @@ impl QueryEngineContext {
 
         let state = Arc::new(QueryEngineState::new(
             catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
             None,
             None,
             false,

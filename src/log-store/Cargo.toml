@@ -9,14 +9,14 @@ protobuf-build = { version = "0.15", default-features = false, features = [
     "protobuf-codec",
 ] }
 
+[lints]
+workspace = true
+
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
-byteorder = "1.4"
-bytes.workspace = true
 chrono.workspace = true
 common-base.workspace = true
-common-config.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
@@ -24,9 +24,10 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
-dashmap.workspace = true
-futures-util.workspace = true
 futures.workspace = true
+futures-util.workspace = true
+lazy_static.workspace = true
+prometheus.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine.workspace = true
 rskafka.workspace = true
@@ -34,7 +35,6 @@ serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 store-api.workspace = true
-tokio-util.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

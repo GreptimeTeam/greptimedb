@@ -301,6 +301,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse bool: {}", err_msg))]
+    ParseBool {
+        err_msg: String,
+        #[snafu(source)]
+        error: std::str::ParseBoolError,
+        location: Location,
+    },
+
     #[snafu(display("Invalid arguments: {}", err_msg))]
     InvalidArguments { err_msg: String, location: Location },
 
@@ -478,6 +486,15 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("Failed to query procedure state"))]
+    QueryProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure not found: {pid}"))]
+    ProcedureNotFound { location: Location, pid: String },
+
     #[snafu(display("Failed to submit procedure"))]
     SubmitProcedure {
         location: Location,
@@ -637,6 +654,18 @@ pub enum Error {
         err_msg: String,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to save cluster info"))]
+    SaveClusterInfo {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Invalid cluster info format"))]
+    InvalidClusterInfoFormat {
+        location: Location,
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -700,12 +729,14 @@ impl ErrorExt for Error {
             | Error::InvalidStatKey { .. }
             | Error::InvalidInactiveRegionKey { .. }
             | Error::ParseNum { .. }
+            | Error::ParseBool { .. }
             | Error::ParseAddr { .. }
             | Error::ParseDuration { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InitExportMetricsTask { .. }
             | Error::InvalidHeartbeatRequest { .. }
+            | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
@@ -727,13 +758,15 @@ impl ErrorExt for Error {
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::SaveClusterInfo { source, .. }
+            | Error::InvalidClusterInfoFormat { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. }
             | Error::InvalidFullTableName { source, .. } => source.status_code(),
-            Error::SubmitProcedure { source, .. } | Error::WaitProcedure { source, .. } => {
-                source.status_code()
-            }
+            Error::SubmitProcedure { source, .. }
+            | Error::WaitProcedure { source, .. }
+            | Error::QueryProcedure { source, .. } => source.status_code(),
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.status_code()
             }

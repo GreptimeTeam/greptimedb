@@ -15,7 +15,7 @@
 use std::ops::Deref;
 
 use common_error::ext::ErrorExt;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -80,22 +80,22 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         // We don't support sending multiple query result because the RowWriter's lifetime is bound to
         // a local variable.
         match output {
-            Ok(output) => match output {
-                Output::Stream(stream) => {
+            Ok(output) => match output.data {
+                OutputData::Stream(stream) => {
                     let query_result = QueryResult {
                         schema: stream.schema(),
                         stream,
                     };
                     Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
-                Output::RecordBatches(recordbatches) => {
+                OutputData::RecordBatches(recordbatches) => {
                     let query_result = QueryResult {
                         schema: recordbatches.schema(),
                         stream: recordbatches.as_stream(),
                     };
                     Self::write_query_result(query_result, self.writer, self.query_context).await?;
                 }
-                Output::AffectedRows(rows) => {
+                OutputData::AffectedRows(rows) => {
                     let next_writer = Self::write_affected_rows(self.writer, rows).await?;
                     return Ok(Some(MysqlResultWriter::new(
                         next_writer,

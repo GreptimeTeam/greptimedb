@@ -219,11 +219,18 @@ pub enum Error {
         error: prost::DecodeError,
     },
 
-    #[snafu(display("Failed to decompress prometheus remote request"))]
-    DecompressPromRemoteRequest {
+    #[snafu(display("Failed to decompress snappy prometheus remote request"))]
+    DecompressSnappyPromRemoteRequest {
         location: Location,
         #[snafu(source)]
         error: snap::Error,
+    },
+
+    #[snafu(display("Failed to decompress zstd prometheus remote request"))]
+    DecompressZstdPromRemoteRequest {
+        location: Location,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Failed to send prometheus remote request"))]
@@ -271,18 +278,25 @@ pub enum Error {
     #[snafu(display("Not found influx http authorization info"))]
     NotFoundInfluxAuth {},
 
+    #[snafu(display("Unsupported http auth scheme, name: {}", name))]
+    UnsupportedAuthScheme { name: String },
+
     #[snafu(display("Invalid visibility ASCII chars"))]
-    InvisibleASCII {
+    InvalidAuthHeaderInvisibleASCII {
         #[snafu(source)]
         error: hyper::header::ToStrError,
         location: Location,
     },
 
-    #[snafu(display("Unsupported http auth scheme, name: {}", name))]
-    UnsupportedAuthScheme { name: String },
+    #[snafu(display("Invalid utf-8 value"))]
+    InvalidAuthHeaderInvalidUtf8Value {
+        #[snafu(source)]
+        error: FromUtf8Error,
+        location: Location,
+    },
 
     #[snafu(display("Invalid http authorization header"))]
-    InvalidAuthorizationHeader { location: Location },
+    InvalidAuthHeader { location: Location },
 
     #[snafu(display("Invalid base64 value"))]
     InvalidBase64Value {
@@ -441,6 +455,13 @@ pub enum Error {
         "Invalid parameter, physical_table is not expected when metric engine is disabled"
     ))]
     UnexpectedPhysicalTable { location: Location },
+
+    #[snafu(display("Failed to initialize a watcher for file {}", path))]
+    FileWatch {
+        path: String,
+        #[snafu(source)]
+        error: notify::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -462,7 +483,8 @@ impl ErrorExt for Error {
             | CatalogError { .. }
             | GrpcReflectionService { .. }
             | BuildHttpResponse { .. }
-            | Arrow { .. } => StatusCode::Internal,
+            | Arrow { .. }
+            | FileWatch { .. } => StatusCode::Internal,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 
@@ -489,7 +511,8 @@ impl ErrorExt for Error {
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
             | CompressPromRemoteRequest { .. }
-            | DecompressPromRemoteRequest { .. }
+            | DecompressSnappyPromRemoteRequest { .. }
+            | DecompressZstdPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidExportMetricsConfig { .. }
             | InvalidFlightTicket { .. }
@@ -513,16 +536,17 @@ impl ErrorExt for Error {
             DescribeStatement { source } => source.status_code(),
 
             NotFoundAuthHeader { .. } | NotFoundInfluxAuth { .. } => StatusCode::AuthHeaderNotFound,
-            InvisibleASCII { .. }
+            InvalidAuthHeaderInvisibleASCII { .. }
             | UnsupportedAuthScheme { .. }
-            | InvalidAuthorizationHeader { .. }
+            | InvalidAuthHeader { .. }
             | InvalidBase64Value { .. }
-            | InvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
+            | InvalidAuthHeaderInvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
-            InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
+
+            InvalidUtf8Value { .. } | InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
             ReplacePreparedStmtParams { source, .. }
             | GetPreparedStmtParams { source, .. }
@@ -596,9 +620,9 @@ macro_rules! define_into_tonic_status {
     ($Error: ty) => {
         impl From<$Error> for tonic::Status {
             fn from(err: $Error) -> Self {
-                use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
                 use tonic::codegen::http::{HeaderMap, HeaderValue};
                 use tonic::metadata::MetadataMap;
+                use $crate::http::header::constants::GREPTIME_DB_HEADER_ERROR_CODE;
 
                 let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
 
@@ -610,10 +634,6 @@ macro_rules! define_into_tonic_status {
                     HeaderValue::from(status_code as u32),
                 );
                 let root_error = err.output_msg();
-
-                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.as_bytes()) {
-                    let _ = headers.insert(GREPTIME_DB_HEADER_ERROR_MSG, err_msg);
-                }
 
                 let metadata = MetadataMap::from_headers(headers);
                 tonic::Status::with_metadata(
@@ -645,7 +665,8 @@ impl IntoResponse for Error {
             | Error::InvalidOpentsdbJsonRequest { .. }
             | Error::DecodePromRemoteRequest { .. }
             | Error::DecodeOtlpRequest { .. }
-            | Error::DecompressPromRemoteRequest { .. }
+            | Error::DecompressSnappyPromRemoteRequest { .. }
+            | Error::DecompressZstdPromRemoteRequest { .. }
             | Error::InvalidPromRemoteRequest { .. }
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => HttpStatusCode::BAD_REQUEST,

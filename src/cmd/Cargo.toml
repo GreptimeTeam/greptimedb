@@ -12,8 +12,10 @@ path = "src/bin/greptime.rs"
 [features]
 tokio-console = ["common-telemetry/tokio-console"]
 
+[lints]
+workspace = true
+
 [dependencies]
-anymap = "1.0.0-beta.2"
 async-trait.workspace = true
 auth.workspace = true
 catalog.workspace = true
@@ -49,7 +51,6 @@ meta-client.workspace = true
 meta-srv.workspace = true
 mito2.workspace = true
 nu-ansi-term = "0.46"
-partition.workspace = true
 plugins.workspace = true
 prometheus.workspace = true
 prost.workspace = true

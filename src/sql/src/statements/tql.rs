@@ -21,28 +21,106 @@ pub enum Tql {
     Analyze(TqlAnalyze),
 }
 
+/// TQL EVAL (<start>, <end>, <step>, [lookback]) <promql>
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlEval {
     pub start: String,
     pub end: String,
     pub step: String,
+    pub lookback: Option<String>,
     pub query: String,
 }
 
-/// TQL EXPLAIN (like SQL EXPLAIN): doesn't execute the query but tells how the query would be executed.
+/// TQL EXPLAIN [VERBOSE] [<start>, <end>, <step>, [lookback]] <promql>
+/// doesn't execute the query but tells how the query would be executed (similar to SQL EXPLAIN).
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlExplain {
     pub start: String,
     pub end: String,
     pub step: String,
+    pub lookback: Option<String>,
     pub query: String,
+    pub is_verbose: bool,
 }
 
-/// TQL ANALYZE (like SQL ANALYZE): executes the plan and tells the detailed per-step execution time.
+/// TQL ANALYZE [VERBOSE] (<start>, <end>, <step>, [lookback]) <promql>
+/// executes the plan and tells the detailed per-step execution time (similar to SQL ANALYZE).
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlAnalyze {
     pub start: String,
     pub end: String,
     pub step: String,
+    pub lookback: Option<String>,
     pub query: String,
+    pub is_verbose: bool,
+}
+
+/// Intermediate structure used to unify parameter mappings for various TQL operations.
+/// This struct serves as a common parameter container for parsing TQL queries
+/// and constructing corresponding TQL operations: `TqlEval`, `TqlAnalyze` or `TqlExplain`.
+#[derive(Debug)]
+pub struct TqlParameters {
+    start: String,
+    end: String,
+    step: String,
+    lookback: Option<String>,
+    query: String,
+    pub is_verbose: bool,
+}
+
+impl TqlParameters {
+    pub fn new(
+        start: String,
+        end: String,
+        step: String,
+        lookback: Option<String>,
+        query: String,
+    ) -> Self {
+        TqlParameters {
+            start,
+            end,
+            step,
+            lookback,
+            query,
+            is_verbose: false,
+        }
+    }
+}
+
+impl From<TqlParameters> for TqlEval {
+    fn from(params: TqlParameters) -> Self {
+        TqlEval {
+            start: params.start,
+            end: params.end,
+            step: params.step,
+            lookback: params.lookback,
+            query: params.query,
+        }
+    }
+}
+
+impl From<TqlParameters> for TqlExplain {
+    fn from(params: TqlParameters) -> Self {
+        TqlExplain {
+            start: params.start,
+            end: params.end,
+            step: params.step,
+            query: params.query,
+            lookback: params.lookback,
+            is_verbose: params.is_verbose,
+        }
+    }
+}
+
+impl From<TqlParameters> for TqlAnalyze {
+    fn from(params: TqlParameters) -> Self {
+        TqlAnalyze {
+            start: params.start,
+            end: params.end,
+            step: params.step,
+            query: params.query,
+            lookback: params.lookback,
+            is_verbose: params.is_verbose,
+        }
+    }
 }

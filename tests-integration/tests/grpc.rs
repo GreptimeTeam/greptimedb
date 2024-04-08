@@ -20,12 +20,15 @@ use api::v1::{
     PromqlRequest, RequestHeader, SemanticType,
 };
 use auth::user_provider_from_option;
-use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::MITO_ENGINE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use servers::grpc::GrpcServerConfig;
-use servers::http::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
+use servers::http::prometheus::{
+    PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
+    PrometheusResponse,
+};
 use servers::server::Server;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
@@ -311,7 +314,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     // create
     let expr = testing_create_expr();
     let result = db.create(expr).await.unwrap();
-    assert!(matches!(result, Output::AffectedRows(0)));
+    assert!(matches!(result.data, OutputData::AffectedRows(0)));
 
     //alter
     let add_column = ColumnDef {
@@ -335,7 +338,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         kind: Some(kind),
     };
     let result = db.alter(expr).await.unwrap();
-    assert!(matches!(result, Output::AffectedRows(0)));
+    assert!(matches!(result.data, OutputData::AffectedRows(0)));
 
     // insert
     insert_and_assert(&db).await;
@@ -373,7 +376,7 @@ async fn insert_and_assert(db: &Database) {
         )
         .await
         .unwrap();
-    assert!(matches!(result, Output::AffectedRows(2)));
+    assert!(matches!(result.data, OutputData::AffectedRows(2)));
 
     // select
     let output = db
@@ -381,10 +384,10 @@ async fn insert_and_assert(db: &Database) {
         .await
         .unwrap();
 
-    let record_batches = match output {
-        Output::RecordBatches(record_batches) => record_batches,
-        Output::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
-        Output::AffectedRows(_) => unreachable!(),
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
     };
 
     let pretty = record_batches.pretty_print().unwrap();
@@ -465,6 +468,8 @@ pub async fn test_health_check(store_type: StorageType) {
 }
 
 pub async fn test_prom_gateway_query(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
     // prepare connection
     let (addr, mut guard, fe_grpc_server) = setup_grpc_server(store_type, "prom_gateway").await;
     let grpc_client = Client::with_urls(vec![addr]);
@@ -479,14 +484,16 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     assert!(matches!(
         db.sql("CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);")
             .await
-            .unwrap(),
-        Output::AffectedRows(0)
+            .unwrap()
+            .data,
+        OutputData::AffectedRows(0)
     ));
     assert!(matches!(
         db.sql(r#"INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");"#)
             .await
-            .unwrap(),
-        Output::AffectedRows(3)
+            .unwrap()
+            .data,
+        OutputData::AffectedRows(3)
     ));
 
     // Instant query using prometheus gateway service
@@ -514,8 +521,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
             result_type: "vector".to_string(),
-            result: vec![
-                PromSeries {
+            result: PromQueryResult::Vector(vec![
+                PromSeriesVector {
                     metric: [
                         ("k".to_string(), "a".to_string()),
                         ("__name__".to_string(), "test".to_string()),
@@ -523,9 +530,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     value: Some((5.0, "2".to_string())),
-                    ..Default::default()
                 },
-                PromSeries {
+                PromSeriesVector {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "b".to_string()),
@@ -533,13 +539,13 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     value: Some((5.0, "1".to_string())),
-                    ..Default::default()
                 },
-            ],
+            ]),
         }),
         error: None,
         error_type: None,
         warnings: None,
+        resp_metrics: Default::default(),
     };
     assert_eq!(instant_query_result, expected);
 
@@ -565,8 +571,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
             result_type: "matrix".to_string(),
-            result: vec![
-                PromSeries {
+            result: PromQueryResult::Matrix(vec![
+                PromSeriesMatrix {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "a".to_string()),
@@ -574,9 +580,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
-                    ..Default::default()
                 },
-                PromSeries {
+                PromSeriesMatrix {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "b".to_string()),
@@ -584,13 +589,13 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
-                    ..Default::default()
                 },
-            ],
+            ]),
         }),
         error: None,
         error_type: None,
         warnings: None,
+        resp_metrics: Default::default(),
     };
     assert_eq!(range_query_result, expected);
 
@@ -616,11 +621,12 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         status: "success".to_string(),
         data: PrometheusResponse::PromData(PromData {
             result_type: "matrix".to_string(),
-            result: vec![],
+            result: PromQueryResult::Matrix(vec![]),
         }),
         error: None,
         error_type: None,
         warnings: None,
+        resp_metrics: Default::default(),
     };
     assert_eq!(range_query_result, expected);
 
@@ -681,10 +687,10 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
 }
 
 async fn to_batch(output: Output) -> String {
-    match output {
-        Output::RecordBatches(batch) => batch,
-        Output::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
-        Output::AffectedRows(_) => unreachable!(),
+    match output.data {
+        OutputData::RecordBatches(batch) => batch,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
     }
     .pretty_print()
     .unwrap()

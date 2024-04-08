@@ -28,7 +28,7 @@ use client::{
     Client, Database as DB, Error as ClientError, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 use common_error::ext::ErrorExt;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
@@ -199,6 +199,8 @@ impl Env {
         };
         let log_file_name = self.data_home.join(log_file_name).display().to_string();
 
+        println!("{subcommand} log file at {log_file_name}");
+
         let log_file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -362,9 +364,7 @@ impl Env {
             kafka_wal_broker_endpoints: String,
         }
 
-        let data_home = self
-            .data_home
-            .join(format!("greptimedb-{subcommand}-{}", db_ctx.time));
+        let data_home = self.data_home.join(format!("greptimedb-{subcommand}"));
         std::fs::create_dir_all(data_home.as_path()).unwrap();
 
         let wal_dir = data_home.join("wal").display().to_string();
@@ -445,7 +445,7 @@ impl Database for GreptimeDB {
                 .trim_end_matches(';');
             client.set_schema(database);
             Box::new(ResultDisplayer {
-                result: Ok(Output::AffectedRows(0)),
+                result: Ok(Output::new_with_affected_rows(0)),
             }) as _
         } else if query.trim().to_lowercase().starts_with("set time_zone") {
             // set time_zone='xxx'
@@ -462,13 +462,19 @@ impl Database for GreptimeDB {
             client.set_timezone(timezone);
 
             Box::new(ResultDisplayer {
-                result: Ok(Output::AffectedRows(0)),
+                result: Ok(Output::new_with_affected_rows(0)),
             }) as _
         } else {
             let mut result = client.sql(&query).await;
-            if let Ok(Output::Stream(stream)) = result {
+            if let Ok(Output {
+                data: OutputData::Stream(stream),
+                ..
+            }) = result
+            {
                 match RecordBatches::try_collect(stream).await {
-                    Ok(recordbatches) => result = Ok(Output::RecordBatches(recordbatches)),
+                    Ok(recordbatches) => {
+                        result = Ok(Output::new_with_record_batches(recordbatches));
+                    }
                     Err(e) => {
                         let status_code = e.status_code();
                         let msg = e.output_msg();
@@ -489,21 +495,26 @@ impl GreptimeDB {
     fn stop(&mut self) {
         if let Some(server_processes) = self.server_processes.clone() {
             let mut server_processes = server_processes.lock().unwrap();
-            for server_process in server_processes.iter_mut() {
-                Env::stop_server(server_process);
+            for mut server_process in server_processes.drain(..) {
+                Env::stop_server(&mut server_process);
+                println!(
+                    "Standalone or Datanode (pid = {}) is stopped",
+                    server_process.id()
+                );
             }
         }
         if let Some(mut metasrv) = self.metasrv_process.take() {
             Env::stop_server(&mut metasrv);
+            println!("Metasrv (pid = {}) is stopped", metasrv.id());
         }
-        if let Some(mut datanode) = self.frontend_process.take() {
-            Env::stop_server(&mut datanode);
+        if let Some(mut frontend) = self.frontend_process.take() {
+            Env::stop_server(&mut frontend);
+            println!("Frontend (pid = {}) is stopped", frontend.id());
         }
         if matches!(self.ctx.wal, WalConfig::Kafka { needs_kafka_cluster, .. } if needs_kafka_cluster)
         {
             util::teardown_wal();
         }
-        println!("Stopped DB.");
     }
 }
 
@@ -564,11 +575,11 @@ struct ResultDisplayer {
 impl Display for ResultDisplayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.result {
-            Ok(result) => match result {
-                Output::AffectedRows(rows) => {
+            Ok(result) => match &result.data {
+                OutputData::AffectedRows(rows) => {
                     write!(f, "Affected Rows: {rows}")
                 }
-                Output::RecordBatches(recordbatches) => {
+                OutputData::RecordBatches(recordbatches) => {
                     let pretty = recordbatches.pretty_print().map_err(|e| e.to_string());
                     match pretty {
                         Ok(s) => write!(f, "{s}"),
@@ -577,7 +588,7 @@ impl Display for ResultDisplayer {
                         }
                     }
                 }
-                Output::Stream(_) => unreachable!(),
+                OutputData::Stream(_) => unreachable!(),
             },
             Err(e) => {
                 let status_code = e.status_code();

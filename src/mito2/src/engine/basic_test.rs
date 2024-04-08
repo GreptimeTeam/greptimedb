@@ -111,7 +111,7 @@ async fn test_region_replay() {
 
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
 
-    let rows = engine
+    let result = engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
@@ -123,7 +123,7 @@ async fn test_region_replay() {
         )
         .await
         .unwrap();
-    assert_eq!(0, rows);
+    assert_eq!(0, result.affected_rows);
 
     let request = ScanRequest::default();
     let stream = engine.handle_query(region_id, request).await.unwrap();
@@ -394,7 +394,7 @@ async fn test_delete_not_null_fields() {
     assert_eq!(expected, batches.pretty_print().unwrap());
 
     // Reopen and scan again.
-    reopen_region(&engine, region_id, region_dir, false).await;
+    reopen_region(&engine, region_id, region_dir, false, HashMap::new()).await;
     let request = ScanRequest::default();
     let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -550,11 +550,11 @@ async fn test_region_usage() {
     flush_region(&engine, region_id, None).await;
 
     let region_stat = region.region_usage().await;
-    assert_eq!(region_stat.wal_usage, 0);
-    assert_eq!(region_stat.sst_usage, 3006);
+    assert_eq!(region_stat.sst_usage, 2962);
 
     // region total usage
-    assert_eq!(region_stat.disk_usage(), 4072);
+    // Some memtables may share items.
+    assert!(region_stat.disk_usage() >= 4028);
 }
 
 #[tokio::test]

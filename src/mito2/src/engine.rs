@@ -17,6 +17,8 @@
 #[cfg(test)]
 mod alter_test;
 #[cfg(test)]
+mod append_mode_test;
+#[cfg(test)]
 mod basic_test;
 #[cfg(test)]
 mod catchup_test;
@@ -47,15 +49,17 @@ mod truncate_test;
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
+use common_telemetry::tracing;
 use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
@@ -110,6 +114,11 @@ impl MitoEngine {
 
     /// Returns a scanner to scan for `request`.
     fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+        self.scan_region(region_id, request)?.scanner()
+    }
+
+    /// Scans a region.
+    fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         self.inner.handle_query(region_id, request)
     }
 
@@ -118,6 +127,10 @@ impl MitoEngine {
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&["edit_region"])
+            .start_timer();
+
         ensure!(
             is_valid_region_edit(&edit),
             InvalidRequestSnafu {
@@ -206,18 +219,15 @@ impl EngineInner {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<AffectedRows> {
-        let _timer = HANDLE_REQUEST_ELAPSED
-            .with_label_values(&[request.type_name()])
-            .start_timer();
-
         let (request, receiver) = WorkerRequest::try_from_region_request(region_id, request)?;
         self.workers.submit_to_worker(region_id, request).await?;
 
         receiver.await.context(RecvSnafu)?
     }
 
-    /// Handles the scan `request` and returns a [Scanner] for the `request`.
-    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+    /// Handles the scan `request` and returns a [ScanRegion].
+    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
+        let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self
             .workers
@@ -238,9 +248,10 @@ impl EngineInner {
             Some(cache_manager),
         )
         .with_parallelism(scan_parallelism)
-        .ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled());
+        .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
+        .with_start_time(query_start);
 
-        scan_region.scanner()
+        Ok(scan_region)
     }
 
     /// Set writable mode for a region.
@@ -281,18 +292,25 @@ impl RegionEngine for MitoEngine {
         MITO_ENGINE_NAME
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<AffectedRows, BoxedError> {
+    ) -> Result<RegionHandleResult, BoxedError> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&[request.request_type()])
+            .start_timer();
+
         self.inner
             .handle_request(region_id, request)
             .await
+            .map(RegionHandleResult::new)
             .map_err(BoxedError::new)
     }
 
     /// Handle substrait query and return a stream of record batches
+    #[tracing::instrument(skip_all)]
     async fn handle_query(
         &self,
         region_id: RegionId,
@@ -341,6 +359,10 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
     ) -> Result<SetReadonlyResponse, BoxedError> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&["set_readonly_gracefully"])
+            .start_timer();
+
         self.inner
             .set_readonly_gracefully(region_id)
             .await
@@ -367,6 +389,7 @@ impl MitoEngine {
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
+        time_provider: crate::time_provider::TimeProviderRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -379,11 +402,17 @@ impl MitoEngine {
                     object_store_manager,
                     write_buffer_manager,
                     listener,
+                    time_provider,
                 )
                 .await?,
                 config,
             }),
         })
+    }
+
+    /// Returns the purge scheduler.
+    pub fn purge_scheduler(&self) -> &crate::schedule::scheduler::SchedulerRef {
+        self.inner.workers.purge_scheduler()
     }
 }
 

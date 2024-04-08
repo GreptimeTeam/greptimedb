@@ -172,7 +172,15 @@ macro_rules! parse_number_to_value {
                     }.fail()
                 }
             }
-
+            // It's valid for MySQL JDBC to send "0" and "1" for boolean types, so adapt to that.
+            ConcreteDataType::Boolean(_) => {
+                match $n {
+                    "0" => Ok(Value::Boolean(false)),
+                    "1" => Ok(Value::Boolean(true)),
+                    _ => ParseSqlValueSnafu {
+                        msg: format!("Failed to parse number '{}' to boolean column type", $n)}.fail(),
+                }
+            }
             _ => ParseSqlValueSnafu {
                 msg: format!("Fail to parse number {}, invalid column type: {:?}",
                                 $n, $data_type
@@ -646,6 +654,12 @@ mod tests {
 
         let v = sql_number_to_value(&ConcreteDataType::string_datatype(), "999");
         assert!(v.is_err(), "parse value error is: {v:?}");
+
+        let v = sql_number_to_value(&ConcreteDataType::boolean_datatype(), "0").unwrap();
+        assert_eq!(v, Value::Boolean(false));
+        let v = sql_number_to_value(&ConcreteDataType::boolean_datatype(), "1").unwrap();
+        assert_eq!(v, Value::Boolean(true));
+        assert!(sql_number_to_value(&ConcreteDataType::boolean_datatype(), "2").is_err());
     }
 
     #[test]
@@ -671,8 +685,7 @@ mod tests {
         let sql_val = SqlValue::Number("3.0".to_string(), false);
         let v = sql_value_to_value("a", &ConcreteDataType::boolean_datatype(), &sql_val, None);
         assert!(v.is_err());
-        assert!(format!("{v:?}")
-            .contains("Fail to parse number 3.0, invalid column type: Boolean(BooleanType)"));
+        assert!(format!("{v:?}").contains("Failed to parse number '3.0' to boolean column type"));
 
         let sql_val = SqlValue::Boolean(true);
         let v = sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val, None);
@@ -889,6 +902,29 @@ mod tests {
             constraint,
             Some(ColumnDefaultConstraint::Value(Value::Boolean(true)))
         );
+    }
+
+    #[test]
+    fn test_incorrect_default_value_issue_3479() {
+        let opts = vec![ColumnOptionDef {
+            name: None,
+            option: ColumnOption::Default(Expr::Value(SqlValue::Number(
+                "0.047318541668048164".into(),
+                false,
+            ))),
+        }];
+        let constraint = parse_column_default_constraint(
+            "coll",
+            &ConcreteDataType::float64_datatype(),
+            &opts,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!("0.047318541668048164", constraint.to_string());
+        let encoded: Vec<u8> = constraint.clone().try_into().unwrap();
+        let decoded = ColumnDefaultConstraint::try_from(encoded.as_ref()).unwrap();
+        assert_eq!(decoded, constraint);
     }
 
     #[test]

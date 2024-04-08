@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
+use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
+use common_function::state::FunctionState;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
 use common_telemetry::warn;
@@ -48,7 +50,6 @@ use crate::optimizer::ExtensionAnalyzerRule;
 use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
-use crate::table_mutation::TableMutationHandlerRef;
 use crate::QueryEngineContext;
 
 /// Query engine global state
@@ -59,7 +60,7 @@ use crate::QueryEngineContext;
 pub struct QueryEngineState {
     df_context: SessionContext,
     catalog_manager: CatalogManagerRef,
-    table_mutation_handler: Option<TableMutationHandlerRef>,
+    function_state: Arc<FunctionState>,
     udf_functions: Arc<RwLock<HashMap<String, FunctionRef>>>,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
@@ -79,6 +80,7 @@ impl QueryEngineState {
         catalog_list: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
     ) -> Self {
@@ -117,7 +119,10 @@ impl QueryEngineState {
         Self {
             df_context,
             catalog_manager: catalog_list,
-            table_mutation_handler,
+            function_state: Arc::new(FunctionState {
+                table_mutation_handler,
+                procedure_service_handler,
+            }),
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
             plugins,
@@ -201,14 +206,22 @@ impl QueryEngineState {
         );
     }
 
-    #[inline]
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
 
-    #[inline]
+    pub fn function_state(&self) -> Arc<FunctionState> {
+        self.function_state.clone()
+    }
+
+    /// Returns the [`TableMutationHandlerRef`] in state.
     pub fn table_mutation_handler(&self) -> Option<&TableMutationHandlerRef> {
-        self.table_mutation_handler.as_ref()
+        self.function_state.table_mutation_handler.as_ref()
+    }
+
+    /// Returns the [`ProcedureServiceHandlerRef`] in state.
+    pub fn procedure_service_handler(&self) -> Option<&ProcedureServiceHandlerRef> {
+        self.function_state.procedure_service_handler.as_ref()
     }
 
     pub(crate) fn disallow_cross_catalog_query(&self) -> bool {

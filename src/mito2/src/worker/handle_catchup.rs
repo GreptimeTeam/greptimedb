@@ -51,9 +51,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 RegionOpener::new(
                     region_id,
                     region.region_dir(),
-                    self.memtable_builder.clone(),
+                    self.memtable_builder_provider.clone(),
                     self.object_store_manager.clone(),
-                    self.scheduler.clone(),
+                    self.purge_scheduler.clone(),
                     self.intermediate_manager.clone(),
                 )
                 .cache(Some(self.cache_manager.clone()))

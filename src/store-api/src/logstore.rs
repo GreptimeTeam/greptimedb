@@ -66,18 +66,17 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Lists all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
 
-    /// Creates an entry of the associated Entry type
-    fn entry<D: AsRef<[u8]>>(&self, data: D, entry_id: EntryId, ns: Self::Namespace)
-        -> Self::Entry;
-
-    /// Creates a namespace of the associated Namespace type
-    // TODO(sunng87): confusion with `create_namespace`
-    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace;
-
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
     async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
+
+    /// Makes an entry instance of the associated Entry type
+    fn entry<D: AsRef<[u8]>>(&self, data: D, entry_id: EntryId, ns: Self::Namespace)
+        -> Self::Entry;
+
+    /// Makes a namespace instance of the associated Namespace type
+    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace;
 }
 
 /// The response of an `append` operation.

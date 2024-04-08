@@ -278,6 +278,8 @@ pub fn send_mock_reply(
 /// Generates a [PersistentContext].
 pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> PersistentContext {
     PersistentContext {
+        catalog: "greptime".into(),
+        schema: "public".into(),
         from_peer: Peer::empty(from),
         to_peer: Peer::empty(to),
         region_id,
@@ -297,16 +299,6 @@ pub(crate) struct ProcedureMigrationTestSuite {
 pub(crate) type BeforeTest =
     Arc<dyn Fn(&mut ProcedureMigrationTestSuite) -> BoxFuture<'_, ()> + Send + Sync>;
 
-/// Custom assertion.
-pub(crate) type CustomAssertion = Arc<
-    dyn Fn(
-            &mut ProcedureMigrationTestSuite,
-            Result<(Box<dyn State>, Status)>,
-        ) -> BoxFuture<'_, Result<()>>
-        + Send
-        + Sync,
->;
-
 /// State assertion function.
 pub(crate) type StateAssertion = Arc<dyn Fn(&dyn State) + Send + Sync>;
 
@@ -316,14 +308,11 @@ pub(crate) type StatusAssertion = Arc<dyn Fn(Status) + Send + Sync>;
 /// Error assertion function.
 pub(crate) type ErrorAssertion = Arc<dyn Fn(Error) + Send + Sync>;
 
-// TODO(weny): Remove it.
-#[allow(dead_code)]
 /// The type of assertion.
 #[derive(Clone)]
 pub(crate) enum Assertion {
     Simple(StateAssertion, StatusAssertion),
     Error(ErrorAssertion),
-    Custom(CustomAssertion),
 }
 
 impl Assertion {
@@ -384,9 +373,6 @@ impl ProcedureMigrationTestSuite {
                 let error = result.unwrap_err();
                 error_assert(error);
             }
-            Assertion::Custom(assert_fn) => {
-                assert_fn(self, result).await?;
-            }
         }
 
         Ok(())
@@ -416,11 +402,11 @@ impl ProcedureMigrationTestSuite {
             .env
             .table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(region_id.table_id())
             .await
             .unwrap()
-            .unwrap()
-            .into_inner();
+            .unwrap();
         let region_routes = table_route.region_routes().unwrap();
 
         let expected_leader_id = self.context.persistent_ctx.to_peer.id;

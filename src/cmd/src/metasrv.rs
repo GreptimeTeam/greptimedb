@@ -117,10 +117,12 @@ struct StartCommand {
     /// The working home directory of this metasrv instance.
     #[clap(long)]
     data_home: Option<String>,
-
     /// If it's not empty, the metasrv will store all data with this key prefix.
     #[clap(long, default_value = "")]
     store_key_prefix: String,
+    /// The max operations per txn
+    #[clap(long)]
+    max_txn_ops: Option<usize>,
 }
 
 impl StartCommand {
@@ -181,6 +183,10 @@ impl StartCommand {
             opts.store_key_prefix = self.store_key_prefix.clone()
         }
 
+        if let Some(max_txn_ops) = self.max_txn_ops {
+            opts.max_txn_ops = max_txn_ops;
+        }
+
         // Disable dashboard in metasrv.
         opts.http.disable_dashboard = true;
 
@@ -212,6 +218,7 @@ impl StartCommand {
 mod tests {
     use std::io::Write;
 
+    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
     use meta_srv::selector::SelectorType;
 
@@ -290,6 +297,10 @@ mod tests {
                 .failure_detector
                 .first_heartbeat_estimate
                 .as_millis()
+        );
+        assert_eq!(
+            options.procedure.max_metadata_value_size,
+            Some(ReadableSize::kb(1500))
         );
     }
 

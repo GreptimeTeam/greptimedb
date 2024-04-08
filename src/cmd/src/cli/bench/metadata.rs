@@ -106,9 +106,15 @@ impl TableMetadataBencher {
                     .await
                     .unwrap();
                 let start = Instant::now();
+                let table_info = table_info.unwrap();
+                let table_id = table_info.table_info.ident.table_id;
                 let _ = self
                     .table_metadata_manager
-                    .delete_table_metadata(&table_info.unwrap(), &table_route.unwrap())
+                    .delete_table_metadata(
+                        table_id,
+                        &table_info.table_name(),
+                        table_route.unwrap().region_routes().unwrap(),
+                    )
                     .await;
                 start.elapsed()
             },

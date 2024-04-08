@@ -25,6 +25,7 @@ mod tests {
     use prost::Message;
     use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
     use servers::prom_store;
+    use servers::prom_store::to_grpc_row_insert_requests;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::PromStoreProtocolHandler;
     use session::context::QueryContext;
@@ -107,8 +108,9 @@ mod tests {
         .unwrap()
         .is_ok());
 
+        let (row_inserts, _) = to_grpc_row_insert_requests(&write_request).unwrap();
         instance
-            .write(write_request, ctx.clone(), true)
+            .write(row_inserts, ctx.clone(), true)
             .await
             .unwrap();
 
@@ -194,12 +196,12 @@ mod tests {
                     value: "metric3".to_string(),
                 },
                 Label {
-                    name: "idc".to_string(),
-                    value: "z002".to_string(),
-                },
-                Label {
                     name: "app".to_string(),
                     value: "biz".to_string(),
+                },
+                Label {
+                    name: "idc".to_string(),
+                    value: "z002".to_string(),
                 },
             ],
             timeseries.labels

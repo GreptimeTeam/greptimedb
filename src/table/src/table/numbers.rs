@@ -17,8 +17,9 @@ use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
+use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::array::UInt32Array;
 use datatypes::data_type::ConcreteDataType;
@@ -31,8 +32,7 @@ use store_api::storage::ScanRequest;
 use crate::metadata::{
     FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
 };
-use crate::thin_table::{ThinTable, ThinTableAdapter};
-use crate::TableRef;
+use crate::{Table, TableRef};
 
 const NUMBER_COLUMN: &str = "number";
 
@@ -48,12 +48,13 @@ impl NumbersTable {
     }
 
     pub fn table_with_name(table_id: TableId, name: String) -> TableRef {
-        let thin_table = ThinTable::new(
+        let data_source = Arc::new(NumbersDataSource::new(Self::schema()));
+        let table = Table::new(
             Self::table_info(table_id, name, "test_engine".to_string()),
             FilterPushDownType::Unsupported,
+            data_source,
         );
-        let data_source = Arc::new(NumbersDataSource::new(Self::schema()));
-        Arc::new(ThinTableAdapter::new(thin_table, data_source))
+        Arc::new(table)
     }
 
     pub fn schema() -> SchemaRef {
@@ -122,6 +123,14 @@ struct NumbersStream {
 impl RecordBatchStream for NumbersStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 

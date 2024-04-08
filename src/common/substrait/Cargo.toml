@@ -4,26 +4,23 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
-async-recursion = "1.0"
 async-trait.workspace = true
 bytes.workspace = true
 catalog.workspace = true
-common-catalog.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
-common-telemetry.workspace = true
+datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-substrait.workspace = true
-datafusion.workspace = true
 datatypes.workspace = true
-futures = "0.3"
 promql.workspace = true
 prost.workspace = true
-session.workspace = true
 snafu.workspace = true
-table.workspace = true
 
 [dependencies.substrait_proto]
 package = "substrait"
@@ -31,5 +28,4 @@ version = "0.17"
 
 [dev-dependencies]
 datatypes.workspace = true
-table.workspace = true
 tokio.workspace = true

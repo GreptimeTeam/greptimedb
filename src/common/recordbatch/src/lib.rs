@@ -21,6 +21,7 @@ pub mod util;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
 use datafusion::physical_plan::memory::MemoryStream;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
@@ -38,13 +39,9 @@ use snafu::{ensure, ResultExt};
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn schema(&self) -> SchemaRef;
 
-    fn output_ordering(&self) -> Option<&[OrderOption]> {
-        None
-    }
+    fn output_ordering(&self) -> Option<&[OrderOption]>;
 
-    fn metrics(&self) -> Option<String> {
-        None
-    }
+    fn metrics(&self) -> Option<RecordBatchMetrics>;
 }
 
 pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
@@ -72,6 +69,14 @@ impl EmptyRecordBatchStream {
 impl RecordBatchStream for EmptyRecordBatchStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 
@@ -191,6 +196,14 @@ impl RecordBatchStream for SimpleRecordBatchStream {
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
+    }
 }
 
 impl Stream for SimpleRecordBatchStream {
@@ -212,7 +225,7 @@ pub struct RecordBatchStreamWrapper<S> {
     pub schema: SchemaRef,
     pub stream: S,
     pub output_ordering: Option<Vec<OrderOption>>,
-    pub metrics: Arc<ArcSwapOption<String>>,
+    pub metrics: Arc<ArcSwapOption<RecordBatchMetrics>>,
 }
 
 impl<S> RecordBatchStreamWrapper<S> {
@@ -238,8 +251,8 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> RecordBatchStream
         self.output_ordering.as_deref()
     }
 
-    fn metrics(&self) -> Option<String> {
-        self.metrics.load().as_ref().map(|s| s.as_ref().clone())
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.metrics.load().as_ref().map(|s| *s.as_ref())
     }
 }
 

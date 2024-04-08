@@ -22,9 +22,7 @@ use datatypes::vectors::{StringVector, VectorRef};
 
 use crate::function::{Function, FunctionContext};
 
-const DEFAULT_VALUE: &str = "unknown";
-
-/// Generates build information  
+/// Generates build information
 #[derive(Clone, Debug, Default)]
 pub struct BuildFunction;
 
@@ -44,23 +42,11 @@ impl Function for BuildFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(
-            0,
-            vec![ConcreteDataType::string_datatype()],
-            Volatility::Immutable,
-        )
+        Signature::uniform(0, vec![], Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let build_info = format!(
-            "branch: {}\ncommit: {}\ncommit short: {}\ndirty: {}\nversion: {}",
-            build_data::get_git_branch().unwrap_or_else(|_| DEFAULT_VALUE.to_string()),
-            build_data::get_git_commit().unwrap_or_else(|_| DEFAULT_VALUE.to_string()),
-            build_data::get_git_commit_short().unwrap_or_else(|_| DEFAULT_VALUE.to_string()),
-            build_data::get_git_dirty().map_or(DEFAULT_VALUE.to_string(), |v| v.to_string()),
-            env!("CARGO_PKG_VERSION")
-        );
-
+        let build_info = common_version::build_info().to_string();
         let v = Arc::new(StringVector::from(vec![build_info]));
         Ok(v)
     }
@@ -85,16 +71,9 @@ mod tests {
                          Signature {
                              type_signature: TypeSignature::Uniform(0, valid_types),
                              volatility: Volatility::Immutable
-                         } if  valid_types == vec![ConcreteDataType::string_datatype()]
+                         } if  valid_types.is_empty()
         ));
-        let build_info = format!(
-            "branch: {}\ncommit: {}\ncommit short: {}\ndirty: {}\nversion: {}",
-            build_data::get_git_branch().unwrap_or_else(|_| DEFAULT_VALUE.to_string()),
-            build_data::get_git_commit().unwrap_or_else(|_| DEFAULT_VALUE.to_string()),
-            build_data::get_git_commit_short().unwrap_or_else(|_| DEFAULT_VALUE.to_string()),
-            build_data::get_git_dirty().map_or(DEFAULT_VALUE.to_string(), |v| v.to_string()),
-            env!("CARGO_PKG_VERSION")
-        );
+        let build_info = common_version::build_info().to_string();
         let vector = build.eval(FunctionContext::default(), &[]).unwrap();
         let expect: VectorRef = Arc::new(StringVector::from(vec![build_info]));
         assert_eq!(expect, vector);

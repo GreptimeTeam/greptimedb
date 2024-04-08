@@ -20,7 +20,7 @@ use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
 use common_error::ext::BoxedError;
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
-use common_query::Output;
+use common_query::OutputData;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::datasource::DefaultTableSource;
 use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
@@ -47,7 +47,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let catalog_list = catalog::memory::new_memory_catalog_manager()
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
-    let factory = QueryEngineFactory::new(catalog_list, None, None, false);
+    let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
     let engine = factory.query_engine();
 
     let column_schemas = vec![ColumnSchema::new(
@@ -79,8 +79,8 @@ async fn test_datafusion_query_engine() -> Result<()> {
 
     let output = engine.execute(plan, QueryContext::arc()).await?;
 
-    let recordbatch = match output {
-        Output::Stream(recordbatch) => recordbatch,
+    let recordbatch = match output.data {
+        OutputData::Stream(recordbatch) => recordbatch,
         _ => unreachable!(),
     };
 
@@ -128,7 +128,8 @@ async fn test_query_validate() -> Result<()> {
         disallow_cross_catalog_query: true,
     });
 
-    let factory = QueryEngineFactory::new_with_plugins(catalog_list, None, None, false, plugins);
+    let factory =
+        QueryEngineFactory::new_with_plugins(catalog_list, None, None, None, false, plugins);
     let engine = factory.query_engine();
 
     let stmt =
@@ -158,7 +159,7 @@ async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let catalog_list = catalog_manager()?;
 
-    let factory = QueryEngineFactory::new(catalog_list, None, None, false);
+    let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
     let engine = factory.query_engine();
 
     let pow = make_scalar_function(pow);

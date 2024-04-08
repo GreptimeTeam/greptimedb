@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
+use client::OutputData;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{RegionDistribution, TableMetaKey};
@@ -104,7 +105,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     let results = insert_values(&frontend, logical_timer).await;
     logical_timer += 1000;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     assert!(has_route_cache(&frontend, table_id).await);
@@ -144,7 +145,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     let frontend = cluster.frontend.clone();
     let results = insert_values(&frontend, logical_timer).await;
     for result in results {
-        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+        assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     assert_values(&frontend).await;
@@ -226,7 +227,7 @@ async fn assert_values(instance: &Arc<Instance>) {
 | 55 | 2023-05-31T04:51:55 |
 | 55 | 2023-05-31T04:51:56 |
 +----+---------------------+";
-    check_output_stream(result.unwrap(), expected).await;
+    check_output_stream(result.unwrap().data, expected).await;
 }
 
 async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
@@ -345,10 +346,13 @@ async fn run_region_failover_procedure(
     let meta_srv = &cluster.meta_srv;
     let procedure_manager = meta_srv.procedure_manager();
     let procedure = RegionFailoverProcedure::new(
+        "greptime".into(),
+        "public".into(),
         failed_region.clone(),
         RegionFailoverContext {
             region_lease_secs: 10,
             in_memory: meta_srv.in_memory().clone(),
+            kv_backend: meta_srv.kv_backend().clone(),
             mailbox: meta_srv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {

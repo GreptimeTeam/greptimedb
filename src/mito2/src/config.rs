@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, NoneAsEmptyString};
 
 use crate::error::Result;
+use crate::memtable::MemtableConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 /// Default max running background job.
@@ -102,6 +103,9 @@ pub struct MitoConfig {
 
     /// Inverted index configs.
     pub inverted_index: InvertedIndexConfig,
+
+    /// Memtable config
+    pub memtable: MemtableConfig,
 }
 
 impl Default for MitoConfig {
@@ -127,6 +131,7 @@ impl Default for MitoConfig {
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
             inverted_index: InvertedIndexConfig::default(),
+            memtable: MemtableConfig::default(),
         };
 
         // Adjust buffer and cache size according to system memory if we can.
@@ -294,6 +299,14 @@ impl InvertedIndexConfig {
             self.intermediate_path = join_dir(data_home, "index_intermediate");
         }
 
+        if self.write_buffer_size < MULTIPART_UPLOAD_MINIMUM_SIZE {
+            self.write_buffer_size = MULTIPART_UPLOAD_MINIMUM_SIZE;
+            warn!(
+                "Sanitize index write buffer size to {}",
+                self.write_buffer_size
+            );
+        }
+
         Ok(())
     }
 }
@@ -305,4 +318,26 @@ fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(cores > 0);
 
     (cores + divisor - 1) / divisor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_config() {
+        let s = r#"
+[memtable]
+type = "partition_tree"
+index_max_keys_per_shard = 8192
+data_freeze_threshold = 1024
+dedup = true
+fork_dictionary_bytes = "512MiB"
+"#;
+        let config: MitoConfig = toml::from_str(s).unwrap();
+        let MemtableConfig::PartitionTree(config) = &config.memtable else {
+            unreachable!()
+        };
+        assert_eq!(1024, config.data_freeze_threshold);
+    }
 }

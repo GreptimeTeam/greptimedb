@@ -29,9 +29,11 @@ use std::time::Duration;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
+use crate::error::Result;
 use crate::manifest::action::RegionEdit;
+use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
-use crate::memtable::{MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
@@ -76,14 +78,16 @@ impl VersionControl {
     }
 
     /// Freezes the mutable memtable if it is not empty.
-    pub(crate) fn freeze_mutable(&self, builder: &MemtableBuilderRef) {
+    pub(crate) fn freeze_mutable(&self) -> Result<()> {
         let version = self.current().version;
         if version.memtables.mutable.is_empty() {
-            return;
+            return Ok(());
         }
-        let new_mutable = builder.build(&version.metadata);
         // Safety: Immutable memtable is None.
-        let new_memtables = version.memtables.freeze_mutable(new_mutable).unwrap();
+        let new_memtables = version
+            .memtables
+            .freeze_mutable(&version.metadata)?
+            .unwrap();
         // Create a new version with memtable switched.
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
@@ -93,6 +97,8 @@ impl VersionControl {
 
         let mut version_data = self.data.write().unwrap();
         version_data.version = new_version;
+
+        Ok(())
     }
 
     /// Apply edit to current version.
@@ -117,7 +123,14 @@ impl VersionControl {
     /// Mark all opened files as deleted and set the delete marker in [VersionControlData]
     pub(crate) fn mark_dropped(&self, memtable_builder: &MemtableBuilderRef) {
         let version = self.current().version;
-        let new_mutable = memtable_builder.build(&version.metadata);
+        let part_duration = version.memtables.mutable.part_duration();
+        let next_memtable_id = version.memtables.mutable.next_memtable_id();
+        let new_mutable = Arc::new(TimePartitions::new(
+            version.metadata.clone(),
+            memtable_builder.clone(),
+            next_memtable_id,
+            part_duration,
+        ));
 
         let mut data = self.data.write().unwrap();
         data.is_dropped = true;
@@ -133,8 +146,15 @@ impl VersionControl {
     /// It replaces existing mutable memtable with a memtable that uses the
     /// new schema. Memtables of the version must be empty.
     pub(crate) fn alter_schema(&self, metadata: RegionMetadataRef, builder: &MemtableBuilderRef) {
-        let new_mutable = builder.build(&metadata);
         let version = self.current().version;
+        let part_duration = version.memtables.mutable.part_duration();
+        let next_memtable_id = version.memtables.mutable.next_memtable_id();
+        let new_mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            builder.clone(),
+            next_memtable_id,
+            part_duration,
+        ));
         debug_assert!(version.memtables.mutable.is_empty());
         debug_assert!(version.memtables.immutables().is_empty());
         let new_version = Arc::new(
@@ -157,7 +177,14 @@ impl VersionControl {
     ) {
         let version = self.current().version;
 
-        let new_mutable = memtable_builder.build(&version.metadata);
+        let part_duration = version.memtables.mutable.part_duration();
+        let next_memtable_id = version.memtables.mutable.next_memtable_id();
+        let new_mutable = Arc::new(TimePartitions::new(
+            version.metadata.clone(),
+            memtable_builder.clone(),
+            next_memtable_id,
+            part_duration,
+        ));
         let new_version = Arc::new(
             VersionBuilder::new(version.metadata.clone(), new_mutable)
                 .flushed_entry_id(truncated_entry_id)
@@ -235,7 +262,7 @@ pub(crate) struct VersionBuilder {
 
 impl VersionBuilder {
     /// Returns a new builder.
-    pub(crate) fn new(metadata: RegionMetadataRef, mutable: MemtableRef) -> Self {
+    pub(crate) fn new(metadata: RegionMetadataRef, mutable: TimePartitionsRef) -> Self {
         VersionBuilder {
             metadata,
             memtables: Arc::new(MemtableVersion::new(mutable)),

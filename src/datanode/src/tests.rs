@@ -31,7 +31,7 @@ use query::query_engine::DescribeResult;
 use query::{QueryEngine, QueryEngineContext};
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use table::TableRef;
@@ -166,16 +166,18 @@ impl RegionEngine for MockRegionEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<AffectedRows, BoxedError> {
+    ) -> Result<RegionHandleResult, BoxedError> {
         if let Some(delay) = self.handle_request_delay {
             tokio::time::sleep(delay).await;
         }
         if let Some(mock_fn) = &self.handle_request_mock_fn {
-            return mock_fn(region_id, request).map_err(BoxedError::new);
+            return mock_fn(region_id, request)
+                .map_err(BoxedError::new)
+                .map(RegionHandleResult::new);
         };
 
         let _ = self.sender.send((region_id, request)).await;
-        Ok(0)
+        Ok(RegionHandleResult::new(0))
     }
 
     async fn handle_query(

@@ -16,8 +16,7 @@
 mod test {
     use std::sync::Arc;
 
-    use client::DEFAULT_CATALOG_NAME;
-    use common_query::Output;
+    use client::{OutputData, DEFAULT_CATALOG_NAME};
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
     use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -65,8 +64,8 @@ mod test {
         .unwrap()
         .is_ok());
 
-        let resp = instance.metrics(req, ctx.clone()).await.unwrap();
-        assert!(resp.partial_success.is_none());
+        let resp = instance.metrics(req, ctx.clone()).await;
+        assert!(resp.is_ok());
 
         let mut output = instance
             .do_query(
@@ -75,7 +74,7 @@ mod test {
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -97,7 +96,7 @@ mod test {
             )
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -117,7 +116,7 @@ mod test {
             .do_query("SELECT * FROM my_test_histo_sum", ctx.clone())
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -135,7 +134,7 @@ mod test {
             .do_query("SELECT * FROM my_test_histo_count", ctx.clone())
             .await;
         let output = output.remove(0).unwrap();
-        let Output::Stream(stream) = output else {
+        let OutputData::Stream(stream) = output.data else {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();

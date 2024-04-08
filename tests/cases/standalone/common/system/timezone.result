@@ -15,6 +15,14 @@ SHOW VARIABLES system_time_zone;
 | UTC              |
 +------------------+
 
+select timezone();
+
++------------+
+| timezone() |
++------------+
+| UTC        |
++------------+
+
 CREATE TABLE test(d double, ts timestamp_ms time index);
 
 Affected Rows: 0
@@ -110,6 +118,14 @@ SHOW VARIABLES system_time_zone;
 | UTC              |
 +------------------+
 
+select timezone();
+
++------------+
+| timezone() |
++------------+
+| +08:00     |
++------------+
+
 SELECT * from test;
 
 +-----+---------------------+
@@ -191,6 +207,14 @@ SHOW VARIABLES system_time_zone;
 | UTC              |
 +------------------+
 
+select timezone();
+
++------------+
+| timezone() |
++------------+
+| -08:00     |
++------------+
+
 SELECT * from test;
 
 +-----+---------------------+
@@ -268,4 +292,12 @@ SHOW VARIABLES time_zone;
 +-----------+
 | UTC       |
 +-----------+
+
+select timezone();
+
++------------+
+| timezone() |
++------------+
+| UTC        |
++------------+
 

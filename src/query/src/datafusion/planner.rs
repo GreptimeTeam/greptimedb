@@ -49,12 +49,16 @@ impl DfContextProviderAdapter {
     pub(crate) async fn try_new(
         engine_state: Arc<QueryEngineState>,
         session_state: SessionState,
-        df_stmt: &DfStatement,
+        df_stmt: Option<&DfStatement>,
         query_ctx: QueryContextRef,
     ) -> Result<Self> {
-        let table_names = session_state
-            .resolve_table_references(df_stmt)
-            .context(DataFusionSnafu)?;
+        let table_names = if let Some(df_stmt) = df_stmt {
+            session_state
+                .resolve_table_references(df_stmt)
+                .context(DataFusionSnafu)?
+        } else {
+            vec![]
+        };
 
         let mut table_provider = DfTableSourceProvider::new(
             engine_state.catalog_manager().clone(),
@@ -109,7 +113,16 @@ impl ContextProvider for DfContextProviderAdapter {
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
         self.engine_state.udf_function(name).map_or_else(
             || self.session_state.scalar_functions().get(name).cloned(),
-            |func| Some(Arc::new(create_udf(func, self.query_ctx.clone()).into())),
+            |func| {
+                Some(Arc::new(
+                    create_udf(
+                        func,
+                        self.query_ctx.clone(),
+                        self.engine_state.function_state(),
+                    )
+                    .into(),
+                ))
+            },
         )
     }
 

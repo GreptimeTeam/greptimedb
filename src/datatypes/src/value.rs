@@ -124,37 +124,45 @@ impl Display for Value {
     }
 }
 
-impl Value {
-    /// Returns data type of the value.
-    ///
-    /// # Panics
-    /// Panics if the data type is not supported.
-    pub fn data_type(&self) -> ConcreteDataType {
-        match self {
-            Value::Null => ConcreteDataType::null_datatype(),
-            Value::Boolean(_) => ConcreteDataType::boolean_datatype(),
-            Value::UInt8(_) => ConcreteDataType::uint8_datatype(),
-            Value::UInt16(_) => ConcreteDataType::uint16_datatype(),
-            Value::UInt32(_) => ConcreteDataType::uint32_datatype(),
-            Value::UInt64(_) => ConcreteDataType::uint64_datatype(),
-            Value::Int8(_) => ConcreteDataType::int8_datatype(),
-            Value::Int16(_) => ConcreteDataType::int16_datatype(),
-            Value::Int32(_) => ConcreteDataType::int32_datatype(),
-            Value::Int64(_) => ConcreteDataType::int64_datatype(),
-            Value::Float32(_) => ConcreteDataType::float32_datatype(),
-            Value::Float64(_) => ConcreteDataType::float64_datatype(),
-            Value::String(_) => ConcreteDataType::string_datatype(),
-            Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            Value::Date(_) => ConcreteDataType::date_datatype(),
-            Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
-            Value::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
-            Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-            Value::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
-            Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
-            Value::Duration(d) => ConcreteDataType::duration_datatype(d.unit()),
-            Value::Decimal128(d) => ConcreteDataType::decimal128_datatype(d.precision(), d.scale()),
+macro_rules! define_data_type_func {
+    ($struct: ident) => {
+        /// Returns data type of the value.
+        ///
+        /// # Panics
+        /// Panics if the data type is not supported.
+        pub fn data_type(&self) -> ConcreteDataType {
+            match self {
+                $struct::Null => ConcreteDataType::null_datatype(),
+                $struct::Boolean(_) => ConcreteDataType::boolean_datatype(),
+                $struct::UInt8(_) => ConcreteDataType::uint8_datatype(),
+                $struct::UInt16(_) => ConcreteDataType::uint16_datatype(),
+                $struct::UInt32(_) => ConcreteDataType::uint32_datatype(),
+                $struct::UInt64(_) => ConcreteDataType::uint64_datatype(),
+                $struct::Int8(_) => ConcreteDataType::int8_datatype(),
+                $struct::Int16(_) => ConcreteDataType::int16_datatype(),
+                $struct::Int32(_) => ConcreteDataType::int32_datatype(),
+                $struct::Int64(_) => ConcreteDataType::int64_datatype(),
+                $struct::Float32(_) => ConcreteDataType::float32_datatype(),
+                $struct::Float64(_) => ConcreteDataType::float64_datatype(),
+                $struct::String(_) => ConcreteDataType::string_datatype(),
+                $struct::Binary(_) => ConcreteDataType::binary_datatype(),
+                $struct::Date(_) => ConcreteDataType::date_datatype(),
+                $struct::DateTime(_) => ConcreteDataType::datetime_datatype(),
+                $struct::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
+                $struct::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+                $struct::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
+                $struct::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
+                $struct::Duration(d) => ConcreteDataType::duration_datatype(d.unit()),
+                $struct::Decimal128(d) => {
+                    ConcreteDataType::decimal128_datatype(d.precision(), d.scale())
+                }
+            }
         }
-    }
+    };
+}
+
+impl Value {
+    define_data_type_func!(Value);
 
     /// Returns true if this is a null value.
     pub fn is_null(&self) -> bool {
@@ -246,6 +254,17 @@ impl Value {
         match self {
             Value::Int64(v) => Some(Time::new_millisecond(*v)),
             Value::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to u64. Return None if value is not a valid uint64 data type.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            Value::UInt64(v) => Some(*v),
             _ => None,
         }
     }
@@ -350,6 +369,36 @@ impl Value {
         Ok(scalar_value)
     }
 }
+
+pub trait TryAsPrimitive<T: LogicalPrimitiveType> {
+    fn try_as_primitive(&self) -> Option<T::Native>;
+}
+
+macro_rules! impl_try_as_primitive {
+    ($Type: ident, $Variant: ident) => {
+        impl TryAsPrimitive<crate::types::$Type> for Value {
+            fn try_as_primitive(
+                &self,
+            ) -> Option<<crate::types::$Type as crate::types::LogicalPrimitiveType>::Native> {
+                match self {
+                    Value::$Variant(v) => Some((*v).into()),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+impl_try_as_primitive!(Int8Type, Int8);
+impl_try_as_primitive!(Int16Type, Int16);
+impl_try_as_primitive!(Int32Type, Int32);
+impl_try_as_primitive!(Int64Type, Int64);
+impl_try_as_primitive!(UInt8Type, UInt8);
+impl_try_as_primitive!(UInt16Type, UInt16);
+impl_try_as_primitive!(UInt32Type, UInt32);
+impl_try_as_primitive!(UInt64Type, UInt64);
+impl_try_as_primitive!(Float32Type, Float32);
+impl_try_as_primitive!(Float64Type, Float64);
 
 pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValue> {
     Ok(match output_type {
@@ -938,6 +987,8 @@ macro_rules! impl_as_for_value_ref {
 }
 
 impl<'a> ValueRef<'a> {
+    define_data_type_func!(ValueRef);
+
     /// Returns true if this is null.
     pub fn is_null(&self) -> bool {
         matches!(self, ValueRef::Null)
@@ -1141,6 +1192,14 @@ impl<'a> ListValueRef<'a> {
         match self {
             ListValueRef::Indexed { vector, idx } => vector.get(idx),
             ListValueRef::Ref { val } => Value::List(val.clone()),
+        }
+    }
+
+    /// Returns the inner element's data type.
+    fn datatype(&self) -> ConcreteDataType {
+        match self {
+            ListValueRef::Indexed { vector, .. } => vector.data_type(),
+            ListValueRef::Ref { val } => val.datatype().clone(),
         }
     }
 }
@@ -2357,5 +2416,13 @@ mod tests {
             85,
         );
         check_value_ref_size_eq(&ValueRef::Decimal128(Decimal128::new(1234, 3, 1)), 32)
+    }
+
+    #[test]
+    fn test_incorrect_default_value_issue_3479() {
+        let value = OrderedF64::from(0.047318541668048164);
+        let serialized = serde_json::to_string(&value).unwrap();
+        let deserialized: OrderedF64 = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value, deserialized);
     }
 }

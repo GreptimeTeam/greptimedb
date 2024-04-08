@@ -226,6 +226,8 @@ mod tests {
 
     fn new_persistent_context() -> PersistentContext {
         PersistentContext {
+            catalog: "greptime".into(),
+            schema: "public".into(),
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),

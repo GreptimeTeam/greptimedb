@@ -63,8 +63,13 @@ mod tests {
     #[test]
     fn test_collect_in_list_basic() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let in_list = InList {
             expr: Box::new(tag_column()),
@@ -87,8 +92,13 @@ mod tests {
     #[test]
     fn test_collect_in_list_negated() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let in_list = InList {
             expr: Box::new(tag_column()),
@@ -103,8 +113,13 @@ mod tests {
     #[test]
     fn test_collect_in_list_field_column() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let in_list = InList {
             expr: Box::new(field_column()),
@@ -119,8 +134,13 @@ mod tests {
     #[test]
     fn test_collect_in_list_type_mismatch() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let in_list = InList {
             expr: Box::new(tag_column()),
@@ -136,8 +156,13 @@ mod tests {
     #[test]
     fn test_collect_in_list_nonexistent_column() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let in_list = InList {
             expr: Box::new(nonexistent_column()),

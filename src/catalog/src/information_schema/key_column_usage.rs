@@ -23,10 +23,10 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
+use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
+use datatypes::vectors::{ConstantVector, StringVector, StringVectorBuilder, UInt32VectorBuilder};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
@@ -37,13 +37,17 @@ use crate::error::{
 use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
-const CONSTRAINT_SCHEMA: &str = "constraint_schema";
-const CONSTRAINT_NAME: &str = "constraint_name";
-const TABLE_CATALOG: &str = "table_catalog";
-const TABLE_SCHEMA: &str = "table_schema";
-const TABLE_NAME: &str = "table_name";
-const COLUMN_NAME: &str = "column_name";
-const ORDINAL_POSITION: &str = "ordinal_position";
+pub const CONSTRAINT_SCHEMA: &str = "constraint_schema";
+pub const CONSTRAINT_NAME: &str = "constraint_name";
+// It's always `def` in MySQL
+pub const TABLE_CATALOG: &str = "table_catalog";
+// The real catalog name for this key column.
+pub const REAL_TABLE_CATALOG: &str = "real_table_catalog";
+pub const TABLE_SCHEMA: &str = "table_schema";
+pub const TABLE_NAME: &str = "table_name";
+pub const COLUMN_NAME: &str = "column_name";
+pub const ORDINAL_POSITION: &str = "ordinal_position";
+const INIT_CAPACITY: usize = 42;
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
 pub(super) struct InformationSchemaKeyColumnUsage {
@@ -75,6 +79,11 @@ impl InformationSchemaKeyColumnUsage {
             ),
             ColumnSchema::new(CONSTRAINT_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_CATALOG, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                REAL_TABLE_CATALOG,
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
             ColumnSchema::new(TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(COLUMN_NAME, ConcreteDataType::string_datatype(), false),
@@ -157,14 +166,12 @@ struct InformationSchemaKeyColumnUsageBuilder {
     constraint_schema: StringVectorBuilder,
     constraint_name: StringVectorBuilder,
     table_catalog: StringVectorBuilder,
+    real_table_catalog: StringVectorBuilder,
     table_schema: StringVectorBuilder,
     table_name: StringVectorBuilder,
     column_name: StringVectorBuilder,
     ordinal_position: UInt32VectorBuilder,
     position_in_unique_constraint: UInt32VectorBuilder,
-    referenced_table_schema: StringVectorBuilder,
-    referenced_table_name: StringVectorBuilder,
-    referenced_column_name: StringVectorBuilder,
 }
 
 impl InformationSchemaKeyColumnUsageBuilder {
@@ -177,18 +184,16 @@ impl InformationSchemaKeyColumnUsageBuilder {
             schema,
             catalog_name,
             catalog_manager,
-            constraint_catalog: StringVectorBuilder::with_capacity(42),
-            constraint_schema: StringVectorBuilder::with_capacity(42),
-            constraint_name: StringVectorBuilder::with_capacity(42),
-            table_catalog: StringVectorBuilder::with_capacity(42),
-            table_schema: StringVectorBuilder::with_capacity(42),
-            table_name: StringVectorBuilder::with_capacity(42),
-            column_name: StringVectorBuilder::with_capacity(42),
-            ordinal_position: UInt32VectorBuilder::with_capacity(42),
-            position_in_unique_constraint: UInt32VectorBuilder::with_capacity(42),
-            referenced_table_schema: StringVectorBuilder::with_capacity(42),
-            referenced_table_name: StringVectorBuilder::with_capacity(42),
-            referenced_column_name: StringVectorBuilder::with_capacity(42),
+            constraint_catalog: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            constraint_schema: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            constraint_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_catalog: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            real_table_catalog: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_schema: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            column_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            ordinal_position: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            position_in_unique_constraint: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -228,6 +233,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
                                 &predicates,
                                 &schema_name,
                                 "TIME INDEX",
+                                &catalog_name,
                                 &schema_name,
                                 &table_name,
                                 &column.name,
@@ -236,6 +242,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
                         }
                         if keys.contains(&idx) {
                             primary_constraints.push((
+                                catalog_name.clone(),
                                 schema_name.clone(),
                                 table_name.clone(),
                                 column.name.clone(),
@@ -249,13 +256,14 @@ impl InformationSchemaKeyColumnUsageBuilder {
             }
         }
 
-        for (i, (schema_name, table_name, column_name)) in
+        for (i, (catalog_name, schema_name, table_name, column_name)) in
             primary_constraints.into_iter().enumerate()
         {
             self.add_key_column_usage(
                 &predicates,
                 &schema_name,
                 "PRIMARY",
+                &catalog_name,
                 &schema_name,
                 &table_name,
                 &column_name,
@@ -274,6 +282,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
         predicates: &Predicates,
         constraint_schema: &str,
         constraint_name: &str,
+        table_catalog: &str,
         table_schema: &str,
         table_name: &str,
         column_name: &str,
@@ -282,6 +291,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
         let row = [
             (CONSTRAINT_SCHEMA, &Value::from(constraint_schema)),
             (CONSTRAINT_NAME, &Value::from(constraint_name)),
+            (REAL_TABLE_CATALOG, &Value::from(table_catalog)),
             (TABLE_SCHEMA, &Value::from(table_schema)),
             (TABLE_NAME, &Value::from(table_name)),
             (COLUMN_NAME, &Value::from(column_name)),
@@ -296,30 +306,35 @@ impl InformationSchemaKeyColumnUsageBuilder {
         self.constraint_schema.push(Some(constraint_schema));
         self.constraint_name.push(Some(constraint_name));
         self.table_catalog.push(Some("def"));
+        self.real_table_catalog.push(Some(table_catalog));
         self.table_schema.push(Some(table_schema));
         self.table_name.push(Some(table_name));
         self.column_name.push(Some(column_name));
         self.ordinal_position.push(Some(ordinal_position));
         self.position_in_unique_constraint.push(None);
-        self.referenced_table_schema.push(None);
-        self.referenced_table_name.push(None);
-        self.referenced_column_name.push(None);
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
+        let rows_num = self.table_catalog.len();
+
+        let null_string_vector = Arc::new(ConstantVector::new(
+            Arc::new(StringVector::from(vec![None as Option<&str>])),
+            rows_num,
+        ));
         let columns: Vec<VectorRef> = vec![
             Arc::new(self.constraint_catalog.finish()),
             Arc::new(self.constraint_schema.finish()),
             Arc::new(self.constraint_name.finish()),
             Arc::new(self.table_catalog.finish()),
+            Arc::new(self.real_table_catalog.finish()),
             Arc::new(self.table_schema.finish()),
             Arc::new(self.table_name.finish()),
             Arc::new(self.column_name.finish()),
             Arc::new(self.ordinal_position.finish()),
             Arc::new(self.position_in_unique_constraint.finish()),
-            Arc::new(self.referenced_table_schema.finish()),
-            Arc::new(self.referenced_table_name.finish()),
-            Arc::new(self.referenced_column_name.finish()),
+            null_string_vector.clone(),
+            null_string_vector.clone(),
+            null_string_vector,
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }

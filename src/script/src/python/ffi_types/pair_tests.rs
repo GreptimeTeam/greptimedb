@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::compute::kernels::numeric;
-use common_query::Output;
+use common_query::OutputData;
 use common_recordbatch::RecordBatch;
 use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::compute;
@@ -87,9 +87,9 @@ async fn integrated_py_copr_test() {
             .execute(HashMap::default(), EvalContext::default())
             .await
             .unwrap();
-        let res = match output {
-            Output::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
-            Output::RecordBatches(rbs) => rbs,
+        let res = match output.data {
+            OutputData::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
+            OutputData::RecordBatches(rbs) => rbs,
             _ => unreachable!(),
         };
         let rb = res.iter().next().expect("One and only one recordbatch");

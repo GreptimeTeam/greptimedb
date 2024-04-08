@@ -93,6 +93,7 @@ pub mod mock {
                     }),
                 }),
                 affected_rows: 0,
+                extension: Default::default(),
             })
         }
     }
@@ -105,6 +106,7 @@ pub mod test_data {
     use chrono::DateTime;
     use common_catalog::consts::MITO2_ENGINE;
     use common_meta::datanode_manager::DatanodeManagerRef;
+    use common_meta::ddl::table_meta::TableMetadataAllocator;
     use common_meta::ddl::DdlContext;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -112,6 +114,7 @@ pub mod test_data {
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::RegionRoute;
     use common_meta::sequence::SequenceBuilder;
+    use common_meta::wal_options_allocator::WalOptionsAllocator;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
     use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
@@ -192,6 +195,7 @@ pub mod test_data {
             SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
         let mailbox = HeartbeatMailbox::create(Pushers::default(), mailbox_sequence);
 
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         DdlContext {
             datanode_manager,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
@@ -200,8 +204,12 @@ pub mod test_data {
                     server_addr: "127.0.0.1:4321".to_string(),
                 },
             )),
-            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
+            table_metadata_manager: table_metadata_manager.clone(),
             memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
+            table_metadata_allocator: Arc::new(TableMetadataAllocator::new(
+                Arc::new(SequenceBuilder::new("test", kv_backend).build()),
+                Arc::new(WalOptionsAllocator::default()),
+            )),
         }
     }
 }

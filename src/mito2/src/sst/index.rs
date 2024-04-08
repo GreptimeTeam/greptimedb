@@ -26,18 +26,13 @@ use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
+use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
+use crate::region::options::IndexOptions;
 use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
 
 const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
-
-// TODO(zhongzc): how to determine this value?
-/// The minimum memory usage threshold for a column to qualify for external sorting during index creation.
-const MIN_MEMORY_USAGE_THRESHOLD: usize = 8192;
-
-/// The buffer size for the pipe used to send index data to the puffin blob.
-const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 
 /// The index creator that hides the error handling details.
 #[derive(Default)]
@@ -45,6 +40,7 @@ pub struct Indexer {
     file_id: FileId,
     region_id: RegionId,
     inner: Option<SstIndexCreator>,
+    last_memory_usage: usize,
 }
 
 impl Indexer {
@@ -68,6 +64,15 @@ impl Indexer {
                 self.inner = None;
             }
         }
+
+        if let Some(creator) = self.inner.as_ref() {
+            let memory_usage = creator.memory_usage();
+            INDEX_CREATE_MEMORY_USAGE.add(memory_usage as i64 - self.last_memory_usage as i64);
+            self.last_memory_usage = memory_usage;
+        } else {
+            INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
+            self.last_memory_usage = 0;
+        }
     }
 
     /// Finish the index creation.
@@ -80,6 +85,9 @@ impl Indexer {
                         "Create index successfully, region_id: {}, file_id: {}, bytes: {}, rows: {}",
                         self.region_id, self.file_id, byte_count, row_count
                     );
+
+                    INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
+                    self.last_memory_usage = 0;
                     return Some(byte_count);
                 }
                 Err(err) => {
@@ -98,6 +106,8 @@ impl Indexer {
             }
         }
 
+        INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
+        self.last_memory_usage = 0;
         None
     }
 
@@ -118,6 +128,8 @@ impl Indexer {
                 }
             }
         }
+        INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
+        self.last_memory_usage = 0;
     }
 }
 
@@ -131,6 +143,7 @@ pub(crate) struct IndexerBuilder<'a> {
     pub(crate) row_group_size: usize,
     pub(crate) object_store: ObjectStore,
     pub(crate) intermediate_manager: IntermediateManager,
+    pub(crate) index_options: IndexOptions,
 }
 
 impl<'a> IndexerBuilder<'a> {
@@ -153,6 +166,16 @@ impl<'a> IndexerBuilder<'a> {
             return Indexer::default();
         }
 
+        let Some(mut segment_row_count) =
+            NonZeroUsize::new(self.index_options.inverted_index.segment_row_count)
+        else {
+            warn!(
+                "Segment row count is 0, skip creating index, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
+            return Indexer::default();
+        };
+
         let Some(row_group_size) = NonZeroUsize::new(self.row_group_size) else {
             warn!(
                 "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
@@ -161,6 +184,11 @@ impl<'a> IndexerBuilder<'a> {
             return Indexer::default();
         };
 
+        // if segment row count not aligned with row group size, adjust it to be aligned.
+        if row_group_size.get() % segment_row_count.get() != 0 {
+            segment_row_count = row_group_size;
+        }
+
         let creator = SstIndexCreator::new(
             self.file_path,
             self.file_id,
@@ -168,14 +196,23 @@ impl<'a> IndexerBuilder<'a> {
             self.object_store,
             self.intermediate_manager,
             self.mem_threshold_index_create,
-            row_group_size,
+            segment_row_count,
         )
-        .with_buffer_size(self.write_buffer_size);
+        .with_buffer_size(self.write_buffer_size)
+        .with_ignore_column_ids(
+            self.index_options
+                .inverted_index
+                .ignore_column_ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect(),
+        );
 
         Indexer {
             file_id: self.file_id,
             region_id: self.metadata.region_id,
             inner: Some(creator),
+            last_memory_usage: 0,
         }
     }
 }
@@ -266,6 +303,7 @@ mod tests {
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 
@@ -285,6 +323,7 @@ mod tests {
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 
@@ -304,6 +343,7 @@ mod tests {
             row_group_size: 1024,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 
@@ -323,6 +363,7 @@ mod tests {
             row_group_size: 0,
             object_store: mock_object_store(),
             intermediate_manager: mock_intm_mgr(),
+            index_options: IndexOptions::default(),
         }
         .build();
 

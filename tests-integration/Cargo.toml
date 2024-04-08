@@ -7,13 +7,16 @@ license.workspace = true
 [features]
 dashboard = []
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true
 async-trait = "0.1"
 auth.workspace = true
-axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 axum.workspace = true
+axum-test-helper = "0.3.0"
 catalog.workspace = true
 chrono.workspace = true
 client = { workspace = true, features = ["testing"] }
@@ -33,7 +36,7 @@ common-test-util.workspace = true
 common-wal.workspace = true
 datanode = { workspace = true }
 datatypes.workspace = true
-dotenv = "0.15"
+dotenv.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 meta-client.workspace = true
@@ -42,18 +45,15 @@ mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 object-store.workspace = true
-once_cell.workspace = true
 operator.workspace = true
+prost.workspace = true
 query.workspace = true
-rand.workspace = true
 rstest = "0.17"
 rstest_reuse = "0.5"
 secrecy = "0.8"
-serde.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
-snafu.workspace = true
 sql.workspace = true
 sqlx = { version = "0.6", features = [
     "runtime-tokio-rustls",
@@ -69,15 +69,17 @@ tokio.workspace = true
 tonic.workspace = true
 tower = "0.4"
 uuid.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
-datafusion-expr.workspace = true
 datafusion.workspace = true
+datafusion-expr.workspace = true
 itertools.workspace = true
 opentelemetry-proto.workspace = true
 partition.workspace = true
 paste.workspace = true
 prost.workspace = true
+rand.workspace = true
 script.workspace = true
 session = { workspace = true, features = ["testing"] }
 store-api.workspace = true

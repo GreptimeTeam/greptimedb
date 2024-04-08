@@ -67,6 +67,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to execute {} txn operations via Etcd", max_operations))]
+    EtcdTxnFailed {
+        max_operations: usize,
+        #[snafu(source)]
+        error: etcd_client::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to get sequence: {}", err_msg))]
     NextSequence { err_msg: String, location: Location },
 
@@ -81,11 +89,8 @@ pub enum Error {
     #[snafu(display("Unexpected sequence value: {}", err_msg))]
     UnexpectedSequenceValue { err_msg: String, location: Location },
 
-    #[snafu(display("Table info not found: {}", table_name))]
-    TableInfoNotFound {
-        table_name: String,
-        location: Location,
-    },
+    #[snafu(display("Table info not found: {}", table))]
+    TableInfoNotFound { table: String, location: Location },
 
     #[snafu(display("Failed to register procedure loader, type name: {}", type_name))]
     RegisterProcedureLoader {
@@ -98,6 +103,23 @@ pub enum Error {
     SubmitProcedure {
         location: Location,
         source: common_procedure::Error,
+    },
+
+    #[snafu(display("Failed to query procedure"))]
+    QueryProcedure {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure not found: {pid}"))]
+    ProcedureNotFound { location: Location, pid: String },
+
+    #[snafu(display("Failed to parse procedure id: {key}"))]
+    ParseProcedureId {
+        location: Location,
+        key: String,
+        #[snafu(source)]
+        error: common_procedure::ParseIdError,
     },
 
     #[snafu(display("Unsupported operation {}", operation))]
@@ -242,6 +264,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Schema nod found, schema: {}", table_schema))]
+    SchemaNotFound {
+        table_schema: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to rename table, reason: {}", reason))]
     RenameTable { reason: String, location: Location },
 
@@ -323,6 +351,9 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
+    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
+    ResolveKafkaEndpoint { source: common_wal::error::Error },
+
     #[snafu(display("Failed to build a Kafka controller client"))]
     BuildKafkaCtrlClient {
         location: Location,
@@ -364,8 +395,39 @@ pub enum Error {
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable { location: Location, err_msg: String },
 
-    #[snafu(display("The tasks of create tables cannot be empty"))]
-    EmptyCreateTableTasks { location: Location },
+    #[snafu(display("The tasks of {} cannot be empty", name))]
+    EmptyDdlTasks { name: String, location: Location },
+
+    #[snafu(display("Metadata corruption: {}", err_msg))]
+    MetadataCorruption { err_msg: String, location: Location },
+
+    #[snafu(display("Alter logical tables invalid arguments: {}", err_msg))]
+    AlterLogicalTablesInvalidArguments { err_msg: String, location: Location },
+
+    #[snafu(display("Create logical tables invalid arguments: {}", err_msg))]
+    CreateLogicalTablesInvalidArguments { err_msg: String, location: Location },
+
+    #[snafu(display("Invalid  node info key: {}", key))]
+    InvalidNodeInfoKey { key: String, location: Location },
+
+    #[snafu(display("Failed to parse number: {}", err_msg))]
+    ParseNum {
+        err_msg: String,
+        #[snafu(source)]
+        error: std::num::ParseIntError,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid role: {}", role))]
+    InvalidRole { role: i32, location: Location },
+
+    #[snafu(display("Failed to parse {} from utf8", name))]
+    FromUtf8 {
+        name: String,
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -377,6 +439,7 @@ impl ErrorExt for Error {
             IllegalServerState { .. }
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
+            | EtcdTxnFailed { .. }
             | ConnectEtcd { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
@@ -405,11 +468,14 @@ impl ErrorExt for Error {
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
             | BuildKafkaPartitionClient { .. }
+            | ResolveKafkaEndpoint { .. }
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. }
             | UnexpectedLogicalRouteTable { .. }
-            | ProcedureOutput { .. } => StatusCode::Unexpected,
+            | ProcedureOutput { .. }
+            | FromUtf8 { .. }
+            | MetadataCorruption { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -419,14 +485,19 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Unsupported { .. } => StatusCode::Internal,
 
-            PrimaryKeyNotFound { .. } | EmptyKey { .. } | InvalidEngineType { .. } => {
-                StatusCode::InvalidArguments
-            }
+            ProcedureNotFound { .. }
+            | PrimaryKeyNotFound { .. }
+            | EmptyKey { .. }
+            | InvalidEngineType { .. }
+            | AlterLogicalTablesInvalidArguments { .. }
+            | CreateLogicalTablesInvalidArguments { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
-            SubmitProcedure { source, .. } | WaitProcedure { source, .. } => source.status_code(),
+            SubmitProcedure { source, .. }
+            | QueryProcedure { source, .. }
+            | WaitProcedure { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),
@@ -435,7 +506,13 @@ impl ErrorExt for Error {
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
 
-            InvalidNumTopics { .. } | EmptyCreateTableTasks { .. } => StatusCode::InvalidArguments,
+            ParseProcedureId { .. }
+            | InvalidNumTopics { .. }
+            | SchemaNotFound { .. }
+            | InvalidNodeInfoKey { .. }
+            | ParseNum { .. }
+            | InvalidRole { .. }
+            | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
         }
     }
 

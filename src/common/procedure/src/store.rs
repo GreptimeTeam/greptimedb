@@ -22,9 +22,10 @@ use snafu::ResultExt;
 
 use crate::error::{Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::StateStoreRef;
-use crate::{BoxedProcedure, ProcedureId};
+use crate::ProcedureId;
 
 pub mod state_store;
+pub mod util;
 
 /// Key prefix of procedure store.
 const PROC_PATH: &str = "procedure/";
@@ -49,6 +50,9 @@ pub struct ProcedureMessage {
     pub parent_id: Option<ProcedureId>,
     /// Current step.
     pub step: u32,
+    /// Errors raised during the procedure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Procedure storage layer.
@@ -75,17 +79,16 @@ impl ProcedureStore {
         &self,
         procedure_id: ProcedureId,
         step: u32,
-        procedure: &BoxedProcedure,
+        type_name: String,
+        data: String,
         parent_id: Option<ProcedureId>,
     ) -> Result<()> {
-        let type_name = procedure.type_name();
-        let data = procedure.dump()?;
-
         let message = ProcedureMessage {
-            type_name: type_name.to_string(),
+            type_name,
             data,
             parent_id,
             step,
+            error: None,
         };
         let key = ParsedKey {
             prefix: &self.proc_path,
@@ -123,16 +126,19 @@ impl ProcedureStore {
     pub(crate) async fn rollback_procedure(
         &self,
         procedure_id: ProcedureId,
-        step: u32,
+        message: ProcedureMessage,
     ) -> Result<()> {
         let key = ParsedKey {
             prefix: &self.proc_path,
             procedure_id,
-            step,
+            step: message.step,
             key_type: KeyType::Rollback,
         }
         .to_string();
-        self.store.put(&key, Vec::new()).await?;
+
+        self.store
+            .put(&key, serde_json::to_vec(&message).context(ToJsonSnafu)?)
+            .await?;
 
         Ok(())
     }
@@ -145,16 +151,17 @@ impl ProcedureStore {
         // 8 should be enough for most procedures.
         let mut step_keys = Vec::with_capacity(8);
         let mut finish_keys = Vec::new();
-        while let Some((key, _)) = key_values.try_next().await? {
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, &key) else {
+        while let Some((key_set, _)) = key_values.try_next().await? {
+            let key = key_set.key();
+            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
                 logging::warn!("Unknown key while deleting procedures, key: {}", key);
                 continue;
             };
             if curr_key.key_type == KeyType::Step {
-                step_keys.push(key);
+                step_keys.extend(key_set.keys());
             } else {
                 // .commit or .rollback
-                finish_keys.push(key);
+                finish_keys.extend(key_set.keys());
             }
         }
 
@@ -176,18 +183,26 @@ impl ProcedureStore {
         Ok(())
     }
 
-    /// Load procedures from the storage. Returns a map of uncommitted procedures and a list
-    /// of finished procedures' ids.
+    /// Load procedures from the storage.
+    /// Returns:
+    /// - a map of uncommitted procedures
+    /// - a map of rolling back procedures
+    /// - a list of finished procedures' ids
     pub(crate) async fn load_messages(
         &self,
-    ) -> Result<(HashMap<ProcedureId, ProcedureMessage>, Vec<ProcedureId>)> {
+    ) -> Result<(
+        HashMap<ProcedureId, ProcedureMessage>,
+        HashMap<ProcedureId, ProcedureMessage>,
+        Vec<ProcedureId>,
+    )> {
         // Track the key-value pair by procedure id.
         let mut procedure_key_values: HashMap<_, (ParsedKey, Vec<u8>)> = HashMap::new();
 
         // Scan all procedures.
         let mut key_values = self.store.walk_top_down(&self.proc_path).await?;
-        while let Some((key, value)) = key_values.try_next().await? {
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, &key) else {
+        while let Some((key_set, value)) = key_values.try_next().await? {
+            let key = key_set.key();
+            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
                 logging::warn!("Unknown key while loading procedures, key: {}", key);
                 continue;
             };
@@ -203,21 +218,33 @@ impl ProcedureStore {
         }
 
         let mut messages = HashMap::with_capacity(procedure_key_values.len());
+        let mut rollback_messages = HashMap::new();
         let mut finished_ids = Vec::new();
         for (procedure_id, (parsed_key, value)) in procedure_key_values {
-            if parsed_key.key_type == KeyType::Step {
-                let Some(message) = self.load_one_message(&parsed_key, &value) else {
-                    // We don't abort the loading process and just ignore errors to ensure all remaining
-                    // procedures are loaded.
-                    continue;
-                };
-                let _ = messages.insert(procedure_id, message);
-            } else {
-                finished_ids.push(procedure_id);
+            match parsed_key.key_type {
+                KeyType::Step => {
+                    let Some(message) = self.load_one_message(&parsed_key, &value) else {
+                        // We don't abort the loading process and just ignore errors to ensure all remaining
+                        // procedures are loaded.
+                        continue;
+                    };
+                    let _ = messages.insert(procedure_id, message);
+                }
+                KeyType::Commit => {
+                    finished_ids.push(procedure_id);
+                }
+                KeyType::Rollback => {
+                    let Some(message) = self.load_one_message(&parsed_key, &value) else {
+                        // We don't abort the loading process and just ignore errors to ensure all remaining
+                        // procedures are loaded.
+                        continue;
+                    };
+                    let _ = rollback_messages.insert(procedure_id, message);
+                }
             }
         }
 
-        Ok((messages, finished_ids))
+        Ok((messages, rollback_messages, finished_ids))
     }
 
     fn load_one_message(&self, key: &ParsedKey, value: &[u8]) -> Option<ProcedureMessage> {
@@ -312,6 +339,7 @@ mod tests {
     use object_store::ObjectStore;
 
     use crate::store::state_store::ObjectStateStore;
+    use crate::BoxedProcedure;
 
     impl ProcedureStore {
         pub(crate) fn from_object_store(store: ObjectStore) -> ProcedureStore {
@@ -428,6 +456,7 @@ mod tests {
             data: "no parent id".to_string(),
             parent_id: None,
             step: 4,
+            error: None,
         };
 
         let json = serde_json::to_string(&message).unwrap();
@@ -481,14 +510,16 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
-
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(procedure_id, 0, type_name, data, None)
             .await
             .unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert_eq!(1, messages.len());
+        assert!(rollback_messages.is_empty());
         assert!(finished.is_empty());
         let msg = messages.get(&procedure_id).unwrap();
         let expect = ProcedureMessage {
@@ -496,6 +527,7 @@ mod tests {
             data: "test store procedure".to_string(),
             parent_id: None,
             step: 0,
+            error: None,
         };
         assert_eq!(expect, *msg);
     }
@@ -507,15 +539,17 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
-
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(procedure_id, 0, type_name, data, None)
             .await
             .unwrap();
         store.commit_procedure(procedure_id, 1).await.unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+        assert!(rollback_messages.is_empty());
         assert_eq!(&[procedure_id], &finished[..]);
     }
 
@@ -526,16 +560,35 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
-
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(
+                procedure_id,
+                0,
+                type_name.to_string(),
+                data.to_string(),
+                None,
+            )
             .await
             .unwrap();
-        store.rollback_procedure(procedure_id, 1).await.unwrap();
+        let message = ProcedureMessage {
+            type_name,
+            data,
+            parent_id: None,
+            step: 1,
+            error: None,
+        };
+        store
+            .rollback_procedure(procedure_id, message)
+            .await
+            .unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
-        assert_eq!(&[procedure_id], &finished[..]);
+        assert_eq!(1, rollback_messages.len());
+        assert!(finished.is_empty());
+        assert!(rollback_messages.contains_key(&procedure_id));
     }
 
     #[tokio::test]
@@ -545,20 +598,24 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
-
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(procedure_id, 0, type_name, data, None)
             .await
             .unwrap();
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 1, &procedure, None)
+            .store_procedure(procedure_id, 1, type_name, data, None)
             .await
             .unwrap();
 
         store.delete_procedure(procedure_id).await.unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+        assert!(rollback_messages.is_empty());
         assert!(finished.is_empty());
     }
 
@@ -570,20 +627,26 @@ mod tests {
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
 
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, &procedure, None)
+            .store_procedure(procedure_id, 0, type_name, data, None)
             .await
             .unwrap();
+
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 1, &procedure, None)
+            .store_procedure(procedure_id, 1, type_name, data, None)
             .await
             .unwrap();
         store.commit_procedure(procedure_id, 2).await.unwrap();
 
         store.delete_procedure(procedure_id).await.unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+        assert!(rollback_messages.is_empty());
         assert!(finished.is_empty());
     }
 
@@ -595,31 +658,41 @@ mod tests {
         // store 3 steps
         let id0 = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id0-0"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id0, 0, &procedure, None)
+            .store_procedure(id0, 0, type_name, data, None)
             .await
             .unwrap();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id0-1"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id0, 1, &procedure, None)
+            .store_procedure(id0, 1, type_name, data, None)
             .await
             .unwrap();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id0-2"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id0, 2, &procedure, None)
+            .store_procedure(id0, 2, type_name, data, None)
             .await
             .unwrap();
 
         // store 2 steps and then commit
         let id1 = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id1-0"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id1, 0, &procedure, None)
+            .store_procedure(id1, 0, type_name, data, None)
             .await
             .unwrap();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id1-1"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id1, 1, &procedure, None)
+            .store_procedure(id1, 1, type_name, data, None)
             .await
             .unwrap();
         store.commit_procedure(id1, 2).await.unwrap();
@@ -627,13 +700,16 @@ mod tests {
         // store 1 step
         let id2 = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("id2-0"));
+        let type_name = procedure.type_name().to_string();
+        let data = procedure.dump().unwrap();
         store
-            .store_procedure(id2, 0, &procedure, None)
+            .store_procedure(id2, 0, type_name, data, None)
             .await
             .unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert_eq!(2, messages.len());
+        assert!(rollback_messages.is_empty());
         assert_eq!(1, finished.len());
 
         let msg = messages.get(&id0).unwrap();

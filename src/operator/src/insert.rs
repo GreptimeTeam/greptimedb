@@ -22,6 +22,7 @@ use api::v1::{
     RowInsertRequests, SemanticType,
 };
 use catalog::CatalogManagerRef;
+use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
@@ -110,8 +111,7 @@ impl Inserter {
         .convert(requests)
         .await?;
 
-        let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+        self.do_request(inserts, &ctx).await
     }
 
     /// Handle row inserts request with metric engine.
@@ -148,15 +148,14 @@ impl Inserter {
                 .convert(requests)
                 .await?;
 
-        let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+        self.do_request(inserts, &ctx).await
     }
 
     pub async fn handle_table_insert(
         &self,
         request: TableInsertRequest,
         ctx: QueryContextRef,
-    ) -> Result<usize> {
+    ) -> Result<Output> {
         let catalog = request.catalog_name.as_str();
         let schema = request.schema_name.as_str();
         let table_name = request.table_name.as_str();
@@ -170,8 +169,7 @@ impl Inserter {
             .convert(request)
             .await?;
 
-        let affected_rows = self.do_request(inserts, &ctx).await?;
-        Ok(affected_rows as _)
+        self.do_request(inserts, &ctx).await
     }
 
     pub async fn handle_statement_insert(
@@ -184,8 +182,7 @@ impl Inserter {
                 .convert(insert, ctx)
                 .await?;
 
-        let affected_rows = self.do_request(inserts, ctx).await?;
-        Ok(Output::AffectedRows(affected_rows as _))
+        self.do_request(inserts, ctx).await
     }
 }
 
@@ -194,8 +191,8 @@ impl Inserter {
         &self,
         requests: RegionInsertRequests,
         ctx: &QueryContextRef,
-    ) -> Result<AffectedRows> {
-        write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
+    ) -> Result<Output> {
+        let write_cost = write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: ctx.get_db_string(),
@@ -219,9 +216,15 @@ impl Inserter {
             });
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
-        let affected_rows = results.into_iter().sum::<Result<u64>>()?;
-        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(affected_rows);
-        Ok(affected_rows)
+        let affected_rows = results
+            .into_iter()
+            .map(|resp| resp.map(|r| r.affected_rows))
+            .sum::<Result<AffectedRows>>()?;
+        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(affected_rows as u64);
+        Ok(Output::new(
+            OutputData::AffectedRows(affected_rows),
+            OutputMeta::new_with_cost(write_cost as _),
+        ))
     }
 
     async fn group_requests_by_peer(
@@ -253,6 +256,7 @@ impl Inserter {
         statement_executor: &StatementExecutor,
     ) -> Result<()> {
         let mut create_tables = vec![];
+        let mut alter_tables = vec![];
         for req in &requests.inserts {
             let catalog = ctx.current_catalog();
             let schema = ctx.current_schema();
@@ -261,16 +265,19 @@ impl Inserter {
                 Some(table) => {
                     // TODO(jeremy): alter in batch? (from `handle_metric_row_inserts`)
                     validate_request_with_table(req, &table)?;
-                    self.alter_table_on_demand(req, table, ctx, statement_executor)
-                        .await?
+                    let alter_expr = self.get_alter_table_expr_on_demand(req, table, ctx)?;
+                    if let Some(alter_expr) = alter_expr {
+                        alter_tables.push(alter_expr);
+                    }
                 }
                 None => {
                     create_tables.push(req);
                 }
             }
         }
-        if !create_tables.is_empty() {
-            if let Some(on_physical_table) = on_physical_table {
+
+        if let Some(on_physical_table) = on_physical_table {
+            if !create_tables.is_empty() {
                 // Creates logical tables in batch.
                 self.create_logical_tables(
                     create_tables,
@@ -279,10 +286,19 @@ impl Inserter {
                     statement_executor,
                 )
                 .await?;
-            } else {
-                for req in create_tables {
-                    self.create_table(req, ctx, statement_executor).await?;
-                }
+            }
+            if !alter_tables.is_empty() {
+                // Alter logical tables in batch.
+                statement_executor
+                    .alter_logical_tables(alter_tables)
+                    .await?;
+            }
+        } else {
+            for req in create_tables {
+                self.create_table(req, ctx, statement_executor).await?;
+            }
+            for alter_expr in alter_tables.into_iter() {
+                statement_executor.alter_table_inner(alter_expr).await?;
             }
         }
 
@@ -361,13 +377,12 @@ impl Inserter {
             .context(CatalogSnafu)
     }
 
-    async fn alter_table_on_demand(
+    fn get_alter_table_expr_on_demand(
         &self,
         req: &RowInsertRequest,
         table: TableRef,
         ctx: &QueryContextRef,
-        statement_executor: &StatementExecutor,
-    ) -> Result<()> {
+    ) -> Result<Option<AlterExpr>> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
@@ -377,39 +392,15 @@ impl Inserter {
         let add_columns = extract_new_columns(&table.schema(), column_exprs)
             .context(FindNewColumnsOnInsertionSnafu)?;
         let Some(add_columns) = add_columns else {
-            return Ok(());
+            return Ok(None);
         };
 
-        info!(
-            "Adding new columns: {:?} to table: {}.{}.{}",
-            add_columns, catalog_name, schema_name, table_name
-        );
-
-        let alter_table_expr = AlterExpr {
+        Ok(Some(AlterExpr {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
             table_name: table_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
-        };
-
-        let res = statement_executor.alter_table_inner(alter_table_expr).await;
-
-        match res {
-            Ok(_) => {
-                info!(
-                    "Successfully added new columns to table: {}.{}.{}",
-                    catalog_name, schema_name, table_name
-                );
-                Ok(())
-            }
-            Err(err) => {
-                error!(
-                    "Failed to add new columns to table: {}.{}.{}: {}",
-                    catalog_name, schema_name, table_name, err
-                );
-                Err(err)
-            }
-        }
+        }))
     }
 
     /// Create a table with schema from insert request.
@@ -467,8 +458,6 @@ impl Inserter {
                     ctx.current_schema(),
                     &req.table_name,
                 );
-
-                info!("Logical table `{table_ref}` does not exist, try creating table");
 
                 let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
                 let mut create_table_expr = build_create_table_expr(&table_ref, request_schema)?;

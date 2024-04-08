@@ -12,14 +12,14 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: ubuntu-latest
     steps:
-    - uses: github/issue-labeler@v3.3
+    - uses: github/issue-labeler@v3.4
       with:
         configuration-path: .github/doc-label-config.yml
         enable-versioned-regex: false
         repo-token: ${{ secrets.GITHUB_TOKEN }}
         sync-labels: 1
     - name: create an issue in doc repo
-      uses: dacbd/create-issue-action@main
+      uses: dacbd/create-issue-action@v1.2.1
       if: ${{ github.event.action == 'opened' && contains(github.event.pull_request.body, '- [ ]  This PR does not require documentation updates.') }}
       with:
         owner: GreptimeTeam

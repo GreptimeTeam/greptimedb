@@ -30,6 +30,7 @@ use query::sql::{
     infer_file_table_schema, prepare_file_table_files,
 };
 use session::context::QueryContextRef;
+use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
@@ -45,7 +46,6 @@ use crate::error::{
     InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result,
     SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
-use crate::table::table_idents_to_full_name;
 
 #[derive(Debug, Copy, Clone)]
 pub struct CreateExprFactory;
@@ -181,7 +181,7 @@ pub(crate) async fn create_external_expr(
     Ok(expr)
 }
 
-/// Convert `CreateTable` statement to `CreateExpr` gRPC request.
+/// Convert `CreateTable` statement to [`CreateTableExpr`] gRPC request.
 pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, &query_ctx)

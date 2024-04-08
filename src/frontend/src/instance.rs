@@ -28,6 +28,7 @@ use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
+use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
@@ -39,15 +40,16 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::error;
 use common_telemetry::logging::info;
+use common_telemetry::{error, tracing};
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
-use operator::table::table_idents_to_full_name;
+use prometheus::HistogramTimer;
+use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -67,8 +69,9 @@ use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
-use servers::server::{start_server, ServerHandlers};
+use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
+use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
@@ -85,7 +88,6 @@ use crate::error::{
 };
 use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::heartbeat::HeartbeatTask;
-use crate::metrics;
 use crate::script::ScriptExecutor;
 
 #[async_trait]
@@ -115,7 +117,7 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
-    servers: Arc<ServerHandlers>,
+    servers: ServerHandlers,
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
@@ -142,12 +144,14 @@ impl Instance {
         let channel_manager = ChannelManager::with_config(channel_config);
         let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
 
-        let cluster_id = 0; // TODO(jeremy): read from config
-        let mut meta_client = MetaClientBuilder::new(cluster_id, 0, Role::Frontend)
+        let cluster_id = 0; // It is currently a reserved field and has not been enabled.
+        let member_id = 0; // Frontend does not need a member id.
+        let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Frontend)
             .enable_router()
             .enable_store()
             .enable_heartbeat()
-            .enable_ddl()
+            .enable_procedure()
+            .enable_access_cluster_info()
             .channel_manager(channel_manager)
             .ddl_channel_manager(ddl_channel_manager)
             .build();
@@ -198,8 +202,7 @@ impl Instance {
             ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
-        self.servers = Arc::new(servers);
-
+        self.servers = servers;
         Ok(())
     }
 
@@ -212,10 +215,14 @@ impl Instance {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        futures::future::try_join_all(self.servers.values().map(|server| server.0.shutdown()))
+        self.servers
+            .shutdown_all()
             .await
             .context(error::ShutdownServerSnafu)
-            .map(|_| ())
+    }
+
+    pub fn server_handlers(&self) -> &ServerHandlers {
+        &self.servers
     }
 
     pub fn statement_executor(&self) -> Arc<StatementExecutor> {
@@ -248,13 +255,7 @@ impl FrontendInstance for Instance {
             }
         }
 
-        futures::future::try_join_all(self.servers.iter().map(|(name, handler)| async move {
-            info!("Starting service: {name}");
-            start_server(handler).await
-        }))
-        .await
-        .context(error::StartServerSnafu)
-        .map(|_| ())
+        self.servers.start_all().await.context(StartServerSnafu)
     }
 }
 
@@ -278,8 +279,8 @@ impl Instance {
 impl SqlQueryHandler for Instance {
     type Error = Error;
 
+    #[tracing::instrument(skip_all)]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let _timer = metrics::METRIC_HANDLE_SQL_ELAPSED.start_timer();
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -339,7 +340,6 @@ impl SqlQueryHandler for Instance {
     }
 
     async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
-        let _timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
         // plan should be prepared before exec
         // we'll do check there
         self.query_engine
@@ -348,6 +348,7 @@ impl SqlQueryHandler for Instance {
             .context(ExecLogicalPlanSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn do_promql_query(
         &self,
         query: &PromQuery,
@@ -401,14 +402,27 @@ impl SqlQueryHandler for Instance {
     }
 }
 
+/// Attaches a timer to the output and observes it once the output is exhausted.
+pub fn attach_timer(output: Output, timer: HistogramTimer) -> Output {
+    match output.data {
+        OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
+        OutputData::Stream(stream) => {
+            let stream = OnDone::new(stream, move || {
+                timer.observe_duration();
+            });
+            Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
+        }
+    }
+}
+
 #[async_trait]
 impl PrometheusHandler for Instance {
+    #[tracing::instrument(skip_all)]
     async fn do_query(
         &self,
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        let _timer = metrics::METRIC_HANDLE_PROMQL_ELAPSED.start_timer();
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
@@ -443,6 +457,17 @@ impl PrometheusHandler for Instance {
     }
 }
 
+/// Validate `stmt.database` permission if it's presented.
+macro_rules! validate_db_permission {
+    ($stmt: expr, $query_ctx: expr) => {
+        if let Some(database) = &$stmt.database {
+            validate_catalog_and_schema($query_ctx.current_catalog(), database, $query_ctx)
+                .map_err(BoxedError::new)
+                .context(SqlExecInterceptedSnafu)?;
+        }
+    };
+}
+
 pub fn check_permission(
     plugins: Plugins,
     stmt: &Statement,
@@ -461,7 +486,8 @@ pub fn check_permission(
         // These are executed by query engine, and will be checked there.
         Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
         // database ops won't be checked
-        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {}
+        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::DropDatabase(_) => {
+        }
         // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
         }
@@ -474,15 +500,21 @@ pub fn check_permission(
         Statement::CreateTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }
+        Statement::CreateTableLike(stmt) => {
+            validate_param(&stmt.table_name, query_ctx)?;
+            validate_param(&stmt.source_name, query_ctx)?;
+        }
         Statement::DropTable(drop_stmt) => {
             validate_param(drop_stmt.table_name(), query_ctx)?;
         }
         Statement::ShowTables(stmt) => {
-            if let Some(database) = &stmt.database {
-                validate_catalog_and_schema(query_ctx.current_catalog(), database, query_ctx)
-                    .map_err(BoxedError::new)
-                    .context(SqlExecInterceptedSnafu)?;
-            }
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowColumns(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowIndex(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
         }
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;

@@ -20,11 +20,12 @@ use std::time::Duration;
 use api::v1::meta::Role;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
-use catalog::kvbackend::{CachedMetaKvBackend, MetaKvBackend};
+use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -77,8 +78,8 @@ pub struct GreptimeDbClusterBuilder {
     store_config: Option<ObjectStoreConfig>,
     store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
-    wal_config: DatanodeWalConfig,
-    meta_wal_config: MetaSrvWalConfig,
+    datanode_wal_config: DatanodeWalConfig,
+    metasrv_wal_config: MetaSrvWalConfig,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
 }
@@ -94,7 +95,7 @@ impl GreptimeDbClusterBuilder {
                 .split(',')
                 .map(|s| s.to_string())
                 .collect::<Vec<String>>();
-            let backend = EtcdStore::with_endpoints(endpoints)
+            let backend = EtcdStore::with_endpoints(endpoints, 128)
                 .await
                 .expect("malformed endpoints");
             // Each retry requires a new isolation namespace.
@@ -108,8 +109,8 @@ impl GreptimeDbClusterBuilder {
             store_config: None,
             store_providers: None,
             datanodes: None,
-            wal_config: DatanodeWalConfig::default(),
-            meta_wal_config: MetaSrvWalConfig::default(),
+            datanode_wal_config: DatanodeWalConfig::default(),
+            metasrv_wal_config: MetaSrvWalConfig::default(),
             shared_home_dir: None,
             meta_selector: None,
         }
@@ -134,14 +135,14 @@ impl GreptimeDbClusterBuilder {
     }
 
     #[must_use]
-    pub fn with_wal_config(mut self, wal_config: DatanodeWalConfig) -> Self {
-        self.wal_config = wal_config;
+    pub fn with_datanode_wal_config(mut self, datanode_wal_config: DatanodeWalConfig) -> Self {
+        self.datanode_wal_config = datanode_wal_config;
         self
     }
 
     #[must_use]
-    pub fn with_meta_wal_config(mut self, wal_meta: MetaSrvWalConfig) -> Self {
-        self.meta_wal_config = wal_meta;
+    pub fn with_metasrv_wal_config(mut self, metasrv_wal_config: MetaSrvWalConfig) -> Self {
+        self.metasrv_wal_config = metasrv_wal_config;
         self
     }
 
@@ -173,8 +174,9 @@ impl GreptimeDbClusterBuilder {
                 // We only make max_retry_times and retry_delay large than the default in tests.
                 max_retry_times: 5,
                 retry_delay: Duration::from_secs(1),
+                max_metadata_value_size: None,
             },
-            wal: self.meta_wal_config.clone(),
+            wal: self.metasrv_wal_config.clone(),
             ..Default::default()
         };
 
@@ -249,7 +251,7 @@ impl GreptimeDbClusterBuilder {
                     store_config.clone(),
                     vec![],
                     home_dir,
-                    self.wal_config.clone(),
+                    self.datanode_wal_config.clone(),
                 )
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
@@ -257,7 +259,7 @@ impl GreptimeDbClusterBuilder {
                     StorageType::File,
                     self.store_providers.clone().unwrap_or_default(),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
-                    self.wal_config.clone(),
+                    self.datanode_wal_config.clone(),
                 );
 
                 storage_guards.push(guard.storage_guards);
@@ -345,16 +347,28 @@ impl GreptimeDbClusterBuilder {
             .enable_store()
             .enable_heartbeat()
             .channel_manager(meta_srv.channel_manager)
-            .enable_ddl()
+            .enable_procedure()
+            .enable_access_cluster_info()
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
-        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
+        let cached_meta_backend =
+            Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
+        let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::with_invalidators(vec![
+            cached_meta_backend.clone(),
+        ]));
+        let catalog_manager = KvBackendCatalogManager::new(
+            cached_meta_backend.clone(),
+            multi_cache_invalidator.clone(),
+        )
+        .await;
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(meta_backend.clone())),
+            Arc::new(InvalidateTableCacheHandler::new(
+                multi_cache_invalidator.clone(),
+            )),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -363,12 +377,17 @@ impl GreptimeDbClusterBuilder {
             Arc::new(handlers_executor),
         );
 
-        let instance = FrontendBuilder::new(meta_backend.clone(), datanode_clients, meta_client)
-            .with_cache_invalidator(meta_backend)
-            .with_heartbeat_task(heartbeat_task)
-            .try_build()
-            .await
-            .unwrap();
+        let instance = FrontendBuilder::new(
+            cached_meta_backend.clone(),
+            catalog_manager,
+            datanode_clients,
+            meta_client,
+        )
+        .with_cache_invalidator(multi_cache_invalidator)
+        .with_heartbeat_task(heartbeat_task)
+        .try_build()
+        .await
+        .unwrap();
 
         Arc::new(instance)
     }

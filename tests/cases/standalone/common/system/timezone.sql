@@ -3,6 +3,8 @@ SHOW VARIABLES time_zone;
 
 SHOW VARIABLES system_time_zone;
 
+select timezone();
+
 CREATE TABLE test(d double, ts timestamp_ms time index);
 
 INSERT INTO test values
@@ -31,6 +33,8 @@ SHOW VARIABLES time_zone;
 
 SHOW VARIABLES system_time_zone;
 
+select timezone();
+
 SELECT * from test;
 
 SELECT * from test where ts >= '2024-01-02 08:00:00';
@@ -50,6 +54,8 @@ SHOW VARIABLES time_zone;
 
 SHOW VARIABLES system_time_zone;
 
+select timezone();
+
 SELECT * from test;
 
 SELECT * from test where ts >= '2024-01-02 08:00:00';
@@ -68,3 +74,5 @@ drop table test;
 SET TIME_ZONE = 'UTC';
 
 SHOW VARIABLES time_zone;
+
+select timezone();

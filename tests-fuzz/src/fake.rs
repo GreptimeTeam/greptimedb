@@ -21,6 +21,7 @@ use rand::Rng;
 
 use crate::generator::Random;
 use crate::impl_random;
+use crate::ir::Ident;
 
 lazy_static! {
     pub static ref LOREM_WORDS: Vec<String> = include_str!("data/lorem_words")
@@ -49,7 +50,7 @@ macro_rules! faker_impl_from_values {
 pub struct Word(String);
 faker_impl_from_values!(Word, LOREM_WORDS);
 pub struct WordGenerator;
-impl_random!(String, WordGenerator, LOREM_WORDS);
+impl_random!(Ident, WordGenerator, LOREM_WORDS);
 
 pub struct MappedGenerator<T, F, R, V>
 where
@@ -63,15 +64,19 @@ where
     _v: PhantomData<V>,
 }
 
-pub fn random_capitalize_map<R: Rng + 'static>(rng: &mut R, s: String) -> String {
-    let mut v = s.chars().collect::<Vec<_>>();
+pub fn random_capitalize_map<R: Rng + 'static>(rng: &mut R, s: Ident) -> Ident {
+    let mut v = s.value.chars().collect::<Vec<_>>();
 
-    let select = rng.gen_range(0..s.len());
-    for idx in (0..s.len()).choose_multiple(rng, select) {
+    let str_len = s.value.len();
+    let select = rng.gen_range(0..str_len);
+    for idx in (0..str_len).choose_multiple(rng, select) {
         v[idx] = v[idx].to_uppercase().next().unwrap();
     }
 
-    v.into_iter().collect::<String>()
+    Ident {
+        quote_style: s.quote_style,
+        value: v.into_iter().collect::<String>(),
+    }
 }
 
 lazy_static! {
@@ -98,12 +103,15 @@ pub fn is_keyword_or_contain_uppercase(s: &str) -> bool {
 
 pub fn make_backtick_map<R: Rng + 'static, F: Fn(&str) -> bool>(
     f: F,
-) -> impl Fn(&mut R, String) -> String {
-    move |_rng, s| -> String {
-        let need = f(&s);
+) -> impl Fn(&mut R, Ident) -> Ident {
+    move |_rng, s| -> Ident {
+        let need = f(&s.value);
 
         if need {
-            format!("`{s}`")
+            Ident {
+                value: s.value,
+                quote_style: Some('`'),
+            }
         } else {
             s
         }
@@ -112,12 +120,15 @@ pub fn make_backtick_map<R: Rng + 'static, F: Fn(&str) -> bool>(
 
 pub fn make_quote_map<R: Rng + 'static, F: Fn(&str) -> bool>(
     f: F,
-) -> impl Fn(&mut R, String) -> String {
-    move |_rng, s| -> String {
-        let need = f(&s);
+) -> impl Fn(&mut R, Ident) -> Ident {
+    move |_rng, s| -> Ident {
+        let need = f(&s.value);
 
         if need {
-            format!("\"{s}\"")
+            Ident {
+                value: s.value,
+                quote_style: Some('"'),
+            }
         } else {
             s
         }
@@ -125,36 +136,39 @@ pub fn make_quote_map<R: Rng + 'static, F: Fn(&str) -> bool>(
 }
 
 /// Adds backticks if it contains uppercase chars.
-pub fn auto_backtick_map<R: Rng + 'static>(_rng: &mut R, s: String) -> String {
-    let need = s.chars().any(|c| c.is_uppercase());
+pub fn auto_backtick_map<R: Rng + 'static>(_rng: &mut R, s: Ident) -> Ident {
+    let need = s.value.chars().any(|c| c.is_uppercase());
 
     if need {
-        format!("`{s}`")
+        Ident {
+            value: s.value,
+            quote_style: Some('`'),
+        }
     } else {
         s
     }
 }
 
 /// Adds backticks if it contains uppercase chars.
-pub fn uppercase_and_keyword_backtick_map<R: Rng + 'static>(rng: &mut R, s: String) -> String {
+pub fn uppercase_and_keyword_backtick_map<R: Rng + 'static>(rng: &mut R, s: Ident) -> Ident {
     make_backtick_map(is_keyword_or_contain_uppercase)(rng, s)
 }
 
 /// Adds quotes if it contains uppercase chars.
-pub fn auto_quote_map<R: Rng + 'static>(rng: &mut R, s: String) -> String {
+pub fn auto_quote_map<R: Rng + 'static>(rng: &mut R, s: Ident) -> Ident {
     make_quote_map(contain_uppercase_char)(rng, s)
 }
 
 /// Adds quotes if it contains uppercase chars.
-pub fn uppercase_and_keyword_quote_map<R: Rng + 'static>(rng: &mut R, s: String) -> String {
+pub fn uppercase_and_keyword_quote_map<R: Rng + 'static>(rng: &mut R, s: Ident) -> Ident {
     make_quote_map(is_keyword_or_contain_uppercase)(rng, s)
 }
 
 pub fn merge_two_word_map_fn<R: Rng>(
-    f1: impl Fn(&mut R, String) -> String,
-    f2: impl Fn(&mut R, String) -> String,
-) -> impl Fn(&mut R, String) -> String {
-    move |rng, s| -> String {
+    f1: impl Fn(&mut R, Ident) -> Ident,
+    f2: impl Fn(&mut R, Ident) -> Ident,
+) -> impl Fn(&mut R, Ident) -> Ident {
+    move |rng, s| -> Ident {
         let s = f1(rng, s);
         f2(rng, s)
     }

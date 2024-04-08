@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
+use common_query::OutputData;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
@@ -399,13 +400,14 @@ impl PyQueryEngine {
                         .await
                         .map_err(|e| e.to_string());
                     match res {
-                        Ok(common_query::Output::AffectedRows(cnt)) => {
-                            Ok(Either::AffectedRows(cnt))
-                        }
-                        Ok(common_query::Output::RecordBatches(rbs)) => Ok(Either::Rb(rbs)),
-                        Ok(common_query::Output::Stream(s)) => Ok(Either::Rb(
-                            common_recordbatch::util::collect_batches(s).await.unwrap(),
-                        )),
+                        Ok(o) => match o.data {
+                            OutputData::AffectedRows(cnt) => Ok(Either::AffectedRows(cnt)),
+                            OutputData::RecordBatches(rbs) => Ok(Either::Rb(rbs)),
+                            OutputData::Stream(s) => Ok(Either::Rb(
+                                common_recordbatch::util::collect_batches(s).await.unwrap(),
+                            )),
+                        },
+
                         Err(e) => Err(e),
                     }
                 })?;

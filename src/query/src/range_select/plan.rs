@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::any::Any;
+use std::cmp::Ordering;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,8 +23,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ahash::RandomState;
-use arrow::compute::{self, cast_with_options, CastOptions};
-use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::compute::{self, cast_with_options, CastOptions, SortColumn};
+use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
 use common_query::DfPhysicalPlan;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::common::{Result as DataFusionResult, Statistics};
@@ -35,10 +37,14 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion::physical_planner::create_physical_sort_expr;
-use datafusion_common::utils::get_arrayref_at_indices;
+use datafusion_common::utils::{get_arrayref_at_indices, get_row_at_idx};
 use datafusion_common::{DFField, DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
-use datafusion_expr::utils::exprlist_to_fields;
-use datafusion_expr::{Accumulator, Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_expr::utils::{exprlist_to_fields, COUNT_STAR_EXPANSION};
+use datafusion_expr::{
+    lit, Accumulator, AggregateFunction, Expr, ExprSchemable, LogicalPlan,
+    UserDefinedLogicalNodeCore,
+};
+use datafusion_physical_expr::aggregate::utils::down_cast_any_ref;
 use datafusion_physical_expr::expressions::create_aggregate_expr as create_aggr_expr;
 use datafusion_physical_expr::hash_utils::create_hashes;
 use datafusion_physical_expr::{
@@ -57,6 +63,140 @@ use snafu::{ensure, ResultExt};
 use crate::error::{DataFusionSnafu, RangeQuerySnafu, Result};
 
 type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
+
+/// Implementation of `first_value`/`last_value`
+/// aggregate function adapted to range query
+#[derive(Debug)]
+struct RangeFirstListValue {
+    /// calculate expr
+    expr: Arc<dyn PhysicalExpr>,
+    order_bys: Vec<PhysicalSortExpr>,
+}
+
+impl RangeFirstListValue {
+    pub fn new_aggregate_expr(
+        expr: Arc<dyn PhysicalExpr>,
+        order_bys: Vec<PhysicalSortExpr>,
+    ) -> Arc<dyn AggregateExpr> {
+        Arc::new(Self { expr, order_bys })
+    }
+}
+
+impl PartialEq<dyn Any> for RangeFirstListValue {
+    fn eq(&self, other: &dyn Any) -> bool {
+        down_cast_any_ref(other)
+            .downcast_ref::<Self>()
+            .map(|x| self.expr.eq(&x.expr) && self.order_bys.iter().eq(x.order_bys.iter()))
+            .unwrap_or(false)
+    }
+}
+
+impl AggregateExpr for RangeFirstListValue {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn create_accumulator(&self) -> DataFusionResult<Box<dyn Accumulator>> {
+        Ok(Box::new(RangeFirstListValueAcc::new(
+            self.order_bys.iter().map(|order| order.options).collect(),
+        )))
+    }
+
+    fn expressions(&self) -> Vec<Arc<dyn PhysicalExpr>> {
+        let mut exprs: Vec<_> = self
+            .order_bys
+            .iter()
+            .map(|order| order.expr.clone())
+            .collect();
+        exprs.push(self.expr.clone());
+        exprs
+    }
+
+    fn field(&self) -> DataFusionResult<Field> {
+        unreachable!("AggregateExpr::field will not be used in range query")
+    }
+
+    fn state_fields(&self) -> DataFusionResult<Vec<Field>> {
+        unreachable!("AggregateExpr::state_fields will not be used in range query")
+    }
+}
+
+#[derive(Debug)]
+pub struct RangeFirstListValueAcc {
+    pub sort_options: Vec<SortOptions>,
+    pub sort_columns: Vec<ScalarValue>,
+    pub data: Option<ScalarValue>,
+}
+
+impl RangeFirstListValueAcc {
+    pub fn new(sort_options: Vec<SortOptions>) -> Self {
+        Self {
+            sort_options,
+            sort_columns: vec![],
+            data: None,
+        }
+    }
+}
+
+impl Accumulator for RangeFirstListValueAcc {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> DataFusionResult<()> {
+        let columns: Vec<_> = values
+            .iter()
+            .zip(self.sort_options.iter())
+            .map(|(v, s)| SortColumn {
+                values: v.clone(),
+                options: Some(*s),
+            })
+            .collect();
+        // finding the Top1 problem with complexity O(n)
+        let idx = compute::lexsort_to_indices(&columns, Some(1))?.value(0);
+        let vs = get_row_at_idx(values, idx as usize)?;
+        let need_update = self.data.is_none()
+            || vs
+                .iter()
+                .zip(self.sort_columns.iter())
+                .zip(self.sort_options.iter())
+                .find_map(|((new_value, old_value), sort_option)| {
+                    if new_value.is_null() && old_value.is_null() {
+                        None
+                    } else if sort_option.nulls_first
+                        && (new_value.is_null() || old_value.is_null())
+                    {
+                        Some(new_value.is_null())
+                    } else {
+                        new_value.partial_cmp(old_value).map(|x| {
+                            (x == Ordering::Greater && sort_option.descending)
+                                || (x == Ordering::Less && !sort_option.descending)
+                        })
+                    }
+                })
+                .unwrap_or(false);
+        if need_update {
+            self.sort_columns = vs;
+            self.data = Some(ScalarValue::try_from_array(
+                &values[self.sort_options.len()],
+                idx as usize,
+            )?);
+        }
+        Ok(())
+    }
+
+    fn evaluate(&self) -> DataFusionResult<ScalarValue> {
+        Ok(self.data.clone().unwrap_or(ScalarValue::Null))
+    }
+
+    fn size(&self) -> usize {
+        std::mem::size_of_val(self)
+    }
+
+    fn state(&self) -> DataFusionResult<Vec<ScalarValue>> {
+        unreachable!("Accumulator::state will not be used in range query")
+    }
+
+    fn merge_batch(&mut self, _states: &[ArrayRef]) -> DataFusionResult<()> {
+        unreachable!("Accumulator::merge_batch will not be used in range query")
+    }
+}
 
 #[derive(PartialEq, Eq, Debug, Hash, Clone)]
 pub enum Fill {
@@ -78,14 +218,15 @@ impl Display for Fill {
 }
 
 impl Fill {
-    pub fn try_from_str(value: &str, datatype: &DataType) -> DfResult<Self> {
+    pub fn try_from_str(value: &str, datatype: &DataType) -> DfResult<Option<Self>> {
         let s = value.to_uppercase();
         match s.as_str() {
-            "NULL" | "" => Ok(Self::Null),
-            "PREV" => Ok(Self::Prev),
+            "" => Ok(None),
+            "NULL" => Ok(Some(Self::Null)),
+            "PREV" => Ok(Some(Self::Prev)),
             "LINEAR" => {
                 if datatype.is_numeric() {
-                    Ok(Self::Linear)
+                    Ok(Some(Self::Linear))
                 } else {
                     Err(DataFusionError::Plan(format!(
                         "Use FILL LINEAR on Non-numeric DataType {}",
@@ -100,13 +241,17 @@ impl Fill {
                         s, err
                     ))
                 })
-                .map(Fill::Const),
+                .map(|x| Some(Fill::Const(x))),
         }
     }
 
     /// The input `data` contains data on a complete time series.
     /// If the filling strategy is `PREV` or `LINEAR`, caller must be ensured that the incoming `ts`&`data` is ascending time order.
     pub fn apply_fill_strategy(&self, ts: &[i64], data: &mut [ScalarValue]) -> DfResult<()> {
+        // No calculation need in `Fill::Null`
+        if matches!(self, Fill::Null) {
+            return Ok(());
+        }
         let len = data.len();
         if *self == Fill::Linear {
             return Self::fill_linear(ts, data);
@@ -114,7 +259,6 @@ impl Fill {
         for i in 0..len {
             if data[i].is_null() {
                 match self {
-                    Fill::Null => continue,
                     Fill::Prev => {
                         if i != 0 {
                             data[i] = data[i - 1].clone()
@@ -122,7 +266,8 @@ impl Fill {
                     }
                     // The calculation of linear interpolation is relatively complicated.
                     // `Self::fill_linear` is used to dispose `Fill::Linear`.
-                    Fill::Linear => unreachable!(),
+                    // No calculation need in `Fill::Null`
+                    Fill::Linear | Fill::Null => unreachable!(),
                     Fill::Const(v) => data[i] = v.clone(),
                 }
             }
@@ -219,12 +364,12 @@ fn linear_interpolation(
 
 #[derive(Eq, Clone, Debug)]
 pub struct RangeFn {
-    /// with format like `max(a) RANGE 300s FILL NULL`
+    /// with format like `max(a) RANGE 300s [FILL NULL]`
     pub name: String,
     pub data_type: DataType,
     pub expr: Expr,
     pub range: Duration,
-    pub fill: Fill,
+    pub fill: Option<Fill>,
     /// If the `FIll` strategy is `Linear` and the output is an integer,
     /// it is possible to calculate a floating point number.
     /// So for `FILL==LINEAR`, the entire data will be implicitly converted to Float type
@@ -271,6 +416,7 @@ pub struct RangeSelect {
     pub align: Duration,
     pub align_to: i64,
     pub time_index: String,
+    pub time_expr: Expr,
     pub by: Vec<Expr>,
     pub schema: DFSchemaRef,
     pub by_schema: DFSchemaRef,
@@ -324,7 +470,7 @@ impl RangeSelect {
                         name,
                         data_type.clone(),
                         // Only when data fill with Const option, the data can't be null
-                        !matches!(fill, Fill::Const(..)),
+                        !matches!(fill, Some(Fill::Const(..))),
                     ))
                 },
             )
@@ -382,6 +528,7 @@ impl RangeSelect {
             align,
             align_to,
             time_index: time_index_name,
+            time_expr: time_index,
             schema,
             by_schema,
             by,
@@ -440,6 +587,7 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
             range_expr: self.range_expr.clone(),
             input: Arc::new(inputs[0].clone()),
             time_index: self.time_index.clone(),
+            time_expr: self.time_expr.clone(),
             schema: self.schema.clone(),
             by: self.by.clone(),
             by_schema: self.by_schema.clone(),
@@ -452,6 +600,7 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
 impl RangeSelect {
     fn create_physical_expr_list(
         &self,
+        is_count_aggr: bool,
         exprs: &[Expr],
         df_schema: &Arc<DFSchema>,
         schema: &Schema,
@@ -459,7 +608,20 @@ impl RangeSelect {
     ) -> DfResult<Vec<Arc<dyn PhysicalExpr>>> {
         exprs
             .iter()
-            .map(|by| create_physical_expr(by, df_schema, schema, session_state.execution_props()))
+            .map(|e| match e {
+                // `count(*)` will be rewritten by `CountWildcardRule` into `count(1)` when optimizing logical plan.
+                // The modification occurs after range plan rewrite.
+                // At this time, aggregate plan has been replaced by a custom range plan,
+                // so `CountWildcardRule` has not been applied.
+                // We manually modify it when creating the physical plan.
+                Expr::Wildcard if is_count_aggr => create_physical_expr(
+                    &lit(COUNT_STAR_EXPANSION),
+                    df_schema,
+                    schema,
+                    session_state.execution_props(),
+                ),
+                _ => create_physical_expr(e, df_schema, schema, session_state.execution_props()),
+            })
             .collect::<DfResult<Vec<_>>>()
     }
 
@@ -488,6 +650,72 @@ impl RangeSelect {
             .iter()
             .map(|range_fn| {
                 let expr = match &range_fn.expr {
+                    Expr::AggregateFunction(aggr)
+                        if aggr.fun == AggregateFunction::FirstValue
+                            || aggr.fun == AggregateFunction::LastValue =>
+                    {
+                        // Because we only need to find the first_value/last_value,
+                        // the complexity of sorting the entire batch is O(nlogn).
+                        // We can sort the batch with limit 1.
+                        // In this case, the algorithm degenerates into finding the Top1 problem with complexity O(n).
+                        // We need reverse the sort order of last_value to correctly apply limit 1 when sorting.
+                        let order_by = if let Some(exprs) = &aggr.order_by {
+                            exprs
+                                .iter()
+                                .map(|x| {
+                                    create_physical_sort_expr(
+                                        x,
+                                        input_dfschema,
+                                        &input_schema,
+                                        session_state.execution_props(),
+                                    )
+                                    .map(|expr| {
+                                        // reverse the last_value sort
+                                        if aggr.fun == AggregateFunction::LastValue {
+                                            PhysicalSortExpr {
+                                                expr: expr.expr,
+                                                options: SortOptions {
+                                                    descending: !expr.options.descending,
+                                                    nulls_first: !expr.options.nulls_first,
+                                                },
+                                            }
+                                        } else {
+                                            expr
+                                        }
+                                    })
+                                })
+                                .collect::<DfResult<Vec<_>>>()?
+                        } else {
+                            // if user not assign order by, time index is needed as default ordering
+                            let time_index = create_physical_expr(
+                                &self.time_expr,
+                                input_dfschema,
+                                &input_schema,
+                                session_state.execution_props(),
+                            )?;
+                            vec![PhysicalSortExpr {
+                                expr: time_index,
+                                options: SortOptions {
+                                    descending: aggr.fun == AggregateFunction::LastValue,
+                                    nulls_first: false,
+                                },
+                            }]
+                        };
+                        let arg = self.create_physical_expr_list(
+                            false,
+                            &aggr.args,
+                            input_dfschema,
+                            &input_schema,
+                            session_state,
+                        )?;
+                        // first_value/last_value has only one param.
+                        // The param have been checked by datafusion in logical plan stage.
+                        // We can safely assume that there is only one element here.
+                        Ok(RangeFirstListValue::new_aggregate_expr(
+                            arg[0].clone(),
+                            order_by,
+                        ))
+                    }
                     Expr::AggregateFunction(aggr) => {
                         let order_by = if let Some(exprs) = &aggr.order_by {
                             exprs
@@ -508,6 +736,7 @@ impl RangeSelect {
                             &aggr.fun,
                             false,
                             &self.create_physical_expr_list(
+                                aggr.fun == AggregateFunction::Count,
                                 &aggr.args,
                                 input_dfschema,
                                 &input_schema,
@@ -523,6 +752,7 @@ impl RangeSelect {
                         let expr = create_aggr_udf_expr(
                             &aggr_udf.fun,
                             &self.create_physical_expr_list(
+                                false,
                                 &aggr_udf.args,
                                 input_dfschema,
                                 &input_schema,
@@ -564,6 +794,7 @@ impl RangeSelect {
             align: self.align.as_millis() as Millisecond,
             align_to: self.align_to,
             by: self.create_physical_expr_list(
+                false,
                 &self.by,
                 input_dfschema,
                 &input_schema,
@@ -584,8 +815,24 @@ struct RangeFnExec {
     pub expr: Arc<dyn AggregateExpr>,
     pub args: Vec<Arc<dyn PhysicalExpr>>,
     pub range: Millisecond,
-    pub fill: Fill,
+    pub fill: Option<Fill>,
     pub need_cast: Option<DataType>,
+}
+
+impl Display for RangeFnExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(fill) = &self.fill {
+            write!(
+                f,
+                "{} RANGE {}s FILL {}",
+                self.expr.name(),
+                self.range / 1000,
+                fill
+            )
+        } else {
+            write!(f, "{} RANGE {}s", self.expr.name(), self.range / 1000)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -608,18 +855,8 @@ impl DisplayAs for RangeSelectExec {
         match t {
             DisplayFormatType::Default | DisplayFormatType::Verbose => {
                 write!(f, "RangeSelectExec: ")?;
-                let range_expr_strs: Vec<String> = self
-                    .range_exec
-                    .iter()
-                    .map(|e| {
-                        format!(
-                            "{} RANGE {}s FILL {}",
-                            e.expr.name(),
-                            e.range / 1000,
-                            e.fill
-                        )
-                    })
-                    .collect();
+                let range_expr_strs: Vec<String> =
+                    self.range_exec.iter().map(RangeFnExec::to_string).collect();
                 let by: Vec<String> = self.by.iter().map(|e| e.to_string()).collect();
                 write!(
                     f,
@@ -713,7 +950,7 @@ impl ExecutionPlan for RangeSelectExec {
             by: self.by.clone(),
             series_map: HashMap::new(),
             exec_state: ExecutionState::ReadingInput,
-            output_num_rows: 0,
+            num_not_null_rows: 0,
             row_converter,
             modify_map: HashMap::new(),
             metric: baseline_metric,
@@ -753,8 +990,8 @@ struct RangeSelectStream {
     /// value: `[row_ids]`
     /// It is used to record the data that needs to be aggregated in each time slot during the data update process
     modify_map: HashMap<(u64, Millisecond), Vec<u32>>,
-    /// The number of rows of the final output
-    output_num_rows: usize,
+    /// The number of rows of not null rows in the final output
+    num_not_null_rows: usize,
     metric: BaselineMetrics,
     schema_project: Option<Vec<usize>>,
     schema_before_project: SchemaRef,
@@ -766,7 +1003,7 @@ struct SeriesState {
     row: OwnedRow,
     /// key: align_ts
     /// value: a vector, each element is a range_fn follow the order of `range_exec`
-    align_ts_accumulator: HashMap<Millisecond, Vec<Box<dyn Accumulator>>>,
+    align_ts_accumulator: BTreeMap<Millisecond, Vec<Box<dyn Accumulator>>>,
 }
 
 /// Use `align_to` as time origin.
@@ -882,7 +1119,7 @@ impl RangeSelectStream {
                     let accumulators_map =
                         self.series_map.entry(*hash).or_insert_with(|| SeriesState {
                             row: by_rows.row(*row as usize).owned(),
-                            align_ts_accumulator: HashMap::new(),
+                            align_ts_accumulator: BTreeMap::new(),
                         });
                     match accumulators_map.align_ts_accumulator.entry(*ts) {
                         Entry::Occupied(mut e) => {
@@ -890,7 +1127,7 @@ impl RangeSelectStream {
                             accumulators[i].update_batch(&sliced_arrays)
                         }
                         Entry::Vacant(e) => {
-                            self.output_num_rows += 1;
+                            self.num_not_null_rows += 1;
                             let mut accumulators = self
                                 .range_exec
                                 .iter()
@@ -915,29 +1152,47 @@ impl RangeSelectStream {
         // 1 for time index column
         let mut columns: Vec<Arc<dyn Array>> =
             Vec::with_capacity(1 + self.range_exec.len() + self.by.len());
-        let mut ts_builder = TimestampMillisecondBuilder::with_capacity(self.output_num_rows);
-        let mut all_scalar = vec![Vec::with_capacity(self.output_num_rows); self.range_exec.len()];
-        let mut by_rows = Vec::with_capacity(self.output_num_rows);
+        let mut ts_builder = TimestampMillisecondBuilder::with_capacity(self.num_not_null_rows);
+        let mut all_scalar =
+            vec![Vec::with_capacity(self.num_not_null_rows); self.range_exec.len()];
+        let mut by_rows = Vec::with_capacity(self.num_not_null_rows);
         let mut start_index = 0;
-        // RangePlan is calculated on a row basis. If a column uses the PREV or LINEAR filling strategy,
-        // we must arrange the data in the entire data row to determine the NULL filling value.
-        let need_sort_output = self
+        // If any range expr need fill, we need fill both the missing align_ts and null value.
+        let need_fill_output = self.range_exec.iter().any(|range| range.fill.is_some());
+        // The padding value for each accumulator
+        let padding_values = self
             .range_exec
             .iter()
-            .any(|range| range.fill == Fill::Linear || range.fill == Fill::Prev);
+            .map(|e| e.expr.create_accumulator()?.evaluate())
+            .collect::<DfResult<Vec<_>>>()?;
         for SeriesState {
             row,
             align_ts_accumulator,
         } in self.series_map.values()
         {
-            // collect data on time series
-            let mut align_ts = align_ts_accumulator.keys().copied().collect::<Vec<_>>();
-            if need_sort_output {
-                align_ts.sort();
+            // skip empty time series
+            if align_ts_accumulator.is_empty() {
+                continue;
             }
+            // find the first and last align_ts
+            let begin_ts = *align_ts_accumulator.first_key_value().unwrap().0;
+            let end_ts = *align_ts_accumulator.last_key_value().unwrap().0;
+            let align_ts = if need_fill_output {
+                // we need to fill empty align_ts which not data in that solt
+                (begin_ts..=end_ts).step_by(self.align as usize).collect()
+            } else {
+                align_ts_accumulator.keys().copied().collect::<Vec<_>>()
+            };
             for ts in &align_ts {
-                for (i, accumulator) in align_ts_accumulator.get(ts).unwrap().iter().enumerate() {
-                    all_scalar[i].push(accumulator.evaluate()?);
+                if let Some(slot) = align_ts_accumulator.get(ts) {
+                    for (column, acc) in all_scalar.iter_mut().zip(slot.iter()) {
+                        column.push(acc.evaluate()?);
+                    }
+                } else {
+                    // fill null in empty time solt
+                    for (column, padding) in all_scalar.iter_mut().zip(padding_values.iter()) {
+                        column.push(padding.clone())
+                    }
                 }
             }
             ts_builder.append_slice(&align_ts);
@@ -950,14 +1205,16 @@ impl RangeSelectStream {
             ) in self.range_exec.iter().enumerate()
             {
                 let time_series_data =
-                    &mut all_scalar[i][start_index..start_index + align_ts_accumulator.len()];
+                    &mut all_scalar[i][start_index..start_index + align_ts.len()];
                 if let Some(data_type) = need_cast {
                     cast_scalar_values(time_series_data, data_type)?;
                 }
-                fill.apply_fill_strategy(&align_ts, time_series_data)?;
+                if let Some(fill) = fill {
+                    fill.apply_fill_strategy(&align_ts, time_series_data)?;
+                }
             }
-            by_rows.resize(by_rows.len() + align_ts_accumulator.len(), row.row());
-            start_index += align_ts_accumulator.len();
+            by_rows.resize(by_rows.len() + align_ts.len(), row.row());
+            start_index += align_ts.len();
         }
         for column_scalar in all_scalar {
             columns.push(ScalarValue::iter_to_array(column_scalar)?);
@@ -1078,7 +1335,7 @@ mod test {
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
 
-    fn prepare_test_data(is_float: bool) -> MemoryExec {
+    fn prepare_test_data(is_float: bool, is_gap: bool) -> MemoryExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new(
@@ -1092,16 +1349,23 @@ mod test {
             ),
             Field::new("host", DataType::Utf8, true),
         ]));
-        let timestamp_column: Arc<dyn Array> = Arc::new(TimestampMillisecondArray::from(vec![
-            0, 5_000, 10_000, 15_000, 20_000, // host 1 every 5s
-            0, 5_000, 10_000, 15_000, 20_000, // host 2 every 5s
-        ])) as _;
-        let mut host = vec!["host1"; 5];
-        host.extend(vec!["host2"; 5]);
-        let value_column: Arc<dyn Array> = if is_float {
-            Arc::new(nullable_array!(Float64;
-                0.0, null, 1.0, null, 2.0, // data for host 1
-                3.0, null, 4.0, null, 5.0 // data for host 2
+        let timestamp_column: Arc<dyn Array> = if !is_gap {
+            Arc::new(TimestampMillisecondArray::from(vec![
+                0, 5_000, 10_000, 15_000, 20_000, // host 1 every 5s
+                0, 5_000, 10_000, 15_000, 20_000, // host 2 every 5s
+            ])) as _
+        } else {
+            Arc::new(TimestampMillisecondArray::from(vec![
+                0, 15_000, // host 1 every 5s, missing data on 5_000, 10_000
+                0, 15_000, // host 2 every 5s, missing data on 5_000, 10_000
+            ])) as _
+        };
+        let mut host = vec!["host1"; timestamp_column.len() / 2];
+        host.extend(vec!["host2"; timestamp_column.len() / 2]);
+        let mut value_column: Arc<dyn Array> = if is_gap {
+            Arc::new(nullable_array!(Int64;
+                0, 6, // data for host 1
+                6, 12 // data for host 2
             )) as _
         } else {
             Arc::new(nullable_array!(Int64;
@@ -1109,6 +1373,11 @@ mod test {
                 3, null, 4, null, 5 // data for host 2
             )) as _
         };
+        if is_float {
+            value_column =
+                cast_with_options(&value_column, &DataType::Float64, &CastOptions::default())
+                    .unwrap();
+        }
         let host_column: Arc<dyn Array> = Arc::new(StringArray::from(host)) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
@@ -1123,8 +1392,9 @@ mod test {
         range1: Millisecond,
         range2: Millisecond,
         align: Millisecond,
-        fill: Fill,
+        fill: Option<Fill>,
         is_float: bool,
+        is_gap: bool,
         expected: String,
     ) {
         let data_type = if is_float {
@@ -1132,13 +1402,13 @@ mod test {
         } else {
             DataType::Int64
         };
-        let (need_cast, schema_data_type) = if !is_float && fill == Fill::Linear {
+        let (need_cast, schema_data_type) = if !is_float && matches!(fill, Some(Fill::Linear)) {
             // data_type = DataType::Float64;
             (Some(DataType::Float64), DataType::Float64)
         } else {
             (None, data_type.clone())
         };
-        let memory_exec = Arc::new(prepare_test_data(is_float));
+        let memory_exec = Arc::new(prepare_test_data(is_float, is_gap));
         let schema = Arc::new(Schema::new(vec![
             Field::new("MIN(value)", schema_data_type.clone(), true),
             Field::new("MAX(value)", schema_data_type, true),
@@ -1223,7 +1493,16 @@ mod test {
             \n| 3.0        | 3.0        | 1970-01-01T00:00:00 | host2 |\
             \n+------------+------------+---------------------+-------+",
         );
-        do_range_select_test(10_000, 10_000, 1_000_000, Fill::Null, true, expected).await;
+        do_range_select_test(
+            10_000,
+            10_000,
+            1_000_000,
+            Some(Fill::Null),
+            true,
+            false,
+            expected,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1246,7 +1525,16 @@ mod test {
             \n| 5.0        | 5.0        | 1970-01-01T00:00:20 | host2 |\
             \n+------------+------------+---------------------+-------+",
         );
-        do_range_select_test(10_000, 5_000, 5_000, Fill::Null, true, expected).await;
+        do_range_select_test(
+            10_000,
+            5_000,
+            5_000,
+            Some(Fill::Null),
+            true,
+            false,
+            expected,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1269,7 +1557,16 @@ mod test {
             \n| 5.0        | 5.0        | 1970-01-01T00:00:20 | host2 |\
             \n+------------+------------+---------------------+-------+",
         );
-        do_range_select_test(10_000, 5_000, 5_000, Fill::Prev, true, expected).await;
+        do_range_select_test(
+            10_000,
+            5_000,
+            5_000,
+            Some(Fill::Prev),
+            true,
+            false,
+            expected,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1292,7 +1589,16 @@ mod test {
             \n| 5.0        | 5.0        | 1970-01-01T00:00:20 | host2 |\
             \n+------------+------------+---------------------+-------+",
         );
-        do_range_select_test(10_000, 5_000, 5_000, Fill::Linear, true, expected).await;
+        do_range_select_test(
+            10_000,
+            5_000,
+            5_000,
+            Some(Fill::Linear),
+            true,
+            false,
+            expected,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1315,7 +1621,16 @@ mod test {
             \n| 5.0        | 5.0        | 1970-01-01T00:00:20 | host2 |\
             \n+------------+------------+---------------------+-------+",
         );
-        do_range_select_test(10_000, 5_000, 5_000, Fill::Linear, false, expected).await;
+        do_range_select_test(
+            10_000,
+            5_000,
+            5_000,
+            Some(Fill::Linear),
+            false,
+            false,
+            expected,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1342,7 +1657,101 @@ mod test {
             10_000,
             5_000,
             5_000,
-            Fill::Const(ScalarValue::Float64(Some(6.6))),
+            Some(Fill::Const(ScalarValue::Float64(Some(6.6)))),
+            true,
+            false,
+            expected,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn range_fill_gap() {
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:15 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:00 | host2 |\
+            \n| 12.0       | 12.0       | 1970-01-01T00:00:15 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(5_000, 5_000, 5_000, None, true, true, expected).await;
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n|            |            | 1970-01-01T00:00:05 | host1 |\
+            \n|            |            | 1970-01-01T00:00:10 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:15 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:00 | host2 |\
+            \n|            |            | 1970-01-01T00:00:05 | host2 |\
+            \n|            |            | 1970-01-01T00:00:10 | host2 |\
+            \n| 12.0       | 12.0       | 1970-01-01T00:00:15 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(5_000, 5_000, 5_000, Some(Fill::Null), true, true, expected).await;
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:05 | host1 |\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:10 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:15 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:00 | host2 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:05 | host2 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:10 | host2 |\
+            \n| 12.0       | 12.0       | 1970-01-01T00:00:15 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(5_000, 5_000, 5_000, Some(Fill::Prev), true, true, expected).await;
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 2.0        | 2.0        | 1970-01-01T00:00:05 | host1 |\
+            \n| 4.0        | 4.0        | 1970-01-01T00:00:10 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:15 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:00 | host2 |\
+            \n| 8.0        | 8.0        | 1970-01-01T00:00:05 | host2 |\
+            \n| 10.0       | 10.0       | 1970-01-01T00:00:10 | host2 |\
+            \n| 12.0       | 12.0       | 1970-01-01T00:00:15 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(
+            5_000,
+            5_000,
+            5_000,
+            Some(Fill::Linear),
+            true,
+            true,
+            expected,
+        )
+        .await;
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:05 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:10 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:15 | host1 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:00 | host2 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:05 | host2 |\
+            \n| 6.0        | 6.0        | 1970-01-01T00:00:10 | host2 |\
+            \n| 12.0       | 12.0       | 1970-01-01T00:00:15 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(
+            5_000,
+            5_000,
+            5_000,
+            Some(Fill::Const(ScalarValue::Float64(Some(6.0)))),
+            true,
             true,
             expected,
         )
@@ -1351,7 +1760,8 @@ mod test {
 
     #[test]
     fn fill_test() {
-        assert!(Fill::try_from_str("Linear", &DataType::UInt8).unwrap() == Fill::Linear);
+        assert!(Fill::try_from_str("", &DataType::UInt8).unwrap().is_none());
+        assert!(Fill::try_from_str("Linear", &DataType::UInt8).unwrap() == Some(Fill::Linear));
         assert_eq!(
             Fill::try_from_str("Linear", &DataType::Boolean)
                 .unwrap_err()
@@ -1372,7 +1782,7 @@ mod test {
         );
         assert!(
             Fill::try_from_str("8", &DataType::UInt8).unwrap()
-                == Fill::Const(ScalarValue::UInt8(Some(8)))
+                == Some(Fill::Const(ScalarValue::UInt8(Some(8))))
         );
         let mut test1 = vec![
             ScalarValue::UInt8(Some(8)),
@@ -1446,5 +1856,45 @@ mod test {
         let mut test1 = test.clone();
         Fill::Linear.apply_fill_strategy(&ts, &mut test1).unwrap();
         assert_eq!(test, test1);
+    }
+
+    #[test]
+    fn test_fist_last_accumulator() {
+        let mut acc = RangeFirstListValueAcc::new(vec![
+            SortOptions {
+                descending: true,
+                nulls_first: false,
+            },
+            SortOptions {
+                descending: false,
+                nulls_first: true,
+            },
+        ]);
+        let batch1: Vec<Arc<dyn Array>> = vec![
+            Arc::new(nullable_array!(Float64;
+                0.0, null, 0.0, null, 1.0
+            )),
+            Arc::new(nullable_array!(Float64;
+                5.0, null, 4.0, null, 3.0
+            )),
+            Arc::new(nullable_array!(Int64;
+                1, 2, 3, 4, 5
+            )),
+        ];
+        let batch2: Vec<Arc<dyn Array>> = vec![
+            Arc::new(nullable_array!(Float64;
+                3.0, 3.0, 3.0, 3.0, 3.0
+            )),
+            Arc::new(nullable_array!(Float64;
+                null,3.0, 3.0, 3.0, 3.0
+            )),
+            Arc::new(nullable_array!(Int64;
+                6, 7, 8, 9, 10
+            )),
+        ];
+        acc.update_batch(&batch1).unwrap();
+        assert_eq!(acc.evaluate().unwrap(), ScalarValue::Int64(Some(5)));
+        acc.update_batch(&batch2).unwrap();
+        assert_eq!(acc.evaluate().unwrap(), ScalarValue::Int64(Some(6)));
     }
 }

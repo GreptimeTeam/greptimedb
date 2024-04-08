@@ -35,14 +35,13 @@ pub struct CsvResponse {
 
 impl CsvResponse {
     pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
-        match handler::from_output(ResponseFormat::Csv, outputs).await {
+        match handler::from_output(outputs).await {
             Err(err) => HttpResponse::Error(err),
-            Ok(output) => {
+            Ok((output, _)) => {
                 if output.len() > 1 {
                     HttpResponse::Error(ErrorResponse::from_error_message(
-                        ResponseFormat::Csv,
                         StatusCode::InvalidArguments,
-                        "Multi-statements are not allowed".to_string(),
+                        "cannot output multi-statements result in csv format".to_string(),
                     ))
                 } else {
                     HttpResponse::Csv(CsvResponse {
@@ -100,10 +99,12 @@ impl IntoResponse for CsvResponse {
             payload,
         )
             .into_response();
-        resp.headers_mut()
-            .insert(GREPTIME_DB_HEADER_FORMAT, HeaderValue::from_static("CSV"));
         resp.headers_mut().insert(
-            GREPTIME_DB_HEADER_EXECUTION_TIME,
+            &GREPTIME_DB_HEADER_FORMAT,
+            HeaderValue::from_static(ResponseFormat::Csv.as_str()),
+        );
+        resp.headers_mut().insert(
+            &GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),
         );
         resp

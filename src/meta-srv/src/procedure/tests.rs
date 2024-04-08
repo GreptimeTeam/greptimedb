@@ -17,11 +17,12 @@ use std::sync::{Arc, Mutex};
 
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
+use api::v1::meta::Partition;
 use api::v1::region::region_request::{self, Body as PbRegionRequest};
 use api::v1::region::{CreateRequest as PbCreateRegionRequest, RegionColumnDef};
 use api::v1::{
     region, AddColumn, AddColumnLocation, AddColumns, AlterExpr, ColumnDataType,
-    ColumnDef as PbColumnDef, CreateTableExpr, DropColumn, DropColumns, SemanticType,
+    ColumnDef as PbColumnDef, DropColumn, DropColumns, SemanticType,
 };
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::MITO2_ENGINE;
@@ -29,12 +30,18 @@ use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::alter_table::AlterTableProcedure;
 use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, CreateTablesState};
 use common_meta::ddl::create_table::*;
+use common_meta::ddl::drop_table::executor::DropTableExecutor;
 use common_meta::ddl::drop_table::DropTableProcedure;
+use common_meta::ddl::test_util::columns::TestColumnDefBuilder;
+use common_meta::ddl::test_util::create_table::{
+    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+};
 use common_meta::key::table_info::TableInfoValue;
-use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use common_meta::key::DeserializedValueWithBytes;
 use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask};
 use common_meta::rpc::router::{find_leaders, RegionRoute};
+use common_meta::table_name::TableName;
 use common_procedure::Status;
 use store_api::storage::RegionId;
 
@@ -42,68 +49,74 @@ use crate::procedure::utils::mock::EchoRegionServer;
 use crate::procedure::utils::test_data;
 
 fn create_table_task(table_name: Option<&str>) -> CreateTableTask {
-    let create_table_expr = CreateTableExpr {
-        catalog_name: "my_catalog".to_string(),
-        schema_name: "my_schema".to_string(),
-        table_name: table_name.unwrap_or("my_table").to_string(),
-        desc: "blabla".to_string(),
-        column_defs: vec![
-            PbColumnDef {
-                name: "ts".to_string(),
-                data_type: ColumnDataType::TimestampMillisecond as i32,
-                is_nullable: false,
-                default_constraint: vec![],
-                semantic_type: SemanticType::Timestamp as i32,
-                comment: String::new(),
-                ..Default::default()
-            },
-            PbColumnDef {
-                name: "my_tag1".to_string(),
-                data_type: ColumnDataType::String as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-                semantic_type: SemanticType::Tag as i32,
-                comment: String::new(),
-                ..Default::default()
-            },
-            PbColumnDef {
-                name: "my_tag2".to_string(),
-                data_type: ColumnDataType::String as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-                semantic_type: SemanticType::Tag as i32,
-                comment: String::new(),
-                ..Default::default()
-            },
-            PbColumnDef {
-                name: "my_field_column".to_string(),
-                data_type: ColumnDataType::Int32 as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-                semantic_type: SemanticType::Field as i32,
-                comment: String::new(),
-                ..Default::default()
-            },
-        ],
-        time_index: "ts".to_string(),
-        primary_keys: vec!["my_tag2".to_string(), "my_tag1".to_string()],
-        create_if_not_exists: false,
-        table_options: HashMap::new(),
-        table_id: None,
-        engine: MITO2_ENGINE.to_string(),
-    };
+    let expr = TestCreateTableExprBuilder::default()
+        .catalog_name("my_catalog")
+        .schema_name("my_schema")
+        .table_name(table_name.unwrap_or("my_table"))
+        .desc("blabla")
+        .column_defs([
+            TestColumnDefBuilder::default()
+                .name("ts")
+                .data_type(ColumnDataType::TimestampMillisecond)
+                .is_nullable(false)
+                .semantic_type(SemanticType::Timestamp)
+                .build()
+                .unwrap()
+                .into(),
+            TestColumnDefBuilder::default()
+                .name("my_tag1")
+                .data_type(ColumnDataType::String)
+                .is_nullable(true)
+                .semantic_type(SemanticType::Tag)
+                .build()
+                .unwrap()
+                .into(),
+            TestColumnDefBuilder::default()
+                .name("my_tag2")
+                .data_type(ColumnDataType::String)
+                .is_nullable(true)
+                .semantic_type(SemanticType::Tag)
+                .build()
+                .unwrap()
+                .into(),
+            TestColumnDefBuilder::default()
+                .name("my_field_column")
+                .data_type(ColumnDataType::Int32)
+                .is_nullable(true)
+                .semantic_type(SemanticType::Field)
+                .build()
+                .unwrap()
+                .into(),
+        ])
+        .time_index("ts")
+        .primary_keys(vec!["my_tag2".into(), "my_tag1".into()])
+        .build()
+        .unwrap()
+        .into();
 
-    CreateTableTask::new(create_table_expr, vec![], test_data::new_table_info())
+    let table_info = build_raw_table_info_from_expr(&expr);
+    CreateTableTask::new(
+        expr,
+        vec![Partition {
+            column_list: vec![],
+            value_list: vec![],
+        }],
+        table_info,
+    )
 }
 
 #[test]
 fn test_region_request_builder() {
-    let procedure = CreateTableProcedure::new(
+    let mut procedure = CreateTableProcedure::new(
         1,
         create_table_task(None),
-        TableRouteValue::physical(test_data::new_region_routes()),
-        HashMap::default(),
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
+    );
+
+    procedure.set_allocated_metadata(
+        1024,
+        PhysicalTableRouteValue::new(test_data::new_region_routes()),
+        HashMap::default(),
     );
 
     let template = procedure.new_region_request_builder(None).unwrap();
@@ -192,9 +205,13 @@ async fn test_on_datanode_create_regions() {
     let mut procedure = CreateTableProcedure::new(
         1,
         create_table_task(None),
-        TableRouteValue::physical(region_routes),
-        HashMap::default(),
         test_data::new_ddl_context(datanode_manager),
+    );
+
+    procedure.set_allocated_metadata(
+        42,
+        PhysicalTableRouteValue::new(test_data::new_region_routes()),
+        HashMap::default(),
     );
 
     let expected_created_regions = Arc::new(Mutex::new(HashSet::from([
@@ -220,7 +237,7 @@ async fn test_on_datanode_create_regions() {
     });
 
     let status = procedure.on_datanode_create_regions().await.unwrap();
-    assert!(matches!(status, Status::Executing { persist: false }));
+    assert!(matches!(status, Status::Executing { persist: true }));
     assert!(matches!(
         procedure.creator.data.state,
         CreateTableState::CreateMetadata
@@ -237,7 +254,7 @@ async fn test_on_datanode_create_logical_regions() {
     let region_routes = test_data::new_region_routes();
     let datanode_manager = new_datanode_manager(&region_server, &region_routes).await;
     let physical_table_route = TableRouteValue::physical(region_routes);
-    let physical_table_id = 111;
+    let physical_table_id = 1;
 
     let task1 = create_table_task(Some("my_table1"));
     let task2 = create_table_task(Some("my_table2"));
@@ -248,6 +265,7 @@ async fn test_on_datanode_create_logical_regions() {
     let physical_route_txn = ctx
         .table_metadata_manager
         .table_route_manager()
+        .table_route_storage()
         .build_create_txn(physical_table_id, &physical_table_route)
         .unwrap()
         .0;
@@ -285,9 +303,9 @@ async fn test_on_datanode_create_logical_regions() {
     });
 
     let status = procedure.on_datanode_create_regions().await.unwrap();
-    assert!(matches!(status, Status::Executing { persist: false }));
+    assert!(matches!(status, Status::Executing { persist: true }));
     assert!(matches!(
-        procedure.creator.data.state(),
+        procedure.data.state(),
         &CreateTablesState::CreateMetadata
     ));
 
@@ -308,7 +326,11 @@ async fn test_on_datanode_drop_regions() {
         table_id: 42,
         drop_if_exists: false,
     };
-
+    let drop_table_executor = DropTableExecutor::new(
+        TableName::new("my_catalog", "my_schema", "my_table"),
+        42,
+        false,
+    );
     let (region_server, mut rx) = EchoRegionServer::new();
     let region_routes = test_data::new_region_routes();
     let datanode_manager = new_datanode_manager(&region_server, &region_routes).await;
@@ -343,7 +365,10 @@ async fn test_on_datanode_drop_regions() {
         }
     });
 
-    let status = procedure.on_datanode_drop_regions().await.unwrap();
+    let status = procedure
+        .on_datanode_drop_regions(&drop_table_executor)
+        .await
+        .unwrap();
     assert!(status.is_done());
 
     handle.await.unwrap();
@@ -382,7 +407,6 @@ fn test_create_alter_region_request() {
         1,
         alter_table_task,
         DeserializedValueWithBytes::from_inner(TableInfoValue::new(test_data::new_table_info())),
-        None,
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
     )
     .unwrap();
@@ -453,7 +477,6 @@ async fn test_submit_alter_region_requests() {
         1,
         alter_table_task,
         DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info)),
-        None,
         context,
     )
     .unwrap();

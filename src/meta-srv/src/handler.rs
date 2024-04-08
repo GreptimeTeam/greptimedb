@@ -41,6 +41,7 @@ use crate::service::mailbox::{
 };
 
 pub mod check_leader_handler;
+pub mod collect_cluster_info_handler;
 pub mod collect_stats_handler;
 pub mod failure_handler;
 pub mod filter_inactive_region_stats;

@@ -50,8 +50,12 @@ pub struct FlightEncoder {
 
 impl Default for FlightEncoder {
     fn default() -> Self {
+        let write_options = writer::IpcWriteOptions::default()
+            .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))
+            .unwrap();
+
         Self {
-            write_options: writer::IpcWriteOptions::default(),
+            write_options,
             data_gen: writer::IpcDataGenerator::default(),
             dictionary_tracker: writer::DictionaryTracker::new(false),
         }

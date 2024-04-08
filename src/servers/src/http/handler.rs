@@ -22,18 +22,23 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_query::Output;
+use common_plugins::GREPTIME_EXEC_WRITE_COST;
+use common_query::{Output, OutputData};
 use common_recordbatch::util;
+use common_telemetry::tracing;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use session::context::QueryContextRef;
 
+use super::header::collect_plan_metrics;
 use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::table_result::TableResponse;
 use crate::http::{
     ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, HttpRecordsOutput,
     HttpResponse, ResponseFormat,
@@ -61,17 +66,22 @@ pub struct SqlQuery {
 
 /// Handler to execute sql
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "sql"))]
 pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SqlQuery>,
 ) -> HttpResponse {
-    let sql_handler = &state.sql_handler;
-
     let start = Instant::now();
-    let sql = query_params.sql.or(form_params.sql);
+    let sql_handler = &state.sql_handler;
     let db = query_ctx.get_db_string();
+
+    let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
+
+    let sql = query_params.sql.or(form_params.sql);
     let format = query_params
         .format
         .or(form_params.format)
@@ -83,10 +93,6 @@ pub async fn sql(
         .or(form_params.epoch)
         .map(|s| s.to_lowercase())
         .map(|s| Epoch::parse(s.as_str()).unwrap_or(Epoch::Millisecond));
-
-    let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
-        .with_label_values(&[db.as_str()])
-        .start_timer();
 
     let result = if let Some(sql) = &sql {
         if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
@@ -104,7 +110,7 @@ pub async fn sql(
     let outputs = match result {
         Err((status, msg)) => {
             return HttpResponse::Error(
-                ErrorResponse::from_error_message(format, status, msg)
+                ErrorResponse::from_error_message(status, msg)
                     .with_execution_time(start.elapsed().as_millis() as u64),
             );
         }
@@ -114,6 +120,7 @@ pub async fn sql(
     let resp = match format {
         ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
         ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+        ResponseFormat::Table => TableResponse::from_output(outputs).await,
         ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
         ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
     };
@@ -123,51 +130,73 @@ pub async fn sql(
 
 /// Create a response from query result
 pub async fn from_output(
-    ty: ResponseFormat,
     outputs: Vec<crate::error::Result<Output>>,
-) -> Result<Vec<GreptimeQueryOutput>, ErrorResponse> {
+) -> Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
     // TODO(sunng87): this api response structure cannot represent error well.
     //  It hides successful execution results from error response
     let mut results = Vec::with_capacity(outputs.len());
+    let mut merge_map = HashMap::new();
+
     for out in outputs {
         match out {
-            Ok(Output::AffectedRows(rows)) => {
-                results.push(GreptimeQueryOutput::AffectedRows(rows));
-            }
-            Ok(Output::Stream(stream)) => {
-                let schema = stream.schema().clone();
-                // TODO(sunng87): streaming response
-                match util::collect(stream).await {
-                    Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
+            Ok(o) => match o.data {
+                OutputData::AffectedRows(rows) => {
+                    results.push(GreptimeQueryOutput::AffectedRows(rows));
+                    if o.meta.cost > 0 {
+                        merge_map.insert(GREPTIME_EXEC_WRITE_COST.to_string(), o.meta.cost as u64);
+                    }
+                }
+                OutputData::Stream(stream) => {
+                    let schema = stream.schema().clone();
+                    // TODO(sunng87): streaming response
+                    let mut http_record_output = match util::collect(stream).await {
+                        Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
+                            Ok(rows) => rows,
+                            Err(err) => {
+                                return Err(ErrorResponse::from_error(err));
+                            }
+                        },
+                        Err(err) => {
+                            return Err(ErrorResponse::from_error(err));
+                        }
+                    };
+                    if let Some(physical_plan) = o.meta.plan {
+                        let mut result_map = HashMap::new();
+
+                        let mut tmp = vec![&mut merge_map, &mut result_map];
+                        collect_plan_metrics(physical_plan, &mut tmp);
+                        let re = result_map
+                            .into_iter()
+                            .map(|(k, v)| (k, Value::from(v)))
+                            .collect::<HashMap<String, Value>>();
+                        http_record_output.metrics.extend(re);
+                    }
+                    results.push(GreptimeQueryOutput::Records(http_record_output))
+                }
+                OutputData::RecordBatches(rbs) => {
+                    match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
                         Ok(rows) => {
                             results.push(GreptimeQueryOutput::Records(rows));
                         }
                         Err(err) => {
-                            return Err(ErrorResponse::from_error(ty, err));
+                            return Err(ErrorResponse::from_error(err));
                         }
-                    },
-                    Err(err) => {
-                        return Err(ErrorResponse::from_error(ty, err));
                     }
                 }
-            }
-            Ok(Output::RecordBatches(rbs)) => {
-                match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
-                    Ok(rows) => {
-                        results.push(GreptimeQueryOutput::Records(rows));
-                    }
-                    Err(err) => {
-                        return Err(ErrorResponse::from_error(ty, err));
-                    }
-                }
-            }
+            },
+
             Err(err) => {
-                return Err(ErrorResponse::from_error(ty, err));
+                return Err(ErrorResponse::from_error(err));
             }
         }
     }
 
-    Ok(results)
+    let merge_map = merge_map
+        .into_iter()
+        .map(|(k, v)| (k, Value::from(v)))
+        .collect();
+
+    Ok((results, merge_map))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -192,6 +221,7 @@ impl From<PromqlQuery> for PromQuery {
 
 /// Handler to execute promql
 #[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "promql"))]
 pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
@@ -200,6 +230,7 @@ pub async fn promql(
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
+
     let _timer = crate::metrics::METRIC_HTTP_PROMQL_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
@@ -207,7 +238,7 @@ pub async fn promql(
     let resp = if let Some((status, msg)) =
         validate_schema(sql_handler.clone(), query_ctx.clone()).await
     {
-        let resp = ErrorResponse::from_error_message(ResponseFormat::GreptimedbV1, status, msg);
+        let resp = ErrorResponse::from_error_message(status, msg);
         HttpResponse::Error(resp)
     } else {
         let prom_query = params.into();

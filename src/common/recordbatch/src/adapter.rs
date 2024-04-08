@@ -32,7 +32,7 @@ use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::{
-    DfRecordBatch, DfSendableRecordBatchStream, RecordBatch, RecordBatchStream,
+    DfRecordBatch, DfSendableRecordBatchStream, OrderOption, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream, Stream,
 };
 
@@ -182,7 +182,7 @@ pub struct RecordBatchStreamAdapter {
 enum Metrics {
     Unavailable,
     Unresolved(Arc<dyn ExecutionPlan>),
-    Resolved(String),
+    Resolved(RecordBatchMetrics),
 }
 
 impl RecordBatchStreamAdapter {
@@ -222,11 +222,15 @@ impl RecordBatchStream for RecordBatchStreamAdapter {
         self.schema.clone()
     }
 
-    fn metrics(&self) -> Option<String> {
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
         match &self.metrics_2 {
-            Metrics::Resolved(metrics) => Some(metrics.clone()),
+            Metrics::Resolved(metrics) => Some(*metrics),
             Metrics::Unavailable | Metrics::Unresolved(_) => None,
         }
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
     }
 }
 
@@ -254,8 +258,7 @@ impl Stream for RecordBatchStreamAdapter {
                     let mut metrics_holder = RecordBatchMetrics::default();
                     collect_metrics(df_plan, &mut metrics_holder);
                     if metrics_holder.elapsed_compute != 0 || metrics_holder.memory_usage != 0 {
-                        self.metrics_2 =
-                            Metrics::Resolved(serde_json::to_string(&metrics_holder).unwrap());
+                        self.metrics_2 = Metrics::Resolved(metrics_holder);
                     }
                 }
                 Poll::Ready(None)
@@ -285,7 +288,7 @@ fn collect_metrics(df_plan: &Arc<dyn ExecutionPlan>, result: &mut RecordBatchMet
 
 /// [`RecordBatchMetrics`] carrys metrics value
 /// from datanode to frontend through gRPC
-#[derive(serde::Serialize, serde::Deserialize, Default, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone, Copy)]
 pub struct RecordBatchMetrics {
     // cpu consumption in nanoseconds
     pub elapsed_compute: usize,
@@ -316,6 +319,14 @@ impl AsyncRecordBatchStreamAdapter {
 impl RecordBatchStream for AsyncRecordBatchStreamAdapter {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 
@@ -375,6 +386,14 @@ mod test {
         impl RecordBatchStream for MaybeErrorRecordBatchStream {
             fn schema(&self) -> SchemaRef {
                 unimplemented!()
+            }
+
+            fn output_ordering(&self) -> Option<&[OrderOption]> {
+                None
+            }
+
+            fn metrics(&self) -> Option<RecordBatchMetrics> {
+                None
             }
         }
 

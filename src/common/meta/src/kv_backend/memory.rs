@@ -323,6 +323,10 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
             responses,
         })
     }
+
+    fn max_txn_ops(&self) -> usize {
+        usize::MAX
+    }
 }
 
 impl<T: ErrorExt + Send + Sync + 'static> ResettableKvBackend for MemoryKvBackend<T> {

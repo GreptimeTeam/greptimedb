@@ -30,7 +30,7 @@ use snafu::{ensure, ResultExt};
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, BuildKafkaPartitionClientSnafu,
     CreateKafkaWalTopicSnafu, DecodeJsonSnafu, EncodeJsonSnafu, InvalidNumTopicsSnafu,
-    ProduceRecordSnafu, Result,
+    ProduceRecordSnafu, ResolveKafkaEndpointSnafu, Result,
 };
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::PutRequest;
@@ -117,7 +117,10 @@ impl TopicManager {
             base: self.config.backoff.base as f64,
             deadline: self.config.backoff.deadline,
         };
-        let client = ClientBuilder::new(self.config.broker_endpoints.clone())
+        let broker_endpoints = common_wal::resolve_to_ipv4(&self.config.broker_endpoints)
+            .await
+            .context(ResolveKafkaEndpointSnafu)?;
+        let client = ClientBuilder::new(broker_endpoints)
             .backoff_config(backoff_config)
             .build()
             .await

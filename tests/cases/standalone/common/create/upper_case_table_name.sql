@@ -29,9 +29,7 @@ drop table aBcDeFgE;
 create table AbCdEfGe(
     CoLA string PRIMARY KEY,
     tS timestamp time index
-) PARTITION BY RANGE COLUMNS (cOlA) (
-    PARTITION p0 VALUES LESS THAN (MAXVALUE)
-);
+) PARTITION ON COLUMNS (cOlA) ();
 
 drop table abcdefge;
 
@@ -41,5 +39,7 @@ create table AbCdEfGe(CoLA string, tS timestamp, TIME INDEX (Ts));
 desc table abcdefge;
 
 drop table abcdefge;
+
+drop database upper_case_table_name;
 
 use public;

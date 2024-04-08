@@ -53,6 +53,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to perform IO on path: {}", path))]
+    Io {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        location: Location,
+    },
+
     #[snafu(display("Log store not started yet"))]
     IllegalState { location: Location },
 
@@ -99,6 +107,9 @@ pub enum Error {
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
+
+    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
+    ResolveKafkaEndpoint { source: common_wal::error::Error },
 
     #[snafu(display(
         "Failed to build a Kafka partition client, topic: {}, partition: {}",

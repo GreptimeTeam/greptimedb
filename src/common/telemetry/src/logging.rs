@@ -31,6 +31,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
+use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
 pub use crate::{debug, error, info, trace, warn};
 
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
@@ -42,7 +43,7 @@ pub struct LoggingOptions {
     pub level: Option<String>,
     pub enable_otlp_tracing: bool,
     pub otlp_endpoint: Option<String>,
-    pub tracing_sample_ratio: Option<f64>,
+    pub tracing_sample_ratio: Option<TracingSampleOptions>,
     pub append_stdout: bool,
 }
 
@@ -132,27 +133,34 @@ pub fn init_global_logging(
     // Enable log compatible layer to convert log record to tracing span.
     LogTracer::init().expect("log tracer must be valid");
 
+    // stdout log layer.
     let stdout_logging_layer = if opts.append_stdout {
         let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
         guards.push(stdout_guard);
 
-        Some(Layer::new().with_writer(stdout_writer))
+        Some(
+            Layer::new()
+                .with_writer(stdout_writer)
+                .with_ansi(atty::is(atty::Stream::Stdout)),
+        )
     } else {
         None
     };
 
-    // JSON log layer.
+    // file log layer.
     let rolling_appender = RollingFileAppender::new(Rotation::HOURLY, dir, app_name);
     let (rolling_writer, rolling_writer_guard) = tracing_appender::non_blocking(rolling_appender);
-    let file_logging_layer = Layer::new().with_writer(rolling_writer);
+    let file_logging_layer = Layer::new().with_writer(rolling_writer).with_ansi(false);
     guards.push(rolling_writer_guard);
 
-    // error JSON log layer.
+    // error file log layer.
     let err_rolling_appender =
         RollingFileAppender::new(Rotation::HOURLY, dir, format!("{}-{}", app_name, "err"));
     let (err_rolling_writer, err_rolling_writer_guard) =
         tracing_appender::non_blocking(err_rolling_appender);
-    let err_file_logging_layer = Layer::new().with_writer(err_rolling_writer);
+    let err_file_logging_layer = Layer::new()
+        .with_writer(err_rolling_writer)
+        .with_ansi(false);
     guards.push(err_rolling_writer_guard);
 
     // resolve log level settings from:
@@ -169,8 +177,10 @@ pub fn init_global_logging(
         .expect("error parsing log level string");
     let sampler = opts
         .tracing_sample_ratio
-        .map(Sampler::TraceIdRatioBased)
-        .unwrap_or(Sampler::AlwaysOn);
+        .as_ref()
+        .map(create_sampler)
+        .map(Sampler::ParentBased)
+        .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
     // Must enable 'tokio_unstable' cfg to use this feature.
     // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
     #[cfg(feature = "tokio-console")]

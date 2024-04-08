@@ -7,10 +7,10 @@ CREATE TABLE demo(
     TIME INDEX (ts),
     PRIMARY KEY(host)
 )
-PARTITION BY RANGE COLUMNS (host) (
-    PARTITION r0 VALUES LESS THAN ('550-A'),
-    PARTITION r1 VALUES LESS THAN ('550-W'),
-    PARTITION r2 VALUES LESS THAN (MAXVALUE),
+PARTITION ON COLUMNS (host) (
+    host < '550-A',
+    host >= '550-A' AND host < '550-W',
+    host >= '550-W'
 );
 
 -- SQLNESS REPLACE (-+) -

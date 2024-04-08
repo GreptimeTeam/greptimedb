@@ -4,11 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true
-async-trait = "0.1"
-backtrace = "0.3"
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -17,10 +18,8 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 dashmap.workspace = true
-datafusion.workspace = true
 datatypes.workspace = true
 flatbuffers = "23.1"
-futures = "0.3"
 lazy_static.workspace = true
 prost.workspace = true
 snafu.workspace = true

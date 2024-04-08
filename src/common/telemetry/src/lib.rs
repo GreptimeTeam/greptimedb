@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(let_chains)]
+
 pub mod logging;
 mod macros;
 pub mod metric;
 mod panic_hook;
 pub mod tracing_context;
+mod tracing_sampler;
 
 pub use logging::{init_default_ut_logging, init_global_logging};
 pub use metric::dump_metrics;

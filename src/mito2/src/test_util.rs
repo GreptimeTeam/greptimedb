@@ -59,6 +59,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
 
 #[derive(Debug)]
@@ -156,7 +157,7 @@ impl TestEnv {
             .unwrap()
     }
 
-    /// Creates a new engine with specific config and manager/listener under this env.
+    /// Creates a new engine with specific config and manager/listener/purge_scheduler under this env.
     pub async fn create_engine_with(
         &mut self,
         config: MitoConfig,
@@ -179,6 +180,7 @@ impl TestEnv {
             object_store_manager,
             manager,
             listener,
+            Arc::new(StdTimeProvider),
         )
         .await
         .unwrap()
@@ -219,6 +221,37 @@ impl TestEnv {
             object_store_manager,
             manager,
             listener,
+            Arc::new(StdTimeProvider),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Creates a new engine with specific config and manager/listener/time provider under this env.
+    pub async fn create_engine_with_time(
+        &mut self,
+        config: MitoConfig,
+        manager: Option<WriteBufferManagerRef>,
+        listener: Option<EventListenerRef>,
+        time_provider: TimeProviderRef,
+    ) -> MitoEngine {
+        let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
+
+        let logstore = Arc::new(log_store);
+        let object_store_manager = Arc::new(object_store_manager);
+        self.logstore = Some(logstore.clone());
+        self.object_store_manager = Some(object_store_manager.clone());
+
+        let data_home = self.data_home().display().to_string();
+
+        MitoEngine::new_for_test(
+            &data_home,
+            config,
+            logstore,
+            object_store_manager,
+            manager,
+            listener,
+            time_provider.clone(),
         )
         .await
         .unwrap()
@@ -679,11 +712,11 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
 /// Put rows into the engine.
 pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
-    let rows_inserted = engine
+    let result = engine
         .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
         .await
         .unwrap();
-    assert_eq!(num_rows, rows_inserted);
+    assert_eq!(num_rows, result.affected_rows);
 }
 
 /// Build rows to put for specific `key`.
@@ -725,26 +758,26 @@ pub fn build_delete_rows_for_key(key: &str, start: usize, end: usize) -> Vec<Row
 /// Delete rows from the engine.
 pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
-    let rows_inserted = engine
+    let result = engine
         .handle_request(
             region_id,
             RegionRequest::Delete(RegionDeleteRequest { rows }),
         )
         .await
         .unwrap();
-    assert_eq!(num_rows, rows_inserted);
+    assert_eq!(num_rows, result.affected_rows);
 }
 
 /// Flush a region manually.
 pub async fn flush_region(engine: &MitoEngine, region_id: RegionId, row_group_size: Option<usize>) {
-    let rows = engine
+    let result = engine
         .handle_request(
             region_id,
             RegionRequest::Flush(RegionFlushRequest { row_group_size }),
         )
         .await
         .unwrap();
-    assert_eq!(0, rows);
+    assert_eq!(0, result.affected_rows);
 }
 
 /// Reopen a region.
@@ -753,6 +786,7 @@ pub async fn reopen_region(
     region_id: RegionId,
     region_dir: String,
     writable: bool,
+    options: HashMap<String, String>,
 ) {
     // Close the region.
     engine
@@ -767,7 +801,7 @@ pub async fn reopen_region(
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
-                options: HashMap::default(),
+                options,
                 skip_wal_replay: false,
             }),
         )

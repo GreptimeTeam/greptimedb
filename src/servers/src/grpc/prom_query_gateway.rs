@@ -126,7 +126,6 @@ impl PrometheusGatewayService {
                         err.status_code().to_string(),
                         err.output_msg(),
                     )
-                    .0
                 }
             };
         // range query only returns matrix
@@ -134,8 +133,6 @@ impl PrometheusGatewayService {
             result_type = ValueType::Matrix;
         };
 
-        PrometheusJsonResponse::from_query_result(result, metric_name, result_type)
-            .await
-            .0
+        PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
     }
 }

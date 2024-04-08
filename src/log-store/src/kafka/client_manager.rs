@@ -24,7 +24,9 @@ use rskafka::BackoffConfig;
 use snafu::ResultExt;
 use tokio::sync::RwLock;
 
-use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result};
+use crate::error::{
+    BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
+};
 
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.
@@ -80,7 +82,10 @@ impl ClientManager {
             base: config.backoff.base as f64,
             deadline: config.backoff.deadline,
         };
-        let client = ClientBuilder::new(config.broker_endpoints.clone())
+        let broker_endpoints = common_wal::resolve_to_ipv4(&config.broker_endpoints)
+            .await
+            .context(ResolveKafkaEndpointSnafu)?;
+        let client = ClientBuilder::new(broker_endpoints)
             .backoff_config(backoff_config)
             .build()
             .await

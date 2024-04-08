@@ -140,40 +140,59 @@ impl FailureDetectRunner {
         let election = self.election.clone();
         let region_failover_manager = self.region_failover_manager.clone();
         let runner_handle = common_runtime::spawn_bg(async move {
+            async fn maybe_region_failover(
+                failure_detectors: &Arc<FailureDetectorContainer>,
+                region_failover_manager: &Arc<RegionFailoverManager>,
+            ) {
+                match region_failover_manager.is_maintenance_mode().await {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        info!("Maintenance mode is enabled, skip failover");
+                        return;
+                    }
+                    Err(err) => {
+                        error!(err; "Failed to check maintenance mode");
+                        return;
+                    }
+                }
+
+                let failed_regions = failure_detectors
+                    .iter()
+                    .filter_map(|e| {
+                        // Intentionally not place `current_time_millis()` out of the iteration.
+                        // The failure detection determination should be happened "just in time",
+                        // i.e., failed or not has to be compared with the most recent "now".
+                        // Besides, it might reduce the false positive of failure detection,
+                        // because during the iteration, heartbeats are coming in as usual,
+                        // and the `phi`s are still updating.
+                        if !e.failure_detector().is_available(current_time_millis()) {
+                            Some(e.region_ident().clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<RegionIdent>>();
+
+                for r in failed_regions {
+                    if let Err(e) = region_failover_manager.do_region_failover(&r).await {
+                        error!(e; "Failed to do region failover for {r}");
+                    } else {
+                        // Now that we know the region is starting to do failover, remove it
+                        // from the failure detectors, avoiding the failover procedure to be
+                        // triggered again.
+                        // If the region is back alive (the failover procedure runs successfully),
+                        // it will be added back to the failure detectors again.
+                        failure_detectors.remove(&r);
+                    }
+                }
+            }
+
             loop {
                 let start = Instant::now();
 
                 let is_leader = election.as_ref().map(|x| x.is_leader()).unwrap_or(true);
                 if is_leader {
-                    let failed_regions = failure_detectors
-                        .iter()
-                        .filter_map(|e| {
-                            // Intentionally not place `current_time_millis()` out of the iteration.
-                            // The failure detection determination should be happened "just in time",
-                            // i.e., failed or not has to be compared with the most recent "now".
-                            // Besides, it might reduce the false positive of failure detection,
-                            // because during the iteration, heartbeats are coming in as usual,
-                            // and the `phi`s are still updating.
-                            if !e.failure_detector().is_available(current_time_millis()) {
-                                Some(e.region_ident().clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<RegionIdent>>();
-
-                    for r in failed_regions {
-                        if let Err(e) = region_failover_manager.do_region_failover(&r).await {
-                            error!(e; "Failed to do region failover for {r}");
-                        } else {
-                            // Now that we know the region is starting to do failover, remove it
-                            // from the failure detectors, avoiding the failover procedure to be
-                            // triggered again.
-                            // If the region is back alive (the failover procedure runs successfully),
-                            // it will be added back to the failure detectors again.
-                            failure_detectors.remove(&r);
-                        }
-                    }
+                    maybe_region_failover(&failure_detectors, &region_failover_manager).await;
                 }
 
                 let elapsed = Instant::now().duration_since(start);

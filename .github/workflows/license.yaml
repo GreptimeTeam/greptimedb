@@ -11,6 +11,6 @@ jobs:
     runs-on: ubuntu-20.04
     name: license-header-check
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Check License Header
-      uses: korandoru/hawkeye@v3
+      uses: korandoru/hawkeye@v5

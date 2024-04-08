@@ -24,6 +24,7 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
 use common_function::function_registry::FUNCTION_REGISTRY;
+use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
@@ -39,7 +40,6 @@ use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
-use crate::table_mutation::TableMutationHandlerRef;
 
 /// Describe statement result
 #[derive(Debug)]
@@ -101,12 +101,14 @@ impl QueryEngineFactory {
         catalog_manager: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         with_dist_planner: bool,
     ) -> Self {
         Self::new_with_plugins(
             catalog_manager,
             region_query_handler,
             table_mutation_handler,
+            procedure_service_handler,
             with_dist_planner,
             Default::default(),
         )
@@ -116,6 +118,7 @@ impl QueryEngineFactory {
         catalog_manager: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
     ) -> Self {
@@ -123,6 +126,7 @@ impl QueryEngineFactory {
             catalog_manager,
             region_query_handler,
             table_mutation_handler,
+            procedure_service_handler,
             with_dist_planner,
             plugins.clone(),
         ));
@@ -156,7 +160,7 @@ mod tests {
     #[test]
     fn test_query_engine_factory() {
         let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list, None, None, false);
+        let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
 
         let engine = factory.query_engine();
 

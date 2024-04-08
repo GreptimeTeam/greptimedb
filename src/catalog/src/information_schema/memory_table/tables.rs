@@ -14,14 +14,14 @@
 
 use std::sync::Arc;
 
-use common_catalog::consts::MITO_ENGINE;
+use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
 use datatypes::prelude::{ConcreteDataType, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, StringVector};
 
 use crate::information_schema::table_names::*;
 
-const UNKNOWN: &str = "unknown";
+const NO_VALUE: &str = "NO";
 
 /// Find the schema and columns by the table_name, only valid for memory tables.
 /// Safety: the user MUST ensure the table schema exists, panic otherwise.
@@ -61,41 +61,39 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
                 "SAVEPOINTS",
             ]),
             vec![
-                Arc::new(StringVector::from(vec![MITO_ENGINE])),
-                Arc::new(StringVector::from(vec!["DEFAULT"])),
+                Arc::new(StringVector::from(vec![MITO_ENGINE, METRIC_ENGINE])),
+                Arc::new(StringVector::from(vec!["DEFAULT", "YES"])),
                 Arc::new(StringVector::from(vec![
                     "Storage engine for time-series data",
+                    "Storage engine for observability scenarios, which is adept at handling a large number of small tables, making it particularly suitable for cloud-native monitoring",
                 ])),
-                Arc::new(StringVector::from(vec!["NO"])),
-                Arc::new(StringVector::from(vec!["NO"])),
-                Arc::new(StringVector::from(vec!["NO"])),
+                Arc::new(StringVector::from(vec![NO_VALUE, NO_VALUE])),
+                Arc::new(StringVector::from(vec![NO_VALUE, NO_VALUE])),
+                Arc::new(StringVector::from(vec![NO_VALUE, NO_VALUE])),
             ],
         ),
 
-        BUILD_INFO => (
-            string_columns(&[
-                "GIT_BRANCH",
-                "GIT_COMMIT",
-                "GIT_COMMIT_SHORT",
-                "GIT_DIRTY",
-                "PKG_VERSION",
-            ]),
-            vec![
-                Arc::new(StringVector::from(vec![
-                    build_data::get_git_branch().unwrap_or_else(|_| UNKNOWN.to_string())
-                ])),
-                Arc::new(StringVector::from(vec![
-                    build_data::get_git_commit().unwrap_or_else(|_| UNKNOWN.to_string())
-                ])),
-                Arc::new(StringVector::from(vec![
-                    build_data::get_git_commit_short().unwrap_or_else(|_| UNKNOWN.to_string())
-                ])),
-                Arc::new(StringVector::from(vec![
-                    build_data::get_git_dirty().map_or(UNKNOWN.to_string(), |v| v.to_string())
-                ])),
-                Arc::new(StringVector::from(vec![option_env!("CARGO_PKG_VERSION")])),
-            ],
-        ),
+        BUILD_INFO => {
+            let build_info = common_version::build_info();
+            (
+                string_columns(&[
+                    "GIT_BRANCH",
+                    "GIT_COMMIT",
+                    "GIT_COMMIT_SHORT",
+                    "GIT_DIRTY",
+                    "PKG_VERSION",
+                ]),
+                vec![
+                    Arc::new(StringVector::from(vec![build_info.branch.to_string()])),
+                    Arc::new(StringVector::from(vec![build_info.commit.to_string()])),
+                    Arc::new(StringVector::from(vec![build_info
+                        .commit_short
+                        .to_string()])),
+                    Arc::new(StringVector::from(vec![build_info.dirty.to_string()])),
+                    Arc::new(StringVector::from(vec![build_info.version.to_string()])),
+                ],
+            )
+        }
 
         CHARACTER_SETS => (
             vec![

@@ -15,8 +15,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::ddl_task_server::DdlTaskServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
+use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use client::client_manager::DatanodeClients;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -42,7 +42,7 @@ pub async fn mock_with_memstore() -> MockInfo {
 }
 
 pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
-    let kv_backend = EtcdStore::with_endpoints([addr]).await.unwrap();
+    let kv_backend = EtcdStore::with_endpoints([addr], 128).await.unwrap();
     mock(Default::default(), kv_backend, None, None).await
 }
 
@@ -83,7 +83,7 @@ pub async fn mock(
         tonic::transport::Server::builder()
             .add_service(HeartbeatServer::new(service.clone()))
             .add_service(StoreServer::new(service.clone()))
-            .add_service(DdlTaskServer::new(service.clone()))
+            .add_service(ProcedureServiceServer::new(service.clone()))
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

@@ -4,24 +4,23 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 api.workspace = true
 async-trait = "0.1"
-chrono.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-telemetry.workspace = true
-etcd-client.workspace = true
 humantime-serde.workspace = true
 rand.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 snafu.workspace = true
-table.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 
 [dev-dependencies]

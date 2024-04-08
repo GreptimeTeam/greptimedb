@@ -31,9 +31,9 @@ use crate::config::MitoConfig;
 use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
-use crate::memtable::MemtableBuilderRef;
 use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL};
 use crate::read::Source;
+use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
@@ -176,6 +176,8 @@ pub enum FlushReason {
     Manual,
     /// Flush to alter table.
     Alter,
+    /// Flush periodically.
+    Periodically,
 }
 
 impl FlushReason {
@@ -197,12 +199,14 @@ pub(crate) struct RegionFlushTask {
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
 
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) memtable_builder: MemtableBuilderRef,
     pub(crate) file_purger: FilePurgerRef,
     pub(crate) listener: WorkerListener,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
     pub(crate) cache_manager: CacheManagerRef,
+
+    /// Index options for the region.
+    pub(crate) index_options: IndexOptions,
 }
 
 impl RegionFlushTask {
@@ -313,7 +317,7 @@ impl RegionFlushTask {
             }
 
             let file_id = FileId::random();
-            let iter = mem.iter(None, None);
+            let iter = mem.iter(None, None)?;
             let source = Source::Iter(iter);
             let create_inverted_index = self.engine_config.inverted_index.create_on_flush.auto();
             let mem_threshold_index_create = self
@@ -338,6 +342,7 @@ impl RegionFlushTask {
                 create_inverted_index,
                 mem_threshold_index_create,
                 index_write_buffer_size,
+                index_options: self.index_options.clone(),
             };
             let Some(sst_info) = self
                 .access_layer
@@ -429,17 +434,18 @@ impl FlushScheduler {
     ) -> Result<()> {
         debug_assert_eq!(region_id, task.region_id);
 
-        FLUSH_REQUESTS_TOTAL
-            .with_label_values(&[task.reason.as_str()])
-            .inc();
-
         let version = version_control.current().version;
-        if version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty() {
+        if version.memtables.is_empty() {
             debug_assert!(!self.region_status.contains_key(&region_id));
             // The region has nothing to flush.
             task.on_success();
             return Ok(());
         }
+
+        // Don't increase the counter if a region has nothing to flush.
+        FLUSH_REQUESTS_TOTAL
+            .with_label_values(&[task.reason.as_str()])
+            .inc();
 
         // Add this region to status map.
         let flush_status = self
@@ -461,7 +467,13 @@ impl FlushScheduler {
         }
 
         // Now we can flush the region directly.
-        version_control.freeze_mutable(&task.memtable_builder);
+        if let Err(e) = version_control.freeze_mutable() {
+            error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
+
+            // Remove from region status if we can't freeze the mutable memtable.
+            self.region_status.remove(&region_id);
+            return Err(e);
+        }
         // Submit a flush job.
         let job = task.into_flush_job(version_control);
         if let Err(e) = self.scheduler.schedule(job) {
@@ -760,12 +772,12 @@ mod tests {
             senders: Vec::new(),
             request_sender: tx,
             access_layer: env.access_layer.clone(),
-            memtable_builder: builder.memtable_builder(),
             file_purger: builder.file_purger(),
             listener: WorkerListener::default(),
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
             cache_manager: Arc::new(CacheManager::default()),
+            index_options: IndexOptions::default(),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler

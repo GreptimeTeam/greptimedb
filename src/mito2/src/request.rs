@@ -247,6 +247,10 @@ impl WriteRequest {
         // Need to add a default value for this column.
         let proto_value = self.column_default_value(column)?;
 
+        if proto_value.value_data.is_none() {
+            return Ok(());
+        }
+
         // Insert default value to each row.
         for row in &mut self.rows.rows {
             row.values.push(proto_value.clone());
@@ -713,7 +717,7 @@ impl OnFailure for CompactionFinished {
                 region_id: self.region_id,
             }));
         }
-        for file in &self.compacted_files {
+        for file in &self.compaction_outputs {
             warn!(
                 "Cleaning region {} compaction output file: {}",
                 self.region_id, file.file_id
@@ -989,16 +993,13 @@ mod tests {
         request.fill_missing_columns(&metadata).unwrap();
 
         let expect_rows = Rows {
-            schema: vec![
-                new_column_schema(
-                    "ts",
-                    ColumnDataType::TimestampMillisecond,
-                    SemanticType::Timestamp,
-                ),
-                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
-            ],
+            schema: vec![new_column_schema(
+                "ts",
+                ColumnDataType::TimestampMillisecond,
+                SemanticType::Timestamp,
+            )],
             rows: vec![Row {
-                values: vec![ts_ms_value(1), Value { value_data: None }],
+                values: vec![ts_ms_value(1)],
             }],
         };
         assert_eq!(expect_rows, request.rows);
@@ -1104,17 +1105,11 @@ mod tests {
                     ColumnDataType::TimestampMillisecond,
                     SemanticType::Timestamp,
                 ),
-                new_column_schema("f0", ColumnDataType::Int64, SemanticType::Field),
                 new_column_schema("f1", ColumnDataType::Int64, SemanticType::Field),
             ],
             // Column f1 is not nullable and we use 0 for padding.
             rows: vec![Row {
-                values: vec![
-                    i64_value(100),
-                    ts_ms_value(1),
-                    Value { value_data: None },
-                    i64_value(0),
-                ],
+                values: vec![i64_value(100), ts_ms_value(1), i64_value(0)],
             }],
         };
         assert_eq!(expect_rows, request.rows);
@@ -1173,17 +1168,11 @@ mod tests {
                     ColumnDataType::TimestampMillisecond,
                     SemanticType::Timestamp,
                 ),
-                new_column_schema("f0", ColumnDataType::Int64, SemanticType::Field),
                 new_column_schema("f1", ColumnDataType::Int64, SemanticType::Field),
             ],
             // Column f1 is not nullable and we use 0 for padding.
             rows: vec![Row {
-                values: vec![
-                    i64_value(100),
-                    ts_ms_value(1),
-                    Value { value_data: None },
-                    i64_value(0),
-                ],
+                values: vec![i64_value(100), ts_ms_value(1), i64_value(0)],
             }],
         };
         assert_eq!(expect_rows, request.rows);

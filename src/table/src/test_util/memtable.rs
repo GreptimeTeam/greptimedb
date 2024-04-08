@@ -17,8 +17,9 @@ use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
+use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::UInt32Vector;
@@ -32,8 +33,7 @@ use crate::error::{SchemaConversionSnafu, TableProjectionSnafu, TablesRecordBatc
 use crate::metadata::{
     FilterPushDownType, TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion,
 };
-use crate::thin_table::{ThinTable, ThinTableAdapter};
-use crate::TableRef;
+use crate::{Table, TableRef};
 
 pub struct MemTable;
 
@@ -93,9 +93,9 @@ impl MemTable {
                 .unwrap(),
         );
 
-        let thin_table = ThinTable::new(info, FilterPushDownType::Unsupported);
         let data_source = Arc::new(MemtableDataSource { recordbatch });
-        Arc::new(ThinTableAdapter::new(thin_table, data_source))
+        let table = Table::new(info, FilterPushDownType::Unsupported, data_source);
+        Arc::new(table)
     }
 
     /// Creates a 1 column 100 rows table, with table name "numbers", column name "uint32s" and
@@ -164,6 +164,14 @@ impl DataSource for MemtableDataSource {
 impl RecordBatchStream for MemtableStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
     }
 }
 

@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
-use super::{DeserializedValueWithBytes, TableMetaValue, TABLE_INFO_KEY_PREFIX};
+use super::{txn_helper, DeserializedValueWithBytes, TableMetaValue, TABLE_INFO_KEY_PREFIX};
 use crate::error::Result;
-use crate::key::{to_removed_key, TableMetaKey};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
+use crate::key::TableMetaKey;
+use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
 use crate::table_name::TableName;
@@ -112,7 +112,7 @@ impl TableInfoManager {
         let raw_key = key.as_raw_key();
         let txn = Txn::new().and_then(vec![TxnOp::Get(raw_key.clone())]);
 
-        (txn, Self::build_decode_fn(raw_key))
+        (txn, txn_helper::build_txn_response_decoder_fn(raw_key))
     }
 
     /// Builds a create table info transaction, it expected the `__table_info/{table_id}` wasn't occupied.
@@ -127,18 +127,12 @@ impl TableInfoManager {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
 
-        let txn = Txn::new()
-            .when(vec![Compare::with_not_exist_value(
-                raw_key.clone(),
-                CompareOp::Equal,
-            )])
-            .and_then(vec![TxnOp::Put(
-                raw_key.clone(),
-                table_info_value.try_as_raw_value()?,
-            )])
-            .or_else(vec![TxnOp::Get(raw_key.clone())]);
+        let txn = txn_helper::build_put_if_absent_txn(
+            raw_key.clone(),
+            table_info_value.try_as_raw_value()?,
+        );
 
-        Ok((txn, Self::build_decode_fn(raw_key)))
+        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
     }
 
     /// Builds a update table info transaction, it expected the remote value equals the `current_current_table_info_value`.
@@ -154,74 +148,22 @@ impl TableInfoManager {
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
-        let raw_value = current_table_info_value.into_bytes();
+        let raw_value = current_table_info_value.get_raw_bytes();
+        let new_raw_value: Vec<u8> = new_table_info_value.try_as_raw_value()?;
 
-        let txn = Txn::new()
-            .when(vec![Compare::with_value(
-                raw_key.clone(),
-                CompareOp::Equal,
-                raw_value,
-            )])
-            .and_then(vec![TxnOp::Put(
-                raw_key.clone(),
-                new_table_info_value.try_as_raw_value()?,
-            )])
-            .or_else(vec![TxnOp::Get(raw_key.clone())]);
+        let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
 
-        Ok((txn, Self::build_decode_fn(raw_key)))
+        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
     }
 
     /// Builds a delete table info transaction.
-    pub(crate) fn build_delete_txn(
-        &self,
-        table_id: TableId,
-        table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
-    ) -> Result<Txn> {
+    pub(crate) fn build_delete_txn(&self, table_id: TableId) -> Result<Txn> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
-        let raw_value = table_info_value.into_bytes();
-        let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
-        let txn = Txn::new().and_then(vec![
-            TxnOp::Delete(raw_key),
-            TxnOp::Put(removed_key.into_bytes(), raw_value),
-        ]);
+        let txn = Txn::new().and_then(vec![TxnOp::Delete(raw_key)]);
 
         Ok(txn)
-    }
-
-    fn build_decode_fn(
-        raw_key: Vec<u8>,
-    ) -> impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>
-    {
-        move |kvs: &Vec<TxnOpResponse>| {
-            kvs.iter()
-                .filter_map(|resp| {
-                    if let TxnOpResponse::ResponseGet(r) = resp {
-                        Some(r)
-                    } else {
-                        None
-                    }
-                })
-                .flat_map(|r| &r.kvs)
-                .find(|kv| kv.key == raw_key)
-                .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
-                .transpose()
-        }
-    }
-
-    #[cfg(test)]
-    pub async fn get_removed(
-        &self,
-        table_id: TableId,
-    ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>> {
-        let key = TableInfoKey::new(table_id).to_string();
-        let removed_key = to_removed_key(&key).into_bytes();
-        self.kv_backend
-            .get(&removed_key)
-            .await?
-            .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
-            .transpose()
     }
 
     pub async fn get(

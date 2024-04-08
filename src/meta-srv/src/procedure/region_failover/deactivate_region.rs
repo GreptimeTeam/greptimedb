@@ -52,7 +52,8 @@ impl DeactivateRegion {
         let table_route_value = ctx
             .table_metadata_manager
             .table_route_manager()
-            .get(table_id)
+            .table_route_storage()
+            .get_raw(table_id)
             .await
             .context(error::TableMetadataManagerSnafu)?
             .context(error::TableRouteNotFoundSnafu { table_id })?;
@@ -201,6 +202,7 @@ mod tests {
             .context
             .table_metadata_manager
             .table_route_manager()
+            .table_route_storage()
             .get(table_id)
             .await
             .unwrap()

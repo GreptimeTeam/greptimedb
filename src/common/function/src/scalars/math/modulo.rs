@@ -128,7 +128,7 @@ mod tests {
         ];
         let result = function.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(result.len(), 4);
-        for i in 0..3 {
+        for i in 0..4 {
             let p: i64 = (nums[i] % divs[i]) as i64;
             assert!(matches!(result.get(i), Value::Int64(v) if v == p));
         }
@@ -160,7 +160,7 @@ mod tests {
         ];
         let result = function.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(result.len(), 4);
-        for i in 0..3 {
+        for i in 0..4 {
             let p: u64 = (nums[i] % divs[i]) as u64;
             assert!(matches!(result.get(i), Value::UInt64(v) if v == p));
         }
@@ -192,7 +192,7 @@ mod tests {
         ];
         let result = function.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(result.len(), 4);
-        for i in 0..3 {
+        for i in 0..4 {
             let p: f64 = nums[i] % divs[i];
             assert!(matches!(result.get(i), Value::Float64(v) if v == p));
         }

@@ -62,7 +62,9 @@ pub struct BenchTableMetadataCommand {
 
 impl BenchTableMetadataCommand {
     pub async fn build(&self) -> Result<Instance> {
-        let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr]).await.unwrap();
+        let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr], 128)
+            .await
+            .unwrap();
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(etcd_store));
 
@@ -156,6 +158,7 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
             }),
             follower_peers: vec![],
             leader_status: None,
+            leader_down_since: None,
         });
     }
 

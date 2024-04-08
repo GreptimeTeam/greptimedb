@@ -18,11 +18,13 @@ use api::v1::meta::{
     Partition as PbPartition, Peer as PbPeer, Region as PbRegion, Table as PbTable,
     TableRoute as PbTableRoute,
 };
+use common_time::util::current_time_millis;
 use derive_builder::Builder;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
+use strum::AsRefStr;
 
 use crate::error::{self, Result};
 use crate::key::RegionDistribution;
@@ -204,6 +206,7 @@ impl TableRoute {
                 leader_peer,
                 follower_peers,
                 leader_status: None,
+                leader_down_since: None,
             });
         }
 
@@ -258,10 +261,25 @@ pub struct RegionRoute {
     #[builder(setter(into, strip_option), default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_status: Option<RegionStatus>,
+    /// The start time when the leader is in `Downgraded` status.
+    #[serde(default)]
+    #[builder(default = "self.default_leader_down_since()")]
+    pub leader_down_since: Option<i64>,
+}
+
+impl RegionRouteBuilder {
+    fn default_leader_down_since(&self) -> Option<i64> {
+        match self.leader_status {
+            Some(Some(RegionStatus::Downgraded)) => Some(current_time_millis()),
+            _ => None,
+        }
+    }
 }
 
 /// The Status of the [Region].
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+/// TODO(dennis): It's better to add more fine-grained statuses such as `PENDING` etc.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, AsRefStr)]
+#[strum(serialize_all = "UPPERCASE")]
 pub enum RegionStatus {
     /// The following cases in which the [Region] will be downgraded.
     ///
@@ -292,7 +310,14 @@ impl RegionRoute {
     /// **Notes:** Meta Server will stop renewing the lease for the downgraded [Region].
     ///
     pub fn downgrade_leader(&mut self) {
+        self.leader_down_since = Some(current_time_millis());
         self.leader_status = Some(RegionStatus::Downgraded)
+    }
+
+    /// Returns how long since the leader is in `Downgraded` status.
+    pub fn leader_down_millis(&self) -> Option<i64> {
+        self.leader_down_since
+            .map(|start| current_time_millis() - start)
     }
 
     /// Sets the leader status.
@@ -300,6 +325,18 @@ impl RegionRoute {
     /// Returns true if updated.
     pub fn set_leader_status(&mut self, status: Option<RegionStatus>) -> bool {
         let updated = self.leader_status != status;
+
+        match (status, updated) {
+            (Some(RegionStatus::Downgraded), true) => {
+                self.leader_down_since = Some(current_time_millis());
+            }
+            (Some(RegionStatus::Downgraded), false) => {
+                // Do nothing if leader is still in `Downgraded` status.
+            }
+            _ => {
+                self.leader_down_since = None;
+            }
+        }
 
         self.leader_status = status;
         updated
@@ -441,6 +478,7 @@ mod tests {
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_status: None,
+            leader_down_since: None,
         };
 
         assert!(!region_route.is_leader_downgraded());
@@ -462,6 +500,7 @@ mod tests {
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_status: None,
+            leader_down_since: None,
         };
 
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}]}"#;

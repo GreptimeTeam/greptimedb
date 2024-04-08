@@ -13,6 +13,8 @@
 // limitations under the License.
 
 pub mod context;
+pub mod session_config;
+pub mod table_name;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,7 +25,7 @@ use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::timezone::get_timezone;
 use common_time::Timezone;
-use context::QueryContextBuilder;
+use context::{ConfigurationVariables, QueryContextBuilder};
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
 
@@ -35,18 +37,24 @@ pub struct Session {
     user_info: ArcSwap<UserInfoRef>,
     conn_info: ConnInfo,
     timezone: ArcSwap<Timezone>,
+    configuration_variables: Arc<ConfigurationVariables>,
 }
 
 pub type SessionRef = Arc<Session>;
 
 impl Session {
-    pub fn new(addr: Option<SocketAddr>, channel: Channel) -> Self {
+    pub fn new(
+        addr: Option<SocketAddr>,
+        channel: Channel,
+        configuration_variables: ConfigurationVariables,
+    ) -> Self {
         Session {
             catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),
             schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
             user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
             conn_info: ConnInfo::new(addr, channel),
             timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
+            configuration_variables: Arc::new(configuration_variables),
         }
     }
 
@@ -59,6 +67,7 @@ impl Session {
             .current_catalog(self.catalog.load().to_string())
             .current_schema(self.schema.load().to_string())
             .sql_dialect(self.conn_info.channel.dialect())
+            .configuration_parameter(self.configuration_variables.clone())
             .timezone(self.timezone())
             .build()
     }
@@ -96,6 +105,11 @@ impl Session {
     #[inline]
     pub fn set_catalog(&self, catalog: String) {
         self.catalog.store(Arc::new(catalog));
+    }
+
+    #[inline]
+    pub fn get_catalog(&self) -> String {
+        self.catalog.load().as_ref().clone()
     }
 
     #[inline]

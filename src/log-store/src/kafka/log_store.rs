@@ -22,7 +22,7 @@ use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
 use snafu::ResultExt;
-use store_api::logstore::entry::Id as EntryId;
+use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
@@ -32,6 +32,7 @@ use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
 use crate::kafka::{EntryImpl, NamespaceImpl};
+use crate::metrics;
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
@@ -86,6 +87,15 @@ impl LogStore for KafkaLogStore {
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
+        metrics::METRIC_KAFKA_APPEND_BATCH_CALLS_TOTAL.inc();
+        metrics::METRIC_KAFKA_APPEND_BATCH_BYTES_TOTAL.inc_by(
+            entries
+                .iter()
+                .map(EntryTrait::estimated_size)
+                .sum::<usize>() as u64,
+        );
+        let _timer = metrics::METRIC_KAFKA_APPEND_BATCH_ELAPSED.start_timer();
+
         if entries.is_empty() {
             return Ok(AppendBatchResponse::default());
         }
@@ -124,6 +134,9 @@ impl LogStore for KafkaLogStore {
         ns: &Self::Namespace,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
+        metrics::METRIC_KAFKA_READ_CALLS_TOTAL.inc();
+        let _timer = metrics::METRIC_KAFKA_READ_ELAPSED.start_timer();
+
         // Gets the client associated with the topic.
         let client = self
             .client_manager
@@ -182,6 +195,9 @@ impl LogStore for KafkaLogStore {
                         ns: ns_clone.clone(),
                     })?;
                 let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
+
+                metrics::METRIC_KAFKA_READ_RECORD_BYTES_TOTAL
+                    .inc_by(kafka_record.approximate_size() as u64);
 
                 debug!(
                     "Read a record at offset {} for ns {}, high watermark: {}",

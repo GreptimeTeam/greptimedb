@@ -32,4 +32,6 @@ lazy_static! {
         register_histogram!("greptime_catalog_kv_get_remote", "catalog kv get remote").unwrap();
     pub static ref METRIC_CATALOG_KV_GET: Histogram =
         register_histogram!("greptime_catalog_kv_get", "catalog kv get").unwrap();
+    pub static ref METRIC_CATALOG_KV_BATCH_GET: Histogram =
+        register_histogram!("greptime_catalog_kv_batch_get", "catalog kv batch get").unwrap();
 }

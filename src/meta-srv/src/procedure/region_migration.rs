@@ -13,8 +13,6 @@
 // limitations under the License.
 
 pub(crate) mod downgrade_leader_region;
-// TODO(weny): remove it.
-#[allow(dead_code)]
 pub(crate) mod manager;
 pub(crate) mod migration_abort;
 pub(crate) mod migration_end;
@@ -31,12 +29,12 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
-use common_meta::instruction::Instruction;
+use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use common_meta::lock_key::{RegionLock, TableLock};
+use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::ClusterId;
@@ -61,6 +59,10 @@ use crate::service::mailbox::{BroadcastChannel, MailboxRef};
 /// **Notes: Stores with too large data in the context might incur replication overhead.**
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
+    /// The table catalog.
+    catalog: String,
+    /// The table schema.
+    schema: String,
     /// The Id of the cluster.
     cluster_id: ClusterId,
     /// The [Peer] of migration source.
@@ -81,8 +83,9 @@ fn default_replay_timeout() -> Duration {
 impl PersistentContext {
     pub fn lock_key(&self) -> Vec<StringKey> {
         let region_id = self.region_id;
-        // TODO(weny): acquires the catalog, schema read locks.
         let lock_key = vec![
+            CatalogLock::Read(&self.catalog).into(),
+            SchemaLock::read(&self.catalog, &self.schema).into(),
             TableLock::Read(region_id.table_id()).into(),
             RegionLock::Write(region_id).into(),
         ];
@@ -185,8 +188,6 @@ impl ContextFactory for DefaultContextFactory {
     }
 }
 
-// TODO(weny): remove it.
-#[allow(dead_code)]
 /// The context of procedure execution.
 pub struct Context {
     persistent_ctx: PersistentContext,
@@ -218,7 +219,8 @@ impl Context {
             let table_route = self
                 .table_metadata_manager
                 .table_route_manager()
-                .get(table_id)
+                .table_route_storage()
+                .get_raw(table_id)
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)
@@ -319,7 +321,7 @@ impl Context {
     /// Broadcasts the invalidate table cache message.
     pub async fn invalidate_table_cache(&self) -> Result<()> {
         let table_id = self.region_id().table_id();
-        let instruction = Instruction::InvalidateTableIdCache(table_id);
+        let instruction = Instruction::InvalidateCaches(vec![CacheIdent::TableId(table_id)]);
 
         let msg = &MailboxMessage::json_message(
             "Invalidate Table Cache",
@@ -367,7 +369,6 @@ pub struct RegionMigrationProcedure {
     context: Context,
 }
 
-// TODO(weny): remove it.
 #[allow(dead_code)]
 impl RegionMigrationProcedure {
     const TYPE_NAME: &'static str = "metasrv-procedure::RegionMigration";
@@ -486,8 +487,7 @@ mod tests {
         let procedure = RegionMigrationProcedure::new(persistent_context, context);
 
         let serialized = procedure.dump().unwrap();
-
-        let expected = r#"{"persistent_ctx":{"cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"replay_timeout":"1s"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"replay_timeout":"1s"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
@@ -495,7 +495,7 @@ mod tests {
     fn test_backward_compatibility() {
         let persistent_ctx = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
         // NOTES: Changes it will break backward compatibility.
-        let serialized = r#"{"cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
+        let serialized = r#"{"catalog":"greptime","schema":"public","cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
         let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
 
         assert_eq!(persistent_ctx, deserialized);
@@ -582,7 +582,10 @@ mod tests {
         let msg = resp.mailbox_message.unwrap();
 
         let instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
-        assert_matches!(instruction, Instruction::InvalidateTableIdCache(1024));
+        assert_eq!(
+            instruction,
+            Instruction::InvalidateCaches(vec![CacheIdent::TableId(1024)])
+        );
     }
 
     fn procedure_flow_steps(from_peer_id: u64, to_peer_id: u64) -> Vec<Step> {
@@ -803,6 +806,7 @@ mod tests {
             .env()
             .table_metadata_manager()
             .table_route_manager()
+            .table_route_storage()
             .get(region_id.table_id())
             .await
             .unwrap()

@@ -15,6 +15,7 @@
 use std::env;
 use std::sync::Arc;
 
+use client::OutputData;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::warn;
@@ -113,7 +114,7 @@ impl MockInstanceBuilder {
                 } = instance;
                 MockInstanceImpl::Standalone(
                     builder
-                        .build_with(kv_backend, procedure_manager, guard, mix_options)
+                        .build_with(kv_backend, guard, mix_options, procedure_manager, false)
                         .await,
                 )
             }
@@ -222,11 +223,11 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
         .collect::<Vec<_>>();
     let test_name = uuid::Uuid::new_v4().to_string();
     let builder = GreptimeDbStandaloneBuilder::new(&test_name)
-        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
+        .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
             num_topics: 3,
@@ -252,11 +253,11 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
     let test_name = uuid::Uuid::new_v4().to_string();
     let builder = GreptimeDbClusterBuilder::new(&test_name)
         .await
-        .with_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
+        .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
             ..Default::default()
         }))
-        .with_meta_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
             num_topics: 3,
@@ -275,7 +276,7 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
 pub(crate) fn both_instances_cases_with_kafka_wal(
     #[future]
     #[case]
-    instance: Option<Box<dyn RebuildableMockInstance>>,
+    rebuildable_instance: Option<Box<dyn RebuildableMockInstance>>,
 ) {
 }
 
@@ -329,14 +330,19 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str
             .unwrap()
     };
 
-    let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
-        Output::RecordBatches(recordbatches) => recordbatches,
+    let recordbatches = match output.data {
+        OutputData::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(recordbatches) => recordbatches,
         _ => unreachable!(),
     };
     let pretty_print = sort_table(&recordbatches.pretty_print().unwrap());
     let expected = sort_table(expected);
-    assert_eq!(pretty_print, expected);
+    assert_eq!(
+        pretty_print,
+        expected,
+        "\n{}",
+        recordbatches.pretty_print().unwrap()
+    );
 }
 
 pub fn prepare_path(p: &str) -> String {

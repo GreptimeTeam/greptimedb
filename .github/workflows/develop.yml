@@ -1,7 +1,7 @@
 on:
   merge_group:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [ opened, synchronize, reopened, ready_for_review ]
     paths-ignore:
       - 'docs/**'
       - 'config/**'
@@ -37,20 +37,19 @@ jobs:
     name: Spell Check with Typos
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: crate-ci/typos@v1.13.10
 
   check:
     name: Check
-    if: github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ windows-latest, ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
@@ -58,44 +57,52 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          # Shares with `Clippy` job
+          shared-key: "check-lint"
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
 
   toml:
     name: Toml Check
-    if: github.event.pull_request.draft == false
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "check-toml"
       - name: Install taplo
-        run: cargo +stable install taplo-cli --version ^0.8 --locked
+        run: cargo +stable install taplo-cli --version ^0.9 --locked
       - name: Run taplo
         run: taplo format --check
 
   build:
     name: Build GreptimeDB binaries
-    if: github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-binaries"
       - name: Build greptime binaries
         shell: bash
-        run: cargo build
+        run: cargo build --bin greptime --bin sqlness-runner
       - name: Pack greptime binaries
         shell: bash
         run: |
@@ -110,9 +117,48 @@ jobs:
           artifacts-dir: bins
           version: current
 
+  fuzztest:
+    name: Fuzz Test
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [ "fuzz_create_table", "fuzz_alter_table" ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "fuzz-test-targets"
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt update && sudo apt install -y libfuzzer-14-dev
+          cargo install cargo-fuzz
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Run GreptimeDB
+        run: |
+          ./bins/greptime standalone start&
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+        with:
+          target: ${{ matrix.target }}
+
   sqlness:
     name: Sqlness Test
-    if: github.event.pull_request.draft == false
     needs: build
     runs-on: ${{ matrix.os }}
     strategy:
@@ -120,7 +166,7 @@ jobs:
         os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -129,18 +175,17 @@ jobs:
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
-        run: ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
       - name: Upload sqlness logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
-          path: ${{ runner.temp }}/greptime-*.log
+          path: /tmp/greptime-*.log
           retention-days: 3
 
   sqlness-kafka-wal:
     name: Sqlness Test with Kafka Wal
-    if: github.event.pull_request.draft == false
     needs: build
     runs-on: ${{ matrix.os }}
     strategy:
@@ -148,7 +193,7 @@ jobs:
         os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -160,23 +205,22 @@ jobs:
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
-        run: ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
       - name: Upload sqlness logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: sqlness-logs
-          path: ${{ runner.temp }}/greptime-*.log
+          name: sqlness-logs-with-kafka-wal
+          path: /tmp/greptime-*.log
           retention-days: 3
 
   fmt:
     name: Rustfmt
-    if: github.event.pull_request.draft == false
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
@@ -185,17 +229,19 @@ jobs:
           components: rustfmt
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "check-rust-fmt"
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
-    if: github.event.pull_request.draft == false
     runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
@@ -204,6 +250,10 @@ jobs:
           components: clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          # Shares with `Check` job
+          shared-key: "check-lint"
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -212,8 +262,8 @@ jobs:
     runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: KyleMayes/install-llvm-action@v1
@@ -226,12 +276,19 @@ jobs:
           components: llvm-tools-preview
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+      - name: Docker Cache
+        uses: ScribeMD/docker-cache@0.3.7
+        with:
+          key: docker-${{ runner.os }}-coverage
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       - name: Install PyArrow Package
@@ -256,10 +313,28 @@ jobs:
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           UNITTEST_LOG_DIR: "__unittest_logs"
       - name: Codecov upload
-        uses: codecov/codecov-action@v2
+        uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./lcov.info
           flags: rust
           fail_ci_if_error: false
           verbose: true
+
+  compat:
+    name: Compatibility Test
+    needs: build
+    runs-on: ubuntu-20.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: |
+          mkdir -p ./bins/current
+          tar -xvf ./bins.tar.gz --strip-components=1 -C ./bins/current
+      - run: ./tests/compat/test-compat.sh 0.6.0

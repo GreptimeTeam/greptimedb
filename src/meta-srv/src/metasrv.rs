@@ -18,15 +18,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
+use common_meta::{distributed_time_constants, ClusterId};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
@@ -42,11 +44,12 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
-    self, InitMetadataSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
+    InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
     StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
+use crate::lease::lookup_alive_datanode_peer;
 use crate::lock::DistLockRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
@@ -77,6 +80,17 @@ pub struct MetaSrvOptions {
     pub wal: MetaSrvWalConfig,
     pub export_metrics: ExportMetricsOption,
     pub store_key_prefix: String,
+    /// The max operations per txn
+    ///
+    /// This value is usually limited by which store is used for the `KvBackend`.
+    /// For example, if using etcd, this value should ensure that it is less than
+    /// or equal to the `--max-txn-ops` option value of etcd.
+    ///
+    /// TODO(jeremy): Currently, this option only affects the etcd store, but it may
+    /// also affect other stores in the future. In other words, each store needs to
+    /// limit the number of operations in a txn because an infinitely large txn could
+    /// potentially block other operations.
+    pub max_txn_ops: usize,
 }
 
 impl MetaSrvOptions {
@@ -102,6 +116,9 @@ impl Default for MetaSrvOptions {
             procedure: ProcedureConfig {
                 max_retry_times: 12,
                 retry_delay: Duration::from_millis(500),
+                // The etcd the maximum size of any request is 1.5 MiB
+                // 1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)
+                max_metadata_value_size: Some(ReadableSize::kb(1500)),
             },
             failure_detector: PhiAccrualFailureDetectorOptions::default(),
             datanode: DatanodeOptions::default(),
@@ -110,6 +127,7 @@ impl Default for MetaSrvOptions {
             wal: MetaSrvWalConfig::default(),
             export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
+            max_txn_ops: 128,
         }
     }
 }
@@ -251,7 +269,7 @@ pub struct MetaSrv {
     lock: DistLockRef,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
-    ddl_executor: DdlTaskExecutorRef,
+    procedure_executor: ProcedureExecutorRef,
     wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
@@ -343,7 +361,7 @@ impl MetaSrv {
             self.leader_cached_kv_backend
                 .load()
                 .await
-                .context(error::KvBackendSnafu)?;
+                .context(KvBackendSnafu)?;
             self.procedure_manager
                 .start()
                 .await
@@ -367,6 +385,21 @@ impl MetaSrv {
             .stop()
             .await
             .context(StopProcedureManagerSnafu)
+    }
+
+    /// Lookup a peer by peer_id, return it only when it's alive.
+    pub(crate) async fn lookup_peer(
+        &self,
+        cluster_id: ClusterId,
+        peer_id: u64,
+    ) -> Result<Option<Peer>> {
+        lookup_alive_datanode_peer(
+            cluster_id,
+            peer_id,
+            &self.meta_peer_client,
+            distributed_time_constants::DATANODE_LEASE_SECS,
+        )
+        .await
     }
 
     #[inline]
@@ -406,8 +439,8 @@ impl MetaSrv {
         &self.mailbox
     }
 
-    pub fn ddl_executor(&self) -> &DdlTaskExecutorRef {
-        &self.ddl_executor
+    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
+        &self.procedure_executor
     }
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {

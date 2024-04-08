@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -26,9 +25,6 @@ use snafu::ResultExt;
 use crate::config::DatanodeOptions;
 use crate::error::{ParseAddrSnafu, Result};
 use crate::region_server::RegionServer;
-
-const DATANODE_GRPC_SERVICE_NAME: &str = "DATANODE_GRPC_SERVICE";
-const DATANODE_HTTP_SERVICE_NAME: &str = "DATANODE_HTTP_SERVICE";
 
 pub struct DatanodeServiceBuilder<'a> {
     opts: &'a DatanodeOptions,
@@ -65,15 +61,15 @@ impl<'a> DatanodeServiceBuilder<'a> {
         }
     }
 
-    pub fn build(mut self) -> Result<ServerHandlers> {
-        let mut services = HashMap::new();
+    pub async fn build(mut self) -> Result<ServerHandlers> {
+        let handlers = ServerHandlers::default();
 
         if let Some(grpc_server) = self.grpc_server.take() {
             let addr: SocketAddr = self.opts.rpc_addr.parse().context(ParseAddrSnafu {
                 addr: &self.opts.rpc_addr,
             })?;
             let handler: ServerHandler = (Box::new(grpc_server), addr);
-            services.insert(DATANODE_GRPC_SERVICE_NAME.to_string(), handler);
+            handlers.insert(handler).await;
         }
 
         if self.enable_http_service {
@@ -85,10 +81,10 @@ impl<'a> DatanodeServiceBuilder<'a> {
                 addr: &self.opts.http.addr,
             })?;
             let handler: ServerHandler = (Box::new(http_server), addr);
-            services.insert(DATANODE_HTTP_SERVICE_NAME.to_string(), handler);
+            handlers.insert(handler).await;
         }
 
-        Ok(services)
+        Ok(handlers)
     }
 
     pub fn grpc_server_builder(

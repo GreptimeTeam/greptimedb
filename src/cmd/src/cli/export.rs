@@ -19,8 +19,7 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use client::api::v1::auth_header::AuthScheme;
 use client::api::v1::Basic;
-use client::{Client, Database, DEFAULT_SCHEMA_NAME};
-use common_query::Output;
+use client::{Client, Database, OutputData, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::util::collect;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::scalars::ScalarVector;
@@ -142,7 +141,7 @@ impl Export {
                     .with_context(|_| RequestDatabaseSnafu {
                         sql: "show databases".to_string(),
                     })?;
-            let Output::Stream(stream) = result else {
+            let OutputData::Stream(stream) = result.data else {
                 NotDataFromOutputSnafu.fail()?
             };
             let record_batch = collect(stream)
@@ -183,7 +182,7 @@ impl Export {
             .sql(&sql)
             .await
             .with_context(|_| RequestDatabaseSnafu { sql })?;
-        let Output::Stream(stream) = result else {
+        let OutputData::Stream(stream) = result.data else {
             NotDataFromOutputSnafu.fail()?
         };
         let Some(record_batch) = collect(stream)
@@ -235,7 +234,7 @@ impl Export {
             .sql(&sql)
             .await
             .with_context(|_| RequestDatabaseSnafu { sql })?;
-        let Output::Stream(stream) = result else {
+        let OutputData::Stream(stream) = result.data else {
             NotDataFromOutputSnafu.fail()?
         };
         let record_batch = collect(stream)

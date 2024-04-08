@@ -17,27 +17,32 @@
 use std::sync::Arc;
 
 use smallvec::SmallVec;
+use store_api::metadata::RegionMetadataRef;
 
+use crate::error::Result;
+use crate::memtable::time_partition::TimePartitionsRef;
 use crate::memtable::{MemtableId, MemtableRef};
+
+pub(crate) type SmallMemtableVec = SmallVec<[MemtableRef; 2]>;
 
 /// A version of current memtables in a region.
 #[derive(Debug, Clone)]
 pub(crate) struct MemtableVersion {
     /// Mutable memtable.
-    pub(crate) mutable: MemtableRef,
+    pub(crate) mutable: TimePartitionsRef,
     /// Immutable memtables.
     ///
     /// We only allow one flush job per region but if a flush job failed, then we
     /// might need to store more than one immutable memtable on the next time we
     /// flush the region.
-    immutables: SmallVec<[MemtableRef; 2]>,
+    immutables: SmallMemtableVec,
 }
 
 pub(crate) type MemtableVersionRef = Arc<MemtableVersion>;
 
 impl MemtableVersion {
     /// Returns a new [MemtableVersion] with specific mutable memtable.
-    pub(crate) fn new(mutable: MemtableRef) -> MemtableVersion {
+    pub(crate) fn new(mutable: TimePartitionsRef) -> MemtableVersion {
         MemtableVersion {
             mutable,
             immutables: SmallVec::new(),
@@ -51,8 +56,8 @@ impl MemtableVersion {
 
     /// Lists mutable and immutable memtables.
     pub(crate) fn list_memtables(&self) -> Vec<MemtableRef> {
-        let mut mems = Vec::with_capacity(self.immutables.len() + 1);
-        mems.push(self.mutable.clone());
+        let mut mems = Vec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
+        self.mutable.list_memtables(&mut mems);
         mems.extend_from_slice(&self.immutables);
         mems
     }
@@ -61,28 +66,30 @@ impl MemtableVersion {
     /// memtable.
     ///
     /// Returns `None` if the mutable memtable is empty.
-    #[must_use]
-    pub(crate) fn freeze_mutable(&self, mutable: MemtableRef) -> Option<MemtableVersion> {
-        debug_assert!(mutable.is_empty());
+    pub(crate) fn freeze_mutable(
+        &self,
+        metadata: &RegionMetadataRef,
+    ) -> Result<Option<MemtableVersion>> {
         if self.mutable.is_empty() {
             // No need to freeze the mutable memtable.
-            return None;
+            return Ok(None);
         }
 
         // Marks the mutable memtable as immutable so it can free the memory usage from our
         // soft limit.
-        self.mutable.mark_immutable();
+        self.mutable.freeze()?;
+        // Fork the memtable.
+        let mutable = Arc::new(self.mutable.fork(metadata));
+
         // Pushes the mutable memtable to immutable list.
-        let immutables = self
-            .immutables
-            .iter()
-            .cloned()
-            .chain([self.mutable.clone()])
-            .collect();
-        Some(MemtableVersion {
+        let mut immutables =
+            SmallVec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
+        self.mutable.list_memtables_to_small_vec(&mut immutables);
+        immutables.extend(self.immutables.iter().cloned());
+        Ok(Some(MemtableVersion {
             mutable,
             immutables,
-        })
+        }))
     }
 
     /// Removes memtables by ids from immutable memtables.
@@ -97,7 +104,7 @@ impl MemtableVersion {
 
     /// Returns the memory usage of the mutable memtable.
     pub(crate) fn mutable_usage(&self) -> usize {
-        self.mutable.stats().estimated_bytes
+        self.mutable.memory_usage()
     }
 
     /// Returns the memory usage of the immutable memtables.

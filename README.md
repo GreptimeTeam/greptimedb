@@ -6,145 +6,154 @@
   </picture>
 </p>
 
+<h1 align="center">Cloud-scale, Fast and Efficient Time Series Database</h1>
 
+<div align="center">
 <h3 align="center">
-    The next-generation hybrid time-series/analytics processing database in the cloud
-</h3>
+  <a href="https://greptime.com/product/cloud">GreptimeCloud</a> |
+  <a href="https://docs.greptime.com/">User guide</a> |
+  <a href="https://greptimedb.rs/">API Docs</a> |
+  <a href="https://github.com/GreptimeTeam/greptimedb/issues/3412">Roadmap 2024</a>
+</h4>
 
-<p align="center">
-    <a href="https://codecov.io/gh/GrepTimeTeam/greptimedb"><img src="https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C"></img></a>
-    &nbsp;
-    <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="CI"></img></a>
-    &nbsp;
-    <a href="https://github.com/greptimeTeam/greptimedb/blob/main/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
-</p>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb.svg" alt="Version"/>
+</a>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
+<img src="https://img.shields.io/github/release-date/GreptimeTeam/greptimedb.svg" alt="Releases"/>
+</a>
+<a href="https://hub.docker.com/r/greptime/greptimedb/">
+<img src="https://img.shields.io/docker/pulls/greptime/greptimedb.svg" alt="Docker Pulls"/>
+</a>
+<a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml">
+<img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="GitHub Actions"/>
+</a>
+<a href="https://codecov.io/gh/GrepTimeTeam/greptimedb">
+<img src="https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C" alt="Codecov"/>
+</a>
+<a href="https://github.com/greptimeTeam/greptimedb/blob/main/LICENSE">
+<img src="https://img.shields.io/github/license/greptimeTeam/greptimedb" alt="License"/>
+</a>
 
-<p align="center">
-    <a href="https://twitter.com/greptime"><img src="https://img.shields.io/badge/twitter-follow_us-1d9bf0.svg"></a>
-    &nbsp;
-    <a href="https://www.linkedin.com/company/greptime/"><img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg"></a>
-    &nbsp;
-    <a href="https://greptime.com/slack"><img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack" alt="slack" /></a>
-</p>
+<br/>
 
-## What is GreptimeDB
+<a href="https://greptime.com/slack">
+<img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack&style=for-the-badge" alt="Slack"/>
+</a>
+<a href="https://twitter.com/greptime">
+<img src="https://img.shields.io/badge/twitter-follow_us-1d9bf0.svg?style=for-the-badge" alt="Twitter"/>
+</a>
+<a href="https://www.linkedin.com/company/greptime/">
+<img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=for-the-badge" alt="LinkedIn"/>
+</a>
+</div>
 
-GreptimeDB is an open-source time-series database focusing on efficiency, scalability, and analytical capabilities.
-It's designed to work on infrastructure of the cloud era, and users benefit from its elasticity and commodity storage.
+## Introduction
 
-Our core developers have been building time-series data platforms for years. Based on their best-practices, GreptimeDB is born to give you:
+**GreptimeDB** is an open-source time-series database focusing on efficiency, scalability, and analytical capabilities.
+Designed to work on infrastructure of the cloud era, GreptimeDB benefits users with its elasticity and commodity storage, offering a fast and cost-effective **alternative to InfluxDB** and a **long-term storage for Prometheus**.
 
-- Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends, particularly cloud object storage with 50x cost efficiency.
-- Fully open-source distributed cluster architecture that harnesses the power of cloud-native elastic computing resources.
-- Seamless scalability from a standalone binary at edge to a robust, highly available distributed cluster in cloud, with a transparent experience for both developers and administrators.
-- Native SQL and PromQL for queries, and Python scripting to facilitate complex analytical tasks.
-- Flexible indexing capabilities and distributed, parallel-processing query engine, tackling high cardinality issues down.
-- Widely adopted database protocols and APIs, including MySQL, PostgreSQL, and Prometheus Remote Storage, etc.
+## Why GreptimeDB
 
-## Quick Start
+Our core developers have been building time-series data platforms for years. Based on our best-practices, GreptimeDB is born to give you:
 
-### [GreptimePlay](https://greptime.com/playground)
+* **Easy horizontal scaling**
+
+  Seamless scalability from a standalone binary at edge to a robust, highly available distributed cluster in cloud, with a transparent experience for both developers and administrators.
+
+* **Analyzing time-series data**
+
+  Query your time-series data with SQL and PromQL. Use Python scripts to facilitate complex analytical tasks.
+
+* **Cloud-native distributed database**
+
+  Fully open-source distributed cluster architecture that harnesses the power of cloud-native elastic computing resources.
+
+* **Performance and Cost-effective**
+
+  Flexible indexing capabilities and distributed, parallel-processing query engine, tackling high cardinality issues down. Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends, particularly cloud object storage with 50x cost efficiency.
+
+* **Compatible with InfluxDB, Prometheus and more protocols**
+
+  Widely adopted database protocols and APIs, including MySQL, PostgreSQL, and Prometheus Remote Storage, etc. [Read more](https://docs.greptime.com/user-guide/clients/overview).
+
+## Try GreptimeDB
+
+### 1. [GreptimePlay](https://greptime.com/playground)
 
 Try out the features of GreptimeDB right from your browser.
 
-### Build
+### 2. [GreptimeCloud](https://console.greptime.cloud/)
 
-#### Build from Source
+Start instantly with a free cluster.
 
-To compile GreptimeDB from source, you'll need:
+### 3. Docker Image
 
-- C/C++ Toolchain: provides basic tools for compiling and linking. This is
-  available as `build-essential` on ubuntu and similar name on other platforms.
-- Rust: the easiest way to install Rust is to use
-  [`rustup`](https://rustup.rs/), which will check our `rust-toolchain` file and
-  install correct Rust version for you.
-- Protobuf: `protoc` is required for compiling `.proto` files. `protobuf` is
-  available from major package manager on macos and linux distributions. You can
-  find an installation instructions [here](https://grpc.io/docs/protoc-installation/).
-  **Note that `protoc` version needs to be >= 3.15** because we have used the `optional`
-  keyword. You can check it with `protoc --version`.
-- python3-dev or python3-devel(Optional feature, only needed if you want to run scripts
-  in CPython, and also need to enable `pyo3_backend` feature when compiling(by `cargo run -F pyo3_backend` or add `pyo3_backend` to src/script/Cargo.toml 's `features.default` like `default = ["python", "pyo3_backend]`)): this install a Python shared library required for running Python
-  scripting engine(In CPython Mode). This is available as `python3-dev` on
-  ubuntu, you can install it with `sudo apt install python3-dev`, or
-  `python3-devel` on RPM based distributions (e.g. Fedora, Red Hat, SuSE). Mac's
-  `Python3` package should have this shared library by default. More detail for compiling with PyO3 can be found in [PyO3](https://pyo3.rs/v0.18.1/building_and_distribution#configuring-the-python-version)'s documentation.
+To install GreptimeDB locally, the recommended way is via Docker:
 
-#### Build with Docker
-
-A docker image with necessary dependencies is provided:
-
-```
-docker build --network host -f docker/Dockerfile -t greptimedb .
+```shell
+docker pull greptime/greptimedb
 ```
 
-### Run
+Start a GreptimeDB container with:
 
-Start GreptimeDB from source code, in standalone mode:
-
+```shell
+docker run --rm --name greptime --net=host greptime/greptimedb standalone start
 ```
+
+Read more about [Installation](https://docs.greptime.com/getting-started/installation/overview) on docs.
+
+## Getting Started
+
+* [Quickstart](https://docs.greptime.com/getting-started/quick-start/overview)
+* [Write Data](https://docs.greptime.com/user-guide/clients/overview)
+* [Query Data](https://docs.greptime.com/user-guide/query-data/overview)
+* [Operations](https://docs.greptime.com/user-guide/operations/overview)
+
+## Build
+
+Check the prerequisite:
+
+* [Rust toolchain](https://www.rust-lang.org/tools/install) (nightly)
+* [Protobuf compiler](https://grpc.io/docs/protoc-installation/) (>= 3.15)
+* Python toolchain (optional): Required only if built with PyO3 backend. More detail for compiling with PyO3 can be found in its [documentation](https://pyo3.rs/v0.18.1/building_and_distribution#configuring-the-python-version).
+
+Build GreptimeDB binary:
+
+```shell
+make
+```
+
+Run a standalone server:
+
+```shell
 cargo run -- standalone start
 ```
 
-Or if you built from docker:
-
-```
-docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalone start
-```
-
-Please see the online document site for more installation options and [operations info](https://docs.greptime.com/user-guide/operations/overview).
-
-### Get started
-
-Read the [complete getting started guide](https://docs.greptime.com/getting-started/overview) on our [official document site](https://docs.greptime.com/).
-
-To write and query data, GreptimeDB is compatible with multiple [protocols and clients](https://docs.greptime.com/user-guide/clients/overview).
-
-## Resources
-
-### Installation
-
-- [Pre-built Binaries](https://greptime.com/download):
-  For Linux and macOS, you can easily download pre-built binaries including official releases and nightly builds that are ready to use.
-  In most cases, downloading the version without PyO3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with PyO3 and install a Python with the same version as the Python in the PyO3 version.
-  We recommend using virtualenv for the installation process to manage multiple Python versions.
-- [Docker Images](https://hub.docker.com/r/greptime/greptimedb)(**recommended**): pre-built
-  Docker images, this is the easiest way to try GreptimeDB. By default it runs CPython script with `pyo3_backend` enabled.
-- [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
-  Kubernetes deployment
-
-### Documentation
-
-- GreptimeDB [User Guide](https://docs.greptime.com/user-guide/concepts/overview)
-- GreptimeDB [Developer
-  Guide](https://docs.greptime.com/developer-guide/overview.html)
-- GreptimeDB [internal code document](https://greptimedb.rs)
+## Extension
 
 ### Dashboard
+
 - [The dashboard UI for GreptimeDB](https://github.com/GreptimeTeam/dashboard)
 
 ### SDK
 
-- [GreptimeDB C++ Client](https://github.com/GreptimeTeam/greptimedb-client-cpp)
-- [GreptimeDB Erlang Client](https://github.com/GreptimeTeam/greptimedb-client-erl)
 - [GreptimeDB Go Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-go)
 - [GreptimeDB Java Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-java)
-- [GreptimeDB Python Client](https://github.com/GreptimeTeam/greptimedb-client-py) (WIP)
-- [GreptimeDB Rust Client](https://github.com/GreptimeTeam/greptimedb-client-rust)
-- [GreptimeDB JavaScript Client](https://github.com/GreptimeTeam/greptime-js-sdk)
+- [GreptimeDB C++ Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-cpp)
+- [GreptimeDB Erlang Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-erl)
+- [GreptimeDB Rust Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-rust)
+- [GreptimeDB JavaScript Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-js)
 
 ### Grafana Dashboard
 
-Our official Grafana dashboard is available at [grafana](./grafana/README.md) directory.
+Our official Grafana dashboard is available at [grafana](grafana/README.md) directory.
 
 ## Project Status
 
-This project is in its early stage and under heavy development. We move fast and
-break things. Benchmark on development branch may not represent its potential
-performance. We release pre-built binaries constantly for functional
-evaluation. Do not use it in production at the moment.
-
-For future plans, check out [GreptimeDB roadmap](https://github.com/GreptimeTeam/greptimedb/issues/669).
+The current version has not yet reached General Availability version standards.
+In line with our Greptime 2024 Roadmap, we plan to achieve a production-level
+version with the update to v1.0 in August. [[Join Force]](https://github.com/GreptimeTeam/greptimedb/issues/3412)
 
 ## Community
 
@@ -154,12 +163,12 @@ and what went wrong. If you have any questions or if you would like to get invol
 community, please check out:
 
 - GreptimeDB Community on [Slack](https://greptime.com/slack)
-- GreptimeDB GitHub [Discussions](https://github.com/GreptimeTeam/greptimedb/discussions)
-- Greptime official [Website](https://greptime.com)
+- GreptimeDB [GitHub Discussions forum](https://github.com/GreptimeTeam/greptimedb/discussions)
+- Greptime official [website](https://greptime.com)
 
 In addition, you may:
 
-- View our official [Blog](https://greptime.com/blogs/index)
+- View our official [Blog](https://greptime.com/blogs/)
 - Connect us with [Linkedin](https://www.linkedin.com/company/greptime/)
 - Follow us on [Twitter](https://twitter.com/greptime)
 
@@ -170,12 +179,12 @@ open contributions and allowing you to use the software however you want.
 
 ## Contributing
 
-Please refer to [contribution guidelines](CONTRIBUTING.md) for more information.
+Please refer to [contribution guidelines](CONTRIBUTING.md) and [internal concepts docs](https://docs.greptime.com/contributor-guide/overview.html) for more information.
 
 ## Acknowledgement
 
 - GreptimeDB uses [Apache Arrow™](https://arrow.apache.org/) as the memory model and [Apache Parquet™](https://parquet.apache.org/) as the persistent file format.
-- GreptimeDB's query engine is powered by [Apache Arrow DataFusion™](https://github.com/apache/arrow-datafusion).
+- GreptimeDB's query engine is powered by [Apache Arrow DataFusion™](https://arrow.apache.org/datafusion/).
 - [Apache OpenDAL™](https://opendal.apache.org) gives GreptimeDB a very general and elegant data access abstraction layer.
 - GreptimeDB's meta service is based on [etcd](https://etcd.io/).
 - GreptimeDB uses [RustPython](https://github.com/RustPython/RustPython) for experimental embedded python scripting.

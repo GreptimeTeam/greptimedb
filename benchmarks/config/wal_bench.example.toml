@@ -1,0 +1,21 @@
+# Refers to the documents of `Args` in benchmarks/src/wal.rs`.
+wal_provider = "kafka"
+bootstrap_brokers = ["localhost:9092"]
+num_workers = 10
+num_topics = 32
+num_regions = 1000
+num_scrapes = 1000
+num_rows = 5
+col_types = "ifs"
+max_batch_size = "512KB"
+linger = "1ms"
+backoff_init = "10ms"
+backoff_max = "1ms"
+backoff_base = 2
+backoff_deadline = "3s"
+compression = "zstd"
+rng_seed = 42
+skip_read = false
+skip_write = false
+random_topics = true
+report_metrics = false

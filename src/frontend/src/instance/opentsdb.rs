@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
+use common_telemetry::tracing;
 use servers::error as server_error;
 use servers::error::AuthSnafu;
 use servers::opentsdb::codec::DataPoint;
@@ -27,6 +28,7 @@ use crate::instance::Instance;
 
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
+    #[tracing::instrument(skip_all, fields(protocol = "opentsdb"))]
     async fn exec(
         &self,
         data_points: Vec<DataPoint>,
@@ -45,8 +47,8 @@ impl OpentsdbProtocolHandler for Instance {
             .map_err(BoxedError::new)
             .context(servers::error::ExecuteGrpcQuerySnafu)?;
 
-        Ok(match output {
-            common_query::Output::AffectedRows(rows) => rows,
+        Ok(match output.data {
+            common_query::OutputData::AffectedRows(rows) => rows,
             _ => unreachable!(),
         })
     }

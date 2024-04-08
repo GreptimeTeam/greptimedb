@@ -20,9 +20,9 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
-use datatypes::value::Value;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
+use sql::ast::Value;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -66,6 +66,15 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to send request to region"))]
+    RequestRegion {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Unsupported region request"))]
+    UnsupportedRegionRequest { location: Location },
 
     #[snafu(display("Failed to parse SQL"))]
     ParseSql {
@@ -445,6 +454,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse sql value"))]
+    ParseSqlValue {
+        source: sql::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to build default value, column: {}", column))]
     ColumnDefaultValue {
         column: String,
@@ -493,26 +508,39 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Do not support creating tables in multiple catalogs: {}",
-        catalog_names
-    ))]
-    CreateTableWithMultiCatalogs {
-        catalog_names: String,
+    #[snafu(display("Do not support {} in multiple catalogs", ddl_name))]
+    DdlWithMultiCatalogs {
+        ddl_name: String,
         location: Location,
     },
 
-    #[snafu(display("Do not support creating tables in multiple schemas: {}", schema_names))]
-    CreateTableWithMultiSchemas {
-        schema_names: String,
+    #[snafu(display("Do not support {} in multiple schemas", ddl_name))]
+    DdlWithMultiSchemas {
+        ddl_name: String,
         location: Location,
     },
 
-    #[snafu(display("Empty creating table expr"))]
-    EmptyCreateTableExpr { location: Location },
+    #[snafu(display("Empty {} expr", name))]
+    EmptyDdlExpr { name: String, location: Location },
 
     #[snafu(display("Failed to create logical tables: {}", reason))]
     CreateLogicalTables { reason: String, location: Location },
+
+    #[snafu(display("Invalid partition rule: {}", reason))]
+    InvalidPartitionRule { reason: String, location: Location },
+
+    #[snafu(display("Invalid configuration value."))]
+    InvalidConfigValue {
+        source: session::session_config::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid timestamp range, start: `{}`, end: `{}`", start, end))]
+    InvalidTimestampRange {
+        start: String,
+        end: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -521,6 +549,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::InvalidSql { .. }
+            | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }
             | Error::IllegalPrimaryKeysDef { .. }
@@ -538,6 +567,7 @@ impl ErrorExt for Error {
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
             | Error::SchemaIncompatible { .. }
+            | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
@@ -565,6 +595,7 @@ impl ErrorExt for Error {
             | Error::IntoVectors { source, .. } => source.status_code(),
 
             Error::RequestInserts { source, .. } => source.status_code(),
+            Error::RequestRegion { source, .. } => source.status_code(),
             Error::RequestDeletes { source, .. } => source.status_code(),
 
             Error::ColumnDataType { source, .. } | Error::InvalidColumnDef { source, .. } => {
@@ -630,9 +661,12 @@ impl ErrorExt for Error {
 
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
 
-            Error::CreateTableWithMultiCatalogs { .. }
-            | Error::CreateTableWithMultiSchemas { .. }
-            | Error::EmptyCreateTableExpr { .. } => StatusCode::InvalidArguments,
+            Error::DdlWithMultiCatalogs { .. }
+            | Error::DdlWithMultiSchemas { .. }
+            | Error::EmptyDdlExpr { .. }
+            | Error::InvalidPartitionRule { .. }
+            | Error::ParseSqlValue { .. }
+            | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
 
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
         }

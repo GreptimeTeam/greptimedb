@@ -17,8 +17,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 
-use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
+use crate::expr::error::{
+    EvalError, InvalidArgumentSnafu, OptimizeSnafu, UnsupportedTemporalFilterSnafu,
+};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 
 /// A scalar expression, which can be evaluated to a value.
@@ -58,4 +61,387 @@ pub enum ScalarExpr {
         then: Box<ScalarExpr>,
         els: Box<ScalarExpr>,
     },
+}
+
+impl ScalarExpr {
+    pub fn call_unary(self, func: UnaryFunc) -> Self {
+        ScalarExpr::CallUnary {
+            func,
+            expr: Box::new(self),
+        }
+    }
+
+    pub fn call_binary(self, other: Self, func: BinaryFunc) -> Self {
+        ScalarExpr::CallBinary {
+            func,
+            expr1: Box::new(self),
+            expr2: Box::new(other),
+        }
+    }
+
+    pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
+        match self {
+            ScalarExpr::Column(index) => Ok(values[*index].clone()),
+            ScalarExpr::Literal(row_res, _ty) => Ok(row_res.clone()),
+            ScalarExpr::CallUnmaterializable(_) => OptimizeSnafu {
+                reason: "Can't eval unmaterializable function".to_string(),
+            }
+            .fail(),
+            ScalarExpr::CallUnary { func, expr } => func.eval(values, expr),
+            ScalarExpr::CallBinary { func, expr1, expr2 } => func.eval(values, expr1, expr2),
+            ScalarExpr::CallVariadic { func, exprs } => func.eval(values, exprs),
+            ScalarExpr::If { cond, then, els } => match cond.eval(values) {
+                Ok(Value::Boolean(true)) => then.eval(values),
+                Ok(Value::Boolean(false)) => els.eval(values),
+                _ => InvalidArgumentSnafu {
+                    reason: "if condition must be boolean".to_string(),
+                }
+                .fail(),
+            },
+        }
+    }
+
+    /// Rewrites column indices with their value in `permutation`.
+    ///
+    /// This method is applicable even when `permutation` is not a
+    /// strict permutation, and it only needs to have entries for
+    /// each column referenced in `self`.
+    pub fn permute(&mut self, permutation: &[usize]) -> Result<(), EvalError> {
+        // check first so that we don't end up with a partially permuted expression
+        ensure!(
+            self.get_all_ref_columns()
+                .into_iter()
+                .all(|i| i < permutation.len()),
+            InvalidArgumentSnafu {
+                reason: format!(
+                    "permutation {:?} is not a valid permutation for expression {:?}",
+                    permutation, self
+                ),
+            }
+        );
+
+        self.visit_mut_post_nolimit(&mut |e| {
+            if let ScalarExpr::Column(old_i) = e {
+                *old_i = permutation[*old_i];
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Rewrites column indices with their value in `permutation`.
+    ///
+    /// This method is applicable even when `permutation` is not a
+    /// strict permutation, and it only needs to have entries for
+    /// each column referenced in `self`.
+    pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) -> Result<(), EvalError> {
+        // check first so that we don't end up with a partially permuted expression
+        ensure!(
+            self.get_all_ref_columns()
+                .is_subset(&permutation.keys().cloned().collect()),
+            InvalidArgumentSnafu {
+                reason: format!(
+                    "permutation {:?} is not a valid permutation for expression {:?}",
+                    permutation, self
+                ),
+            }
+        );
+
+        self.visit_mut_post_nolimit(&mut |e| {
+            if let ScalarExpr::Column(old_i) = e {
+                *old_i = permutation[old_i];
+            }
+            Ok(())
+        })
+    }
+
+    /// Returns the set of columns that are referenced by `self`.
+    pub fn get_all_ref_columns(&self) -> BTreeSet<usize> {
+        let mut support = BTreeSet::new();
+        self.visit_post_nolimit(&mut |e| {
+            if let ScalarExpr::Column(i) = e {
+                support.insert(*i);
+            }
+            Ok(())
+        })
+        .unwrap();
+        support
+    }
+
+    pub fn as_literal(&self) -> Option<Value> {
+        if let ScalarExpr::Literal(lit, _column_type) = self {
+            Some(lit.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn is_literal(&self) -> bool {
+        matches!(self, ScalarExpr::Literal(..))
+    }
+
+    pub fn is_literal_true(&self) -> bool {
+        Some(Value::Boolean(true)) == self.as_literal()
+    }
+
+    pub fn is_literal_false(&self) -> bool {
+        Some(Value::Boolean(false)) == self.as_literal()
+    }
+
+    pub fn is_literal_null(&self) -> bool {
+        Some(Value::Null) == self.as_literal()
+    }
+
+    pub fn literal_null() -> Self {
+        ScalarExpr::Literal(Value::Null, ConcreteDataType::null_datatype())
+    }
+
+    pub fn literal(res: Value, typ: ConcreteDataType) -> Self {
+        ScalarExpr::Literal(res, typ)
+    }
+
+    pub fn literal_false() -> Self {
+        ScalarExpr::Literal(Value::Boolean(false), ConcreteDataType::boolean_datatype())
+    }
+
+    pub fn literal_true() -> Self {
+        ScalarExpr::Literal(Value::Boolean(true), ConcreteDataType::boolean_datatype())
+    }
+}
+
+impl ScalarExpr {
+    /// visit post-order without stack call limit, but may cause stack overflow
+    fn visit_post_nolimit<F>(&self, f: &mut F) -> Result<(), EvalError>
+    where
+        F: FnMut(&Self) -> Result<(), EvalError>,
+    {
+        self.visit_children(|e| e.visit_post_nolimit(f))?;
+        f(self)
+    }
+
+    fn visit_children<F>(&self, mut f: F) -> Result<(), EvalError>
+    where
+        F: FnMut(&Self) -> Result<(), EvalError>,
+    {
+        match self {
+            ScalarExpr::Column(_)
+            | ScalarExpr::Literal(_, _)
+            | ScalarExpr::CallUnmaterializable(_) => Ok(()),
+            ScalarExpr::CallUnary { expr, .. } => f(expr),
+            ScalarExpr::CallBinary { expr1, expr2, .. } => {
+                f(expr1)?;
+                f(expr2)
+            }
+            ScalarExpr::CallVariadic { exprs, .. } => {
+                for expr in exprs {
+                    f(expr)?;
+                }
+                Ok(())
+            }
+            ScalarExpr::If { cond, then, els } => {
+                f(cond)?;
+                f(then)?;
+                f(els)
+            }
+        }
+    }
+
+    fn visit_mut_post_nolimit<F>(&mut self, f: &mut F) -> Result<(), EvalError>
+    where
+        F: FnMut(&mut Self) -> Result<(), EvalError>,
+    {
+        self.visit_mut_children(|e: &mut Self| e.visit_mut_post_nolimit(f))?;
+        f(self)
+    }
+
+    fn visit_mut_children<F>(&mut self, mut f: F) -> Result<(), EvalError>
+    where
+        F: FnMut(&mut Self) -> Result<(), EvalError>,
+    {
+        match self {
+            ScalarExpr::Column(_)
+            | ScalarExpr::Literal(_, _)
+            | ScalarExpr::CallUnmaterializable(_) => Ok(()),
+            ScalarExpr::CallUnary { expr, .. } => f(expr),
+            ScalarExpr::CallBinary { expr1, expr2, .. } => {
+                f(expr1)?;
+                f(expr2)
+            }
+            ScalarExpr::CallVariadic { exprs, .. } => {
+                for expr in exprs {
+                    f(expr)?;
+                }
+                Ok(())
+            }
+            ScalarExpr::If { cond, then, els } => {
+                f(cond)?;
+                f(then)?;
+                f(els)
+            }
+        }
+    }
+}
+
+impl ScalarExpr {
+    /// if expr contains function `Now`
+    pub fn contains_temporal(&self) -> bool {
+        let mut contains = false;
+        self.visit_post_nolimit(&mut |e| {
+            if let ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now) = e {
+                contains = true;
+            }
+            Ok(())
+        })
+        .unwrap();
+        contains
+    }
+
+    /// extract lower or upper bound of `Now` for expr, where `lower bound <= expr < upper bound`
+    ///
+    /// returned bool indicates whether the bound is upper bound:
+    ///
+    /// false for lower bound, true for upper bound
+    /// TODO(discord9): allow simple transform like `now() + a < b` to `now() < b - a`
+    pub fn extract_bound(&self) -> Result<(Option<Self>, Option<Self>), EvalError> {
+        let unsupported_err = |msg: &str| {
+            UnsupportedTemporalFilterSnafu {
+                reason: msg.to_string(),
+            }
+            .fail()
+        };
+
+        let Self::CallBinary {
+            mut func,
+            mut expr1,
+            mut expr2,
+        } = self.clone()
+        else {
+            return unsupported_err("Not a binary expression");
+        };
+
+        // TODO: support simple transform like `now() + a < b` to `now() < b - a`
+
+        let expr1_is_now = *expr1 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now);
+        let expr2_is_now = *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now);
+
+        if !(expr1_is_now ^ expr2_is_now) {
+            return unsupported_err("None of the sides of the comparison is `now()`");
+        }
+
+        if expr2_is_now {
+            std::mem::swap(&mut expr1, &mut expr2);
+            func = BinaryFunc::reverse_compare(&func)?;
+        }
+
+        let step = |expr: ScalarExpr| expr.call_unary(UnaryFunc::StepTimestamp);
+        match func {
+            // now == expr2 -> now <= expr2 && now < expr2 + 1
+            BinaryFunc::Eq => Ok((Some(*expr2.clone()), Some(step(*expr2)))),
+            // now < expr2 -> now < expr2
+            BinaryFunc::Lt => Ok((None, Some(*expr2))),
+            // now <= expr2 -> now < expr2 + 1
+            BinaryFunc::Lte => Ok((None, Some(step(*expr2)))),
+            // now > expr2 -> now >= expr2 + 1
+            BinaryFunc::Gt => Ok((Some(step(*expr2)), None)),
+            // now >= expr2 -> now >= expr2
+            BinaryFunc::Gte => Ok((Some(*expr2), None)),
+            _ => unreachable!("Already checked"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use datatypes::arrow::array::Scalar;
+
+    use super::*;
+    #[test]
+    fn test_extract_bound() {
+        let test_list: [(ScalarExpr, Result<_, EvalError>); 5] = [
+            // col(0) == now
+            (
+                ScalarExpr::CallBinary {
+                    func: BinaryFunc::Eq,
+                    expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                    expr2: Box::new(ScalarExpr::Column(0)),
+                },
+                Ok((
+                    Some(ScalarExpr::Column(0)),
+                    Some(ScalarExpr::CallUnary {
+                        func: UnaryFunc::StepTimestamp,
+                        expr: Box::new(ScalarExpr::Column(0)),
+                    }),
+                )),
+            ),
+            // now < col(0)
+            (
+                ScalarExpr::CallBinary {
+                    func: BinaryFunc::Lt,
+                    expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                    expr2: Box::new(ScalarExpr::Column(0)),
+                },
+                Ok((None, Some(ScalarExpr::Column(0)))),
+            ),
+            // now <= col(0)
+            (
+                ScalarExpr::CallBinary {
+                    func: BinaryFunc::Lte,
+                    expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                    expr2: Box::new(ScalarExpr::Column(0)),
+                },
+                Ok((
+                    None,
+                    Some(ScalarExpr::CallUnary {
+                        func: UnaryFunc::StepTimestamp,
+                        expr: Box::new(ScalarExpr::Column(0)),
+                    }),
+                )),
+            ),
+            // now > col(0) -> now >= col(0) + 1
+            (
+                ScalarExpr::CallBinary {
+                    func: BinaryFunc::Gt,
+                    expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                    expr2: Box::new(ScalarExpr::Column(0)),
+                },
+                Ok((
+                    Some(ScalarExpr::CallUnary {
+                        func: UnaryFunc::StepTimestamp,
+                        expr: Box::new(ScalarExpr::Column(0)),
+                    }),
+                    None,
+                )),
+            ),
+            // now >= col(0)
+            (
+                ScalarExpr::CallBinary {
+                    func: BinaryFunc::Gte,
+                    expr1: Box::new(ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now)),
+                    expr2: Box::new(ScalarExpr::Column(0)),
+                },
+                Ok((Some(ScalarExpr::Column(0)), None)),
+            ),
+        ];
+        for (expr, expected) in test_list.into_iter() {
+            let actual = expr.extract_bound();
+            // EvalError is not Eq, so we need to compare the error message
+            match (actual, expected) {
+                (Ok(l), Ok(r)) => assert_eq!(l, r),
+                (l, r) => panic!("expected: {:?}, actual: {:?}", r, l),
+            }
+        }
+    }
+
+    #[test]
+    fn test_bad_permute() {
+        let mut expr = ScalarExpr::Column(4);
+        let permutation = vec![1, 2, 3];
+        let res = expr.permute(&permutation);
+        assert!(matches!(res, Err(EvalError::InvalidArgument { .. })));
+
+        let mut expr = ScalarExpr::Column(0);
+        let permute_map = BTreeMap::from([(1, 2), (3, 4)]);
+        let res = expr.permute_map(&permute_map);
+        assert!(matches!(res, Err(EvalError::InvalidArgument { .. })));
+    }
 }

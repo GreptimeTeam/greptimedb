@@ -1,4 +1,4 @@
-CREATE TABLE test_alt_table(i INTEGER, j TIMESTAMP TIME INDEX);
+CREATE TABLE test_alt_table(h INTEGER, i INTEGER, j TIMESTAMP TIME INDEX, PRIMARY KEY (h, i));
 
 Affected Rows: 0
 
@@ -7,11 +7,18 @@ DESC TABLE test_alt_table;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| i      | Int32                |     | YES  |         | FIELD         |
+| h      | Int32                | PRI | YES  |         | TAG           |
+| i      | Int32                | PRI | YES  |         | TAG           |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
 
-ALTER TABLE test_alt_table ADD COLUMN k INTEGER;
+INSERT INTO test_alt_table VALUES (1, 1, 0), (2, 2, 1);
+
+Affected Rows: 2
+
+-- TODO: It may result in an error if `k` is with type INTEGER.
+-- Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Int32 but found Utf8 at column index 3
+ALTER TABLE test_alt_table ADD COLUMN k STRING PRIMARY KEY;
 
 Affected Rows: 0
 
@@ -20,10 +27,28 @@ DESC TABLE test_alt_table;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| i      | Int32                |     | YES  |         | FIELD         |
+| h      | Int32                | PRI | YES  |         | TAG           |
+| i      | Int32                | PRI | YES  |         | TAG           |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| k      | Int32                |     | YES  |         | FIELD         |
+| k      | String               | PRI | YES  |         | TAG           |
 +--------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM test_alt_table;
+
++---+---+-------------------------+---+
+| h | i | j                       | k |
++---+---+-------------------------+---+
+| 1 | 1 | 1970-01-01T00:00:00     |   |
+| 2 | 2 | 1970-01-01T00:00:00.001 |   |
++---+---+-------------------------+---+
+
+SELECT * FROM test_alt_table WHERE i = 1;
+
++---+---+---------------------+---+
+| h | i | j                   | k |
++---+---+---------------------+---+
+| 1 | 1 | 1970-01-01T00:00:00 |   |
++---+---+---------------------+---+
 
 -- SQLNESS ARG restart=true
 ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
@@ -35,9 +60,10 @@ DESC TABLE test_alt_table;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| i      | Int32                |     | YES  |         | FIELD         |
+| h      | Int32                | PRI | YES  |         | TAG           |
+| i      | Int32                | PRI | YES  |         | TAG           |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| k      | Int32                |     | YES  |         | FIELD         |
+| k      | String               | PRI | YES  |         | TAG           |
 | m      | Int32                |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 

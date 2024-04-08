@@ -28,7 +28,7 @@ use datafusion::logical_expr::{
     AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast, Extension,
     LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF as ScalarUdfDef,
 };
-use datafusion::optimizer::utils;
+use datafusion::optimizer::utils::{self, conjunction};
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
@@ -49,8 +49,8 @@ use crate::error::{
     ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultiFieldsNotSupportedSnafu,
     MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, Result,
     TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
-    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
-    ZeroRangeSelectorSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
+    UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
@@ -79,6 +79,9 @@ const DEFAULT_FIELD_COLUMN: &str = "value";
 /// Special modifier to project field columns under multi-field mode
 const FIELD_COLUMN_MATCHER: &str = "__field__";
 
+/// Special modifier for cross schema query
+const SCHEMA_COLUMN_MATCHER: &str = "__schema__";
+
 #[derive(Default, Debug, Clone)]
 struct PromPlannerContext {
     // query parameters
@@ -93,6 +96,7 @@ struct PromPlannerContext {
     field_columns: Vec<String>,
     tag_columns: Vec<String>,
     field_column_matcher: Option<Vec<Matcher>>,
+    schema_name: Option<String>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
 }
@@ -115,7 +119,14 @@ impl PromPlannerContext {
         self.field_columns = vec![];
         self.tag_columns = vec![];
         self.field_column_matcher = None;
+        self.schema_name = None;
         self.range = None;
+    }
+
+    /// Reset table name and schema to empty
+    fn reset_table_name_and_schema(&mut self) {
+        self.table_name = Some(String::new());
+        self.schema_name = None;
     }
 
     /// Check if `le` is present in tag columns
@@ -205,7 +216,7 @@ impl PromPlanner {
                     (Some(lhs), Some(rhs)) => {
                         self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
                         self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
-                        self.ctx.table_name = Some(String::new());
+                        self.ctx.reset_table_name_and_schema();
                         let field_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
                         let mut field_expr = field_expr_builder(lhs, rhs)?;
 
@@ -292,14 +303,16 @@ impl PromPlanner {
                     (None, None) => {
                         let left_input = self.prom_expr_to_plan(*lhs.clone()).await?;
                         let left_field_columns = self.ctx.field_columns.clone();
-                        let mut left_table_ref: OwnedTableReference =
-                            self.ctx.table_name.clone().unwrap_or_default().into();
+                        let mut left_table_ref = self
+                            .table_ref()
+                            .unwrap_or_else(|_| OwnedTableReference::bare(""));
                         let left_context = self.ctx.clone();
 
                         let right_input = self.prom_expr_to_plan(*rhs.clone()).await?;
                         let right_field_columns = self.ctx.field_columns.clone();
-                        let mut right_table_ref: OwnedTableReference =
-                            self.ctx.table_name.clone().unwrap_or_default().into();
+                        let mut right_table_ref = self
+                            .table_ref()
+                            .unwrap_or_else(|_| OwnedTableReference::bare(""));
                         let right_context = self.ctx.clone();
 
                         // TODO(ruihang): avoid join if left and right are the same table
@@ -373,7 +386,7 @@ impl PromPlanner {
             PromExpr::NumberLiteral(NumberLiteral { val }) => {
                 self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
                 self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
-                self.ctx.table_name = Some(String::new());
+                self.ctx.reset_table_name_and_schema();
                 let literal_expr = df_prelude::lit(*val);
 
                 LogicalPlan::Extension(Extension {
@@ -393,7 +406,7 @@ impl PromPlanner {
             PromExpr::StringLiteral(StringLiteral { val }) => {
                 self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
                 self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
-                self.ctx.table_name = Some(String::new());
+                self.ctx.reset_table_name_and_schema();
                 let literal_expr = df_prelude::lit(val.to_string());
 
                 LogicalPlan::Extension(Extension {
@@ -487,7 +500,7 @@ impl PromPlanner {
                     self.prom_expr_to_plan(prom_expr).await?
                 } else {
                     self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
-                    self.ctx.table_name = Some(String::new());
+                    self.ctx.reset_table_name_and_schema();
                     LogicalPlan::Extension(Extension {
                         node: Arc::new(
                             EmptyMetric::new(
@@ -528,8 +541,18 @@ impl PromPlanner {
                         .unwrap()
                         .build()
                         .context(DataFusionPlanningSnafu)?,
+                    "ANALYZE VERBOSE" => LogicalPlanBuilder::from(plan)
+                        .explain(true, true)
+                        .unwrap()
+                        .build()
+                        .context(DataFusionPlanningSnafu)?,
                     "EXPLAIN" => LogicalPlanBuilder::from(plan)
                         .explain(false, false)
+                        .unwrap()
+                        .build()
+                        .context(DataFusionPlanningSnafu)?,
+                    "EXPLAIN VERBOSE" => LogicalPlanBuilder::from(plan)
+                        .explain(true, false)
                         .unwrap()
                         .build()
                         .context(DataFusionPlanningSnafu)?,
@@ -543,14 +566,14 @@ impl PromPlanner {
     }
 
     /// Extract metric name from `__name__` matcher and set it into [PromPlannerContext].
-    /// Returns a new [Matchers] that doesn't contains metric name matcher.
+    /// Returns a new [Matchers] that doesn't contain metric name matcher.
     ///
-    /// Each call to this function means new selector is started. Thus the context will be reset
+    /// Each call to this function means new selector is started. Thus, the context will be reset
     /// at first.
     ///
     /// Name rule:
-    /// - if `name` is some, then the matchers MUST NOT contains `__name__` matcher.
-    /// - if `name` is none, then the matchers MAY contains NONE OR MULTIPLE `__name__` matchers.
+    /// - if `name` is some, then the matchers MUST NOT contain `__name__` matcher.
+    /// - if `name` is none, then the matchers MAY contain NONE OR MULTIPLE `__name__` matchers.
     fn preprocess_label_matchers(
         &mut self,
         label_matchers: &Matchers,
@@ -572,6 +595,7 @@ impl PromPlanner {
                     .context(NoMetricMatcherSnafu)?,
             );
         }
+
         self.ctx.table_name = metric_name;
 
         let mut matchers = HashSet::new();
@@ -582,6 +606,15 @@ impl PromPlanner {
                     .field_column_matcher
                     .get_or_insert_default()
                     .push(matcher.clone());
+            } else if matcher.name == SCHEMA_COLUMN_MATCHER {
+                ensure!(
+                    matcher.op == MatchOp::Equal,
+                    UnsupportedMatcherOpSnafu {
+                        matcher: matcher.name.to_string(),
+                        matcher_op: matcher.op.to_string(),
+                    }
+                );
+                self.ctx.schema_name = Some(matcher.value.clone());
             } else if matcher.name != METRIC_NAME {
                 let _ = matchers.insert(matcher.clone());
             }
@@ -596,8 +629,6 @@ impl PromPlanner {
         label_matchers: Matchers,
         is_range_selector: bool,
     ) -> Result<LogicalPlan> {
-        let table_name = self.ctx.table_name.clone().unwrap();
-
         // make filter exprs
         let offset_duration = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
@@ -620,8 +651,9 @@ impl PromPlanner {
         )));
 
         // make table scan with filter exprs
+        let table_ref = self.table_ref()?;
         let mut table_scan = self
-            .create_table_scan_plan(&table_name, scan_filters.clone())
+            .create_table_scan_plan(table_ref.clone(), scan_filters.clone())
             .await?;
 
         // make a projection plan if there is any `__field__` matcher
@@ -699,15 +731,8 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        // make filter and sort plan
-        let mut plan_builder = LogicalPlanBuilder::from(table_scan);
-        let accurate_filters = self.matchers_to_expr(label_matchers)?;
-        if !accurate_filters.is_empty() {
-            plan_builder = plan_builder
-                .filter(utils::conjunction(accurate_filters).unwrap())
-                .context(DataFusionPlanningSnafu)?;
-        }
-        let sort_plan = plan_builder
+        // make sort plan
+        let sort_plan = LogicalPlanBuilder::from(table_scan)
             .sort(self.create_tag_and_time_index_column_sort_exprs()?)
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -724,7 +749,9 @@ impl PromPlanner {
             self.ctx
                 .time_index_column
                 .clone()
-                .with_context(|| TimeIndexNotFoundSnafu { table: table_name })?,
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: table_ref.to_quoted_string(),
+                })?,
             is_range_selector,
             divide_plan,
         );
@@ -832,18 +859,41 @@ impl PromPlanner {
         Ok(exprs)
     }
 
+    fn table_ref(&self) -> Result<OwnedTableReference> {
+        let table_name = self
+            .ctx
+            .table_name
+            .clone()
+            .context(TableNameNotFoundSnafu)?;
+
+        // set schema name if `__schema__` is given
+        let table_ref = if let Some(schema_name) = &self.ctx.schema_name {
+            TableReference::partial(schema_name, &table_name)
+        } else {
+            TableReference::bare(&table_name)
+        };
+
+        Ok(table_ref.to_owned_reference())
+    }
+
+    /// Create a table scan plan and a filter plan with given filter.
+    ///
+    /// # Panic
+    /// If the filter is empty
     async fn create_table_scan_plan(
         &mut self,
-        table_name: &str,
+        table_ref: OwnedTableReference,
         filter: Vec<DfExpr>,
     ) -> Result<LogicalPlan> {
-        let table_ref = OwnedTableReference::bare(table_name.to_string());
         let provider = self
             .table_provider
             .resolve_table(table_ref.clone())
             .await
             .context(CatalogSnafu)?;
-        let result = LogicalPlanBuilder::scan_with_filters(table_ref, provider, None, filter)
+        // Safety: `scan_filters` is not empty.
+        let result = LogicalPlanBuilder::scan(table_ref, provider, None)
+            .context(DataFusionPlanningSnafu)?
+            .filter(conjunction(filter).unwrap())
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
@@ -852,14 +902,10 @@ impl PromPlanner {
 
     /// Setup [PromPlannerContext]'s state fields.
     async fn setup_context(&mut self) -> Result<()> {
-        let table_name = self
-            .ctx
-            .table_name
-            .clone()
-            .context(TableNameNotFoundSnafu)?;
+        let table_ref = self.table_ref()?;
         let table = self
             .table_provider
-            .resolve_table(TableReference::bare(&table_name))
+            .resolve_table(table_ref.clone())
             .await
             .context(CatalogSnafu)?
             .as_any()
@@ -875,7 +921,9 @@ impl PromPlanner {
         let time_index = table
             .schema()
             .timestamp_column()
-            .with_context(|| TimeIndexNotFoundSnafu { table: table_name })?
+            .with_context(|| TimeIndexNotFoundSnafu {
+                table: table_ref.to_quoted_string(),
+            })?
             .name
             .clone();
         self.ctx.time_index_column = Some(time_index);
@@ -1211,7 +1259,7 @@ impl PromPlanner {
         }
 
         utils::conjunction(exprs).context(ValueNotFoundSnafu {
-            table: self.ctx.table_name.clone().unwrap(),
+            table: self.table_ref()?.to_quoted_string(),
         })
     }
 
@@ -1341,7 +1389,7 @@ impl PromPlanner {
 
         // reuse `SPECIAL_TIME_FUNCTION` as name of time index column
         self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
-        self.ctx.table_name = Some(String::new());
+        self.ctx.reset_table_name_and_schema();
         self.ctx.tag_columns = vec![];
         self.ctx.field_columns = vec![GREPTIME_VALUE.to_string()];
         Ok(LogicalPlan::Extension(Extension {
@@ -1883,7 +1931,7 @@ impl PromPlanner {
             .chain(self.ctx.time_index_column.iter())
             .map(|col| {
                 Ok(DfExpr::Column(Column::new(
-                    self.ctx.table_name.clone(),
+                    self.ctx.table_name.clone().map(TableReference::bare),
                     col,
                 )))
             });
@@ -2001,57 +2049,61 @@ mod test {
     use super::*;
 
     async fn build_test_table_provider(
-        table_name: String,
+        table_name_tuples: &[(String, String)],
         num_tag: usize,
         num_field: usize,
     ) -> DfTableSourceProvider {
-        let mut columns = vec![];
-        for i in 0..num_tag {
-            columns.push(ColumnSchema::new(
-                format!("tag_{i}"),
-                ConcreteDataType::string_datatype(),
-                false,
-            ));
-        }
-        columns.push(
-            ColumnSchema::new(
-                "timestamp".to_string(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
-        );
-        for i in 0..num_field {
-            columns.push(ColumnSchema::new(
-                format!("field_{i}"),
-                ConcreteDataType::float64_datatype(),
-                true,
-            ));
-        }
-        let schema = Arc::new(Schema::new(columns));
-        let table_meta = TableMetaBuilder::default()
-            .schema(schema)
-            .primary_key_indices((0..num_tag).collect())
-            .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
-            .next_column_id(1024)
-            .build()
-            .unwrap();
-        let table_info = TableInfoBuilder::default()
-            .name(&table_name)
-            .meta(table_meta)
-            .build()
-            .unwrap();
-        let table = EmptyTable::from_table_info(&table_info);
         let catalog_list = MemoryCatalogManager::with_default_setup();
-        assert!(catalog_list
-            .register_table_sync(RegisterTableRequest {
-                catalog: DEFAULT_CATALOG_NAME.to_string(),
-                schema: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name,
-                table_id: 1024,
-                table,
-            })
-            .is_ok());
+        for (schema_name, table_name) in table_name_tuples {
+            let mut columns = vec![];
+            for i in 0..num_tag {
+                columns.push(ColumnSchema::new(
+                    format!("tag_{i}"),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ));
+            }
+            columns.push(
+                ColumnSchema::new(
+                    "timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            for i in 0..num_field {
+                columns.push(ColumnSchema::new(
+                    format!("field_{i}"),
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ));
+            }
+            let schema = Arc::new(Schema::new(columns));
+            let table_meta = TableMetaBuilder::default()
+                .schema(schema)
+                .primary_key_indices((0..num_tag).collect())
+                .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .name(table_name.to_string())
+                .meta(table_meta)
+                .build()
+                .unwrap();
+            let table = EmptyTable::from_table_info(&table_info);
+
+            assert!(catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: schema_name.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok());
+        }
+
         DfTableSourceProvider::new(catalog_list, false, QueryContext::arc().as_ref())
     }
 
@@ -2083,7 +2135,12 @@ mod test {
             lookback_delta: Duration::from_secs(1),
         };
 
-        let table_provider = build_test_table_provider("some_metric".to_string(), 1, 1).await;
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
             .await
             .unwrap();
@@ -2095,8 +2152,8 @@ mod test {
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n            Filter: some_metric.tag_0 != Utf8(\"bar\") [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n              TableScan: some_metric, unsupported_filters=[tag_0 != Utf8(\"bar\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n            Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         ).replace("TEMPLATE", plan_name);
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -2288,7 +2345,12 @@ mod test {
         };
 
         // test group by
-        let table_provider = build_test_table_provider("some_metric".to_string(), 2, 2).await;
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            2,
+            2,
+        )
+        .await;
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone())
             .await
             .unwrap();
@@ -2299,8 +2361,8 @@ mod test {
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\", \"tag_1\"] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
             \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.tag_1 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
-            \n            Filter: some_metric.tag_0 != Utf8(\"bar\") [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
-            \n              TableScan: some_metric, unsupported_filters=[tag_0 != Utf8(\"bar\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]"
+            \n            Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
+            \n              TableScan: some_metric [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]"
         ).replace("TEMPLATE", plan_name);
         assert_eq!(
             plan.display_indent_schema().to_string(),
@@ -2313,7 +2375,12 @@ mod test {
                 labels: vec![String::from("tag_1")].into_iter().collect(),
             }));
         }
-        let table_provider = build_test_table_provider("some_metric".to_string(), 2, 2).await;
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            2,
+            2,
+        )
+        .await;
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
             .await
             .unwrap();
@@ -2324,8 +2391,8 @@ mod test {
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\", \"tag_1\"] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
             \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.tag_1 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
-            \n            Filter: some_metric.tag_0 != Utf8(\"bar\") [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
-            \n              TableScan: some_metric, unsupported_filters=[tag_0 != Utf8(\"bar\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]"
+            \n            Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
+            \n              TableScan: some_metric [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]"
         ).replace("TEMPLATE", plan_name);
         assert_eq!(plan.display_indent_schema().to_string(), expected_without);
     }
@@ -2433,7 +2500,12 @@ mod test {
             lookback_delta: Duration::from_secs(1),
         };
 
-        let table_provider = build_test_table_provider("some_metric".to_string(), 1, 1).await;
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
             .await
             .unwrap();
@@ -2446,15 +2518,15 @@ mod test {
             \n        PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n            Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n              Filter: some_metric.tag_0 = Utf8(\"foo\") [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n                TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"foo\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n              Filter: some_metric.tag_0 = Utf8(\"foo\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n                TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    SubqueryAlias: rhs [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n            Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n              Filter: some_metric.tag_0 = Utf8(\"bar\") [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n                TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"bar\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n              Filter: some_metric.tag_0 = Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n                TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -2472,7 +2544,18 @@ mod test {
             lookback_delta: Duration::from_secs(1),
         };
 
-        let table_provider = build_test_table_provider("some_metric".to_string(), 1, 1).await;
+        let table_provider = build_test_table_provider(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    "greptime_private".to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            1,
+            1,
+        )
+        .await;
         let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
             .await
             .unwrap();
@@ -2489,8 +2572,8 @@ mod test {
             \n    PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          Filter: some_metric.tag_0 = Utf8(\"bar\") [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n            TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"bar\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          Filter: some_metric.tag_0 = Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -2513,7 +2596,8 @@ mod test {
             \n    PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -2528,7 +2612,8 @@ mod test {
             \n    PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -2543,7 +2628,8 @@ mod test {
             \n    PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -2559,7 +2645,8 @@ mod test {
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n            TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-301000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n            Filter: some_metric.timestamp >= TimestampMillisecond(-301000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -2574,7 +2661,8 @@ mod test {
             \n    PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n          Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -2590,7 +2678,8 @@ mod test {
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n            TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-301000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+            \n            Filter: some_metric.timestamp >= TimestampMillisecond(-301000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -2705,7 +2794,12 @@ mod test {
         for case in cases {
             let prom_expr = parser::parse(case.0).unwrap();
             eval_stmt.expr = prom_expr;
-            let table_provider = build_test_table_provider("some_metric".to_string(), 3, 3).await;
+            let table_provider = build_test_table_provider(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                3,
+                3,
+            )
+            .await;
             let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone())
                 .await
                 .unwrap();
@@ -2724,9 +2818,66 @@ mod test {
         for case in bad_cases {
             let prom_expr = parser::parse(case).unwrap();
             eval_stmt.expr = prom_expr;
-            let table_provider = build_test_table_provider("some_metric".to_string(), 3, 3).await;
+            let table_provider = build_test_table_provider(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                3,
+                3,
+            )
+            .await;
             let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone()).await;
             assert!(plan.is_err(), "case: {:?}", case);
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_schema() {
+        let query = "some_alt_metric{__schema__=\"greptime_private\"}";
+        let expected = String::from(
+            "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n  PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n      Sort: greptime_private.some_alt_metric.tag_0 DESC NULLS LAST, greptime_private.some_alt_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n        Filter: greptime_private.some_alt_metric.timestamp >= TimestampMillisecond(-1000, None) AND greptime_private.some_alt_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n          TableScan: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+        );
+
+        indie_query_plan_compare(query, expected).await;
+
+        let query = "some_alt_metric{__schema__=\"greptime_private\"} / some_metric";
+        let expected = String::from("Projection: some_metric.tag_0, some_metric.timestamp, greptime_private.some_alt_metric.field_0 / some_metric.field_0 AS greptime_private.some_alt_metric.field_0 / some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), greptime_private.some_alt_metric.field_0 / some_metric.field_0:Float64;N]\n  Inner Join: greptime_private.some_alt_metric.tag_0 = some_metric.tag_0, greptime_private.some_alt_metric.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n    SubqueryAlias: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n        PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n            Sort: greptime_private.some_alt_metric.tag_0 DESC NULLS LAST, greptime_private.some_alt_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n              Filter: greptime_private.some_alt_metric.timestamp >= TimestampMillisecond(-1000, None) AND greptime_private.some_alt_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n                TableScan: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n    SubqueryAlias: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n        PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n            Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n              Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n                TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]");
+
+        indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn only_equals_is_supported_for_special_matcher() {
+        let queries = &[
+            "some_alt_metric{__schema__!=\"greptime_private\"}",
+            "some_alt_metric{__schema__=~\"lalala\"}",
+        ];
+
+        for query in queries {
+            let prom_expr = parser::parse(query).unwrap();
+            let eval_stmt = EvalStmt {
+                expr: prom_expr,
+                start: UNIX_EPOCH,
+                end: UNIX_EPOCH
+                    .checked_add(Duration::from_secs(100_000))
+                    .unwrap(),
+                interval: Duration::from_secs(5),
+                lookback_delta: Duration::from_secs(1),
+            };
+
+            let table_provider = build_test_table_provider(
+                &[
+                    (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                    (
+                        "greptime_private".to_string(),
+                        "some_alt_metric".to_string(),
+                    ),
+                ],
+                1,
+                1,
+            )
+            .await;
+
+            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt).await;
+            assert!(plan.is_err(), "query: {:?}", query);
         }
     }
 }

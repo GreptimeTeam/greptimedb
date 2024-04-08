@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info, warn};
-use common_time::util::current_time_millis;
 use common_wal::options::WalOptions;
 use futures::StreamExt;
 use object_store::manager::ObjectStoreManagerRef;
@@ -37,7 +36,8 @@ use crate::error::{
 };
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
-use crate::memtable::MemtableBuilderRef;
+use crate::memtable::time_partition::TimePartitions;
+use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
@@ -46,20 +46,22 @@ use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::{EntryId, Wal};
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
     region_id: RegionId,
     metadata: Option<RegionMetadata>,
-    memtable_builder: MemtableBuilderRef,
+    memtable_builder_provider: MemtableBuilderProvider,
     object_store_manager: ObjectStoreManagerRef,
     region_dir: String,
-    scheduler: SchedulerRef,
+    purge_scheduler: SchedulerRef,
     options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
     intermediate_manager: IntermediateManager,
+    time_provider: Option<TimeProviderRef>,
 }
 
 impl RegionOpener {
@@ -67,22 +69,23 @@ impl RegionOpener {
     pub(crate) fn new(
         region_id: RegionId,
         region_dir: &str,
-        memtable_builder: MemtableBuilderRef,
+        memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
-        scheduler: SchedulerRef,
+        purge_scheduler: SchedulerRef,
         intermediate_manager: IntermediateManager,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
             metadata: None,
-            memtable_builder,
+            memtable_builder_provider,
             object_store_manager,
             region_dir: normalize_dir(region_dir),
-            scheduler,
+            purge_scheduler,
             options: None,
             cache_manager: None,
             skip_wal_replay: false,
             intermediate_manager,
+            time_provider: None,
         }
     }
 
@@ -168,7 +171,19 @@ impl RegionOpener {
         let manifest_manager =
             RegionManifestManager::new(metadata.clone(), region_manifest_options).await?;
 
-        let mutable = self.memtable_builder.build(&metadata);
+        let memtable_builder = self
+            .memtable_builder_provider
+            .builder_for_options(options.memtable.as_ref(), !options.append_mode);
+        // Initial memtable id is 0.
+        let part_duration = options.compaction.time_window();
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            memtable_builder.clone(),
+            0,
+            part_duration,
+        ));
+
+        debug!("Create region {} with options: {:?}", region_id, options);
 
         let version = VersionBuilder::new(metadata, mutable)
             .options(options)
@@ -179,6 +194,9 @@ impl RegionOpener {
             object_store,
             self.intermediate_manager,
         ));
+        let time_provider = self
+            .time_provider
+            .unwrap_or_else(|| Arc::new(StdTimeProvider));
 
         Ok(MitoRegion {
             region_id,
@@ -186,14 +204,16 @@ impl RegionOpener {
             access_layer: access_layer.clone(),
             manifest_manager,
             file_purger: Arc::new(LocalFilePurger::new(
-                self.scheduler,
+                self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
             )),
             wal_options,
-            last_flush_millis: AtomicI64::new(current_time_millis()),
+            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
+            time_provider,
+            memtable_builder,
         })
     }
 
@@ -248,17 +268,31 @@ impl RegionOpener {
 
         let region_id = self.region_id;
         let object_store = self.object_store(&region_options.storage)?.clone();
+
+        debug!("Open region {} with options: {:?}", region_id, self.options);
+
         let access_layer = Arc::new(AccessLayer::new(
             self.region_dir.clone(),
             object_store,
             self.intermediate_manager.clone(),
         ));
         let file_purger = Arc::new(LocalFilePurger::new(
-            self.scheduler.clone(),
+            self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
         ));
-        let mutable = self.memtable_builder.build(&metadata);
+        let memtable_builder = self.memtable_builder_provider.builder_for_options(
+            region_options.memtable.as_ref(),
+            !region_options.append_mode,
+        );
+        // Initial memtable id is 0.
+        let part_duration = region_options.compaction.time_window();
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            memtable_builder.clone(),
+            0,
+            part_duration,
+        ));
         let version = VersionBuilder::new(metadata, mutable)
             .add_files(file_purger.clone(), manifest.files.values().cloned())
             .flushed_entry_id(manifest.flushed_entry_id)
@@ -287,6 +321,10 @@ impl RegionOpener {
         } else {
             info!("Skip the WAL replay for region: {}", region_id);
         }
+        let time_provider = self
+            .time_provider
+            .clone()
+            .unwrap_or_else(|| Arc::new(StdTimeProvider));
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -295,9 +333,11 @@ impl RegionOpener {
             manifest_manager,
             file_purger,
             wal_options,
-            last_flush_millis: AtomicI64::new(current_time_millis()),
+            last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
+            time_provider,
+            memtable_builder,
         };
         Ok(Some(region))
     }
@@ -396,10 +436,9 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     // Last entry id should start from flushed entry id since there might be no
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
-    let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control, wal_options.clone());
-
     let replay_from_entry_id = flushed_entry_id + 1;
     let mut stale_entry_found = false;
+
     let mut wal_stream = wal.scan(region_id, replay_from_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
@@ -415,8 +454,10 @@ pub(crate) async fn replay_memtable<S: LogStore>(
                 }
             );
         }
-
         last_entry_id = last_entry_id.max(entry_id);
+
+        let mut region_write_ctx =
+            RegionWriteCtx::new(region_id, version_control, wal_options.clone());
         for mutation in entry.mutations {
             rows_replayed += mutation
                 .rows
@@ -425,11 +466,11 @@ pub(crate) async fn replay_memtable<S: LogStore>(
                 .unwrap_or(0);
             region_write_ctx.push_mutation(mutation.op_type, mutation.rows, OptionOutputTx::none());
         }
-    }
 
-    // set next_entry_id and write to memtable.
-    region_write_ctx.set_next_entry_id(last_entry_id + 1);
-    region_write_ctx.write_memtable();
+        // set next_entry_id and write to memtable.
+        region_write_ctx.set_next_entry_id(last_entry_id + 1);
+        region_write_ctx.write_memtable();
+    }
 
     if allow_stale_entries && stale_entry_found {
         wal.obsolete(region_id, flushed_entry_id, wal_options)

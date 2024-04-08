@@ -58,6 +58,8 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::error::Error;
     use crate::sst::index::applier::builder::tests::{
@@ -68,8 +70,13 @@ mod tests {
     #[test]
     fn test_collect_between_basic() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let between = Between {
             negated: false,
@@ -102,8 +109,13 @@ mod tests {
     #[test]
     fn test_collect_between_negated() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let between = Between {
             negated: true,
@@ -119,8 +131,13 @@ mod tests {
     #[test]
     fn test_collect_between_field_column() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let between = Between {
             negated: false,
@@ -136,8 +153,13 @@ mod tests {
     #[test]
     fn test_collect_between_type_mismatch() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let between = Between {
             negated: false,
@@ -154,8 +176,13 @@ mod tests {
     #[test]
     fn test_collect_between_nonexistent_column() {
         let metadata = test_region_metadata();
-        let mut builder =
-            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), None, &metadata);
+        let mut builder = SstIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            None,
+            &metadata,
+            HashSet::default(),
+        );
 
         let between = Between {
             negated: false,
