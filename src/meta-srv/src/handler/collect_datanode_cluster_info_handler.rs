@@ -72,7 +72,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             }),
         };
 
-        let key = key.try_into().context(SaveClusterInfoSnafu)?;
+        let key = key.into();
         let value = value.try_into().context(SaveClusterInfoSnafu)?;
         let put_req = PutRequest {
             key,

@@ -157,18 +157,16 @@ impl TryFrom<Vec<u8>> for NodeInfoKey {
     }
 }
 
-impl TryFrom<NodeInfoKey> for Vec<u8> {
-    type Error = Error;
-
-    fn try_from(key: NodeInfoKey) -> Result<Self> {
-        Ok(format!(
+impl From<NodeInfoKey> for Vec<u8> {
+    fn from(key: NodeInfoKey) -> Self {
+        format!(
             "{}-{}-{}-{}",
             CLUSTER_NODE_INFO_PREFIX,
             key.cluster_id,
             i32::from(key.role),
             key.node_id
         )
-        .into_bytes())
+        .into_bytes()
     }
 }
 
@@ -241,7 +239,7 @@ mod tests {
             node_id: 2,
         };
 
-        let key_bytes: Vec<u8> = key.try_into().unwrap();
+        let key_bytes: Vec<u8> = key.into();
         let new_key: NodeInfoKey = key_bytes.try_into().unwrap();
 
         assert_eq!(1, new_key.cluster_id);

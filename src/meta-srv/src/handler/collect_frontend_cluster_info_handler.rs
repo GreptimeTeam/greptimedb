@@ -56,7 +56,7 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             status: NodeStatus::Frontend(FrontendStatus {}),
         };
 
-        let key = key.try_into().context(SaveClusterInfoSnafu)?;
+        let key = key.into();
         let value = value.try_into().context(SaveClusterInfoSnafu)?;
         let put_req = PutRequest {
             key,
