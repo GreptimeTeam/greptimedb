@@ -36,7 +36,7 @@ use super::header::{collect_plan_metrics, GREPTIME_DB_HEADER_METRICS};
 use super::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
 };
-use crate::error::{CollectRecordbatchSnafu, InternalSnafu, Result};
+use crate::error::{CollectRecordbatchSnafu, Result, UnexpectedResultSnafu};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PrometheusJsonResponse {
@@ -183,7 +183,17 @@ impl PrometheusJsonResponse {
                         timestamp_column_index = Some(i);
                     }
                 }
-                ConcreteDataType::Float64(_) => {
+                // Treat all value types as field
+                ConcreteDataType::Float32(_)
+                | ConcreteDataType::Float64(_)
+                | ConcreteDataType::Int8(_)
+                | ConcreteDataType::Int16(_)
+                | ConcreteDataType::Int32(_)
+                | ConcreteDataType::Int64(_)
+                | ConcreteDataType::UInt8(_)
+                | ConcreteDataType::UInt16(_)
+                | ConcreteDataType::UInt32(_)
+                | ConcreteDataType::UInt64(_) => {
                     if first_field_column_index.is_none() {
                         first_field_column_index = Some(i);
                     }
@@ -195,11 +205,11 @@ impl PrometheusJsonResponse {
             }
         }
 
-        let timestamp_column_index = timestamp_column_index.context(InternalSnafu {
-            err_msg: "no timestamp column found".to_string(),
+        let timestamp_column_index = timestamp_column_index.context(UnexpectedResultSnafu {
+            reason: "no timestamp column found".to_string(),
         })?;
-        let first_field_column_index = first_field_column_index.context(InternalSnafu {
-            err_msg: "no value column found".to_string(),
+        let first_field_column_index = first_field_column_index.context(UnexpectedResultSnafu {
+            reason: "no value column found".to_string(),
         })?;
 
         let metric_name = (METRIC_NAME.to_string(), metric_name);
@@ -226,8 +236,11 @@ impl PrometheusJsonResponse {
                 .as_any()
                 .downcast_ref::<TimestampMillisecondVector>()
                 .unwrap();
-            let field_column = batch
+            let casted_field_column = batch
                 .column(first_field_column_index)
+                .cast(&ConcreteDataType::float64_datatype())
+                .unwrap();
+            let field_column = casted_field_column
                 .as_any()
                 .downcast_ref::<Float64Vector>()
                 .unwrap();
