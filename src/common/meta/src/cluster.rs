@@ -14,7 +14,6 @@
 
 use std::str::FromStr;
 
-use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -36,7 +35,8 @@ lazy_static! {
     .unwrap();
 }
 
-#[async_trait]
+/// [ClusterInfo] provides information about the cluster.
+#[async_trait::async_trait]
 pub trait ClusterInfo {
     type Error: ErrorExt;
 
@@ -49,10 +49,14 @@ pub trait ClusterInfo {
     // TODO(jeremy): Other info, like region status, etc.
 }
 
+/// The key of [NodeInfo] in the storage. The format is `__meta_cluster_node_info-{cluster_id}-{role}-{node_id}`.
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct NodeInfoKey {
+    /// The cluster id.
     pub cluster_id: u64,
+    /// The role of the node. It can be [Role::Datanode], [Role::Frontend], or [Role::Metasrv].
     pub role: Role,
+    /// The node id.
     pub node_id: u64,
 }
 
@@ -71,11 +75,14 @@ impl NodeInfoKey {
     }
 }
 
+/// The information of a node in the cluster.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeInfo {
+    /// The peer information. [node_id, address]
     pub peer: Peer,
     /// Last activity time in milliseconds.
     pub last_activity_ts: i64,
+    /// The status of the node. Different roles have different node status.
     pub status: NodeStatus,
 }
 
@@ -93,6 +100,7 @@ pub enum NodeStatus {
     Metasrv(MetasrvStatus),
 }
 
+/// The status of a datanode.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DatanodeStatus {
     /// The read capacity units during this period.
@@ -105,9 +113,11 @@ pub struct DatanodeStatus {
     pub follower_regions: usize,
 }
 
+/// The status of a frontend.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FrontendStatus {}
 
+/// The status of a metasrv.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MetasrvStatus {
     pub is_leader: bool,
