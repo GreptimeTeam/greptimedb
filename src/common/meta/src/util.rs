@@ -17,7 +17,6 @@ use api::v1::meta::ResponseHeader;
 use crate::error::{IllegalServerStateSnafu, Result};
 
 /// Get prefix end key of `key`.
-#[inline]
 pub fn get_prefix_end_key(key: &[u8]) -> Vec<u8> {
     for (i, v) in key.iter().enumerate().rev() {
         if *v < 0xFF {
@@ -31,7 +30,6 @@ pub fn get_prefix_end_key(key: &[u8]) -> Vec<u8> {
     vec![0]
 }
 
-#[inline]
 pub fn check_response_header(header: Option<&ResponseHeader>) -> Result<()> {
     if let Some(header) = header {
         if let Some(error) = &header.error {
@@ -45,7 +43,6 @@ pub fn check_response_header(header: Option<&ResponseHeader>) -> Result<()> {
 }
 
 /// Get next prefix key of `key`.
-#[inline]
 pub fn get_next_prefix_key(key: &[u8]) -> Vec<u8> {
     let mut next = Vec::with_capacity(key.len() + 1);
     next.extend_from_slice(key);
