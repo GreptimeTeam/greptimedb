@@ -91,6 +91,7 @@ impl MaintenanceHandler {
 impl HttpHandler for MaintenanceHandler {
     async fn handle(
         &self,
+        _: http::Method,
         path: &str,
         params: &HashMap<String, String>,
     ) -> crate::Result<Response<String>> {

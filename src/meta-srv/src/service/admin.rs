@@ -115,6 +115,7 @@ pub trait HttpHandler: Send + Sync {
     async fn handle(
         &self,
         path: &str,
+        method: http::Method,
         params: &HashMap<String, String>,
     ) -> crate::Result<http::Response<String>>;
 }
@@ -163,7 +164,8 @@ where
             })
             .unwrap_or_default();
         let path = req.uri().path().to_owned();
-        Box::pin(async move { router.call(&path, query_params).await })
+        let method = req.method().to_owned();
+        Box::pin(async move { router.call(&path, method, query_params).await })
     }
 }
 
@@ -202,6 +204,7 @@ impl Router {
     pub async fn call(
         &self,
         path: &str,
+        method: http::Method,
         params: HashMap<String, String>,
     ) -> Result<http::Response<BoxBody>, Infallible> {
         let handler = match self.handlers.get(path) {
@@ -214,7 +217,7 @@ impl Router {
             }
         };
 
-        let res = match handler.handle(path, &params).await {
+        let res = match handler.handle(path, method, &params).await {
             Ok(res) => res.map(boxed),
             Err(e) => http::Response::builder()
                 .status(http::StatusCode::INTERNAL_SERVER_ERROR)
@@ -250,6 +253,7 @@ mod tests {
         async fn handle(
             &self,
             _: &str,
+            _: http::Method,
             _: &HashMap<String, String>,
         ) -> crate::Result<http::Response<String>> {
             Ok(http::Response::builder()
@@ -265,6 +269,7 @@ mod tests {
         async fn handle(
             &self,
             _: &str,
+            _: http::Method,
             _: &HashMap<String, String>,
         ) -> crate::Result<http::Response<String>> {
             error::EmptyKeySnafu {}.fail()
@@ -300,7 +305,7 @@ mod tests {
         let router = Router::nest("/test_root", router);
 
         let res = router
-            .call("/test_root/test_node", HashMap::default())
+            .call("/test_root/test_node", http::Method::GET, HashMap::default())
             .await
             .unwrap();
 
@@ -312,7 +317,7 @@ mod tests {
         let router = Router::new();
 
         let res = router
-            .call("/test_root/test_node", HashMap::default())
+            .call("/test_root/test_node", http::Method::GET, HashMap::default())
             .await
             .unwrap();
 
@@ -326,7 +331,7 @@ mod tests {
         let router = Router::nest("/test_root", router);
 
         let res = router
-            .call("/test_root/test_node", HashMap::default())
+            .call("/test_root/test_node", http::Method::GET, HashMap::default())
             .await
             .unwrap();
 

@@ -32,6 +32,7 @@ pub struct HeartBeatHandler {
 impl HttpHandler for HeartBeatHandler {
     async fn handle(
         &self,
+        _: http::Method,
         path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
