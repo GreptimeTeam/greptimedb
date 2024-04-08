@@ -19,9 +19,8 @@ use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
-use crate::expr::error::{
-    EvalError, InvalidArgumentSnafu, OptimizeSnafu, UnsupportedTemporalFilterSnafu,
-};
+use crate::adapter::error::{Error, InvalidQuerySnafu, UnsupportedTemporalFilterSnafu};
+use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 
 /// A scalar expression, which can be evaluated to a value.
@@ -106,13 +105,13 @@ impl ScalarExpr {
     /// This method is applicable even when `permutation` is not a
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
-    pub fn permute(&mut self, permutation: &[usize]) -> Result<(), EvalError> {
+    pub fn permute(&mut self, permutation: &[usize]) -> Result<(), Error> {
         // check first so that we don't end up with a partially permuted expression
         ensure!(
             self.get_all_ref_columns()
                 .into_iter()
                 .all(|i| i < permutation.len()),
-            InvalidArgumentSnafu {
+            InvalidQuerySnafu {
                 reason: format!(
                     "permutation {:?} is not a valid permutation for expression {:?}",
                     permutation, self
@@ -134,12 +133,12 @@ impl ScalarExpr {
     /// This method is applicable even when `permutation` is not a
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
-    pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) -> Result<(), EvalError> {
+    pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) -> Result<(), Error> {
         // check first so that we don't end up with a partially permuted expression
         ensure!(
             self.get_all_ref_columns()
                 .is_subset(&permutation.keys().cloned().collect()),
-            InvalidArgumentSnafu {
+            InvalidQuerySnafu {
                 reason: format!(
                     "permutation {:?} is not a valid permutation for expression {:?}",
                     permutation, self
@@ -166,6 +165,18 @@ impl ScalarExpr {
         })
         .unwrap();
         support
+    }
+
+    pub fn is_column(&self) -> bool {
+        matches!(self, ScalarExpr::Column(_))
+    }
+
+    pub fn as_column(&self) -> Option<usize> {
+        if let ScalarExpr::Column(i) = self {
+            Some(*i)
+        } else {
+            None
+        }
     }
 
     pub fn as_literal(&self) -> Option<Value> {
@@ -246,17 +257,17 @@ impl ScalarExpr {
         }
     }
 
-    fn visit_mut_post_nolimit<F>(&mut self, f: &mut F) -> Result<(), EvalError>
+    fn visit_mut_post_nolimit<F>(&mut self, f: &mut F) -> Result<(), Error>
     where
-        F: FnMut(&mut Self) -> Result<(), EvalError>,
+        F: FnMut(&mut Self) -> Result<(), Error>,
     {
         self.visit_mut_children(|e: &mut Self| e.visit_mut_post_nolimit(f))?;
         f(self)
     }
 
-    fn visit_mut_children<F>(&mut self, mut f: F) -> Result<(), EvalError>
+    fn visit_mut_children<F>(&mut self, mut f: F) -> Result<(), Error>
     where
-        F: FnMut(&mut Self) -> Result<(), EvalError>,
+        F: FnMut(&mut Self) -> Result<(), Error>,
     {
         match self {
             ScalarExpr::Column(_)
@@ -302,7 +313,7 @@ impl ScalarExpr {
     ///
     /// false for lower bound, true for upper bound
     /// TODO(discord9): allow simple transform like `now() + a < b` to `now() < b - a`
-    pub fn extract_bound(&self) -> Result<(Option<Self>, Option<Self>), EvalError> {
+    pub fn extract_bound(&self) -> Result<(Option<Self>, Option<Self>), Error> {
         let unsupported_err = |msg: &str| {
             UnsupportedTemporalFilterSnafu {
                 reason: msg.to_string(),
@@ -437,11 +448,11 @@ mod test {
         let mut expr = ScalarExpr::Column(4);
         let permutation = vec![1, 2, 3];
         let res = expr.permute(&permutation);
-        assert!(matches!(res, Err(EvalError::InvalidArgument { .. })));
+        assert!(matches!(res, Err(Error::InvalidQuery { .. })));
 
         let mut expr = ScalarExpr::Column(0);
         let permute_map = BTreeMap::from([(1, 2), (3, 4)]);
         let res = expr.permute_map(&permute_map);
-        assert!(matches!(res, Err(EvalError::InvalidArgument { .. })));
+        assert!(matches!(res, Err(Error::InvalidQuery { .. })));
     }
 }

@@ -59,9 +59,6 @@ pub enum EvalError {
     #[snafu(display("Optimize error: {reason}"))]
     Optimize { reason: String, location: Location },
 
-    #[snafu(display("Unsupported temporal filter: {reason}"))]
-    UnsupportedTemporalFilter { reason: String, location: Location },
-
     #[snafu(display("Overflowed during evaluation"))]
     Overflow { location: Location },
 }

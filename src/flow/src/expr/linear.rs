@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use datatypes::value::Value;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 
+use crate::adapter::error::{Error, InvalidQuerySnafu};
 use crate::expr::error::EvalError;
 use crate::expr::{Id, InvalidArgumentSnafu, LocalId, ScalarExpr};
 use crate::repr::{self, value_to_internal_ts, Diff, Row};
@@ -89,7 +91,7 @@ impl MapFilterProject {
     /// followed by the other.
     /// Note that the arguments are in the opposite order
     /// from how function composition is usually written in mathematics.
-    pub fn compose(before: Self, after: Self) -> Result<Self, EvalError> {
+    pub fn compose(before: Self, after: Self) -> Result<Self, Error> {
         let (m, f, p) = after.into_map_filter_project();
         before.map(m)?.filter(f)?.project(p)
     }
@@ -131,7 +133,7 @@ impl MapFilterProject {
     /// new_project -->|0| col-2
     /// new_project -->|1| col-1
     /// ```
-    pub fn project<I>(mut self, columns: I) -> Result<Self, EvalError>
+    pub fn project<I>(mut self, columns: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = usize> + std::fmt::Debug,
     {
@@ -140,7 +142,7 @@ impl MapFilterProject {
             .map(|c| self.projection.get(c).cloned().ok_or(c))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|c| {
-                InvalidArgumentSnafu {
+                InvalidQuerySnafu {
                     reason: format!(
                         "column index {} out of range, expected at most {} columns",
                         c,
@@ -178,7 +180,7 @@ impl MapFilterProject {
     /// filter -->|0| col-1
     /// filter --> |1| col-2
     /// ```
-    pub fn filter<I>(mut self, predicates: I) -> Result<Self, EvalError>
+    pub fn filter<I>(mut self, predicates: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = ScalarExpr>,
     {
@@ -193,7 +195,7 @@ impl MapFilterProject {
                 let cur_row_len = self.input_arity + self.expressions.len();
                 ensure!(
                     *c < cur_row_len,
-                    InvalidArgumentSnafu {
+                    InvalidQuerySnafu {
                         reason: format!(
                             "column index {} out of range, expected at most {} columns",
                             c, cur_row_len
@@ -250,7 +252,7 @@ impl MapFilterProject {
     /// map -->|1|col-2
     /// map -->|2|col-0
     /// ```
-    pub fn map<I>(mut self, expressions: I) -> Result<Self, EvalError>
+    pub fn map<I>(mut self, expressions: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = ScalarExpr>,
     {
@@ -264,7 +266,7 @@ impl MapFilterProject {
                 let current_row_len = self.input_arity + self.expressions.len();
                 ensure!(
                     c < current_row_len,
-                    InvalidArgumentSnafu {
+                    InvalidQuerySnafu {
                         reason: format!(
                             "column index {} out of range, expected at most {} columns",
                             c, current_row_len
@@ -303,6 +305,9 @@ impl MapFilterProject {
 }
 
 impl MapFilterProject {
+    pub fn into_safe(self) -> SafeMfpPlan {
+        SafeMfpPlan { mfp: self }
+    }
     pub fn optimize(&mut self) {
         // TODO(discord9): optimize
     }
@@ -311,7 +316,7 @@ impl MapFilterProject {
     ///
     /// The main behavior is extract temporal predicates, which cannot be evaluated
     /// using the standard machinery.
-    pub fn into_plan(self) -> Result<MfpPlan, EvalError> {
+    pub fn into_plan(self) -> Result<MfpPlan, Error> {
         MfpPlan::create_from(self)
     }
 
@@ -354,13 +359,13 @@ impl MapFilterProject {
         &mut self,
         mut shuffle: BTreeMap<usize, usize>,
         new_input_arity: usize,
-    ) -> Result<(), EvalError> {
+    ) -> Result<(), Error> {
         // check shuffle is valid
         let demand = self.demand();
         for d in demand {
             ensure!(
                 shuffle.contains_key(&d),
-                InvalidArgumentSnafu {
+                InvalidQuerySnafu {
                     reason: format!(
                         "Demanded column {} is not in shuffle's keys: {:?}",
                         d,
@@ -371,7 +376,7 @@ impl MapFilterProject {
         }
         ensure!(
             shuffle.len() <= new_input_arity,
-            InvalidArgumentSnafu {
+            InvalidQuerySnafu {
                 reason: format!(
                     "shuffle's length {} is greater than new_input_arity {}",
                     shuffle.len(),
@@ -397,7 +402,7 @@ impl MapFilterProject {
         for proj in project.iter_mut() {
             ensure!(
                 shuffle[proj] < new_row_len,
-                InvalidArgumentSnafu {
+                InvalidQuerySnafu {
                     reason: format!(
                         "shuffled column index {} out of range, expected at most {} columns",
                         shuffle[proj], new_row_len
@@ -422,11 +427,7 @@ pub struct SafeMfpPlan {
 
 impl SafeMfpPlan {
     /// See [`MapFilterProject::permute`].
-    pub fn permute(
-        &mut self,
-        map: BTreeMap<usize, usize>,
-        new_arity: usize,
-    ) -> Result<(), EvalError> {
+    pub fn permute(&mut self, map: BTreeMap<usize, usize>, new_arity: usize) -> Result<(), Error> {
         self.mfp.permute(map, new_arity)
     }
 
@@ -544,7 +545,7 @@ pub struct MfpPlan {
 
 impl MfpPlan {
     /// find `now` in `predicates` and put them into lower/upper temporal bounds for temporal filter to use
-    pub fn create_from(mut mfp: MapFilterProject) -> Result<Self, EvalError> {
+    pub fn create_from(mut mfp: MapFilterProject) -> Result<Self, Error> {
         let mut lower_bounds = Vec::new();
         let mut upper_bounds = Vec::new();
 
