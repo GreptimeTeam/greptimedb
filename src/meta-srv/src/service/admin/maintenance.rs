@@ -21,9 +21,7 @@ use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 use tonic::codegen::http::Response;
 
-use crate::error::{
-    InvalidHttpBodySnafu, KvBackendSnafu, MissingRequiredParameterSnafu, ParseBoolSnafu,
-};
+use crate::error::{InvalidHttpBodySnafu, KvBackendSnafu, MissingRequiredParameterSnafu, ParseBoolSnafu, UnsupportedSnafu};
 use crate::service::admin::HttpHandler;
 
 #[derive(Clone)]
@@ -91,14 +89,16 @@ impl MaintenanceHandler {
 impl HttpHandler for MaintenanceHandler {
     async fn handle(
         &self,
-        _: http::Method,
-        path: &str,
+        method: http::Method,
+        _: &str,
         params: &HashMap<String, String>,
     ) -> crate::Result<Response<String>> {
-        if path.ends_with("/set") {
-            self.set_maintenance(params).await
-        } else {
-            self.get_maintenance().await
+        match method {
+            http::Method::GET => self.get_maintenance().await,
+            http::Method::PUT => self.set_maintenance(params).await,
+            _ => UnsupportedSnafu {
+                operation: format!("http method {method}"),
+            }.fail()
         }
     }
 }

@@ -98,13 +98,10 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     };
     let router = router.route("/region-migration", handler);
 
-    let handler = maintenance::MaintenanceHandler {
-        kv_backend: meta_srv.kv_backend().clone(),
-    };
     let router = router
-        .route("/maintenance", handler.clone())
-        .route("/maintenance/set", handler);
-
+        .route("/maintenance", maintenance::MaintenanceHandler {
+            kv_backend: meta_srv.kv_backend().clone(),
+        });
     let router = Router::nest("/admin", router);
 
     Admin::new(router)
