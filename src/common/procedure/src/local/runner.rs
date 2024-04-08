@@ -241,7 +241,7 @@ impl Runner {
     }
 
     async fn prepare_rollback(&mut self, err: Arc<Error>) {
-        if let Err(e) = self.write_procedure_state().await {
+        if let Err(e) = self.write_procedure_state(err.to_string()).await {
             self.meta
                 .set_state(ProcedureState::prepare_rollback(Arc::new(e)));
             return;
@@ -475,7 +475,7 @@ impl Runner {
         Ok(())
     }
 
-    async fn write_procedure_state(&mut self) -> Result<()> {
+    async fn write_procedure_state(&mut self, error: String) -> Result<()> {
         // Persists procedure state
         let type_name = self.procedure.type_name().to_string();
         let data = self.procedure.dump()?;
@@ -484,6 +484,7 @@ impl Runner {
             data,
             parent_id: self.meta.parent_id,
             step: self.step,
+            error: Some(error),
         };
         self.store
             .rollback_procedure(self.meta.id, message)

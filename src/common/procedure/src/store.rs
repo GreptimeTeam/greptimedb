@@ -50,6 +50,9 @@ pub struct ProcedureMessage {
     pub parent_id: Option<ProcedureId>,
     /// Current step.
     pub step: u32,
+    /// Errors raised during the procedure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Procedure storage layer.
@@ -85,6 +88,7 @@ impl ProcedureStore {
             data,
             parent_id,
             step,
+            error: None,
         };
         let key = ParsedKey {
             prefix: &self.proc_path,
@@ -452,6 +456,7 @@ mod tests {
             data: "no parent id".to_string(),
             parent_id: None,
             step: 4,
+            error: None,
         };
 
         let json = serde_json::to_string(&message).unwrap();
@@ -522,6 +527,7 @@ mod tests {
             data: "test store procedure".to_string(),
             parent_id: None,
             step: 0,
+            error: None,
         };
         assert_eq!(expect, *msg);
     }
@@ -571,6 +577,7 @@ mod tests {
             data,
             parent_id: None,
             step: 1,
+            error: None,
         };
         store
             .rollback_procedure(procedure_id, message)

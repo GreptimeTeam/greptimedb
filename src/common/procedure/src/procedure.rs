@@ -371,18 +371,18 @@ impl From<InitProcedureState> for ProcedureState {
     fn from(value: InitProcedureState) -> Self {
         match value {
             InitProcedureState::Running => ProcedureState::Running,
-            InitProcedureState::RollingBack => ProcedureState::RollingBack {
-                error: Arc::new(error::ProcedureRecoveredAfterFailsSnafu {}.build()),
+            InitProcedureState::RollingBack(error) => ProcedureState::RollingBack {
+                error: Arc::new(error::ProcedureRecoveredAfterFailsSnafu { error }.build()),
             },
         }
     }
 }
 
 /// The initial procedure state.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum InitProcedureState {
     Running,
-    RollingBack,
+    RollingBack(String),
 }
 
 // TODO(yingwen): Shutdown

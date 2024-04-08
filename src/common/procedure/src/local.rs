@@ -479,11 +479,13 @@ impl LocalManager {
         Ok(watcher)
     }
 
-    fn submit_recovered_messages(
+    fn submit_recovered_messages<F>(
         &self,
         messages: HashMap<ProcedureId, ProcedureMessage>,
-        init_state: InitProcedureState,
-    ) {
+        init_state_loader: F,
+    ) where
+        F: Fn(&ProcedureMessage) -> InitProcedureState,
+    {
         for (procedure_id, message) in &messages {
             if message.parent_id.is_none() {
                 // This is the root procedure. We only submit the root procedure as it will
@@ -505,7 +507,7 @@ impl LocalManager {
 
                 if let Err(e) = self.submit_root(
                     *procedure_id,
-                    init_state,
+                    init_state_loader(message),
                     loaded_procedure.step,
                     loaded_procedure.procedure,
                 ) {
@@ -523,8 +525,12 @@ impl LocalManager {
         let (messages, rollback_messages, finished_ids) =
             self.procedure_store.load_messages().await?;
         // Submits recovered messages first.
-        self.submit_recovered_messages(rollback_messages, InitProcedureState::RollingBack);
-        self.submit_recovered_messages(messages, InitProcedureState::Running);
+        self.submit_recovered_messages(rollback_messages, |message| {
+            InitProcedureState::RollingBack(
+                message.error.clone().unwrap_or("Unknown error".to_string()),
+            )
+        });
+        self.submit_recovered_messages(messages, |_| InitProcedureState::Running);
 
         if !finished_ids.is_empty() {
             logging::info!(

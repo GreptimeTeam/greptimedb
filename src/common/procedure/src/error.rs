@@ -104,8 +104,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Procedure recovered after the system fails"))]
-    ProcedureRecoveredAfterFails { location: Location },
+    #[snafu(display("Procedure recovered after the system fails: {error}"))]
+    ProcedureRecoveredAfterFails { error: String, location: Location },
 
     #[snafu(display("Procedure retry exceeded max times, procedure_id: {}", procedure_id))]
     RetryTimesExceeded {
