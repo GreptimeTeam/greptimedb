@@ -40,8 +40,9 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
-use crate::handler::collect_datanode_cluster_info_handler::CollectDatanodeClusterInfoHandler;
-use crate::handler::collect_frontend_cluster_info_handler::CollectFrontendClusterInfoHandler;
+use crate::handler::collect_cluster_info_handler::{
+    CollectDatanodeClusterInfoHandler, CollectFrontendClusterInfoHandler,
+};
 use crate::handler::collect_stats_handler::CollectStatsHandler;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;

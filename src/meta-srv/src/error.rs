@@ -660,6 +660,12 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Invalid cluster info format"))]
+    InvalidClusterInfoFormat {
+        location: Location,
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -750,9 +756,10 @@ impl ErrorExt for Error {
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
-            | Error::SaveClusterInfo { .. }
             | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::SaveClusterInfo { source, .. }
+            | Error::InvalidClusterInfoFormat { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. }
