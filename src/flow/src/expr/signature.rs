@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Function signature, useful for type checking and function resolution.
+
 use datatypes::data_type::ConcreteDataType;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;

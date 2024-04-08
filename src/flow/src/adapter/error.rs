@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Error definition for flow module
+
 use std::any::Any;
 
 use common_macro::stack_trace_debug;
@@ -25,6 +27,7 @@ use snafu::{Location, Snafu};
 
 use crate::expr::EvalError;
 
+/// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]

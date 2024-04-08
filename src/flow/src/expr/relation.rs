@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Describes an aggregation function and it's input expression.
+
 pub(crate) use func::AggregateFunc;
 use serde::{Deserialize, Serialize};
 

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! This module contains the definition of functions that can be used in expressions.
+
 use std::collections::HashMap;
 use std::sync::OnceLock;
 

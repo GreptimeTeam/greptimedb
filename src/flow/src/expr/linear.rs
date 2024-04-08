@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! define MapFilterProject which is a compound operator that can be applied row-by-row.
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use datatypes::value::Value;
