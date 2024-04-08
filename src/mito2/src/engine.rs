@@ -127,6 +127,10 @@ impl MitoEngine {
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&["edit_region"])
+            .start_timer();
+
         ensure!(
             is_valid_region_edit(&edit),
             InvalidRequestSnafu {
@@ -215,10 +219,6 @@ impl EngineInner {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<AffectedRows> {
-        let _timer = HANDLE_REQUEST_ELAPSED
-            .with_label_values(&[request.type_name()])
-            .start_timer();
-
         let (request, receiver) = WorkerRequest::try_from_region_request(region_id, request)?;
         self.workers.submit_to_worker(region_id, request).await?;
 
@@ -298,6 +298,10 @@ impl RegionEngine for MitoEngine {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<RegionHandleResult, BoxedError> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&[request.type_name()])
+            .start_timer();
+
         self.inner
             .handle_request(region_id, request)
             .await
@@ -355,6 +359,10 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
     ) -> Result<SetReadonlyResponse, BoxedError> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&["set_readonly_gracefully"])
+            .start_timer();
+
         self.inner
             .set_readonly_gracefully(region_id)
             .await
