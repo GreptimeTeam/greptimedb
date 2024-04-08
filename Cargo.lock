@@ -4059,9 +4059,8 @@ dependencies = [
 
 [[package]]
 name = "hydroflow"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5129724896b4c3cf12f8e5f5af2f1d94b4c5933ae911189747025c6a5ff1346"
+version = "0.6.0"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
 dependencies = [
  "bincode",
  "byteorder",
@@ -4092,9 +4091,8 @@ dependencies = [
 
 [[package]]
 name = "hydroflow_datalog"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41813c88b02f3bfa8f5962e125495aa47c8d382cf5d135b02da40af4342bc6fb"
+version = "0.6.0"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
 dependencies = [
  "hydroflow_datalog_core",
  "proc-macro-crate 1.3.1",
@@ -4105,9 +4103,8 @@ dependencies = [
 
 [[package]]
 name = "hydroflow_datalog_core"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea77a3b2f09bba3d461f9ce0dee28798d3b07dafe77fc46de4675155f5925e53"
+version = "0.6.0"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
 dependencies = [
  "hydroflow_lang",
  "proc-macro-crate 1.3.1",
@@ -4121,9 +4118,8 @@ dependencies = [
 
 [[package]]
 name = "hydroflow_lang"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3191eee8ef49b4a814e4c33a0ce0d7470b733dc6118ea744f7f15168c38803f"
+version = "0.6.0"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
 dependencies = [
  "auto_impl",
  "clap 4.4.11",
@@ -4142,9 +4138,8 @@ dependencies = [
 
 [[package]]
 name = "hydroflow_macro"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9be25d2a927fe4e6afe3e204786e968e983f53f313cc561950ff1cd09ecd92fc"
+version = "0.6.0"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
 dependencies = [
  "hydroflow_lang",
  "itertools 0.10.5",
@@ -4646,9 +4641,8 @@ dependencies = [
 
 [[package]]
 name = "lattices"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f3bff82353a971b61106a49369cfc1bd8398661107eadcb5387fcd21c43cac9"
+version = "0.5.3"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
 dependencies = [
  "cc-traits",
  "sealed",
@@ -7294,9 +7288,8 @@ checksum = "3b7e158a385023d209d6d5f2585c4b468f6dcb3dd5aca9b75c4f1678c05bb375"
 
 [[package]]
 name = "pusherator"
-version = "0.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd486cb5153e0d8fa91d3daebae48917ae299b2569cc79901922f3923dc312ef"
+version = "0.0.5"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
 dependencies = [
  "either",
  "variadics",
@@ -11368,9 +11361,11 @@ checksum = "830b7e5d4d90034032940e4ace0d9a9a057e7a45cd94e6c007832e39edb82f6d"
 
 [[package]]
 name = "variadics"
-version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4500f518837578bf2d62d9c12f47ecb5b5279da689574793b7bace8138b4784"
+version = "0.0.4"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
+dependencies = [
+ "sealed",
+]
 
 [[package]]
 name = "vcpkg"

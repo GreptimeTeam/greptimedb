@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
-// allow unused for now because it should be use later
-mod adapter;
-mod compute;
-mod expr;
-mod plan;
-mod repr;
-mod utils;
+mod render;
+mod state;
+mod types;

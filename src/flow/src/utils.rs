@@ -207,7 +207,7 @@ impl Arrangement {
     }
 
     /// get the last compaction time
-    pub fn get_compaction(&self) -> Option<Timestamp> {
+    pub fn last_compaction_time(&self) -> Option<Timestamp> {
         self.last_compaction_time
     }
 
@@ -253,7 +253,7 @@ impl Arrangement {
     /// advance time to `now` and consolidate all older(`now` included) updates to the first key
     ///
     /// return the maximum expire time(already expire by how much time) of all updates if any keys is already expired
-    pub fn set_compaction(&mut self, now: Timestamp) -> Result<Option<Duration>, EvalError> {
+    pub fn compaction_to(&mut self, now: Timestamp) -> Result<Option<Duration>, EvalError> {
         let mut max_late_by: Option<Duration> = None;
 
         let should_compact = self.split_lte(&now);
@@ -546,7 +546,7 @@ mod test {
                 vec![((Row::new(vec![1.into()]), Row::new(vec![2.into()])), 1, 1)]
             );
             assert_eq!(arr.spine.len(), 3);
-            arr.set_compaction(1).unwrap();
+            arr.compaction_to(1).unwrap();
             assert_eq!(arr.spine.len(), 3);
         }
 
@@ -555,7 +555,7 @@ mod test {
         {
             let mut arr = arr.write();
             assert_eq!(arr.spine.len(), 3);
-            arr.set_compaction(2).unwrap();
+            arr.compaction_to(2).unwrap();
             assert_eq!(arr.spine.len(), 2);
         }
     }
@@ -605,7 +605,7 @@ mod test {
                 ]
             );
             assert_eq!(arr.spine.len(), 3);
-            arr.set_compaction(1).unwrap();
+            arr.compaction_to(1).unwrap();
             assert_eq!(arr.spine.len(), 3);
         }
         {
