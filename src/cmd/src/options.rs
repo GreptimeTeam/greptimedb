@@ -15,12 +15,12 @@
 use clap::ArgMatches;
 use common_config::KvBackendConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use common_wal::config::MetaSrvWalConfig;
+use common_wal::config::MetasrvWalConfig;
 use config::{Config, Environment, File, FileFormat};
 use datanode::config::{DatanodeOptions, ProcedureConfig};
 use frontend::error::{Result as FeResult, TomlFormatSnafu};
 use frontend::frontend::{FrontendOptions, TomlSerializable};
-use meta_srv::metasrv::MetaSrvOptions;
+use meta_srv::metasrv::MetasrvOptions;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -38,7 +38,7 @@ pub struct MixOptions {
     pub frontend: FrontendOptions,
     pub datanode: DatanodeOptions,
     pub logging: LoggingOptions,
-    pub wal_meta: MetaSrvWalConfig,
+    pub wal_meta: MetasrvWalConfig,
 }
 
 impl From<MixOptions> for FrontendOptions {
@@ -56,7 +56,7 @@ impl TomlSerializable for MixOptions {
 pub enum Options {
     Datanode(Box<DatanodeOptions>),
     Frontend(Box<FrontendOptions>),
-    Metasrv(Box<MetaSrvOptions>),
+    Metasrv(Box<MetasrvOptions>),
     Standalone(Box<MixOptions>),
     Cli(Box<LoggingOptions>),
 }

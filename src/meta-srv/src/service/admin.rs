@@ -31,20 +31,20 @@ use tonic::body::BoxBody;
 use tonic::codegen::{empty_body, http, BoxFuture, Service};
 use tonic::transport::NamedService;
 
-use crate::metasrv::MetaSrv;
+use crate::metasrv::Metasrv;
 
-pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
+pub fn make_admin_service(metasrv: Metasrv) -> Admin {
     let router = Router::new().route("/health", health::HealthHandler);
 
     let router = router.route(
         "/node-lease",
         node_lease::NodeLeaseHandler {
-            meta_peer_client: meta_srv.meta_peer_client().clone(),
+            meta_peer_client: metasrv.meta_peer_client().clone(),
         },
     );
 
     let handler = heartbeat::HeartBeatHandler {
-        meta_peer_client: meta_srv.meta_peer_client().clone(),
+        meta_peer_client: metasrv.meta_peer_client().clone(),
     };
     let router = router
         .route("/heartbeat", handler.clone())
@@ -53,26 +53,26 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = router.route(
         "/catalogs",
         meta::CatalogsHandler {
-            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+            table_metadata_manager: metasrv.table_metadata_manager().clone(),
         },
     );
 
     let handler = meta::SchemasHandler {
-        table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+        table_metadata_manager: metasrv.table_metadata_manager().clone(),
     };
     let router = router
         .route("/schemas", handler.clone())
         .route("/schemas/help", handler);
 
     let handler = meta::TablesHandler {
-        table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+        table_metadata_manager: metasrv.table_metadata_manager().clone(),
     };
     let router = router
         .route("/tables", handler.clone())
         .route("/tables/help", handler);
 
     let handler = meta::TableHandler {
-        table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+        table_metadata_manager: metasrv.table_metadata_manager().clone(),
     };
     let router = router
         .route("/table", handler.clone())
@@ -81,27 +81,27 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = router.route(
         "/leader",
         leader::LeaderHandler {
-            election: meta_srv.election().cloned(),
+            election: metasrv.election().cloned(),
         },
     );
 
     let handler = route::RouteHandler {
-        table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+        table_metadata_manager: metasrv.table_metadata_manager().clone(),
     };
     let router = router
         .route("/route", handler.clone())
         .route("/route/help", handler);
 
     let handler = region_migration::SubmitRegionMigrationTaskHandler {
-        region_migration_manager: meta_srv.region_migration_manager().clone(),
-        meta_peer_client: meta_srv.meta_peer_client().clone(),
+        region_migration_manager: metasrv.region_migration_manager().clone(),
+        meta_peer_client: metasrv.meta_peer_client().clone(),
     };
     let router = router.route("/region-migration", handler);
 
     let router = router.route(
         "/maintenance",
         maintenance::MaintenanceHandler {
-            kv_backend: meta_srv.kv_backend().clone(),
+            kv_backend: metasrv.kv_backend().clone(),
         },
     );
     let router = Router::nest("/admin", router);

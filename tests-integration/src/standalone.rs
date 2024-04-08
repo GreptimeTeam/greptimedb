@@ -30,7 +30,7 @@ use common_meta::wal_options_allocator::WalOptionsAllocator;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
-use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
+use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
@@ -51,7 +51,7 @@ pub struct GreptimeDbStandalone {
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
     datanode_wal_config: DatanodeWalConfig,
-    metasrv_wal_config: MetaSrvWalConfig,
+    metasrv_wal_config: MetasrvWalConfig,
     store_providers: Option<Vec<StorageType>>,
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
@@ -65,7 +65,7 @@ impl GreptimeDbStandaloneBuilder {
             plugin: None,
             default_store: None,
             datanode_wal_config: DatanodeWalConfig::default(),
-            metasrv_wal_config: MetaSrvWalConfig::default(),
+            metasrv_wal_config: MetasrvWalConfig::default(),
         }
     }
 
@@ -102,7 +102,7 @@ impl GreptimeDbStandaloneBuilder {
     }
 
     #[must_use]
-    pub fn with_metasrv_wal_config(mut self, metasrv_wal_config: MetaSrvWalConfig) -> Self {
+    pub fn with_metasrv_wal_config(mut self, metasrv_wal_config: MetasrvWalConfig) -> Self {
         self.metasrv_wal_config = metasrv_wal_config;
         self
     }

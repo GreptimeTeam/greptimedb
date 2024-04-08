@@ -26,14 +26,14 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use tower::service_fn;
 
-use crate::metasrv::builder::MetaSrvBuilder;
-use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
+use crate::metasrv::builder::MetasrvBuilder;
+use crate::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 
 #[derive(Clone)]
 pub struct MockInfo {
     pub server_addr: String,
     pub channel_manager: ChannelManager,
-    pub meta_srv: MetaSrv,
+    pub metasrv: Metasrv,
 }
 
 pub async fn mock_with_memstore() -> MockInfo {
@@ -52,7 +52,7 @@ pub async fn mock_with_memstore_and_selector(selector: SelectorRef) -> MockInfo 
 }
 
 pub async fn mock(
-    opts: MetaSrvOptions,
+    opts: MetasrvOptions,
     kv_backend: KvBackendRef,
     selector: Option<SelectorRef>,
     datanode_clients: Option<Arc<DatanodeClients>>,
@@ -62,7 +62,7 @@ pub async fn mock(
 
     table_metadata_manager.init().await.unwrap();
 
-    let builder = MetaSrvBuilder::new().options(opts).kv_backend(kv_backend);
+    let builder = MetasrvBuilder::new().options(opts).kv_backend(kv_backend);
 
     let builder = match selector {
         Some(s) => builder.selector(s),
@@ -74,11 +74,11 @@ pub async fn mock(
         None => builder,
     };
 
-    let meta_srv = builder.build().await.unwrap();
-    meta_srv.try_start().await.unwrap();
+    let metasrv = builder.build().await.unwrap();
+    metasrv.try_start().await.unwrap();
 
     let (client, server) = tokio::io::duplex(1024);
-    let service = meta_srv.clone();
+    let service = metasrv.clone();
     let _handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(HeartbeatServer::new(service.clone()))
@@ -119,6 +119,6 @@ pub async fn mock(
     MockInfo {
         server_addr,
         channel_manager,
-        meta_srv,
+        metasrv,
     }
 }

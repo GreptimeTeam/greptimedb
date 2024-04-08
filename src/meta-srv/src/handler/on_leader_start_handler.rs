@@ -38,7 +38,7 @@ impl HeartbeatHandler for OnLeaderStartHandler {
 
         if election.in_infancy() {
             ctx.is_infancy = true;
-            // TODO(weny): Unifies the multiple leader state between Context and MetaSrv.
+            // TODO(weny): Unifies the multiple leader state between Context and Metasrv.
             // we can't ensure the in-memory kv has already been reset in the outside loop.
             // We still use heartbeat requests to trigger resetting in-memory kv.
             ctx.reset_in_memory();
