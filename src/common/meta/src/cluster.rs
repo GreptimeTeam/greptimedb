@@ -58,12 +58,12 @@ pub struct NodeInfoKey {
 
 impl NodeInfoKey {
     pub fn key_prefix_with_cluster_id(cluster_id: u64) -> String {
-        format!("{}-{}", CLUSTER_NODE_INFO_PREFIX, cluster_id)
+        format!("{}-{}-", CLUSTER_NODE_INFO_PREFIX, cluster_id)
     }
 
     pub fn key_prefix_with_role(cluster_id: u64, role: Role) -> String {
         format!(
-            "{}-{}-{}",
+            "{}-{}-{}-",
             CLUSTER_NODE_INFO_PREFIX,
             cluster_id,
             i32::from(role)
@@ -229,7 +229,7 @@ impl TryFrom<i32> for Role {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use crate::cluster::Role::Datanode;
+    use crate::cluster::Role::{Datanode, Frontend};
     use crate::cluster::{DatanodeStatus, NodeInfo, NodeInfoKey, NodeStatus};
     use crate::peer::Peer;
 
@@ -281,5 +281,14 @@ mod tests {
                 }),
             }
         );
+    }
+
+    #[test]
+    fn test_node_info_key_prefix() {
+        let prefix = NodeInfoKey::key_prefix_with_cluster_id(1);
+        assert_eq!(prefix, "__meta_cluster_node_info-1-");
+
+        let prefix = NodeInfoKey::key_prefix_with_role(2, Frontend);
+        assert_eq!(prefix, "__meta_cluster_node_info-2-1-");
     }
 }
