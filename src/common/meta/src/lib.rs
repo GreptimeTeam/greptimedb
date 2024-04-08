@@ -18,6 +18,7 @@
 #![feature(let_chains)]
 
 pub mod cache_invalidator;
+pub mod cluster;
 pub mod datanode_manager;
 pub mod ddl;
 pub mod ddl_manager;

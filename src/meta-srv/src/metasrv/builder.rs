@@ -40,6 +40,9 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
+use crate::handler::collect_cluster_info_handler::{
+    CollectDatanodeClusterInfoHandler, CollectFrontendClusterInfoHandler,
+};
 use crate::handler::collect_stats_handler::CollectStatsHandler;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
@@ -298,6 +301,8 @@ impl MetaSrvBuilder {
                 group.add_handler(CheckLeaderHandler).await;
                 group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler).await;
+                group.add_handler(CollectDatanodeClusterInfoHandler).await;
+                group.add_handler(CollectFrontendClusterInfoHandler).await;
                 group.add_handler(MailboxHandler).await;
                 group.add_handler(region_lease_handler).await;
                 group.add_handler(FilterInactiveRegionStatsHandler).await;

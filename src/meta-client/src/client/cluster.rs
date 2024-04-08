@@ -14,15 +14,14 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
-use api::v1::meta::procedure_service_client::ProcedureServiceClient;
-use api::v1::meta::{
-    DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureId,
-    ProcedureStateResponse, QueryProcedureRequest, ResponseHeader, Role,
-};
+use api::greptime_proto::v1;
+use api::v1::meta::cluster_client::ClusterClient;
+use api::v1::meta::{ResponseHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
-use common_telemetry::tracing_context::TracingContext;
+use common_meta::cluster;
+use common_meta::cluster::{ClusterInfo, NodeInfo, NodeInfoKey};
+use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse, RangeRequest, RangeResponse};
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
@@ -31,8 +30,10 @@ use tonic::Status;
 
 use crate::client::ask_leader::AskLeader;
 use crate::client::{util, Id};
-use crate::error;
-use crate::error::Result;
+use crate::error::{
+    ConvertMetaResponseSnafu, CreateChannelSnafu, Error, IllegalGrpcClientStateSnafu, Result,
+    RetryTimesExceededSnafu,
+};
 
 #[derive(Clone, Debug)]
 pub struct Client {
@@ -61,33 +62,37 @@ impl Client {
         inner.start(urls).await
     }
 
-    pub async fn submit_ddl_task(&self, req: DdlTaskRequest) -> Result<DdlTaskResponse> {
+    pub async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         let inner = self.inner.read().await;
-        inner.submit_ddl_task(req).await
+        inner.range(req).await
     }
 
-    /// Query the procedure' state by its id
-    pub async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
+    #[allow(dead_code)]
+    pub async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
         let inner = self.inner.read().await;
-        inner.query_procedure_state(pid).await
+        inner.batch_get(req).await
     }
+}
 
-    /// Migrate the region from one datanode to the other datanode:
-    /// - `region_id`:  the migrated region id
-    /// - `from_peer`:  the source datanode id
-    /// - `to_peer`:  the target datanode id
-    /// - `replay_timeout`: replay WAL timeout after migration.
-    pub async fn migrate_region(
-        &self,
-        region_id: u64,
-        from_peer: u64,
-        to_peer: u64,
-        replay_timeout: Duration,
-    ) -> Result<MigrateRegionResponse> {
-        let inner = self.inner.read().await;
-        inner
-            .migrate_region(region_id, from_peer, to_peer, replay_timeout)
-            .await
+#[async_trait::async_trait]
+impl ClusterInfo for Client {
+    type Error = Error;
+
+    async fn list_nodes(&self, role: Option<cluster::Role>) -> Result<Vec<NodeInfo>> {
+        let cluster_id = self.inner.read().await.id.0;
+        let key_prefix = match role {
+            None => NodeInfoKey::key_prefix_with_cluster_id(cluster_id),
+            Some(role) => NodeInfoKey::key_prefix_with_role(cluster_id, role),
+        };
+
+        let req = RangeRequest::new().with_prefix(key_prefix);
+
+        let res = self.range(req).await?;
+
+        res.kvs
+            .into_iter()
+            .map(|kv| NodeInfo::try_from(kv.value).context(ConvertMetaResponseSnafu))
+            .collect::<Result<Vec<_>>>()
     }
 }
 
@@ -108,8 +113,8 @@ impl Inner {
     {
         ensure!(
             !self.is_started(),
-            error::IllegalGrpcClientStateSnafu {
-                err_msg: "DDL client already started",
+            IllegalGrpcClientStateSnafu {
+                err_msg: "Cluster client already started",
             }
         );
 
@@ -129,13 +134,10 @@ impl Inner {
         Ok(())
     }
 
-    fn make_client(&self, addr: impl AsRef<str>) -> Result<ProcedureServiceClient<Channel>> {
-        let channel = self
-            .channel_manager
-            .get(addr)
-            .context(error::CreateChannelSnafu)?;
+    fn make_client(&self, addr: impl AsRef<str>) -> Result<ClusterClient<Channel>> {
+        let channel = self.channel_manager.get(addr).context(CreateChannelSnafu)?;
 
-        Ok(ProcedureServiceClient::new(channel))
+        Ok(ClusterClient::new(channel))
     }
 
     #[inline]
@@ -146,8 +148,8 @@ impl Inner {
     fn ask_leader(&self) -> Result<&AskLeader> {
         ensure!(
             self.is_started(),
-            error::IllegalGrpcClientStateSnafu {
-                err_msg: "DDL client not start"
+            IllegalGrpcClientStateSnafu {
+                err_msg: "Cluster client not start"
             }
         );
 
@@ -157,7 +159,7 @@ impl Inner {
     async fn with_retry<T, F, R, H>(&self, task: &str, body_fn: F, get_header: H) -> Result<T>
     where
         R: Future<Output = std::result::Result<T, Status>>,
-        F: Fn(ProcedureServiceClient<Channel>) -> R,
+        F: Fn(ClusterClient<Channel>) -> R,
         H: Fn(&T) -> &Option<ResponseHeader>,
     {
         let ask_leader = self.ask_leader()?;
@@ -171,7 +173,7 @@ impl Inner {
                         if util::is_not_leader(get_header(&res)) {
                             warn!("Failed to {task} to {leader}, not a leader");
                             let leader = ask_leader.ask_leader().await?;
-                            info!("DDL client updated to new leader addr: {leader}");
+                            info!("Cluster client updated to new leader addr: {leader}");
                             times += 1;
                             continue;
                         }
@@ -182,11 +184,11 @@ impl Inner {
                         if util::is_unreachable(&status) {
                             warn!("Failed to {task} to {leader}, source: {status}");
                             let leader = ask_leader.ask_leader().await?;
-                            info!("Procedure client updated to new leader addr: {leader}");
+                            info!("Cluster client updated to new leader addr: {leader}");
                             times += 1;
                             continue;
                         } else {
-                            return Err(error::Error::from(status));
+                            return Err(Error::from(status));
                         }
                     }
                 }
@@ -195,85 +197,46 @@ impl Inner {
             }
         }
 
-        error::RetryTimesExceededSnafu {
+        RetryTimesExceededSnafu {
             msg: "Failed to {task}",
             times: self.max_retry,
         }
         .fail()
     }
 
-    async fn migrate_region(
-        &self,
-        region_id: u64,
-        from_peer: u64,
-        to_peer: u64,
-        replay_timeout: Duration,
-    ) -> Result<MigrateRegionResponse> {
-        let mut req = MigrateRegionRequest {
-            region_id,
-            from_peer,
-            to_peer,
-            replay_timeout_secs: replay_timeout.as_secs() as u32,
-            ..Default::default()
-        };
-
-        req.set_header(
-            self.id,
-            self.role,
-            TracingContext::from_current_span().to_w3c(),
-        );
-
+    async fn range(&self, request: RangeRequest) -> Result<RangeResponse> {
         self.with_retry(
-            "migrate region",
+            "range",
             move |mut client| {
-                let req = req.clone();
+                let inner_req = tonic::Request::new(v1::meta::RangeRequest::from(request.clone()));
 
-                async move { client.migrate(req).await.map(|res| res.into_inner()) }
+                async move { client.range(inner_req).await.map(|res| res.into_inner()) }
             },
-            |resp: &MigrateRegionResponse| &resp.header,
+            |res| &res.header,
         )
-        .await
+        .await?
+        .try_into()
+        .context(ConvertMetaResponseSnafu)
     }
 
-    async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
-        let mut req = QueryProcedureRequest {
-            pid: Some(ProcedureId { key: pid.into() }),
-            ..Default::default()
-        };
-
-        req.set_header(
-            self.id,
-            self.role,
-            TracingContext::from_current_span().to_w3c(),
-        );
-
+    async fn batch_get(&self, request: BatchGetRequest) -> Result<BatchGetResponse> {
         self.with_retry(
-            "query procedure state",
+            "batch_get",
             move |mut client| {
-                let req = req.clone();
+                let inner_req =
+                    tonic::Request::new(v1::meta::BatchGetRequest::from(request.clone()));
 
-                async move { client.query(req).await.map(|res| res.into_inner()) }
+                async move {
+                    client
+                        .batch_get(inner_req)
+                        .await
+                        .map(|res| res.into_inner())
+                }
             },
-            |resp: &ProcedureStateResponse| &resp.header,
+            |res| &res.header,
         )
-        .await
-    }
-
-    async fn submit_ddl_task(&self, mut req: DdlTaskRequest) -> Result<DdlTaskResponse> {
-        req.set_header(
-            self.id,
-            self.role,
-            TracingContext::from_current_span().to_w3c(),
-        );
-
-        self.with_retry(
-            "submit ddl task",
-            move |mut client| {
-                let req = req.clone();
-                async move { client.ddl(req).await.map(|res| res.into_inner()) }
-            },
-            |resp: &DdlTaskResponse| &resp.header,
-        )
-        .await
+        .await?
+        .try_into()
+        .context(ConvertMetaResponseSnafu)
     }
 }

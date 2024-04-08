@@ -105,6 +105,21 @@ impl KvBackend for MetaPeerClient {
         .fail()
     }
 
+    // MetaPeerClient does not support mutable methods listed below.
+    async fn put(&self, _req: PutRequest) -> Result<PutResponse> {
+        error::UnsupportedSnafu {
+            operation: "put".to_string(),
+        }
+        .fail()
+    }
+
+    async fn batch_put(&self, _req: BatchPutRequest) -> Result<BatchPutResponse> {
+        error::UnsupportedSnafu {
+            operation: "batch put".to_string(),
+        }
+        .fail()
+    }
+
     // Get kv information from the leader's in_mem kv store
     async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
         if self.is_leader() {
@@ -139,21 +154,6 @@ impl KvBackend for MetaPeerClient {
         .fail()
     }
 
-    // MetaPeerClient does not support mutable methods listed below.
-    async fn put(&self, _req: PutRequest) -> Result<PutResponse> {
-        error::UnsupportedSnafu {
-            operation: "put".to_string(),
-        }
-        .fail()
-    }
-
-    async fn batch_put(&self, _req: BatchPutRequest) -> Result<BatchPutResponse> {
-        error::UnsupportedSnafu {
-            operation: "batch put".to_string(),
-        }
-        .fail()
-    }
-
     async fn compare_and_put(&self, _req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
         error::UnsupportedSnafu {
             operation: "compare and put".to_string(),
@@ -175,13 +175,6 @@ impl KvBackend for MetaPeerClient {
         .fail()
     }
 
-    async fn delete(&self, _key: &[u8], _prev_kv: bool) -> Result<Option<KeyValue>> {
-        error::UnsupportedSnafu {
-            operation: "delete".to_string(),
-        }
-        .fail()
-    }
-
     async fn put_conditionally(
         &self,
         _key: Vec<u8>,
@@ -190,6 +183,13 @@ impl KvBackend for MetaPeerClient {
     ) -> Result<bool> {
         error::UnsupportedSnafu {
             operation: "put conditionally".to_string(),
+        }
+        .fail()
+    }
+
+    async fn delete(&self, _key: &[u8], _prev_kv: bool) -> Result<Option<KeyValue>> {
+        error::UnsupportedSnafu {
+            operation: "delete".to_string(),
         }
         .fail()
     }

@@ -144,12 +144,14 @@ impl Instance {
         let channel_manager = ChannelManager::with_config(channel_config);
         let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
 
-        let cluster_id = 0; // TODO(jeremy): read from config
-        let mut meta_client = MetaClientBuilder::new(cluster_id, 0, Role::Frontend)
+        let cluster_id = 0; // It is currently a reserved field and has not been enabled.
+        let member_id = 0; // Frontend does not need a member id.
+        let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Frontend)
             .enable_router()
             .enable_store()
             .enable_heartbeat()
             .enable_procedure()
+            .enable_access_cluster_info()
             .channel_manager(channel_manager)
             .ddl_channel_manager(ddl_channel_manager)
             .build();
