@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `Id` is used to identify a dataflow component in plan like `Plan::Get{id: Id}`, this could be a source of data of a arrangement.
+//! `Id` is used to identify a dataflow component in plan like `Plan::Get{id: Id}`, this could be a source of data for an arrangement.
 
 use serde::{Deserialize, Serialize};
 

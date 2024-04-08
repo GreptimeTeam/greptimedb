@@ -156,7 +156,9 @@ static SPECIALIZATION: OnceLock<HashMap<(GenericFn, ConcreteDataType), Aggregate
     OnceLock::new();
 
 impl AggregateFunc {
-    /// Create a `AggregateFunc`` from a string of the function name and given argument type(optional)
+    /// Create a `AggregateFunc` from a string of the function name and given argument type(optional)
+    /// given an None type will be treated as null type,
+    /// which in turn for AggregateFunc like `Count` will be treated as any type
     pub fn from_str_and_type(
         name: &str,
         arg_type: Option<ConcreteDataType>,
