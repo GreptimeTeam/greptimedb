@@ -14,8 +14,6 @@
 
 //! Datanode configurations
 
-use std::time::Duration;
-
 use common_base::readable_size::ReadableSize;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
