@@ -73,6 +73,7 @@ mod test {
     async fn test_handle_ddl_request(instance: &Instance) {
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
+                catalog_name: "greptime".to_string(),
                 database_name: "database_created_through_grpc".to_string(),
                 create_if_not_exists: true,
                 options: Default::default(),

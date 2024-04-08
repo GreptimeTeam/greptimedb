@@ -26,6 +26,7 @@ use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
+use crate::ddl::create_database::CreateDatabaseProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
@@ -45,12 +46,12 @@ use crate::key::table_route::TableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::DdlTask::{
-    AlterLogicalTables, AlterTable, CreateLogicalTables, CreateTable, DropDatabase,
+    AlterLogicalTables, AlterTable, CreateDatabase, CreateLogicalTables, CreateTable, DropDatabase,
     DropLogicalTables, DropTable, TruncateTable,
 };
 use crate::rpc::ddl::{
-    AlterTableTask, CreateTableTask, DropDatabaseTask, DropTableTask, SubmitDdlTaskRequest,
-    SubmitDdlTaskResponse, TruncateTableTask,
+    AlterTableTask, CreateDatabaseTask, CreateTableTask, DropDatabaseTask, DropTableTask,
+    SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -167,6 +168,15 @@ impl DdlManager {
                     Box::new(move |json: &str| {
                         let context = context.clone();
                         TruncateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
+                CreateDatabaseProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        CreateDatabaseProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                     })
                 },
             ),
@@ -288,6 +298,26 @@ impl DdlManager {
             context,
         );
 
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    /// Submits and executes a create database task.
+    pub async fn submit_create_database(
+        &self,
+        _cluster_id: ClusterId,
+        CreateDatabaseTask {
+            catalog,
+            schema,
+            create_if_not_exists,
+            options,
+        }: CreateDatabaseTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure =
+            CreateDatabaseProcedure::new(catalog, schema, create_if_not_exists, options, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
@@ -557,6 +587,27 @@ async fn handle_create_logical_table_tasks(
     })
 }
 
+async fn handle_create_database_task(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    create_database_task: CreateDatabaseTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, _) = ddl_manager
+        .submit_create_database(cluster_id, create_database_task.clone())
+        .await?;
+
+    let procedure_id = id.to_string();
+    info!(
+        "Database {}.{} is created via procedure_id {id:?}",
+        create_database_task.catalog, create_database_task.schema
+    );
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        ..Default::default()
+    })
+}
+
 async fn handle_drop_database_task(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
@@ -651,6 +702,9 @@ impl ProcedureExecutor for DdlManager {
                     handle_alter_logical_table_tasks(self, cluster_id, alter_table_tasks).await
                 }
                 DropLogicalTables(_) => todo!(),
+                CreateDatabase(create_database_task) => {
+                    handle_create_database_task(self, cluster_id, create_database_task).await
+                }
                 DropDatabase(drop_database_task) => {
                     handle_drop_database_task(self, cluster_id, drop_database_task).await
                 }
