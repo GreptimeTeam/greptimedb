@@ -299,7 +299,7 @@ impl RegionEngine for MitoEngine {
         request: RegionRequest,
     ) -> Result<RegionHandleResult, BoxedError> {
         let _timer = HANDLE_REQUEST_ELAPSED
-            .with_label_values(&[request.type_name()])
+            .with_label_values(&[request.request_type()])
             .start_timer();
 
         self.inner
