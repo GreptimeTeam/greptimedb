@@ -66,7 +66,8 @@ Release date: {{ timestamp | date(format="%B %d, %Y") }}
 We would like to thank the following contributors from the GreptimeDB community:
 
 {{ github.contributors | map(attribute="username") | join(sep=", ") }}
-{%- endif %}\
+{%- endif %}
+{% raw %}\n{% endraw %}
 
 {%- macro remote_url() -%}
   https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}
