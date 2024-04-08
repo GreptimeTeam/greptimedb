@@ -133,7 +133,7 @@ pub trait Procedure: Send {
     }
 
     /// Indicates whether it supports rolling back the procedure.
-    fn is_support_rollback(&self) -> bool {
+    fn rollback_supported(&self) -> bool {
         false
     }
 

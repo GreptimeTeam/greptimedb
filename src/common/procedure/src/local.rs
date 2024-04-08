@@ -962,7 +962,7 @@ mod tests {
                 Ok(())
             }
 
-            fn is_support_rollback(&self) -> bool {
+            fn rollback_supported(&self) -> bool {
                 true
             }
 

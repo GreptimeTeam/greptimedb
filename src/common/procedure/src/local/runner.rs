@@ -232,7 +232,7 @@ impl Runner {
     }
 
     async fn rollback(&mut self, ctx: &Context, err: Arc<Error>) {
-        if self.procedure.is_support_rollback() {
+        if self.procedure.rollback_supported() {
             if let Err(e) = self.procedure.rollback(ctx).await {
                 self.meta
                     .set_state(ProcedureState::rolling_back(Arc::new(e)));
@@ -248,7 +248,7 @@ impl Runner {
                 .set_state(ProcedureState::prepare_rollback(Arc::new(e)));
             return;
         }
-        if self.procedure.is_support_rollback() {
+        if self.procedure.rollback_supported() {
             self.meta.set_state(ProcedureState::rolling_back(err));
         } else {
             self.meta.set_state(ProcedureState::failed(err));
@@ -629,7 +629,7 @@ mod tests {
             Ok(())
         }
 
-        fn is_support_rollback(&self) -> bool {
+        fn rollback_supported(&self) -> bool {
             self.rollback_fn.is_some()
         }
 
