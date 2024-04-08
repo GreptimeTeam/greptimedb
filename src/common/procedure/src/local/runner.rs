@@ -232,10 +232,12 @@ impl Runner {
     }
 
     async fn rollback(&mut self, ctx: &Context, err: Arc<Error>) {
-        if let Err(e) = self.procedure.rollback(ctx).await {
-            self.meta
-                .set_state(ProcedureState::rolling_back(Arc::new(e)));
-            return;
+        if self.procedure.is_support_rollback() {
+            if let Err(e) = self.procedure.rollback(ctx).await {
+                self.meta
+                    .set_state(ProcedureState::rolling_back(Arc::new(e)));
+                return;
+            }
         }
         self.meta.set_state(ProcedureState::failed(err));
     }
@@ -246,7 +248,11 @@ impl Runner {
                 .set_state(ProcedureState::prepare_rollback(Arc::new(e)));
             return;
         }
-        self.meta.set_state(ProcedureState::rolling_back(err));
+        if self.procedure.is_support_rollback() {
+            self.meta.set_state(ProcedureState::rolling_back(err));
+        } else {
+            self.meta.set_state(ProcedureState::failed(err));
+        }
     }
 
     async fn execute_once(&mut self, ctx: &Context) {
@@ -623,6 +629,10 @@ mod tests {
             Ok(())
         }
 
+        fn is_support_rollback(&self) -> bool {
+            self.rollback_fn.is_some()
+        }
+
         fn dump(&self) -> Result<String> {
             Ok(self.data.clone())
         }
@@ -934,6 +944,42 @@ mod tests {
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
             rollback_fn: None,
+        };
+
+        let dir = create_temp_dir("fail");
+        let meta = fail.new_meta(ROOT_ID);
+        let ctx = context_without_provider(meta.id);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta.clone(), Box::new(fail), procedure_store.clone());
+        runner.manager_ctx.start();
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_prepare_rollback(), "{state:?}");
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_failed(), "{state:?}");
+        check_files(
+            &object_store,
+            &procedure_store,
+            ctx.procedure_id,
+            &["0000000000.rollback"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_rollback_on_error() {
+        let exec_fn =
+            |_| async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }.boxed();
+        let rollback_fn = move |_| async move { Ok(()) }.boxed();
+        let fail = ProcedureAdapter {
+            data: "fail".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            exec_fn,
+            rollback_fn: Some(Box::new(rollback_fn)),
         };
 
         let dir = create_temp_dir("fail");

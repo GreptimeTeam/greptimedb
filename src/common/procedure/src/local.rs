@@ -952,6 +952,14 @@ mod tests {
                 }
             }
 
+            async fn rollback(&mut self, _: &Context) -> Result<()> {
+                Ok(())
+            }
+
+            fn is_support_rollback(&self) -> bool {
+                true
+            }
+
             fn dump(&self) -> Result<String> {
                 Ok(String::new())
             }

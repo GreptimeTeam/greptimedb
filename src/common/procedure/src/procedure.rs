@@ -128,9 +128,13 @@ pub trait Procedure: Send {
     /// Rollback the failed procedure.
     ///
     /// The implementation must be idempotent.
-    async fn rollback(&mut self, ctx: &Context) -> Result<()> {
-        let _ = ctx;
-        Ok(())
+    async fn rollback(&mut self, _: &Context) -> Result<()> {
+        error::RollbackNotSupportedSnafu {}.fail()
+    }
+
+    /// Indices whether support to rollback the procedure.
+    fn is_support_rollback(&self) -> bool {
+        false
     }
 
     /// Dump the state of the procedure to a string.
