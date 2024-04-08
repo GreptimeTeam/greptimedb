@@ -32,8 +32,8 @@ pub struct HeartBeatHandler {
 impl HttpHandler for HeartBeatHandler {
     async fn handle(
         &self,
-        _: http::Method,
         path: &str,
+        _: http::Method,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         if path.ends_with("/help") {
