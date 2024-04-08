@@ -35,6 +35,7 @@ use crate::ddl::DdlContext;
 use crate::error::{DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
+use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::find_leaders;
@@ -245,10 +246,10 @@ pub struct AlterTablesData {
     tasks: Vec<AlterTableTask>,
     /// Table info values before the alter operation.
     /// Corresponding one-to-one with the AlterTableTask in tasks.
-    table_info_values: Vec<TableInfoValue>,
+    table_info_values: Vec<DeserializedValueWithBytes<TableInfoValue>>,
     /// Physical table info
     physical_table_id: TableId,
-    physical_table_info: Option<TableInfoValue>,
+    physical_table_info: Option<DeserializedValueWithBytes<TableInfoValue>>,
     physical_table_route: Option<PhysicalTableRouteValue>,
     physical_columns: Vec<ColumnMetadata>,
 }
