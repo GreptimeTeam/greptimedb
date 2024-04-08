@@ -40,7 +40,7 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer)) = extract_base_info(req, cluster::Role::Datanode) else {
+        let Some((key, peer)) = extract_base_info(req, Role::Frontend) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -71,7 +71,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer)) = extract_base_info(req, cluster::Role::Datanode) else {
+        let Some((key, peer)) = extract_base_info(req, Role::Datanode) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -103,7 +103,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
     }
 }
 
-fn extract_base_info(req: &HeartbeatRequest, role: cluster::Role) -> Option<(NodeInfoKey, Peer)> {
+fn extract_base_info(req: &HeartbeatRequest, role: Role) -> Option<(NodeInfoKey, Peer)> {
     let HeartbeatRequest { header, peer, .. } = req;
     let Some(header) = &header else {
         return None;
@@ -115,7 +115,10 @@ fn extract_base_info(req: &HeartbeatRequest, role: cluster::Role) -> Option<(Nod
     Some((
         NodeInfoKey {
             cluster_id: header.cluster_id,
-            role,
+            role: match role {
+                Role::Datanode => cluster::Role::Datanode,
+                Role::Frontend => cluster::Role::Frontend,
+            },
             node_id: peer.id,
         },
         Peer::from(peer.clone()),
