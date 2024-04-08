@@ -22,7 +22,7 @@ use tokio::time;
 use super::rwlock::OwnedKeyRwLockGuard;
 use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
-use crate::procedure::{InitProcedureState, Output, StringKey};
+use crate::procedure::{Output, StringKey};
 use crate::store::{ProcedureMessage, ProcedureStore};
 use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
 
@@ -335,7 +335,7 @@ impl Runner {
     fn submit_subprocedure(
         &self,
         procedure_id: ProcedureId,
-        init_state: InitProcedureState,
+        procedure_state: ProcedureState,
         mut procedure: BoxedProcedure,
     ) {
         if self.manager_ctx.contains_procedure(procedure_id) {
@@ -357,7 +357,7 @@ impl Runner {
 
         let meta = Arc::new(ProcedureMeta::new(
             procedure_id,
-            init_state,
+            procedure_state,
             Some(self.meta.id),
             procedure.lock_key(),
         ));
@@ -417,7 +417,7 @@ impl Runner {
 
             self.submit_subprocedure(
                 subprocedure.id,
-                InitProcedureState::Running,
+                ProcedureState::Running,
                 subprocedure.procedure,
             );
         }

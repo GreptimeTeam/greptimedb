@@ -132,7 +132,7 @@ pub trait Procedure: Send {
         error::RollbackNotSupportedSnafu {}.fail()
     }
 
-    /// Indices whether support to rollback the procedure.
+    /// Indicates whether it supports rolling back the procedure.
     fn is_support_rollback(&self) -> bool {
         false
     }
@@ -371,22 +371,11 @@ impl ProcedureState {
     }
 }
 
-impl From<InitProcedureState> for ProcedureState {
-    fn from(value: InitProcedureState) -> Self {
-        match value {
-            InitProcedureState::Running => ProcedureState::Running,
-            InitProcedureState::RollingBack(error) => ProcedureState::RollingBack {
-                error: Arc::new(error::ProcedureRecoveredAfterFailsSnafu { error }.build()),
-            },
-        }
-    }
-}
-
 /// The initial procedure state.
 #[derive(Debug, Clone)]
 pub enum InitProcedureState {
     Running,
-    RollingBack(String),
+    RollingBack,
 }
 
 // TODO(yingwen): Shutdown

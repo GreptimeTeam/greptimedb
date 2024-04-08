@@ -31,7 +31,7 @@ use tokio::sync::{Mutex as TokioMutex, Notify};
 
 use self::rwlock::KeyRwLock;
 use crate::error::{
-    DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ManagerNotStartSnafu, Result,
+    self, DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ManagerNotStartSnafu, Result,
     StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
 };
 use crate::local::runner::Runner;
@@ -74,11 +74,11 @@ pub(crate) struct ProcedureMeta {
 impl ProcedureMeta {
     fn new(
         id: ProcedureId,
-        init_state: InitProcedureState,
+        procedure_state: ProcedureState,
         parent_id: Option<ProcedureId>,
         lock_key: LockKey,
     ) -> ProcedureMeta {
-        let (state_sender, state_receiver) = watch::channel(init_state.into());
+        let (state_sender, state_receiver) = watch::channel(procedure_state);
         ProcedureMeta {
             id,
             parent_id,
@@ -429,7 +429,7 @@ impl LocalManager {
     fn submit_root(
         &self,
         procedure_id: ProcedureId,
-        init_state: InitProcedureState,
+        procedure_state: ProcedureState,
         step: u32,
         procedure: BoxedProcedure,
     ) -> Result<Watcher> {
@@ -437,7 +437,7 @@ impl LocalManager {
 
         let meta = Arc::new(ProcedureMeta::new(
             procedure_id,
-            init_state,
+            procedure_state,
             None,
             procedure.lock_key(),
         ));
@@ -479,13 +479,11 @@ impl LocalManager {
         Ok(watcher)
     }
 
-    fn submit_recovered_messages<F>(
+    fn submit_recovered_messages(
         &self,
         messages: HashMap<ProcedureId, ProcedureMessage>,
-        init_state_loader: F,
-    ) where
-        F: Fn(&ProcedureMessage) -> InitProcedureState,
-    {
+        init_state: InitProcedureState,
+    ) {
         for (procedure_id, message) in &messages {
             if message.parent_id.is_none() {
                 // This is the root procedure. We only submit the root procedure as it will
@@ -505,9 +503,21 @@ impl LocalManager {
                     loaded_procedure.step
                 );
 
+                let procedure_state = match init_state {
+                    InitProcedureState::RollingBack => ProcedureState::RollingBack {
+                        error: Arc::new(
+                            error::ProcedureRecoveredAfterFailsSnafu {
+                                error: message.error.clone().unwrap_or("Unknown error".to_string()),
+                            }
+                            .build(),
+                        ),
+                    },
+                    InitProcedureState::Running => ProcedureState::Running,
+                };
+
                 if let Err(e) = self.submit_root(
                     *procedure_id,
-                    init_state_loader(message),
+                    procedure_state,
                     loaded_procedure.step,
                     loaded_procedure.procedure,
                 ) {
@@ -525,12 +535,8 @@ impl LocalManager {
         let (messages, rollback_messages, finished_ids) =
             self.procedure_store.load_messages().await?;
         // Submits recovered messages first.
-        self.submit_recovered_messages(rollback_messages, |message| {
-            InitProcedureState::RollingBack(
-                message.error.clone().unwrap_or("Unknown error".to_string()),
-            )
-        });
-        self.submit_recovered_messages(messages, |_| InitProcedureState::Running);
+        self.submit_recovered_messages(rollback_messages, InitProcedureState::RollingBack);
+        self.submit_recovered_messages(messages, InitProcedureState::Running);
 
         if !finished_ids.is_empty() {
             logging::info!(
@@ -617,7 +623,7 @@ impl ProcedureManager for LocalManager {
 
         self.submit_root(
             procedure.id,
-            InitProcedureState::Running,
+            ProcedureState::Running,
             0,
             procedure.procedure,
         )
@@ -661,7 +667,7 @@ pub(crate) mod test_util {
     pub(crate) fn procedure_meta_for_test() -> ProcedureMeta {
         ProcedureMeta::new(
             ProcedureId::random(),
-            InitProcedureState::Running,
+            ProcedureState::Running,
             None,
             LockKey::default(),
         )
