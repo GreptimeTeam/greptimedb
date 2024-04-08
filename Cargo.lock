@@ -1290,6 +1290,7 @@ dependencies = [
  "serde_json",
  "session",
  "snafu",
+ "sql",
  "store-api",
  "table",
  "tokio",

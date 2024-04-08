@@ -266,6 +266,38 @@ impl ConcreteDataType {
         }
     }
 
+    /// Try to get numeric precision, returns `None` if it's not numeric type
+    pub fn numeric_precision(&self) -> Option<u8> {
+        match self {
+            ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => Some(3),
+            ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => Some(5),
+            ConcreteDataType::Int32(_) | ConcreteDataType::UInt32(_) => Some(10),
+            ConcreteDataType::Int64(_) => Some(19),
+            ConcreteDataType::UInt64(_) => Some(20),
+            ConcreteDataType::Float32(_) => Some(12),
+            ConcreteDataType::Float64(_) => Some(22),
+            ConcreteDataType::Decimal128(decimal_type) => Some(decimal_type.precision()),
+            _ => None,
+        }
+    }
+
+    /// Try to get numeric scale, returns `None` if it's float or not numeric type
+    pub fn numeric_scale(&self) -> Option<i8> {
+        match self {
+            ConcreteDataType::Int8(_)
+            | ConcreteDataType::UInt8(_)
+            | ConcreteDataType::Int16(_)
+            | ConcreteDataType::UInt16(_)
+            | ConcreteDataType::Int32(_)
+            | ConcreteDataType::UInt32(_)
+            | ConcreteDataType::Int64(_)
+            | ConcreteDataType::UInt64(_) => Some(0),
+            ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => None,
+            ConcreteDataType::Decimal128(decimal_type) => Some(decimal_type.scale()),
+            _ => None,
+        }
+    }
+
     /// Try to cast data type as a [`TimeType`].
     pub fn as_time(&self) -> Option<TimeType> {
         match self {
