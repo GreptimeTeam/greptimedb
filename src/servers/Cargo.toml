@@ -51,6 +51,7 @@ futures = "0.3"
 hashbrown = "0.14"
 headers = "0.3"
 hostname = "0.3.1"
+http = "0.2.12"
 http-body = "0.4"
 humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
@@ -109,7 +110,6 @@ tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
-axum-test-helper = "0.3"
 catalog = { workspace = true, features = ["testing"] }
 client.workspace = true
 common-base.workspace = true

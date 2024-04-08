@@ -94,6 +94,9 @@ pub mod greptime_result_v1;
 pub mod influxdb_result_v1;
 pub mod table_result;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod test_helpers;
+
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
 /// Default http body limit (64M).
@@ -824,7 +827,6 @@ mod test {
     use axum::handler::Handler;
     use axum::http::StatusCode;
     use axum::routing::get;
-    use axum_test_helper::TestClient;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
@@ -838,6 +840,7 @@ mod test {
 
     use super::*;
     use crate::error::Error;
+    use crate::http::test_helpers::TestClient;
     use crate::query_handler::grpc::GrpcQueryHandler;
     use crate::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 
