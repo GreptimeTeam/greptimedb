@@ -27,14 +27,17 @@ use crate::expr::{
 use crate::plan::join::JoinPlan;
 use crate::repr::{DiffRow, RelationType};
 
+/// A plan for a dataflow component. But with type to indicate the output type of the relation.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct TypedPlan {
     /// output type of the relation
     pub typ: RelationType,
+    /// The untyped plan.
     pub plan: Plan,
 }
 
 /// TODO(discord9): support `TableFunc`（by define FlatMap that map 1 to n)
+/// Plan describe how to transform data in dataflow
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub enum Plan {
     /// A constant collection of rows.

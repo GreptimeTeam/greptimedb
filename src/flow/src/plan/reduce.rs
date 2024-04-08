@@ -16,9 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::expr::{AggregateExpr, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr};
 
+/// Describe how to extract key-value pair from a `Row`
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct KeyValPlan {
+    /// Extract key from row
     pub key_plan: SafeMfpPlan,
+    /// Extract value from row
     pub val_plan: SafeMfpPlan,
 }
 

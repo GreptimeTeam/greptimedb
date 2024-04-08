@@ -45,6 +45,7 @@ pub enum UnmaterializableFunc {
 }
 
 impl UnmaterializableFunc {
+    /// Return the signature of the function
     pub fn signature(&self) -> Signature {
         match self {
             Self::Now => Signature {
@@ -59,6 +60,8 @@ impl UnmaterializableFunc {
             },
         }
     }
+
+    /// Create a UnmaterializableFunc from a string of the function name
     pub fn from_str(name: &str) -> Result<Self, Error> {
         match name {
             "now" => Ok(Self::Now),
@@ -71,6 +74,8 @@ impl UnmaterializableFunc {
     }
 }
 
+/// UnaryFunc is a function that takes one argument. Also notice this enum doesn't contain function arguments,
+/// because the arguments are stored in the expression. (except `cast` function, which requires a type argument)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum UnaryFunc {
     Not,
@@ -82,6 +87,7 @@ pub enum UnaryFunc {
 }
 
 impl UnaryFunc {
+    /// Return the signature of the function
     pub fn signature(&self) -> Signature {
         match self {
             Self::IsNull => Signature {
@@ -111,6 +117,8 @@ impl UnaryFunc {
             },
         }
     }
+
+    /// Create a UnaryFunc from a string of the function name and given argument type(optional)
     pub fn from_str_and_type(
         name: &str,
         arg_type: Option<ConcreteDataType>,
@@ -136,6 +144,14 @@ impl UnaryFunc {
             .fail(),
         }
     }
+
+    /// Evaluate the function with given values and expression
+    ///
+    /// # Arguments
+    ///
+    /// - `values`: The values to be used in the evaluation
+    ///
+    /// - `expr`: The expression to be evaluated and use as arguement, will extract the value from the `values` and evaluate the expression
     pub fn eval(&self, values: &[Value], expr: &ScalarExpr) -> Result<Value, EvalError> {
         let arg = expr.eval(values)?;
         match self {
@@ -198,6 +214,9 @@ impl UnaryFunc {
     }
 }
 
+/// BinaryFunc is a function that takes two arguments.
+/// Also notice this enum doesn't contain function arguments, since the arguments are stored in the expression.
+///
 /// TODO(discord9): support more binary functions for more types
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash, EnumIter)]
 pub enum BinaryFunc {
@@ -247,6 +266,23 @@ pub enum BinaryFunc {
     ModUInt64,
 }
 
+/// Generate binary function signature based on the function and the input types
+/// The user can provide custom signature for some functions in the form of a regular match arm,
+/// and the rest will be generated according to the provided list of functions like this:
+/// ```ignore
+/// AddInt16=>(int16_datatype,Add),
+/// ```
+/// which expand to:
+/// ```ignore, rust
+/// Self::AddInt16 => Signature {
+///    input: smallvec![
+///       ConcreteDataType::int16_datatype(),
+///      ConcreteDataType::int16_datatype(),
+///    ],
+///    output: ConcreteDataType::int16_datatype(),
+///    generic_fn: GenericFn::Add,
+/// },
+/// ````
 macro_rules! generate_binary_signature {
     ($value:ident, { $($user_arm:tt)* },
     [ $(
@@ -336,6 +372,7 @@ impl BinaryFunc {
         )
     }
 
+    /// Get the specialization of the binary function based on the generic function and the input type
     pub fn specialization(generic: GenericFn, input_type: ConcreteDataType) -> Result<Self, Error> {
         let rule = SPECIALIZATION.get_or_init(|| {
             let mut spec = HashMap::new();
@@ -439,6 +476,15 @@ impl BinaryFunc {
         Ok(spec_fn)
     }
 
+    /// Evaluate the function with given values and expression
+    ///
+    /// # Arguments
+    ///
+    /// - `values`: The values to be used in the evaluation
+    ///
+    /// - `expr1`: The first arg to be evaluated, will extract the value from the `values` and evaluate the expression
+    ///
+    /// - `expr2`: The second arg to be evaluated
     pub fn eval(
         &self,
         values: &[Value],
@@ -521,6 +567,7 @@ impl BinaryFunc {
     }
 }
 
+/// VariadicFunc is a function that takes a variable number of arguments.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub enum VariadicFunc {
     And,
@@ -528,6 +575,7 @@ pub enum VariadicFunc {
 }
 
 impl VariadicFunc {
+    /// Return the signature of the function
     pub fn signature(&self) -> Signature {
         Signature {
             input: smallvec![ConcreteDataType::boolean_datatype()],
@@ -538,6 +586,8 @@ impl VariadicFunc {
             },
         }
     }
+
+    /// Create a VariadicFunc from a string of the function name and given argument types(optional)
     pub fn from_str_and_types(
         name: &str,
         arg_types: &[Option<ConcreteDataType>],
@@ -553,6 +603,8 @@ impl VariadicFunc {
             .fail(),
         }
     }
+
+    /// Evaluate the function with given values and expressions
     pub fn eval(&self, values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
         match self {
             VariadicFunc::And => and(values, exprs),

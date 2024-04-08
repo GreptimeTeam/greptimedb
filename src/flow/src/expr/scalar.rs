@@ -65,6 +65,7 @@ pub enum ScalarExpr {
 }
 
 impl ScalarExpr {
+    /// Call a unary function on this expression.
     pub fn call_unary(self, func: UnaryFunc) -> Self {
         ScalarExpr::CallUnary {
             func,
@@ -72,6 +73,7 @@ impl ScalarExpr {
         }
     }
 
+    /// Call a binary function on this expression and another.
     pub fn call_binary(self, other: Self, func: BinaryFunc) -> Self {
         ScalarExpr::CallBinary {
             func,
@@ -80,6 +82,7 @@ impl ScalarExpr {
         }
     }
 
+    /// Eval this expression with the given values.
     pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
         match self {
             ScalarExpr::Column(index) => Ok(values[*index].clone()),
@@ -169,10 +172,12 @@ impl ScalarExpr {
         support
     }
 
+    /// Return true if the expression is a column reference.
     pub fn is_column(&self) -> bool {
         matches!(self, ScalarExpr::Column(_))
     }
 
+    /// Cast the expression to a column reference if it is one.
     pub fn as_column(&self) -> Option<usize> {
         if let ScalarExpr::Column(i) = self {
             Some(*i)
@@ -181,6 +186,7 @@ impl ScalarExpr {
         }
     }
 
+    /// Cast the expression to a literal if it is one.
     pub fn as_literal(&self) -> Option<Value> {
         if let ScalarExpr::Literal(lit, _column_type) = self {
             Some(lit.clone())
@@ -189,34 +195,42 @@ impl ScalarExpr {
         }
     }
 
+    /// Return true if the expression is a literal.
     pub fn is_literal(&self) -> bool {
         matches!(self, ScalarExpr::Literal(..))
     }
 
+    /// Return true if the expression is a literal true.
     pub fn is_literal_true(&self) -> bool {
         Some(Value::Boolean(true)) == self.as_literal()
     }
 
+    /// Return true if the expression is a literal false.
     pub fn is_literal_false(&self) -> bool {
         Some(Value::Boolean(false)) == self.as_literal()
     }
 
+    /// Return true if the expression is a literal null.
     pub fn is_literal_null(&self) -> bool {
         Some(Value::Null) == self.as_literal()
     }
 
+    /// Build a literal null
     pub fn literal_null() -> Self {
         ScalarExpr::Literal(Value::Null, ConcreteDataType::null_datatype())
     }
 
+    /// Build a literal from value and type
     pub fn literal(res: Value, typ: ConcreteDataType) -> Self {
         ScalarExpr::Literal(res, typ)
     }
 
+    /// Build a literal false
     pub fn literal_false() -> Self {
         ScalarExpr::Literal(Value::Boolean(false), ConcreteDataType::boolean_datatype())
     }
 
+    /// Build a literal true
     pub fn literal_true() -> Self {
         ScalarExpr::Literal(Value::Boolean(true), ConcreteDataType::boolean_datatype())
     }

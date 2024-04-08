@@ -307,9 +307,12 @@ impl MapFilterProject {
 }
 
 impl MapFilterProject {
+    /// Convert the `MapFilterProject` into a safe evaluation plan. Marking it safe to evaluate.
     pub fn into_safe(self) -> SafeMfpPlan {
         SafeMfpPlan { mfp: self }
     }
+
+    /// Optimize the `MapFilterProject` in place.
     pub fn optimize(&mut self) {
         // TODO(discord9): optimize
     }

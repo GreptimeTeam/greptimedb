@@ -18,10 +18,14 @@ use datatypes::data_type::ConcreteDataType;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
+/// Function signature
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash)]
 pub struct Signature {
+    /// the input types, usually not great than two input arg
     pub input: SmallVec<[ConcreteDataType; 2]>,
+    /// Output type
     pub output: ConcreteDataType,
+    /// Generic function
     pub generic_fn: GenericFn,
 }
 

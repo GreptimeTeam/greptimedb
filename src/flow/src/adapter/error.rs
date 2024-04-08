@@ -75,6 +75,7 @@ pub enum Error {
     },
 }
 
+/// Result type for flow module
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {

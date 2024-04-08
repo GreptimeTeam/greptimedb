@@ -90,14 +90,17 @@ pub enum AggregateFunc {
 }
 
 impl AggregateFunc {
+    /// if this function is a `max`
     pub fn is_max(&self) -> bool {
         self.signature().generic_fn == GenericFn::Max
     }
 
+    /// if this function is a `min`
     pub fn is_min(&self) -> bool {
         self.signature().generic_fn == GenericFn::Min
     }
 
+    /// if this function is a `sum`
     pub fn is_sum(&self) -> bool {
         self.signature().generic_fn == GenericFn::Sum
     }
@@ -152,6 +155,7 @@ static SPECIALIZATION: OnceLock<HashMap<(GenericFn, ConcreteDataType), Aggregate
     OnceLock::new();
 
 impl AggregateFunc {
+    /// Create a `AggregateFunc`` from a string of the function name and given argument type(optional)
     pub fn from_str_and_type(
         name: &str,
         arg_type: Option<ConcreteDataType>,

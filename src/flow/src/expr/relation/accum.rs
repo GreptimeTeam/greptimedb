@@ -258,7 +258,6 @@ impl Accumulator for SimpleNumber {
 }
 /// Accumulates float values for sum over floating numbers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-
 pub struct Float {
     /// Accumulates non-special float values, i.e. not NaN, +inf, -inf.
     /// accum will be set to zero if `non_nulls` is zero.
@@ -550,6 +549,7 @@ pub enum Accum {
 }
 
 impl Accum {
+    /// create a new accumlator from given aggregate function
     pub fn new_accum(aggr_fn: &AggregateFunc) -> Result<Self, EvalError> {
         Ok(match aggr_fn {
             AggregateFunc::Any
@@ -592,6 +592,8 @@ impl Accum {
             }
         })
     }
+
+    /// try to convert a vector of value into given aggregate function's accumlator
     pub fn try_into_accum(aggr_fn: &AggregateFunc, state: Vec<Value>) -> Result<Self, EvalError> {
         match aggr_fn {
             AggregateFunc::Any
