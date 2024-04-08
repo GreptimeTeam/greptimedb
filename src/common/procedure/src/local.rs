@@ -506,7 +506,7 @@ impl LocalManager {
                 let procedure_state = match init_state {
                     InitProcedureState::RollingBack => ProcedureState::RollingBack {
                         error: Arc::new(
-                            error::ProcedureRecoveredAfterFailsSnafu {
+                            error::RollbackProcedureRecoveredSnafu {
                                 error: message.error.clone().unwrap_or("Unknown error".to_string()),
                             }
                             .build(),

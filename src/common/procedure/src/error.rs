@@ -104,8 +104,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Procedure recovered after the system fails: {error}"))]
-    ProcedureRecoveredAfterFails { error: String, location: Location },
+    #[snafu(display("Rollback Procedure recovered: {error}"))]
+    RollbackProcedureRecovered { error: String, location: Location },
 
     #[snafu(display("Procedure retry exceeded max times, procedure_id: {}", procedure_id))]
     RetryTimesExceeded {
@@ -180,7 +180,7 @@ impl ErrorExt for Error {
             | Error::RetryLater { .. }
             | Error::WaitWatcher { .. }
             | Error::ManagerNotStart { .. }
-            | Error::ProcedureRecoveredAfterFails { .. }
+            | Error::RollbackProcedureRecovered { .. }
             | Error::RollbackNotSupported { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
