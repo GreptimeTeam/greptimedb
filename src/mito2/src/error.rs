@@ -576,8 +576,8 @@ pub enum Error {
     #[snafu(display("Invalid region options, {}", reason))]
     InvalidRegionOptions { reason: String, location: Location },
 
-    #[snafu(display("checksum mismatch (got: {}, wanted: {})", got, wanted))]
-    ChecksumMismatch { got: u32, wanted: u32 },
+    #[snafu(display("checksum mismatch (actual: {}, expected: {})", actual, expected))]
+    ChecksumMismatch { actual: u32, expected: u32 },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

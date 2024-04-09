@@ -47,7 +47,6 @@ const FALL_BACK_COMPRESS_TYPE: CompressionType = CompressionType::Uncompressed;
 const FETCH_MANIFEST_PARALLELISM: usize = 16;
 
 /// Returns the [CompressionType] according to whether to compress manifest files.
-#[inline]
 pub const fn manifest_compress_type(compress: bool) -> CompressionType {
     if compress {
         DEFAULT_MANIFEST_COMPRESSION_TYPE
@@ -56,17 +55,14 @@ pub const fn manifest_compress_type(compress: bool) -> CompressionType {
     }
 }
 
-#[inline]
 pub fn delta_file(version: ManifestVersion) -> String {
     format!("{version:020}.json")
 }
 
-#[inline]
 pub fn checkpoint_file(version: ManifestVersion) -> String {
     format!("{version:020}.checkpoint")
 }
 
-#[inline]
 pub fn gen_path(path: &str, file: &str, compress_type: CompressionType) -> String {
     if compress_type == CompressionType::Uncompressed {
         format!("{}{}", path, file)
@@ -75,22 +71,20 @@ pub fn gen_path(path: &str, file: &str, compress_type: CompressionType) -> Strin
     }
 }
 
-#[inline]
 fn checkpoint_checksum(data: &[u8]) -> u32 {
     let mut hasher = Hasher::new();
     hasher.update(data);
     hasher.finalize()
 }
 
-#[inline]
 fn verify_checksum(data: &[u8], wanted: Option<u32>) -> Result<()> {
     if let Some(checksum) = wanted {
         let calculated_checksum = checkpoint_checksum(data);
         ensure!(
             checksum == calculated_checksum,
             ChecksumMismatchSnafu {
-                got: calculated_checksum,
-                wanted: checksum,
+                actual: calculated_checksum,
+                expected: checksum,
             }
         );
     }
@@ -100,8 +94,7 @@ fn verify_checksum(data: &[u8], wanted: Option<u32>) -> Result<()> {
 /// Return's the file manifest version from path
 ///
 /// # Panics
-/// Panics if the file path is not a valid delta or checkpoint file.
-#[inline]
+/// If the file path is not a valid delta or checkpoint file.
 pub fn file_version(path: &str) -> ManifestVersion {
     let s = path.split('.').next().unwrap();
     s.parse().unwrap_or_else(|_| panic!("Invalid file: {path}"))
@@ -111,18 +104,15 @@ pub fn file_version(path: &str) -> ManifestVersion {
 ///
 /// for example file
 /// `00000000000000000000.json.gz` -> `CompressionType::GZIP`
-#[inline]
 pub fn file_compress_type(path: &str) -> CompressionType {
     let s = path.rsplit('.').next().unwrap_or("");
     CompressionType::from_str(s).unwrap_or(CompressionType::Uncompressed)
 }
 
-#[inline]
 pub fn is_delta_file(file_name: &str) -> bool {
     DELTA_RE.is_match(file_name)
 }
 
-#[inline]
 pub fn is_checkpoint_file(file_name: &str) -> bool {
     CHECKPOINT_RE.is_match(file_name)
 }
