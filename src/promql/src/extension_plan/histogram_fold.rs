@@ -279,7 +279,8 @@ impl ExecutionPlan for HistogramFoldExec {
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
         // partition on all tag columns, i.e., non-le, non-ts and non-field columns
-        vec![Distribution::HashPartitioned(self.tag_col_exprs())]
+        // vec![Distribution::HashPartitioned(self.tag_col_exprs())]
+        self.input.required_input_distribution()
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {

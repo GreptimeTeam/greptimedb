@@ -28,7 +28,7 @@ use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
 use datatypes::arrow::compute;
@@ -198,8 +198,13 @@ impl ExecutionPlan for InstantManipulateExec {
         self.input.properties()
     }
 
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        self.input.required_input_distribution()
+    }
+
+    // Prevent reordering of input
     fn maintains_input_order(&self) -> Vec<bool> {
-        vec![true; self.children().len()]
+        vec![false; self.children().len()]
     }
 
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
