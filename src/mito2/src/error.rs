@@ -575,6 +575,9 @@ pub enum Error {
 
     #[snafu(display("Invalid region options, {}", reason))]
     InvalidRegionOptions { reason: String, location: Location },
+
+    #[snafu(display("checksum mismatch (actual: {}, expected: {})", actual, expected))]
+    ChecksumMismatch { actual: u32, expected: u32 },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -680,6 +683,7 @@ impl ErrorExt for Error {
             Upload { .. } => StatusCode::StorageUnavailable,
             BiError { .. } => StatusCode::Internal,
             EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
+            ChecksumMismatch { .. } => StatusCode::Unexpected,
         }
     }
 

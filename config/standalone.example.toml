@@ -170,8 +170,6 @@ retry_delay = "500ms"
 data_home = "/tmp/greptimedb/"
 # Storage type.
 type = "File"
-# TTL for all tables. Disabled by default.
-# global_ttl = "7d"
 # Cache configuration for object storage such as 'S3' etc.
 # cache_path = "/path/local_cache"
 # The local file cache capacity in bytes.

@@ -25,6 +25,7 @@ serde.workspace = true
 servers.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
+strum.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 

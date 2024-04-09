@@ -53,7 +53,7 @@ Release date: {{ timestamp | date(format="%B %d, %Y") }}
   ## New Contributors
 {% endif -%}
 {% for contributor in github.contributors | filter(attribute="is_first_time", value=true) %}
-  * @{{ contributor.username }} made their first contribution
+  * [@{{ contributor.username }}](https://github.com/{{ contributor.username }}) made their first contribution
     {%- if contributor.pr_number %} in \
       [#{{ contributor.pr_number }}]({{ self::remote_url() }}/pull/{{ contributor.pr_number }}) \
     {%- endif %}
@@ -65,7 +65,17 @@ Release date: {{ timestamp | date(format="%B %d, %Y") }}
 
 We would like to thank the following contributors from the GreptimeDB community:
 
-{{ github.contributors | map(attribute="username") | join(sep=", ") }}
+{%- set contributors = github.contributors | sort(attribute="username") | map(attribute="username") -%}
+{%- set bots = ['dependabot[bot]'] %}
+
+{% for contributor in contributors %}
+{%- if bots is containing(contributor) -%}{% continue %}{%- endif -%}
+{%- if loop.first -%}
+  [@{{ contributor }}](https://github.com/{{ contributor }})
+{%- else -%}
+  , [@{{ contributor }}](https://github.com/{{ contributor }})
+{%- endif -%}
+{%- endfor %}
 {%- endif %}
 {% raw %}\n{% endraw %}
 

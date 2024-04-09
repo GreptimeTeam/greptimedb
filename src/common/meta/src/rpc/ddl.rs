@@ -474,6 +474,16 @@ pub struct AlterTableTask {
 }
 
 impl AlterTableTask {
+    pub fn validate(&self) -> Result<()> {
+        self.alter_table
+            .kind
+            .as_ref()
+            .context(error::UnexpectedSnafu {
+                err_msg: "'kind' is absent",
+            })?;
+        Ok(())
+    }
+
     pub fn table_ref(&self) -> TableReference {
         TableReference {
             catalog: &self.alter_table.catalog_name,

@@ -206,13 +206,12 @@ impl DdlManager {
     pub async fn submit_alter_table_task(
         &self,
         cluster_id: ClusterId,
+        table_id: TableId,
         alter_table_task: AlterTableTask,
-        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure =
-            AlterTableProcedure::new(cluster_id, alter_table_task, table_info_value, context)?;
+        let procedure = AlterTableProcedure::new(cluster_id, table_id, alter_table_task, context)?;
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -442,12 +441,12 @@ async fn handle_alter_table_task(
         })?
         .table_id();
 
-    let (table_info_value, table_route_value) = ddl_manager
+    let table_route_value = ddl_manager
         .table_metadata_manager()
-        .get_full_table_info(table_id)
-        .await?;
-
-    let table_route_value = table_route_value
+        .table_route_manager()
+        .table_route_storage()
+        .get_raw(table_id)
+        .await?
         .context(TableRouteNotFoundSnafu { table_id })?
         .into_inner();
 
@@ -458,12 +457,8 @@ async fn handle_alter_table_task(
         }
     );
 
-    let table_info_value = table_info_value.with_context(|| TableInfoNotFoundSnafu {
-        table: table_ref.to_string(),
-    })?;
-
     let (id, _) = ddl_manager
-        .submit_alter_table_task(cluster_id, alter_table_task, table_info_value)
+        .submit_alter_table_task(cluster_id, table_id, alter_table_task)
         .await?;
 
     info!("Table: {table_id} is altered via procedure_id {id:?}");
@@ -489,15 +484,13 @@ async fn handle_drop_table_task(
         .await?;
     let (_, table_route_value) = table_metadata_manager
         .table_route_manager()
-        .get_physical_table_route(table_id)
+        .table_route_storage()
+        .get_raw_physical_table_route(table_id)
         .await?;
 
     let table_info_value = table_info_value.with_context(|| TableInfoNotFoundSnafu {
         table: table_ref.to_string(),
     })?;
-
-    let table_route_value =
-        DeserializedValueWithBytes::from_inner(TableRouteValue::Physical(table_route_value));
 
     let (id, _) = ddl_manager
         .submit_drop_table_task(

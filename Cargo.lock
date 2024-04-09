@@ -794,24 +794,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-test-helper"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "298f62fa902c2515c169ab0bfb56c593229f33faa01131215d58e3d4898e3aa9"
-dependencies = [
- "axum",
- "bytes",
- "http",
- "http-body",
- "hyper",
- "reqwest",
- "serde",
- "tokio",
- "tower",
- "tower-service",
-]
-
-[[package]]
 name = "backon"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2303,9 +2285,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.3.2"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b540bd8bc810d3885c6ea91e2018302f68baba2129ab3e88f32389ee9370880d"
+checksum = "b3855a8a784b474f333699ef2bbca9db2c4a1f6d9088a90a2d25b1eb53111eaa"
 dependencies = [
  "cfg-if 1.0.0",
 ]
@@ -3421,6 +3403,7 @@ dependencies = [
  "servers",
  "smallvec",
  "snafu",
+ "strum 0.25.0",
  "tokio",
  "tonic 0.10.2",
 ]
@@ -3794,9 +3777,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.3.24"
+version = "0.3.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb2c4422095b67ee78da96fbb51a4cc413b3b25883c7717ff7ca1ab31022c9c9"
+checksum = "81fe527a889e1532da5c525686d96d4c2e74cdd345badf8dfef9f6b39dd5f5e8"
 dependencies = [
  "bytes",
  "fnv",
@@ -5323,6 +5306,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-wal",
+ "crc32fast",
  "criterion",
  "datafusion",
  "datafusion-common",
@@ -9029,7 +9013,6 @@ dependencies = [
  "auth",
  "axum",
  "axum-macros",
- "axum-test-helper",
  "base64 0.21.5",
  "bytes",
  "catalog",
@@ -9060,6 +9043,7 @@ dependencies = [
  "hashbrown 0.14.3",
  "headers",
  "hostname",
+ "http",
  "http-body",
  "humantime-serde",
  "hyper",
@@ -10104,7 +10088,6 @@ dependencies = [
  "async-trait",
  "auth",
  "axum",
- "axum-test-helper",
  "catalog",
  "chrono",
  "client",
@@ -11443,6 +11426,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
 
 [[package]]
+name = "wasite"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8dad83b4f25e74f184f64c43b150b91efe7647395b42289f38e50566d82855b"
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11597,11 +11586,12 @@ dependencies = [
 
 [[package]]
 name = "whoami"
-version = "1.4.1"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22fc3756b8a9133049b26c7f61ab35416c130e8c09b660f5b3958b446f52cc50"
+checksum = "a44ab49fad634e88f55bf8f9bb3abd2f27d7204172a112c7c9987e01c1c94ea9"
 dependencies = [
- "wasm-bindgen",
+ "redox_syscall 0.4.1",
+ "wasite",
  "web-sys",
 ]
 

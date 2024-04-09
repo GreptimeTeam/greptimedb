@@ -23,8 +23,8 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::create_temp_dir;
-use common_wal::config::kafka::{DatanodeKafkaConfig, MetaSrvKafkaConfig};
-use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
+use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
+use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datatypes::prelude::ScalarVector;
 use datatypes::value::Value;
 use datatypes::vectors::{Helper, UInt64Vector};
@@ -116,7 +116,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -127,7 +127,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         .build()
         .await;
     let mut logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -143,7 +143,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     let mut distribution = find_region_distribution(&table_metadata_manager, table_id).await;
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
     let (from_peer_id, from_regions) = distribution.pop_first().unwrap();
     info!(
         "Selecting from peer: {from_peer_id}, and regions: {:?}",
@@ -243,7 +243,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -271,7 +271,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     let old_distribution = distribution.clone();
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
     let (from_peer_id, from_regions) = distribution.pop_first().unwrap();
     info!(
         "Selecting from peer: {from_peer_id}, and regions: {:?}",
@@ -365,7 +365,7 @@ pub async fn test_region_migration_multiple_regions(
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -376,7 +376,7 @@ pub async fn test_region_migration_multiple_regions(
         .build()
         .await;
     let mut logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -393,7 +393,7 @@ pub async fn test_region_migration_multiple_regions(
     assert_eq!(distribution.len(), 2);
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
     let (peer_1, peer_1_regions) = distribution.pop_first().unwrap();
     let (peer_2, peer_2_regions) = distribution.pop_first().unwrap();
 
@@ -502,7 +502,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -513,7 +513,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
         .build()
         .await;
     let mut logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -530,7 +530,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     assert_eq!(distribution.len(), 1);
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
     let (from_peer_id, mut from_regions) = distribution.pop_first().unwrap();
     let to_peer_id = 1;
     let mut to_regions = Vec::new();
@@ -634,7 +634,7 @@ pub async fn test_region_migration_incorrect_from_peer(
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -645,7 +645,7 @@ pub async fn test_region_migration_incorrect_from_peer(
         .build()
         .await;
     let logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -659,7 +659,7 @@ pub async fn test_region_migration_incorrect_from_peer(
     // The region distribution
     let distribution = find_region_distribution(&table_metadata_manager, table_id).await;
     assert_eq!(distribution.len(), 3);
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
 
     let region_id = RegionId::new(table_id, 1);
 
@@ -709,7 +709,7 @@ pub async fn test_region_migration_incorrect_region_id(
             linger: Duration::from_millis(25),
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             num_topics: 3,
             topic_name_prefix: Uuid::new_v4().to_string(),
@@ -720,7 +720,7 @@ pub async fn test_region_migration_incorrect_region_id(
         .build()
         .await;
     let logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -734,7 +734,7 @@ pub async fn test_region_migration_incorrect_region_id(
     // The region distribution
     let distribution = find_region_distribution(&table_metadata_manager, table_id).await;
     assert_eq!(distribution.len(), 3);
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
 
     let region_id = RegionId::new(table_id, 5);
 

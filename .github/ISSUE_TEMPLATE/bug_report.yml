@@ -39,7 +39,7 @@ body:
         - Query Engine
         - Table Engine
         - Write Protocols
-        - MetaSrv
+        - Metasrv
         - Frontend
         - Datanode
         - Other

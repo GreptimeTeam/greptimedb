@@ -22,7 +22,7 @@ use tokio::sync::broadcast::Receiver;
 
 use crate::error::Result;
 
-pub const ELECTION_KEY: &str = "__meta_srv_election";
+pub const ELECTION_KEY: &str = "__metasrv_election";
 
 #[derive(Debug, Clone)]
 pub enum LeaderChangeMessage {

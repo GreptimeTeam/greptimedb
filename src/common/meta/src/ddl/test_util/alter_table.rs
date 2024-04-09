@@ -28,7 +28,7 @@ pub struct TestAlterTableExpr {
     table_name: String,
     #[builder(setter(into))]
     add_columns: Vec<ColumnDef>,
-    #[builder(setter(into))]
+    #[builder(setter(into, strip_option))]
     new_table_name: Option<String>,
 }
 

@@ -64,3 +64,11 @@ pub struct CreateTableExpr {
     pub options: HashMap<String, Value>,
     pub primary_keys: Vec<usize>,
 }
+
+#[derive(Debug, Builder, Clone, Serialize, Deserialize)]
+pub struct CreateDatabaseExpr {
+    #[builder(setter(into))]
+    pub database_name: Ident,
+    #[builder(default)]
+    pub if_not_exists: bool,
+}

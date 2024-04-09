@@ -21,6 +21,7 @@ use crate::adapter::error::{InvalidQuerySnafu, Result};
 /// a set of column indices that are "keys" for the collection.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct Key {
+    /// indicate whose column form key
     pub column_indices: Vec<usize>,
 }
 
@@ -122,6 +123,7 @@ impl RelationType {
         self
     }
 
+    /// Adds new keys for the relation. Also sorts the key indices.
     pub fn with_keys(mut self, keys: Vec<Vec<usize>>) -> Self {
         for key in keys {
             self = self.with_key(key)

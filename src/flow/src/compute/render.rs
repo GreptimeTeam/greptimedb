@@ -185,7 +185,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
         let arrange_handler_inner = ArrangeHandler::from(arrange);
 
         // This closure capture following variables:
-        let mfp_plan = MfpPlan::create_from(mfp).context(EvalSnafu)?;
+        let mfp_plan = MfpPlan::create_from(mfp)?;
         let now = self.compute_state.current_time_ref();
 
         let err_collector = self.err_collector.clone();
