@@ -30,6 +30,7 @@ use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, Procedu
 
 pub mod alter_logical_tables;
 pub mod alter_table;
+pub mod create_database;
 pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;

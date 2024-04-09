@@ -1,14 +1,12 @@
 show databases;
 
-+-----------------------+
-| Database              |
-+-----------------------+
-| greptime_private      |
-| illegal-database      |
-| information_schema    |
-| public                |
-| upper_case_table_name |
-+-----------------------+
++--------------------+
+| Database           |
++--------------------+
+| greptime_private   |
+| information_schema |
+| public             |
++--------------------+
 
 use information_schema;
 
@@ -47,4 +45,8 @@ show tables;
 | tables                                |
 | triggers                              |
 +---------------------------------------+
+
+use public;
+
+Affected Rows: 0
 

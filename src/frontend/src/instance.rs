@@ -144,12 +144,14 @@ impl Instance {
         let channel_manager = ChannelManager::with_config(channel_config);
         let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
 
-        let cluster_id = 0; // TODO(jeremy): read from config
-        let mut meta_client = MetaClientBuilder::new(cluster_id, 0, Role::Frontend)
+        let cluster_id = 0; // It is currently a reserved field and has not been enabled.
+        let member_id = 0; // Frontend does not need a member id.
+        let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Frontend)
             .enable_router()
             .enable_store()
             .enable_heartbeat()
             .enable_procedure()
+            .enable_access_cluster_info()
             .channel_manager(channel_manager)
             .ddl_channel_manager(ddl_channel_manager)
             .build();
@@ -455,6 +457,17 @@ impl PrometheusHandler for Instance {
     }
 }
 
+/// Validate `stmt.database` permission if it's presented.
+macro_rules! validate_db_permission {
+    ($stmt: expr, $query_ctx: expr) => {
+        if let Some(database) = &$stmt.database {
+            validate_catalog_and_schema($query_ctx.current_catalog(), database, $query_ctx)
+                .map_err(BoxedError::new)
+                .context(SqlExecInterceptedSnafu)?;
+        }
+    };
+}
+
 pub fn check_permission(
     plugins: Plugins,
     stmt: &Statement,
@@ -495,11 +508,13 @@ pub fn check_permission(
             validate_param(drop_stmt.table_name(), query_ctx)?;
         }
         Statement::ShowTables(stmt) => {
-            if let Some(database) = &stmt.database {
-                validate_catalog_and_schema(query_ctx.current_catalog(), database, query_ctx)
-                    .map_err(BoxedError::new)
-                    .context(SqlExecInterceptedSnafu)?;
-            }
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowColumns(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowIndex(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
         }
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;

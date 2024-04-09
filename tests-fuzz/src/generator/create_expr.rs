@@ -25,11 +25,11 @@ use super::Generator;
 use crate::error::{self, Error, Result};
 use crate::fake::{random_capitalize_map, MappedGenerator, WordGenerator};
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random};
-use crate::ir::create_expr::CreateTableExprBuilder;
+use crate::ir::create_expr::{CreateDatabaseExprBuilder, CreateTableExprBuilder};
 use crate::ir::{
     column_options_generator, generate_columns, generate_random_value,
     partible_column_options_generator, ts_column_options_generator, ColumnTypeGenerator,
-    CreateTableExpr, Ident, PartibleColumnTypeGenerator, TsColumnTypeGenerator,
+    CreateDatabaseExpr, CreateTableExpr, Ident, PartibleColumnTypeGenerator, TsColumnTypeGenerator,
 };
 
 #[derive(Builder)]
@@ -200,6 +200,40 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
     }
 }
 
+#[derive(Builder)]
+#[builder(default, pattern = "owned")]
+pub struct CreateDatabaseExprGenerator<R: Rng + 'static> {
+    #[builder(setter(into))]
+    database_name: String,
+    name_generator: Box<dyn Random<Ident, R>>,
+    if_not_exists: bool,
+}
+
+impl<R: Rng + 'static> Default for CreateDatabaseExprGenerator<R> {
+    fn default() -> Self {
+        Self {
+            database_name: String::new(),
+            name_generator: Box::new(MappedGenerator::new(WordGenerator, random_capitalize_map)),
+            if_not_exists: false,
+        }
+    }
+}
+
+impl<R: Rng + 'static> Generator<CreateDatabaseExpr, R> for CreateDatabaseExprGenerator<R> {
+    type Error = Error;
+
+    fn generate(&self, rng: &mut R) -> Result<CreateDatabaseExpr> {
+        let mut builder = CreateDatabaseExprBuilder::default();
+        builder.if_not_exists(self.if_not_exists);
+        if self.database_name.is_empty() {
+            builder.database_name(self.name_generator.gen(rng));
+        } else {
+            builder.database_name(self.database_name.to_string());
+        }
+        builder.build().context(error::BuildCreateDatabaseExprSnafu)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use datatypes::value::Value;
@@ -259,6 +293,35 @@ mod tests {
 
         let serialized = serde_json::to_string(&expr).unwrap();
         let expected = r#"{"table_name":{"value":"tEmporIbUS","quote_style":null},"columns":[{"name":{"value":"IMpEdIT","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey","NotNull"]},{"name":{"value":"natuS","quote_style":null},"column_type":{"Timestamp":{"Nanosecond":null}},"options":["TimeIndex"]},{"name":{"value":"ADIPisCI","quote_style":null},"column_type":{"Int16":{}},"options":[{"DefaultValue":{"Int16":4864}}]},{"name":{"value":"EXpEdita","quote_style":null},"column_type":{"Int64":{}},"options":["PrimaryKey"]},{"name":{"value":"cUlpA","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"MOLeStIAs","quote_style":null},"column_type":{"Boolean":null},"options":["Null"]},{"name":{"value":"cUmquE","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.21569687}}]},{"name":{"value":"toTAm","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"deBitIs","quote_style":null},"column_type":{"Float32":{}},"options":["Null"]},{"name":{"value":"QUi","quote_style":null},"column_type":{"Int64":{}},"options":["Null"]}],"if_not_exists":true,"partition":{"partition_columns":["IMpEdIT"],"partition_bounds":[{"Value":{"String":"򟘲"}},{"Value":{"String":"򴥫"}},"MaxValue"]},"engine":"mito2","options":{},"primary_keys":[0,3]}"#;
+        assert_eq!(expected, serialized);
+    }
+
+    #[test]
+    fn test_create_database_expr_generator() {
+        let mut rng = rand::thread_rng();
+
+        let expr = CreateDatabaseExprGeneratorBuilder::default()
+            .if_not_exists(true)
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+        assert!(expr.if_not_exists);
+    }
+
+    #[test]
+    fn test_create_database_expr_generator_deterministic() {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
+        let expr = CreateDatabaseExprGeneratorBuilder::default()
+            .if_not_exists(true)
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+
+        let serialized = serde_json::to_string(&expr).unwrap();
+        let expected =
+            r#"{"database_name":{"value":"eXPedITa","quote_style":null},"if_not_exists":true}"#;
         assert_eq!(expected, serialized);
     }
 }

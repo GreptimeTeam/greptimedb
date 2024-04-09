@@ -19,7 +19,7 @@ use sql::statements::concrete_data_type_to_sql_data_type;
 
 use crate::error::{Error, Result};
 use crate::ir::create_expr::ColumnOption;
-use crate::ir::{Column, CreateTableExpr};
+use crate::ir::{Column, CreateDatabaseExpr, CreateTableExpr};
 use crate::translator::DslTranslator;
 
 pub struct CreateTableExprTranslator;
@@ -161,13 +161,37 @@ impl CreateTableExprTranslator {
     }
 }
 
+pub struct CreateDatabaseExprTranslator;
+
+impl DslTranslator<CreateDatabaseExpr, String> for CreateDatabaseExprTranslator {
+    type Error = Error;
+
+    fn translate(&self, input: &CreateDatabaseExpr) -> Result<String> {
+        Ok(format!(
+            "CREATE DATABASE{}{};",
+            Self::create_if_not_exists(input),
+            input.database_name
+        ))
+    }
+}
+
+impl CreateDatabaseExprTranslator {
+    fn create_if_not_exists(input: &CreateDatabaseExpr) -> &str {
+        if input.if_not_exists {
+            " IF NOT EXISTS "
+        } else {
+            " "
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use datatypes::value::Value;
     use partition::partition::{PartitionBound, PartitionDef};
 
     use super::CreateTableExprTranslator;
-    use crate::ir::create_expr::CreateTableExprBuilder;
+    use crate::ir::create_expr::{CreateDatabaseExprBuilder, CreateTableExprBuilder};
     use crate::test_utils;
     use crate::translator::DslTranslator;
 
@@ -212,5 +236,20 @@ PARTITION r2 VALUES LESS THAN (MAXVALUE)
 );",
             output
         );
+    }
+
+    #[test]
+    fn test_create_database_expr_translator() {
+        let create_database_expr = CreateDatabaseExprBuilder::default()
+            .database_name("all_metrics")
+            .if_not_exists(true)
+            .build()
+            .unwrap();
+
+        let output = super::CreateDatabaseExprTranslator
+            .translate(&create_database_expr)
+            .unwrap();
+
+        assert_eq!("CREATE DATABASE IF NOT EXISTS all_metrics;", output);
     }
 }

@@ -37,13 +37,16 @@ use crate::error::{
 use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
-const CONSTRAINT_SCHEMA: &str = "constraint_schema";
-const CONSTRAINT_NAME: &str = "constraint_name";
-const TABLE_CATALOG: &str = "table_catalog";
-const TABLE_SCHEMA: &str = "table_schema";
-const TABLE_NAME: &str = "table_name";
-const COLUMN_NAME: &str = "column_name";
-const ORDINAL_POSITION: &str = "ordinal_position";
+pub const CONSTRAINT_SCHEMA: &str = "constraint_schema";
+pub const CONSTRAINT_NAME: &str = "constraint_name";
+// It's always `def` in MySQL
+pub const TABLE_CATALOG: &str = "table_catalog";
+// The real catalog name for this key column.
+pub const REAL_TABLE_CATALOG: &str = "real_table_catalog";
+pub const TABLE_SCHEMA: &str = "table_schema";
+pub const TABLE_NAME: &str = "table_name";
+pub const COLUMN_NAME: &str = "column_name";
+pub const ORDINAL_POSITION: &str = "ordinal_position";
 const INIT_CAPACITY: usize = 42;
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
@@ -76,6 +79,11 @@ impl InformationSchemaKeyColumnUsage {
             ),
             ColumnSchema::new(CONSTRAINT_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_CATALOG, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                REAL_TABLE_CATALOG,
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
             ColumnSchema::new(TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(COLUMN_NAME, ConcreteDataType::string_datatype(), false),
@@ -158,6 +166,7 @@ struct InformationSchemaKeyColumnUsageBuilder {
     constraint_schema: StringVectorBuilder,
     constraint_name: StringVectorBuilder,
     table_catalog: StringVectorBuilder,
+    real_table_catalog: StringVectorBuilder,
     table_schema: StringVectorBuilder,
     table_name: StringVectorBuilder,
     column_name: StringVectorBuilder,
@@ -179,6 +188,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
             constraint_schema: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             constraint_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_catalog: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            real_table_catalog: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_schema: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             column_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -223,6 +233,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
                                 &predicates,
                                 &schema_name,
                                 "TIME INDEX",
+                                &catalog_name,
                                 &schema_name,
                                 &table_name,
                                 &column.name,
@@ -231,6 +242,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
                         }
                         if keys.contains(&idx) {
                             primary_constraints.push((
+                                catalog_name.clone(),
                                 schema_name.clone(),
                                 table_name.clone(),
                                 column.name.clone(),
@@ -244,13 +256,14 @@ impl InformationSchemaKeyColumnUsageBuilder {
             }
         }
 
-        for (i, (schema_name, table_name, column_name)) in
+        for (i, (catalog_name, schema_name, table_name, column_name)) in
             primary_constraints.into_iter().enumerate()
         {
             self.add_key_column_usage(
                 &predicates,
                 &schema_name,
                 "PRIMARY",
+                &catalog_name,
                 &schema_name,
                 &table_name,
                 &column_name,
@@ -269,6 +282,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
         predicates: &Predicates,
         constraint_schema: &str,
         constraint_name: &str,
+        table_catalog: &str,
         table_schema: &str,
         table_name: &str,
         column_name: &str,
@@ -277,6 +291,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
         let row = [
             (CONSTRAINT_SCHEMA, &Value::from(constraint_schema)),
             (CONSTRAINT_NAME, &Value::from(constraint_name)),
+            (REAL_TABLE_CATALOG, &Value::from(table_catalog)),
             (TABLE_SCHEMA, &Value::from(table_schema)),
             (TABLE_NAME, &Value::from(table_name)),
             (COLUMN_NAME, &Value::from(column_name)),
@@ -291,6 +306,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
         self.constraint_schema.push(Some(constraint_schema));
         self.constraint_name.push(Some(constraint_name));
         self.table_catalog.push(Some("def"));
+        self.real_table_catalog.push(Some(table_catalog));
         self.table_schema.push(Some(table_schema));
         self.table_name.push(Some(table_name));
         self.column_name.push(Some(column_name));
@@ -310,6 +326,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
             Arc::new(self.constraint_schema.finish()),
             Arc::new(self.constraint_name.finish()),
             Arc::new(self.table_catalog.finish()),
+            Arc::new(self.real_table_catalog.finish()),
             Arc::new(self.table_schema.finish()),
             Arc::new(self.table_name.finish()),
             Arc::new(self.column_name.finish()),

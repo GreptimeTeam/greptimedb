@@ -191,6 +191,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         mut request: FlushFinished,
     ) {
         let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
+            warn!(
+                "Unable to finish the flush task for a read only region {}",
+                region_id
+            );
             return;
         };
 

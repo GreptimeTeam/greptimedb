@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
@@ -115,6 +116,9 @@ impl Default for MetaSrvOptions {
             procedure: ProcedureConfig {
                 max_retry_times: 12,
                 retry_delay: Duration::from_millis(500),
+                // The etcd the maximum size of any request is 1.5 MiB
+                // 1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)
+                max_metadata_value_size: Some(ReadableSize::kb(1500)),
             },
             failure_detector: PhiAccrualFailureDetectorOptions::default(),
             datanode: DatanodeOptions::default(),

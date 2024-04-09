@@ -57,11 +57,6 @@ impl Client {
         inner.start(urls).await
     }
 
-    pub async fn is_started(&self) -> bool {
-        let inner = self.inner.read().await;
-        inner.is_started()
-    }
-
     pub async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         let inner = self.inner.read().await;
         inner.range(req).await
@@ -255,24 +250,12 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn test_start_client() {
-        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
-        assert!(!client.is_started().await);
-        client
-            .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
-            .await
-            .unwrap();
-        assert!(client.is_started().await);
-    }
-
-    #[tokio::test]
     async fn test_already_start() {
         let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
             .unwrap();
-        assert!(client.is_started().await);
         let res = client.start(&["127.0.0.1:1002"]).await;
         assert!(res.is_err());
         assert!(matches!(

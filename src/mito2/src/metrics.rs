@@ -297,4 +297,14 @@ lazy_static! {
     .unwrap();
 
     // ------- End of partition tree memtable metrics.
+
+
+    // Manifest related metrics:
+
+    /// Elapsed time of manifest operation. Labeled with "op".
+    pub static ref MANIFEST_OP_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_manifest_op_elapsed",
+        "mito manifest operation elapsed",
+        &["op"]
+    ).unwrap();
 }

@@ -283,7 +283,7 @@ impl<T: Serialize + DeserializeOwned + TableMetaValue> DeserializedValueWithByte
         self.bytes.to_vec()
     }
 
-    /// Notes: used for test purpose.
+    #[cfg(any(test, feature = "testing"))]
     pub fn from_inner(inner: T) -> Self {
         let bytes = serde_json::to_vec(&inner).unwrap();
 
@@ -356,7 +356,6 @@ impl TableMetadataManager {
         &self.kv_backend
     }
 
-    // TODO(ruihang): deprecate this
     pub async fn get_full_table_info(
         &self,
         table_id: TableId,
@@ -368,17 +367,14 @@ impl TableMetadataManager {
             .table_route_manager
             .table_route_storage()
             .build_get_txn(table_id);
-
         let (get_table_info_txn, table_info_decoder) =
             self.table_info_manager.build_get_txn(table_id);
 
         let txn = Txn::merge_all(vec![get_table_route_txn, get_table_info_txn]);
+        let res = self.kv_backend.txn(txn).await?;
 
-        let r = self.kv_backend.txn(txn).await?;
-
-        let table_info_value = table_info_decoder(&r.responses)?;
-
-        let table_route_value = table_route_decoder(&r.responses)?;
+        let table_info_value = table_info_decoder(&res.responses)?;
+        let table_route_value = table_route_decoder(&res.responses)?;
 
         Ok((table_info_value, table_route_value))
     }
@@ -691,7 +687,7 @@ impl TableMetadataManager {
 
     pub async fn batch_update_table_info_values(
         &self,
-        table_info_value_pairs: Vec<(TableInfoValue, RawTableInfo)>,
+        table_info_value_pairs: Vec<(DeserializedValueWithBytes<TableInfoValue>, RawTableInfo)>,
     ) -> Result<()> {
         let len = table_info_value_pairs.len();
         let mut txns = Vec::with_capacity(len);
@@ -712,7 +708,7 @@ impl TableMetadataManager {
             let (update_table_info_txn, on_update_table_info_failure) =
                 self.table_info_manager().build_update_txn(
                     table_id,
-                    &DeserializedValueWithBytes::from_inner(table_info_value),
+                    &table_info_value,
                     &new_table_info_value,
                 )?;
 

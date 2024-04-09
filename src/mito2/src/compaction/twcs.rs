@@ -439,8 +439,11 @@ impl CompactionTask for TwcsCompactionTask {
         let notify = match self.handle_compaction().await {
             Ok((added, deleted)) => {
                 info!(
-                    "Compacted SST files, input: {:?}, output: {:?}, window: {:?}",
-                    deleted, added, self.compaction_time_window
+                    "Compacted SST files, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}",
+                    deleted,
+                    added,
+                    self.compaction_time_window,
+                    self.waiters.len(),
                 );
 
                 BackgroundNotify::CompactionFinished(CompactionFinished {

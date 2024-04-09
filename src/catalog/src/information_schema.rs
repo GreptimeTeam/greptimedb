@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod columns;
-mod key_column_usage;
+pub mod columns;
+pub mod key_column_usage;
 mod memory_table;
 mod partitions;
 mod predicate;
@@ -41,8 +41,7 @@ use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
 use table::metadata::{
     FilterPushDownType, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
 };
-use table::thin_table::{ThinTable, ThinTableAdapter};
-use table::TableRef;
+use table::{Table, TableRef};
 pub use table_names::*;
 
 use self::columns::InformationSchemaColumns;
@@ -187,10 +186,9 @@ impl InformationSchemaProvider {
         self.information_table(name).map(|table| {
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
             let filter_pushdown = FilterPushDownType::Inexact;
-            let thin_table = ThinTable::new(table_info, filter_pushdown);
-
             let data_source = Arc::new(InformationTableDataSource::new(table));
-            Arc::new(ThinTableAdapter::new(thin_table, data_source)) as _
+            let table = Table::new(table_info, filter_pushdown, data_source);
+            Arc::new(table)
         })
     }
 

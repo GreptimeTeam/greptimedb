@@ -19,7 +19,7 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result};
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowCreateTable, ShowDatabases, ShowKind, ShowTables, ShowVariables,
+    ShowColumns, ShowCreateTable, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
 };
 use crate::statements::statement::Statement;
 
@@ -33,6 +33,16 @@ impl<'a> ParserContext<'a> {
         } else if self.matches_keyword(Keyword::TABLES) {
             let _ = self.parser.next_token();
             self.parse_show_tables(false)
+        } else if self.matches_keyword(Keyword::COLUMNS) || self.matches_keyword(Keyword::FIELDS) {
+            // SHOW {COLUMNS | FIELDS}
+            let _ = self.parser.next_token();
+            self.parse_show_columns(false)
+        } else if self.consume_token("INDEX")
+            || self.consume_token("INDEXES")
+            || self.consume_token("KEYS")
+        {
+            // SHOW {INDEX | INDEXES | KEYS}
+            self.parse_show_index()
         } else if self.consume_token("CREATE") {
             if self.consume_token("TABLE") {
                 self.parse_show_create_table()
@@ -42,6 +52,9 @@ impl<'a> ParserContext<'a> {
         } else if self.consume_token("FULL") {
             if self.consume_token("TABLES") {
                 self.parse_show_tables(true)
+            } else if self.consume_token("COLUMNS") || self.consume_token("FIELDS") {
+                // SHOW {COLUMNS | FIELDS}
+                self.parse_show_columns(true)
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
@@ -80,6 +93,186 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
     }
 
+    fn parse_show_table_name(&mut self) -> Result<String> {
+        let _ = self.parser.next_token();
+        let table_name =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.peek_token_as_string(),
+                })?;
+
+        ensure!(
+            table_name.0.len() == 1,
+            InvalidDatabaseNameSnafu {
+                name: table_name.to_string(),
+            }
+        );
+
+        // Safety: already checked above
+        Ok(Self::canonicalize_object_name(table_name).0[0]
+            .value
+            .clone())
+    }
+
+    fn parse_db_name(&mut self) -> Result<Option<String>> {
+        let _ = self.parser.next_token();
+        let db_name = self
+            .parser
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a database name",
+                actual: self.peek_token_as_string(),
+            })?;
+
+        ensure!(
+            db_name.0.len() == 1,
+            InvalidDatabaseNameSnafu {
+                name: db_name.to_string(),
+            }
+        );
+
+        // Safety: already checked above
+        Ok(Some(
+            Self::canonicalize_object_name(db_name).0[0].value.clone(),
+        ))
+    }
+
+    fn parse_show_columns(&mut self, full: bool) -> Result<Statement> {
+        let table = match self.parser.peek_token().token {
+            // SHOW columns {in | FROM} TABLE
+            Token::Word(w) if matches!(w.keyword, Keyword::IN | Keyword::FROM) => {
+                self.parse_show_table_name()?
+            }
+            _ => {
+                return error::UnexpectedTokenSnafu {
+                    sql: self.sql,
+                    expected: "{FROM | IN} table",
+                    actual: self.peek_token_as_string(),
+                }
+                .fail();
+            }
+        };
+
+        let database = match self.parser.peek_token().token {
+            Token::EOF | Token::SemiColon => {
+                return Ok(Statement::ShowColumns(ShowColumns {
+                    kind: ShowKind::All,
+                    table,
+                    database: None,
+                    full,
+                }));
+            }
+
+            // SHOW columns {In | FROM} TABLE {In | FROM} DATABASE
+            Token::Word(w) => match w.keyword {
+                Keyword::IN | Keyword::FROM => self.parse_db_name()?,
+
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let kind = match self.parser.peek_token().token {
+            Token::EOF | Token::SemiColon => ShowKind::All,
+            // SHOW COLUMNS [WHERE | LIKE] [EXPR]
+            Token::Word(w) => match w.keyword {
+                Keyword::LIKE => {
+                    let _ = self.parser.next_token();
+                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "LIKE",
+                            actual: self.peek_token_as_string(),
+                        }
+                    })?)
+                }
+                Keyword::WHERE => {
+                    let _ = self.parser.next_token();
+                    ShowKind::Where(self.parser.parse_expr().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "some valid expression",
+                            actual: self.peek_token_as_string(),
+                        }
+                    })?)
+                }
+                _ => return self.unsupported(self.peek_token_as_string()),
+            },
+            _ => return self.unsupported(self.peek_token_as_string()),
+        };
+
+        Ok(Statement::ShowColumns(ShowColumns {
+            kind,
+            database,
+            table,
+            full,
+        }))
+    }
+
+    fn parse_show_index(&mut self) -> Result<Statement> {
+        let table = match self.parser.peek_token().token {
+            // SHOW INDEX {in | FROM} TABLE
+            Token::Word(w) if matches!(w.keyword, Keyword::IN | Keyword::FROM) => {
+                self.parse_show_table_name()?
+            }
+            _ => {
+                return error::UnexpectedTokenSnafu {
+                    sql: self.sql,
+                    expected: "{FROM | IN} table",
+                    actual: self.peek_token_as_string(),
+                }
+                .fail();
+            }
+        };
+
+        let database = match self.parser.peek_token().token {
+            Token::EOF | Token::SemiColon => {
+                return Ok(Statement::ShowIndex(ShowIndex {
+                    kind: ShowKind::All,
+                    table,
+                    database: None,
+                }));
+            }
+
+            // SHOW INDEX {In | FROM} TABLE {In | FROM} DATABASE
+            Token::Word(w) => match w.keyword {
+                Keyword::IN | Keyword::FROM => self.parse_db_name()?,
+
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let kind = match self.parser.peek_token().token {
+            Token::EOF | Token::SemiColon => ShowKind::All,
+            // SHOW INDEX [WHERE] [EXPR]
+            Token::Word(w) => match w.keyword {
+                Keyword::WHERE => {
+                    let _ = self.parser.next_token();
+                    ShowKind::Where(self.parser.parse_expr().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "some valid expression",
+                            actual: self.peek_token_as_string(),
+                        }
+                    })?)
+                }
+                _ => return self.unsupported(self.peek_token_as_string()),
+            },
+            _ => return self.unsupported(self.peek_token_as_string()),
+        };
+
+        Ok(Statement::ShowIndex(ShowIndex {
+            kind,
+            database,
+            table,
+        }))
+    }
+
     fn parse_show_tables(&mut self, full: bool) -> Result<Statement> {
         let database = match self.parser.peek_token().token {
             Token::EOF | Token::SemiColon => {
@@ -92,25 +285,7 @@ impl<'a> ParserContext<'a> {
 
             // SHOW TABLES [in | FROM] [DATABASE]
             Token::Word(w) => match w.keyword {
-                Keyword::IN | Keyword::FROM => {
-                    let _ = self.parser.next_token();
-                    let db_name = self.parser.parse_object_name().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "a database name",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?;
-
-                    ensure!(
-                        db_name.0.len() == 1,
-                        InvalidDatabaseNameSnafu {
-                            name: db_name.to_string(),
-                        }
-                    );
-
-                    Some(db_name.to_string())
-                }
+                Keyword::IN | Keyword::FROM => self.parse_db_name()?,
 
                 _ => None,
             },
@@ -430,5 +605,121 @@ mod tests {
                 variable: ObjectName(vec![Ident::new("system_time_zone")]),
             })
         );
+    }
+
+    #[test]
+    pub fn test_show_columns() {
+        let sql = "SHOW COLUMNS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let error = result.unwrap_err();
+        assert_eq!("Unexpected token while parsing SQL statement: SHOW COLUMNS, expected: '{FROM | IN} table', found: EOF", error.to_string());
+
+        let sql = "SHOW COLUMNS from test";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert!(matches!(&stmts[0],
+                         Statement::ShowColumns(ShowColumns {
+                             table,
+                             database,
+                             full,
+                             ..
+
+                         }) if table == "test" && database.is_none() && !full));
+
+        let sql = "SHOW FULL COLUMNS from test from public";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert!(matches!(&stmts[0],
+                         Statement::ShowColumns(ShowColumns {
+                             table,
+                             database: Some(database),
+                             full,
+                             ..
+                         }) if table == "test" && database == "public" && *full));
+
+        let sql = "SHOW COLUMNS from test like 'disk%'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert!(matches!(&stmts[0],
+                         Statement::ShowColumns(ShowColumns {
+                             table,
+                             kind: ShowKind::Like(ident),
+                             ..
+                         }) if table == "test" && ident.to_string() == "'disk%'"));
+
+        let sql = "SHOW COLUMNS from test where Field = 'disk'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert!(matches!(&stmts[0],
+                         Statement::ShowColumns(ShowColumns {
+                             table,
+                             kind: ShowKind::Where(expr),
+                             ..
+                         }) if table == "test" && expr.to_string() == "Field = 'disk'"));
+    }
+
+    #[test]
+    pub fn test_show_index() {
+        let sql = "SHOW INDEX";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let error = result.unwrap_err();
+        assert_eq!("Unexpected token while parsing SQL statement: SHOW INDEX, expected: '{FROM | IN} table', found: EOF", error.to_string());
+
+        let sql = "SHOW INDEX from test";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert!(matches!(&stmts[0],
+                         Statement::ShowIndex(ShowIndex {
+                             table,
+                             database,
+                             ..
+
+                         }) if table == "test" && database.is_none()));
+
+        let sql = "SHOW INDEX from test from public";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert!(matches!(&stmts[0],
+                         Statement::ShowIndex(ShowIndex {
+                             table,
+                             database: Some(database),
+                             ..
+                         }) if table == "test" && database == "public"));
+
+        // SHOW INDEX deosn't support like
+        let sql = "SHOW INDEX from test like 'disk%'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let error = result.unwrap_err();
+        assert_eq!(
+            "SQL statement is not supported: SHOW INDEX from test like 'disk%', keyword: like",
+            error.to_string()
+        );
+
+        let sql = "SHOW INDEX from test where Field = 'disk'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert!(matches!(&stmts[0],
+                         Statement::ShowIndex(ShowIndex {
+                             table,
+                             kind: ShowKind::Where(expr),
+                             ..
+                         }) if table == "test" && expr.to_string() == "Field = 'disk'"));
     }
 }

@@ -98,6 +98,10 @@ drop table abcdefge;
 
 Affected Rows: 0
 
+drop database upper_case_table_name;
+
+Affected Rows: 0
+
 use public;
 
 Affected Rows: 0

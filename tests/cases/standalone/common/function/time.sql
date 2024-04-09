@@ -11,3 +11,5 @@ select to_timezone('2024-03-29T14:16:43.012345Z', 'Asia/Shanghai');
 select to_timezone('2024-03-29T14:16:43.012345Z'::Timestamp, 'Asia/Shanghai');
 
 select to_timezone(1709992225, 'Asia/Shanghai');
+
+select to_timezone(1711508510000::INT64, 'Asia/Shanghai');

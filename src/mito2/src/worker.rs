@@ -110,6 +110,8 @@ pub(crate) struct WorkerGroup {
     workers: Vec<RegionWorker>,
     /// Global background job scheduelr.
     scheduler: SchedulerRef,
+    /// Scheduler for file purgers.
+    purge_scheduler: SchedulerRef,
     /// Cache.
     cache_manager: CacheManagerRef,
 }
@@ -131,6 +133,9 @@ impl WorkerGroup {
                 .await?
                 .with_buffer_size(Some(config.inverted_index.write_buffer_size.as_bytes() as _));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        // We use another scheduler to avoid purge jobs blocking other jobs.
+        // A purge job is cheaper than other background jobs so they share the same job limit.
+        let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let write_cache = write_cache_from_config(
             &config,
             object_store_manager.clone(),
@@ -156,6 +161,7 @@ impl WorkerGroup {
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     scheduler: scheduler.clone(),
+                    purge_scheduler: purge_scheduler.clone(),
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
                     intermediate_manager: intermediate_manager.clone(),
@@ -168,6 +174,7 @@ impl WorkerGroup {
         Ok(WorkerGroup {
             workers,
             scheduler,
+            purge_scheduler,
             cache_manager,
         })
     }
@@ -178,6 +185,8 @@ impl WorkerGroup {
 
         // Stops the scheduler gracefully.
         self.scheduler.stop(true).await?;
+        // Stops the purge scheduler gracefully.
+        self.purge_scheduler.stop(true).await?;
 
         try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
 
@@ -238,6 +247,7 @@ impl WorkerGroup {
             ))
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let intermediate_manager =
             IntermediateManager::init_fs(&config.inverted_index.intermediate_path)
                 .await?
@@ -265,6 +275,7 @@ impl WorkerGroup {
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     scheduler: scheduler.clone(),
+                    purge_scheduler: purge_scheduler.clone(),
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
                     intermediate_manager: intermediate_manager.clone(),
@@ -277,8 +288,14 @@ impl WorkerGroup {
         Ok(WorkerGroup {
             workers,
             scheduler,
+            purge_scheduler,
             cache_manager,
         })
+    }
+
+    /// Returns the purge scheduler.
+    pub(crate) fn purge_scheduler(&self) -> &SchedulerRef {
+        &self.purge_scheduler
     }
 }
 
@@ -323,6 +340,7 @@ struct WorkerStarter<S> {
     object_store_manager: ObjectStoreManagerRef,
     write_buffer_manager: WriteBufferManagerRef,
     scheduler: SchedulerRef,
+    purge_scheduler: SchedulerRef,
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
     intermediate_manager: IntermediateManager,
@@ -351,7 +369,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 Some(self.write_buffer_manager.clone()),
                 self.config,
             ),
-            scheduler: self.scheduler.clone(),
+            purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
             compaction_scheduler: CompactionScheduler::new(
@@ -507,8 +525,8 @@ struct RegionWorkerLoop<S> {
     running: Arc<AtomicBool>,
     /// Memtable builder provider for each region.
     memtable_builder_provider: MemtableBuilderProvider,
-    /// Background job scheduler.
-    scheduler: SchedulerRef,
+    /// Background purge job scheduler.
+    purge_scheduler: SchedulerRef,
     /// Engine write buffer manager.
     write_buffer_manager: WriteBufferManagerRef,
     /// Schedules background flush requests.
@@ -805,6 +823,15 @@ impl WorkerListener {
         // Avoid compiler warning.
         let _ = region_id;
         let _ = removed;
+    }
+
+    pub(crate) async fn on_handle_compaction_finished(&self, region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_handle_compaction_finished(region_id).await;
+        }
+        // Avoid compiler warning.
+        let _ = region_id;
     }
 }
 

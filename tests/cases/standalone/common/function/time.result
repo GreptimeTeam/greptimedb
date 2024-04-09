@@ -54,5 +54,17 @@ select to_timezone('2024-03-29T14:16:43.012345Z'::Timestamp, 'Asia/Shanghai');
 
 select to_timezone(1709992225, 'Asia/Shanghai');
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Error during planning: Coercion from [Int64, Utf8] to the signature OneOf([Exact([Timestamp(Second, None), Utf8]), Exact([Timestamp(Millisecond, None), Utf8]), Exact([Timestamp(Microsecond, None), Utf8]), Exact([Timestamp(Nanosecond, None), Utf8])]) failed.
++------------------------------------------------------+
+| to_timezone(Int64(1709992225),Utf8("Asia/Shanghai")) |
++------------------------------------------------------+
+| 1970-01-21 02:59:52.225                              |
++------------------------------------------------------+
+
+select to_timezone(1711508510000::INT64, 'Asia/Shanghai');
+
++---------------------------------------------------------+
+| to_timezone(Int64(1711508510000),Utf8("Asia/Shanghai")) |
++---------------------------------------------------------+
+| 2024-03-27 11:01:50                                     |
++---------------------------------------------------------+
 

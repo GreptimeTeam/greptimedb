@@ -26,13 +26,17 @@ use tokio::sync::Notify;
 #[async_trait]
 pub trait EventListener: Send + Sync {
     /// Notifies the listener that a region is flushed successfully.
-    fn on_flush_success(&self, region_id: RegionId);
+    fn on_flush_success(&self, region_id: RegionId) {
+        let _ = region_id;
+    }
 
     /// Notifies the listener that the engine is stalled.
-    fn on_write_stall(&self);
+    fn on_write_stall(&self) {}
 
     /// Notifies the listener that the region starts to do flush.
-    async fn on_flush_begin(&self, region_id: RegionId);
+    async fn on_flush_begin(&self, region_id: RegionId) {
+        let _ = region_id;
+    }
 
     /// Notifies the listener that the later drop task starts running.
     /// Returns the gc interval if we want to override the default one.
@@ -45,6 +49,12 @@ pub trait EventListener: Send + Sync {
     fn on_later_drop_end(&self, region_id: RegionId, removed: bool) {
         let _ = region_id;
         let _ = removed;
+    }
+
+    /// Notifies the listener that the region is going to handle the compaction
+    /// finished request.
+    async fn on_handle_compaction_finished(&self, region_id: RegionId) {
+        let _ = region_id;
     }
 }
 
@@ -70,10 +80,6 @@ impl EventListener for FlushListener {
 
         self.notify.notify_one()
     }
-
-    fn on_write_stall(&self) {}
-
-    async fn on_flush_begin(&self, _region_id: RegionId) {}
 }
 
 /// Listener to watch stall events.
@@ -98,8 +104,6 @@ impl EventListener for StallListener {
 
         self.notify.notify_one();
     }
-
-    async fn on_flush_begin(&self, _region_id: RegionId) {}
 }
 
 /// Listener to watch begin flush events.
@@ -130,10 +134,6 @@ impl FlushTruncateListener {
 
 #[async_trait]
 impl EventListener for FlushTruncateListener {
-    fn on_flush_success(&self, _region_id: RegionId) {}
-
-    fn on_write_stall(&self) {}
-
     /// Calling this function will block the thread!
     /// Notify the listener to perform a truncate region and block the flush region job.
     async fn on_flush_begin(&self, region_id: RegionId) {
@@ -169,12 +169,6 @@ impl DropListener {
 
 #[async_trait]
 impl EventListener for DropListener {
-    fn on_flush_success(&self, _region_id: RegionId) {}
-
-    fn on_write_stall(&self) {}
-
-    async fn on_flush_begin(&self, _region_id: RegionId) {}
-
     fn on_later_drop_begin(&self, _region_id: RegionId) -> Option<Duration> {
         Some(self.gc_duration)
     }
@@ -183,5 +177,36 @@ impl EventListener for DropListener {
         // Asserts result.
         assert!(removed);
         self.notify.notify_one();
+    }
+}
+
+/// Listener on handling compaction requests.
+#[derive(Default)]
+pub struct CompactionListener {
+    handle_finished_notify: Notify,
+    blocker: Notify,
+}
+
+impl CompactionListener {
+    /// Waits for handling compaction finished request.
+    pub async fn wait_handle_finished(&self) {
+        self.handle_finished_notify.notified().await;
+    }
+
+    /// Wakes up the listener.
+    pub fn wake(&self) {
+        self.blocker.notify_one();
+    }
+}
+
+#[async_trait]
+impl EventListener for CompactionListener {
+    async fn on_handle_compaction_finished(&self, region_id: RegionId) {
+        info!("Handle compaction finished request, region {region_id}");
+
+        self.handle_finished_notify.notify_one();
+
+        // Blocks current task.
+        self.blocker.notified().await;
     }
 }

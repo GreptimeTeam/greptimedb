@@ -50,6 +50,10 @@ impl Entry for EntryImpl {
     fn namespace(&self) -> Self::Namespace {
         Default::default()
     }
+
+    fn estimated_size(&self) -> usize {
+        0
+    }
 }
 
 #[async_trait::async_trait]
