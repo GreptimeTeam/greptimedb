@@ -23,7 +23,7 @@ use crate::error::Error::ChecksumMismatch;
 use crate::manifest::action::{
     RegionCheckpoint, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
-use crate::manifest::manager::{RegionManifestManager, RegionManifestManagerInner};
+use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::tests::utils::basic_region_metadata;
 use crate::sst::file::{FileId, FileMeta};
 use crate::test_util::TestEnv;
@@ -76,7 +76,6 @@ async fn manager_without_checkpoint() {
     // no checkpoint
     assert!(manager
         .store()
-        .await
         .load_last_checkpoint()
         .await
         .unwrap()
@@ -99,7 +98,6 @@ async fn manager_without_checkpoint() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .await
         .get_paths(|e| Some(e.name().to_string()))
         .await
         .unwrap();
@@ -120,7 +118,6 @@ async fn manager_with_checkpoint_distance_1() {
     // has checkpoint
     assert!(manager
         .store()
-        .await
         .load_last_checkpoint()
         .await
         .unwrap()
@@ -137,7 +134,6 @@ async fn manager_with_checkpoint_distance_1() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .await
         .get_paths(|e| Some(e.name().to_string()))
         .await
         .unwrap();
@@ -147,8 +143,7 @@ async fn manager_with_checkpoint_distance_1() {
     // check content in `_last_checkpoint`
     let raw_bytes = manager
         .store()
-        .await
-        .read_file(&manager.store().await.last_checkpoint_path())
+        .read_file(&manager.store().last_checkpoint_path())
         .await
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
@@ -159,7 +154,7 @@ async fn manager_with_checkpoint_distance_1() {
     // reopen the manager
     manager.stop().await.unwrap();
     let manager = reopen_manager(&env, 1, CompressionType::Uncompressed).await;
-    assert_eq!(10, manager.manifest().await.manifest_version);
+    assert_eq!(10, manager.manifest().manifest_version);
 }
 
 #[tokio::test]
@@ -245,13 +240,13 @@ async fn generate_checkpoint_with_compression_types(
     compress_type: CompressionType,
     actions: Vec<RegionMetaActionList>,
 ) -> RegionCheckpoint {
-    let (_env, manager) = build_manager(1, compress_type).await;
+    let (_env, mut manager) = build_manager(1, compress_type).await;
 
     for action in actions {
         manager.update(action).await.unwrap();
     }
 
-    RegionManifestManagerInner::last_checkpoint(&mut manager.store().await)
+    RegionManifestManager::last_checkpoint(&mut manager.store())
         .await
         .unwrap()
         .unwrap()

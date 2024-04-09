@@ -263,7 +263,7 @@ impl RegionOpener {
             return Ok(None);
         };
 
-        let manifest = manifest_manager.manifest().await;
+        let manifest = manifest_manager.manifest();
         let metadata = manifest.metadata.clone();
 
         let region_id = self.region_id;
