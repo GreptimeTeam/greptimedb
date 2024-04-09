@@ -36,7 +36,7 @@ use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
-use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
+use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
@@ -45,7 +45,7 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
-use meta_srv::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
+use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
@@ -68,7 +68,7 @@ pub struct GreptimeDbCluster {
 
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
     pub kv_backend: KvBackendRef,
-    pub meta_srv: MetaSrv,
+    pub metasrv: Metasrv,
     pub frontend: Arc<FeInstance>,
 }
 
@@ -79,7 +79,7 @@ pub struct GreptimeDbClusterBuilder {
     store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
     datanode_wal_config: DatanodeWalConfig,
-    metasrv_wal_config: MetaSrvWalConfig,
+    metasrv_wal_config: MetasrvWalConfig,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
 }
@@ -110,7 +110,7 @@ impl GreptimeDbClusterBuilder {
             store_providers: None,
             datanodes: None,
             datanode_wal_config: DatanodeWalConfig::default(),
-            metasrv_wal_config: MetaSrvWalConfig::default(),
+            metasrv_wal_config: MetasrvWalConfig::default(),
             shared_home_dir: None,
             meta_selector: None,
         }
@@ -141,7 +141,7 @@ impl GreptimeDbClusterBuilder {
     }
 
     #[must_use]
-    pub fn with_metasrv_wal_config(mut self, metasrv_wal_config: MetaSrvWalConfig) -> Self {
+    pub fn with_metasrv_wal_config(mut self, metasrv_wal_config: MetasrvWalConfig) -> Self {
         self.metasrv_wal_config = metasrv_wal_config;
         self
     }
@@ -168,7 +168,7 @@ impl GreptimeDbClusterBuilder {
         let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
         let datanode_clients = Arc::new(DatanodeClients::new(channel_config));
 
-        let opt = MetaSrvOptions {
+        let opt = MetasrvOptions {
             procedure: ProcedureConfig {
                 // Due to large network delay during cross data-center.
                 // We only make max_retry_times and retry_delay large than the default in tests.
@@ -180,7 +180,7 @@ impl GreptimeDbClusterBuilder {
             ..Default::default()
         };
 
-        let meta_srv = meta_srv::mocks::mock(
+        let metasrv = meta_srv::mocks::mock(
             opt,
             self.kv_backend.clone(),
             self.meta_selector.clone(),
@@ -189,17 +189,15 @@ impl GreptimeDbClusterBuilder {
         .await;
 
         let datanode_instances = self
-            .build_datanodes_with_options(&meta_srv, &datanode_options)
+            .build_datanodes_with_options(&metasrv, &datanode_options)
             .await;
 
         build_datanode_clients(datanode_clients.clone(), &datanode_instances, datanodes).await;
 
-        self.wait_datanodes_alive(meta_srv.meta_srv.meta_peer_client(), datanodes)
+        self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
-        let frontend = self
-            .build_frontend(meta_srv.clone(), datanode_clients)
-            .await;
+        let frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
 
         test_util::prepare_another_catalog_and_schema(frontend.as_ref()).await;
 
@@ -211,7 +209,7 @@ impl GreptimeDbClusterBuilder {
             dir_guards,
             datanode_instances,
             kv_backend: self.kv_backend.clone(),
-            meta_srv: meta_srv.meta_srv,
+            metasrv: metasrv.metasrv,
             frontend,
         }
     }
@@ -280,13 +278,13 @@ impl GreptimeDbClusterBuilder {
 
     async fn build_datanodes_with_options(
         &self,
-        meta_srv: &MockInfo,
+        metasrv: &MockInfo,
         options: &[DatanodeOptions],
     ) -> HashMap<DatanodeId, Datanode> {
         let mut instances = HashMap::with_capacity(options.len());
 
         for opts in options {
-            let datanode = self.create_datanode(opts.clone(), meta_srv.clone()).await;
+            let datanode = self.create_datanode(opts.clone(), metasrv.clone()).await;
             instances.insert(opts.node_id.unwrap(), datanode);
         }
 
@@ -312,14 +310,14 @@ impl GreptimeDbClusterBuilder {
         panic!("Some Datanodes are not alive in 10 seconds!")
     }
 
-    async fn create_datanode(&self, opts: DatanodeOptions, meta_srv: MockInfo) -> Datanode {
+    async fn create_datanode(&self, opts: DatanodeOptions, metasrv: MockInfo) -> Datanode {
         let mut meta_client = MetaClientBuilder::new(1000, opts.node_id.unwrap(), Role::Datanode)
             .enable_router()
             .enable_store()
             .enable_heartbeat()
-            .channel_manager(meta_srv.channel_manager)
+            .channel_manager(metasrv.channel_manager)
             .build();
-        meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
+        meta_client.start(&[&metasrv.server_addr]).await.unwrap();
 
         let meta_backend = Arc::new(MetaKvBackend {
             client: Arc::new(meta_client.clone()),
@@ -339,18 +337,18 @@ impl GreptimeDbClusterBuilder {
 
     async fn build_frontend(
         &self,
-        meta_srv: MockInfo,
+        metasrv: MockInfo,
         datanode_clients: Arc<DatanodeClients>,
     ) -> Arc<FeInstance> {
         let mut meta_client = MetaClientBuilder::new(1000, 0, Role::Frontend)
             .enable_router()
             .enable_store()
             .enable_heartbeat()
-            .channel_manager(meta_srv.channel_manager)
+            .channel_manager(metasrv.channel_manager)
             .enable_procedure()
             .enable_access_cluster_info()
             .build();
-        meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
+        meta_client.start(&[&metasrv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
         let cached_meta_backend =

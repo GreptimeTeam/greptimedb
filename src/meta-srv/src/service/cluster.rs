@@ -21,11 +21,11 @@ use snafu::ResultExt;
 use tonic::{Request, Response};
 
 use crate::error;
-use crate::metasrv::MetaSrv;
+use crate::metasrv::Metasrv;
 use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
-impl cluster_server::Cluster for MetaSrv {
+impl cluster_server::Cluster for Metasrv {
     async fn batch_get(&self, req: Request<PbBatchGetRequest>) -> GrpcResult<PbBatchGetResponse> {
         if !self.is_leader() {
             let is_not_leader = ResponseHeader::failed(0, Error::is_not_leader());
@@ -73,7 +73,7 @@ impl cluster_server::Cluster for MetaSrv {
     }
 }
 
-impl MetaSrv {
+impl Metasrv {
     pub fn is_leader(&self) -> bool {
         self.election().map(|x| x.is_leader()).unwrap_or(false)
     }

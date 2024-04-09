@@ -30,11 +30,11 @@ use tonic::{Request, Response, Streaming};
 use crate::error;
 use crate::error::Result;
 use crate::handler::Pusher;
-use crate::metasrv::{Context, MetaSrv};
+use crate::metasrv::{Context, Metasrv};
 use crate::service::{GrpcResult, GrpcStream};
 
 #[async_trait::async_trait]
-impl heartbeat_server::Heartbeat for MetaSrv {
+impl heartbeat_server::Heartbeat for Metasrv {
     type HeartbeatStream = GrpcStream<HeartbeatResponse>;
 
     async fn heartbeat(
@@ -179,13 +179,13 @@ mod tests {
     use tonic::IntoRequest;
 
     use super::get_node_id;
-    use crate::metasrv::builder::MetaSrvBuilder;
+    use crate::metasrv::builder::MetasrvBuilder;
 
     #[tokio::test]
     async fn test_ask_leader() {
         let kv_backend = Arc::new(MemoryKvBackend::new());
 
-        let meta_srv = MetaSrvBuilder::new()
+        let metasrv = MetasrvBuilder::new()
             .kv_backend(kv_backend)
             .build()
             .await
@@ -195,10 +195,10 @@ mod tests {
             header: Some(RequestHeader::new((1, 1), Role::Datanode, W3cTrace::new())),
         };
 
-        let res = meta_srv.ask_leader(req.into_request()).await.unwrap();
+        let res = metasrv.ask_leader(req.into_request()).await.unwrap();
         let res = res.into_inner();
         assert_eq!(1, res.header.unwrap().cluster_id);
-        assert_eq!(meta_srv.options().bind_addr, res.leader.unwrap().addr);
+        assert_eq!(metasrv.options().bind_addr, res.leader.unwrap().addr);
     }
 
     #[test]

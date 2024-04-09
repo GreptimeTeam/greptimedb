@@ -216,7 +216,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to perform metasrv operation"))]
-    MetaSrv {
+    Metasrv {
         location: Location,
         source: meta_client::error::Error,
     },
@@ -304,7 +304,7 @@ impl ErrorExt for Error {
             | Error::CreateTable { source, .. }
             | Error::TableSchemaMismatch { source, .. } => source.status_code(),
 
-            Error::MetaSrv { source, .. } => source.status_code(),
+            Error::Metasrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source, .. } => source.status_code(),
             Error::SystemCatalogTableScanExec { source, .. } => source.status_code(),
             Error::InvalidTableInfoInCatalog { source, .. } => source.status_code(),

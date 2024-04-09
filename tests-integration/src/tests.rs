@@ -38,7 +38,7 @@ impl MockDistributedInstance {
     }
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
-        self.0.meta_srv.table_metadata_manager()
+        self.0.metasrv.table_metadata_manager()
     }
 }
 

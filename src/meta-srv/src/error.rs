@@ -363,7 +363,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("MetaSrv has no leader at this moment"))]
+    #[snafu(display("Metasrv has no leader at this moment"))]
     NoLeader { location: Location },
 
     #[snafu(display("Table {} not found", name))]

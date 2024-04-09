@@ -20,8 +20,8 @@ use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::warn;
 use common_test_util::find_workspace_path;
-use common_wal::config::kafka::{DatanodeKafkaConfig, MetaSrvKafkaConfig};
-use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
+use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
+use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
@@ -227,7 +227,7 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
             broker_endpoints: endpoints.clone(),
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
             num_topics: 3,
@@ -257,7 +257,7 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
             broker_endpoints: endpoints.clone(),
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
             num_topics: 3,
