@@ -260,7 +260,6 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
-    // TODO(shuiyisong): fix this when return source err msg to client side
     assert!(body.error().contains("Table not found"));
     assert_eq!(body.code(), ErrorCode::PlanQuery as u32);
 
