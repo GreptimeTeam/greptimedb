@@ -14,7 +14,6 @@
 
 //! This module contains the definition of functions that can be used in expressions.
 
-use core::arch;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
