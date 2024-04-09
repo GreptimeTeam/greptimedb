@@ -163,7 +163,7 @@ where
             })
             .unwrap_or_default();
         let path = req.uri().path().to_owned();
-        let method = req.method().to_owned();
+        let method = req.method().clone();
         Box::pin(async move { router.call(&path, method, query_params).await })
     }
 }
