@@ -35,12 +35,12 @@ impl AlterTableProcedure {
         let manager = &self.context.table_metadata_manager;
         if let Kind::RenameTable(RenameTable { new_table_name }) = alter_kind {
             let new_table_name_key = TableNameKey::new(catalog, schema, new_table_name);
-            let exist = manager
+            let exists = manager
                 .table_name_manager()
                 .exists(new_table_name_key)
                 .await?;
             ensure!(
-                !exist,
+                !exists,
                 error::TableAlreadyExistsSnafu {
                     table_name: format_full_table_name(catalog, schema, new_table_name),
                 }

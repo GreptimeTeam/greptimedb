@@ -21,18 +21,21 @@ use crate::error::{self, Result};
 impl AlterTableProcedure {
     /// Fetches the table info.
     pub(crate) async fn fill_table_info(&mut self) -> Result<()> {
-        let manager = &self.context.table_metadata_manager;
         let table_id = self.data.table_id();
         let alter_expr = self.alter_expr();
         let catalog = &alter_expr.catalog_name;
         let schema = &alter_expr.schema_name;
         let table_name = &alter_expr.table_name;
 
-        let table_info_value = manager.table_info_manager().get(table_id).await?.context(
-            error::TableNotFoundSnafu {
+        let table_info_value = self
+            .context
+            .table_metadata_manager
+            .table_info_manager()
+            .get(table_id)
+            .await?
+            .with_context(|| error::TableNotFoundSnafu {
                 table_name: format_full_table_name(catalog, schema, table_name),
-            },
-        )?;
+            })?;
         self.data.table_info_value = Some(table_info_value);
         Ok(())
     }

@@ -56,7 +56,7 @@ impl AlterTableProcedure {
         Ok(new_info)
     }
 
-    /// Update table metadata for rename table operation.
+    /// Updates table metadata for rename table operation.
     pub(crate) async fn on_update_metadata_for_rename(
         &self,
         new_table_name: String,
@@ -70,6 +70,7 @@ impl AlterTableProcedure {
         Ok(())
     }
 
+    /// Updates table metadata for alter table operation.
     pub(crate) async fn on_update_metadata_for_alter(
         &self,
         new_table_info: RawTableInfo,

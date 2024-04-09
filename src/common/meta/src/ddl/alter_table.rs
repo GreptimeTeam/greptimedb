@@ -121,13 +121,6 @@ impl AlterTableProcedure {
             for region in regions {
                 let region_id = RegionId::new(table_id, region);
                 let request = self.make_alter_region_request(region_id)?;
-                let request = RegionRequest {
-                    header: Some(RegionRequestHeader {
-                        tracing_context: TracingContext::from_current_span().to_w3c(),
-                        ..Default::default()
-                    }),
-                    body: Some(Body::Alter(request)),
-                };
                 debug!("Submitting {request:?} to {datanode}");
 
                 let datanode = datanode.clone();
@@ -157,20 +150,20 @@ impl AlterTableProcedure {
         let table_id = self.data.table_id();
         let table_ref = self.data.table_ref();
         // Safety: checked before.
-        let table_route_value = self.data.table_info_value.as_ref().unwrap();
-        let new_info = self.build_new_table_info(&table_route_value.table_info)?;
+        let table_info_value = self.data.table_info_value.as_ref().unwrap();
+        let new_info = self.build_new_table_info(&table_info_value.table_info)?;
 
         debug!(
-            "starting update table: {} metadata, new table info {:?}",
+            "Starting update table: {} metadata, new table info {:?}",
             table_ref.to_string(),
             new_info
         );
 
         if let Kind::RenameTable(RenameTable { new_table_name }) = self.alter_kind() {
-            self.on_update_metadata_for_rename(new_table_name.to_string(), table_route_value)
+            self.on_update_metadata_for_rename(new_table_name.to_string(), table_info_value)
                 .await?;
         } else {
-            self.on_update_metadata_for_alter(new_info.into(), table_route_value)
+            self.on_update_metadata_for_alter(new_info.into(), table_info_value)
                 .await?;
         }
 
@@ -202,7 +195,6 @@ impl AlterTableProcedure {
     fn lock_key_inner(&self) -> Vec<StringKey> {
         let mut lock_key = vec![];
         let table_ref = self.data.table_ref();
-        // Safety: checked before.
         let table_id = self.data.table_id();
         lock_key.push(CatalogLock::Read(table_ref.catalog).into());
         lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());

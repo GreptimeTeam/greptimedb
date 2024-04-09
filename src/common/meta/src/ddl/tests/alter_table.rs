@@ -47,7 +47,7 @@ use crate::rpc::ddl::{AlterTableTask, CreateTableTask};
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
 
-pub fn test_create_table_task(name: &str, table_id: TableId) -> CreateTableTask {
+fn test_create_table_task(name: &str, table_id: TableId) -> CreateTableTask {
     let create_table = TestCreateTableExprBuilder::default()
         .column_defs([
             TestColumnDefBuilder::default()

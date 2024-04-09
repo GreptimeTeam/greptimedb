@@ -13,9 +13,12 @@
 // limitations under the License.
 
 use api::v1::alter_expr::Kind;
+use api::v1::region::region_request::Body;
 use api::v1::region::{
     alter_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns, RegionColumnDef,
+    RegionRequest, RegionRequestHeader,
 };
+use common_telemetry::tracing_context::TracingContext;
 use snafu::OptionExt;
 use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
@@ -25,16 +28,22 @@ use crate::error::{InvalidProtoMsgSnafu, Result};
 
 impl AlterTableProcedure {
     /// Makes alter region request.
-    pub(crate) fn make_alter_region_request(&self, region_id: RegionId) -> Result<AlterRequest> {
+    pub(crate) fn make_alter_region_request(&self, region_id: RegionId) -> Result<RegionRequest> {
         let alter_kind = self.alter_kind();
         // Safety: checked
         let table_info = self.data.table_info().unwrap();
         let kind = create_proto_alter_kind(table_info, alter_kind)?;
 
-        Ok(AlterRequest {
-            region_id: region_id.as_u64(),
-            schema_version: table_info.ident.version,
-            kind,
+        Ok(RegionRequest {
+            header: Some(RegionRequestHeader {
+                tracing_context: TracingContext::from_current_span().to_w3c(),
+                ..Default::default()
+            }),
+            body: Some(Body::Alter(AlterRequest {
+                region_id: region_id.as_u64(),
+                schema_version: table_info.ident.version,
+                kind,
+            })),
         })
     }
 }
@@ -105,6 +114,7 @@ mod tests {
 
     use api::v1::add_column_location::LocationType;
     use api::v1::alter_expr::Kind;
+    use api::v1::region::region_request::Body;
     use api::v1::region::RegionColumnDef;
     use api::v1::{
         region, AddColumn, AddColumnLocation, AddColumns, AlterExpr, ColumnDataType,
@@ -211,7 +221,11 @@ mod tests {
         let mut procedure =
             AlterTableProcedure::new(cluster_id, table_id, task, ddl_context).unwrap();
         procedure.on_prepare().await.unwrap();
-        let alter_region_request = procedure.make_alter_region_request(region_id).unwrap();
+        let Some(Body::Alter(alter_region_request)) =
+            procedure.make_alter_region_request(region_id).unwrap().body
+        else {
+            unreachable!()
+        };
         assert_eq!(alter_region_request.region_id, region_id.as_u64());
         assert_eq!(alter_region_request.schema_version, 1);
         assert_eq!(
