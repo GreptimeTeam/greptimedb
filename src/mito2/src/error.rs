@@ -29,6 +29,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::FileType;
+use crate::region::region_state_to_str;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
@@ -395,9 +396,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region {} is read only", region_id))]
-    RegionReadonly {
+    #[snafu(display("Region {} is in {} state", region_id, region_state_to_str(*state)))]
+    RegionState {
         region_id: RegionId,
+        state: u8,
         location: Location,
     },
 
@@ -669,7 +671,7 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionReadonly { .. } => StatusCode::RegionReadonly,
+            RegionState { .. } => StatusCode::RegionReadonly,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,

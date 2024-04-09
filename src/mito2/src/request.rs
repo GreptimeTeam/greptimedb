@@ -620,6 +620,8 @@ pub(crate) enum BackgroundNotify {
     CompactionFinished(CompactionFinished),
     /// Compaction has failed.
     CompactionFailed(CompactionFailed),
+    /// Truncate result.
+    Truncate(TruncateResult),
 }
 
 /// Notifies a flush job is finished.
@@ -735,6 +737,21 @@ pub(crate) struct CompactionFailed {
     pub(crate) region_id: RegionId,
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
+}
+
+/// Notifies the truncate result of a region.
+#[derive(Debug)]
+pub(crate) struct TruncateResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Result sender.
+    pub(crate) sender: OptionOutputTx,
+    /// Truncate result.
+    pub(crate) result: Result<()>,
+    /// Truncated entry id.
+    pub(crate) truncated_entry_id: EntryId,
+    /// Truncated sequence.
+    pub(crate) truncated_sequence: SequenceNumber,
 }
 
 #[cfg(test)]

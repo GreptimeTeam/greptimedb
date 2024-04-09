@@ -46,9 +46,8 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error::{InvalidRequestSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
-use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableBuilderProvider;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
@@ -667,7 +666,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     self.handle_compaction_request(ddl.region_id, ddl.sender);
                     continue;
                 }
-                DdlRequest::Truncate(_) => self.handle_truncate_request(ddl.region_id).await,
+                DdlRequest::Truncate(_) => {
+                    self.handle_truncate_request(ddl.region_id, ddl.sender)
+                        .await;
+                    continue;
+                }
                 DdlRequest::Catchup(req) => self.handle_catchup_request(ddl.region_id, req).await,
             };
 
@@ -704,6 +707,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_compaction_finished(region_id, req).await
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
+            BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
         }
     }
 

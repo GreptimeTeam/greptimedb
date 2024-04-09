@@ -16,6 +16,7 @@
 //!
 //! It updates the manifest and applies the changes to the region in background.
 
+use common_telemetry::{info, warn};
 use snafu::ensure;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot::Sender;
@@ -23,8 +24,11 @@ use tokio::sync::oneshot::Sender;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate};
 use crate::manifest::manager::RegionManifestManagerRef;
+use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::version::VersionControlRef;
-use crate::region::MitoRegionRef;
+use crate::region::{switch_state_to_writable, MitoRegionRef, REGION_STATE_EDITING};
+use crate::request::{BackgroundNotify, OptionOutputTx, TruncateResult, WorkerRequest};
+use crate::sst::file_purger::FilePurgerRef;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -35,7 +39,30 @@ impl<S> RegionWorkerLoop<S> {
         edit: RegionEdit,
         sender: Sender<Result<()>>,
     ) {
-        todo!()
+        let region = match self.regions.writable_region(region_id) {
+            Ok(region) => region,
+            Err(e) => {
+                let _ = sender.send(Err(e));
+                return;
+            }
+        };
+
+        // Marks the region as editing.
+        if let Err(e) = region.set_editing() {
+            let _ = sender.send(Err(e));
+            return;
+        }
+
+        // Updates manifest in background.
+        common_runtime::spawn_bg(async move {
+            let result = edit_region(&region, edit).await;
+
+            let _ = sender.send(result);
+
+            // Sets the region as writable. For simplicity, we don't send the result
+            // back to the worker.
+            switch_state_to_writable(&region, REGION_STATE_EDITING);
+        });
     }
 
     /// Writes truncate action to the manifest and then applies it to the region in background.
@@ -43,44 +70,108 @@ impl<S> RegionWorkerLoop<S> {
         &self,
         region: MitoRegionRef,
         truncate: RegionTruncate,
-        sender: Sender<Result<()>>,
-    ) -> Result<()> {
+        sender: OptionOutputTx,
+    ) {
+        // Marks the region as truncating.
+        // This prevents the region from being accessed by other write requests.
+        if let Err(e) = region.set_truncating() {
+            let _ = sender.send(Err(e));
+            return;
+        }
+
         let request_sender = self.sender.clone();
         let manifest_manager = region.manifest_manager.clone();
         let version_control = region.version_control.clone();
+        let memtable_builder = region.memtable_builder.clone();
 
         // Updates manifest in background.
         common_runtime::spawn_bg(async move {
-            //
+            let result = write_and_apply_truncate_action(
+                manifest_manager,
+                version_control,
+                &truncate,
+                memtable_builder,
+            )
+            .await;
+
+            // Sends the result back to the request sender.
+            let truncate_result = TruncateResult {
+                region_id: truncate.region_id,
+                sender,
+                result,
+                truncated_entry_id: truncate.truncated_entry_id,
+                truncated_sequence: truncate.truncated_sequence,
+            };
+            let _ = request_sender
+                .send(WorkerRequest::Background {
+                    region_id: truncate.region_id,
+                    notify: BackgroundNotify::Truncate(truncate_result),
+                })
+                .await
+                .inspect_err(|_| warn!("failed to send truncate result"));
         });
-
-        todo!()
-    }
-
-    /// Checks the region edit, writes it to the manifest and then applies it to the region.
-    async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
-        let region = self.regions.writable_region(region_id)?;
-
-        for file_meta in &edit.files_to_add {
-            let is_exist = region.access_layer.is_exist(file_meta).await?;
-            ensure!(
-                is_exist,
-                InvalidRequestSnafu {
-                    region_id,
-                    reason: format!(
-                        "trying to add a not exist file '{}' when editing region",
-                        file_meta.file_id
-                    )
-                }
-            );
-        }
-
-        // Applying region edit directly has nothing to do with memtables (at least for now).
-        region.apply_edit(edit, &[]).await
     }
 }
 
-async fn write_and_apply_truncate_action(manifest_manager: RegionManifestManagerRef, version_control: VersionControlRef, truncate: RegionTruncate, sender: ) -> Result<()> {
+/// Checks the edit, writes and applies it.
+async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
+    let region_id = region.region_id;
+    for file_meta in &edit.files_to_add {
+        let is_exist = region.access_layer.is_exist(file_meta).await?;
+        ensure!(
+            is_exist,
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "trying to add a not exist file '{}' when editing region",
+                    file_meta.file_id
+                )
+            }
+        );
+    }
+
+    write_and_apply_region_edit(
+        region.region_id,
+        &region.manifest_manager,
+        &region.version_control,
+        &region.file_purger,
+        edit,
+        &[],
+    )
+    .await
+}
+
+/// Writes it to the manifest and then applies it to the region.
+async fn write_and_apply_region_edit(
+    region_id: RegionId,
+    manifest_manager: &RegionManifestManagerRef,
+    version_control: &VersionControlRef,
+    file_purger: &FilePurgerRef,
+    edit: RegionEdit,
+    memtables_to_remove: &[MemtableId],
+) -> Result<()> {
+    info!("Applying {edit:?} to region {}", region_id);
+
+    let mut manager = manifest_manager.write().await;
+    // TODO(yingwen): Check region state.
+    manager
+        .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
+            edit.clone(),
+        )))
+        .await?;
+
+    // Apply edit to region's version.
+    version_control.apply_edit(edit, memtables_to_remove, file_purger.clone());
+
+    Ok(())
+}
+
+async fn write_and_apply_truncate_action(
+    manifest_manager: RegionManifestManagerRef,
+    version_control: VersionControlRef,
+    truncate: &RegionTruncate,
+    memtable_builder: MemtableBuilderRef,
+) -> Result<()> {
     // Write region truncated to manifest.
     let action_list =
         RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
@@ -89,5 +180,12 @@ async fn write_and_apply_truncate_action(manifest_manager: RegionManifestManager
     let mut manifest_manager = manifest_manager.write().await;
     manifest_manager.update(action_list).await?;
 
-    todo!()
+    // Applies the truncate action to the region.
+    version_control.truncate(
+        truncate.truncated_entry_id,
+        truncate.truncated_sequence,
+        &memtable_builder,
+    );
+
+    Ok(())
 }

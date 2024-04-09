@@ -19,17 +19,17 @@ pub mod options;
 pub(crate) mod version;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use common_wal::options::WalOptions;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
+use crate::error::{RegionNotFoundSnafu, RegionStateSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManagerRef;
 use crate::memtable::{MemtableBuilderRef, MemtableId};
@@ -53,6 +53,33 @@ pub struct RegionUsage {
 impl RegionUsage {
     pub fn disk_usage(&self) -> u64 {
         self.wal_usage + self.sst_usage + self.manifest_usage
+    }
+}
+
+// States of the region.
+/// The region is opened but is still read-only.
+pub(crate) const REGION_STATE_READ_ONLY: u8 = 0;
+/// The region is opened and is writable.
+pub(crate) const REGION_STATE_WRITABLE: u8 = 1;
+/// The region is altering.
+pub(crate) const REGION_STATE_ALTERING: u8 = 2;
+/// The region is dropping.
+pub(crate) const REGION_STATE_DROPPING: u8 = 3;
+/// The region is truncating.
+pub(crate) const REGION_STATE_TRUNCATING: u8 = 4;
+/// The region is handling a region edit.
+pub(crate) const REGION_STATE_EDITING: u8 = 5;
+
+/// Returns a string representation of the region state.
+pub(crate) fn region_state_to_str(state: u8) -> &'static str {
+    match state {
+        REGION_STATE_READ_ONLY => "READ_ONLY",
+        REGION_STATE_WRITABLE => "WRITABLE",
+        REGION_STATE_ALTERING => "ALTERING",
+        REGION_STATE_DROPPING => "DROPPING",
+        REGION_STATE_TRUNCATING => "TRUNCATING",
+        REGION_STATE_EDITING => "EDITING",
+        _ => "UNKNOWN",
     }
 }
 
@@ -83,8 +110,8 @@ pub(crate) struct MitoRegion {
     pub(crate) wal_options: WalOptions,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
-    /// Whether the region is writable.
-    writable: AtomicBool,
+    /// The state of the region.
+    state: AtomicU8,
     /// Provider to get current time.
     time_provider: TimeProviderRef,
     /// Memtable builder for the region.
@@ -129,19 +156,74 @@ impl MitoRegion {
         self.last_flush_millis.store(now, Ordering::Relaxed);
     }
 
-    /// Returns whether the region is writable.
-    pub(crate) fn is_writable(&self) -> bool {
-        self.writable.load(Ordering::Relaxed)
-    }
-
     /// Returns the region dir.
     pub(crate) fn region_dir(&self) -> &str {
         self.access_layer.region_dir()
     }
 
-    /// Sets the writable flag.
+    /// Returns whether the region is writable.
+    pub(crate) fn is_writable(&self) -> bool {
+        self.state.load(Ordering::Relaxed) == REGION_STATE_WRITABLE
+    }
+
+    /// Returns the state of the region.
+    pub(crate) fn state(&self) -> u8 {
+        self.state.load(Ordering::Relaxed)
+    }
+
+    /// Sets the writable state.
     pub(crate) fn set_writable(&self, writable: bool) {
-        self.writable.store(writable, Ordering::Relaxed);
+        if writable {
+            // Only sets the region to writable if it is read only.
+            // This prevents others updating the manifest.
+            let _ = self.state.compare_exchange(
+                REGION_STATE_READ_ONLY,
+                REGION_STATE_WRITABLE,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        } else {
+            self.state.store(REGION_STATE_READ_ONLY, Ordering::Relaxed);
+        }
+    }
+
+    /// Sets the altering state.
+    /// You should call this method in the worker loop.
+    pub(crate) fn set_altering(&self) -> Result<()> {
+        self.compare_exchange_state(REGION_STATE_WRITABLE, REGION_STATE_ALTERING)
+    }
+
+    /// Sets the dropping state.
+    /// You should call this method in the worker loop.
+    pub(crate) fn set_dropping(&self) -> Result<()> {
+        self.compare_exchange_state(REGION_STATE_WRITABLE, REGION_STATE_DROPPING)
+    }
+
+    /// Sets the truncating state.
+    /// You should call this method in the worker loop.
+    pub(crate) fn set_truncating(&self) -> Result<()> {
+        self.compare_exchange_state(REGION_STATE_WRITABLE, REGION_STATE_TRUNCATING)
+    }
+
+    /// Sets the editing state.
+    /// You should call this method in the worker loop.
+    pub(crate) fn set_editing(&self) -> Result<()> {
+        self.compare_exchange_state(REGION_STATE_WRITABLE, REGION_STATE_EDITING)
+    }
+
+    /// Sets the state of the region to given state if the current state equals to
+    /// the expected.
+    pub(crate) fn compare_exchange_state(&self, expect: u8, state: u8) -> Result<()> {
+        self.state
+            .compare_exchange(expect, state, Ordering::Relaxed, Ordering::Relaxed)
+            .map_err(|actual| {
+                RegionStateSnafu {
+                    region_id: self.region_id,
+                    state: actual,
+                }
+                .build()
+            })?;
+        Ok(())
     }
 
     /// Returns the region usage in bytes.
@@ -194,6 +276,12 @@ impl MitoRegion {
     }
 }
 
+pub(crate) fn switch_state_to_writable(region: &MitoRegionRef, expect: u8) {
+    if let Err(e) = region.compare_exchange_state(expect, REGION_STATE_WRITABLE) {
+        error!(e; "failed to switch region state to writable, expect state is {}", region_state_to_str(expect));
+    }
+}
+
 /// Regions indexed by ids.
 #[derive(Debug, Default)]
 pub(crate) struct RegionMap {
@@ -226,7 +314,13 @@ impl RegionMap {
         let region = self
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
-        ensure!(region.is_writable(), RegionReadonlySnafu { region_id });
+        ensure!(
+            region.is_writable(),
+            RegionStateSnafu {
+                region_id,
+                state: region.state()
+            }
+        );
         Ok(region)
     }
 
