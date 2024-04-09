@@ -26,9 +26,9 @@ use api::v1::meta::{
     ResponseHeader as PbResponseHeader,
 };
 
-use crate::error;
 use crate::error::Result;
-use crate::rpc::{util, KeyValue};
+use crate::rpc::KeyValue;
+use crate::{error, util};
 
 pub fn to_range(key: Vec<u8>, range_end: Vec<u8>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
     match (&key[..], &range_end[..]) {

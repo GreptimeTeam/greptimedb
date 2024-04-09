@@ -143,7 +143,7 @@ cargo run -- standalone start
 - [GreptimeDB C++ Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-cpp)
 - [GreptimeDB Erlang Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-erl)
 - [GreptimeDB Rust Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-rust)
-- [GreptimeDB JavaScript Ingester](https://github.com/GreptimeTeam/greptime-ingester-js)
+- [GreptimeDB JavaScript Ingester](https://github.com/GreptimeTeam/greptimedb-ingester-js)
 
 ### Grafana Dashboard
 

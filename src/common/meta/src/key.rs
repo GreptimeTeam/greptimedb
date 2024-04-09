@@ -283,7 +283,7 @@ impl<T: Serialize + DeserializeOwned + TableMetaValue> DeserializedValueWithByte
         self.bytes.to_vec()
     }
 
-    /// Notes: used for test purpose.
+    #[cfg(any(test, feature = "testing"))]
     pub fn from_inner(inner: T) -> Self {
         let bytes = serde_json::to_vec(&inner).unwrap();
 
@@ -687,7 +687,7 @@ impl TableMetadataManager {
 
     pub async fn batch_update_table_info_values(
         &self,
-        table_info_value_pairs: Vec<(TableInfoValue, RawTableInfo)>,
+        table_info_value_pairs: Vec<(DeserializedValueWithBytes<TableInfoValue>, RawTableInfo)>,
     ) -> Result<()> {
         let len = table_info_value_pairs.len();
         let mut txns = Vec::with_capacity(len);
@@ -708,7 +708,7 @@ impl TableMetadataManager {
             let (update_table_info_txn, on_update_table_info_failure) =
                 self.table_info_manager().build_update_txn(
                     table_id,
-                    &DeserializedValueWithBytes::from_inner(table_info_value),
+                    &table_info_value,
                     &new_table_info_value,
                 )?;
 

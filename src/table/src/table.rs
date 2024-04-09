@@ -12,49 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use common_query::logical_plan::Expr;
+use common_recordbatch::SendableRecordBatchStream;
+use datatypes::schema::SchemaRef;
+use snafu::ResultExt;
+use store_api::data_source::DataSourceRef;
+use store_api::storage::ScanRequest;
+
+use crate::error::{Result, TablesRecordBatchSnafu};
+use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
+
 pub mod adapter;
 mod metrics;
 pub mod numbers;
 pub mod scan;
 
-use std::any::Any;
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use common_query::logical_plan::Expr;
-use common_recordbatch::SendableRecordBatchStream;
-use datatypes::schema::SchemaRef;
-use store_api::storage::ScanRequest;
-
-use crate::error::Result;
-use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
-
-/// Table abstraction.
-#[async_trait]
-pub trait Table: Send + Sync {
-    /// Returns the table as [`Any`](std::any::Any) so that it can be
-    /// downcast to a specific implementation.
-    fn as_any(&self) -> &dyn Any;
-
-    /// Get a reference to the schema for this table
-    fn schema(&self) -> SchemaRef;
-
-    /// Get a reference to the table info.
-    fn table_info(&self) -> TableInfoRef;
-
-    /// Get the type of this table for metadata/catalog purposes.
-    fn table_type(&self) -> TableType;
-
-    async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
-
-    /// Tests whether the table provider can make use of any or all filter expressions
-    /// to optimise data retrieval.
-    fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
-        Ok(vec![FilterPushDownType::Unsupported; filters.len()])
-    }
-}
-
-pub type TableRef = Arc<dyn Table>;
+pub type TableRef = Arc<Table>;
 
 #[async_trait::async_trait]
 pub trait TableIdProvider {
@@ -62,3 +37,55 @@ pub trait TableIdProvider {
 }
 
 pub type TableIdProviderRef = Arc<dyn TableIdProvider + Send + Sync>;
+
+/// Table handle.
+pub struct Table {
+    table_info: TableInfoRef,
+    filter_pushdown: FilterPushDownType,
+    data_source: DataSourceRef,
+}
+
+impl Table {
+    pub fn new(
+        table_info: TableInfoRef,
+        filter_pushdown: FilterPushDownType,
+        data_source: DataSourceRef,
+    ) -> Self {
+        Self {
+            table_info,
+            filter_pushdown,
+            data_source,
+        }
+    }
+
+    pub fn data_source(&self) -> DataSourceRef {
+        self.data_source.clone()
+    }
+
+    /// Get a reference to the schema for this table.
+    pub fn schema(&self) -> SchemaRef {
+        self.table_info.meta.schema.clone()
+    }
+
+    /// Get a reference to the table info.
+    pub fn table_info(&self) -> TableInfoRef {
+        self.table_info.clone()
+    }
+
+    /// Get the type of this table for metadata/catalog purposes.
+    pub fn table_type(&self) -> TableType {
+        self.table_info.table_type
+    }
+
+    pub async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
+        self.data_source
+            .get_stream(request)
+            .context(TablesRecordBatchSnafu)
+    }
+
+    /// Tests whether the table provider can make use of any or all filter expressions
+    /// to optimise data retrieval.
+    pub fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
+        Ok(vec![self.filter_pushdown; filters.len()])
+    }
+}

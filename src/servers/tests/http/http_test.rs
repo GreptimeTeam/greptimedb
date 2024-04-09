@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use axum::Router;
-use axum_test_helper::TestClient;
 use common_test_util::ports;
+use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use table::test_util::MemTable;
 

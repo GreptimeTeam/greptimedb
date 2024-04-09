@@ -50,6 +50,9 @@ pub struct ProcedureMessage {
     pub parent_id: Option<ProcedureId>,
     /// Current step.
     pub step: u32,
+    /// Errors raised during the procedure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Procedure storage layer.
@@ -85,6 +88,7 @@ impl ProcedureStore {
             data,
             parent_id,
             step,
+            error: None,
         };
         let key = ParsedKey {
             prefix: &self.proc_path,
@@ -122,16 +126,19 @@ impl ProcedureStore {
     pub(crate) async fn rollback_procedure(
         &self,
         procedure_id: ProcedureId,
-        step: u32,
+        message: ProcedureMessage,
     ) -> Result<()> {
         let key = ParsedKey {
             prefix: &self.proc_path,
             procedure_id,
-            step,
+            step: message.step,
             key_type: KeyType::Rollback,
         }
         .to_string();
-        self.store.put(&key, Vec::new()).await?;
+
+        self.store
+            .put(&key, serde_json::to_vec(&message).context(ToJsonSnafu)?)
+            .await?;
 
         Ok(())
     }
@@ -176,11 +183,18 @@ impl ProcedureStore {
         Ok(())
     }
 
-    /// Load procedures from the storage. Returns a map of uncommitted procedures and a list
-    /// of finished procedures' ids.
+    /// Load procedures from the storage.
+    /// Returns:
+    /// - a map of uncommitted procedures
+    /// - a map of rolling back procedures
+    /// - a list of finished procedures' ids
     pub(crate) async fn load_messages(
         &self,
-    ) -> Result<(HashMap<ProcedureId, ProcedureMessage>, Vec<ProcedureId>)> {
+    ) -> Result<(
+        HashMap<ProcedureId, ProcedureMessage>,
+        HashMap<ProcedureId, ProcedureMessage>,
+        Vec<ProcedureId>,
+    )> {
         // Track the key-value pair by procedure id.
         let mut procedure_key_values: HashMap<_, (ParsedKey, Vec<u8>)> = HashMap::new();
 
@@ -204,21 +218,33 @@ impl ProcedureStore {
         }
 
         let mut messages = HashMap::with_capacity(procedure_key_values.len());
+        let mut rollback_messages = HashMap::new();
         let mut finished_ids = Vec::new();
         for (procedure_id, (parsed_key, value)) in procedure_key_values {
-            if parsed_key.key_type == KeyType::Step {
-                let Some(message) = self.load_one_message(&parsed_key, &value) else {
-                    // We don't abort the loading process and just ignore errors to ensure all remaining
-                    // procedures are loaded.
-                    continue;
-                };
-                let _ = messages.insert(procedure_id, message);
-            } else {
-                finished_ids.push(procedure_id);
+            match parsed_key.key_type {
+                KeyType::Step => {
+                    let Some(message) = self.load_one_message(&parsed_key, &value) else {
+                        // We don't abort the loading process and just ignore errors to ensure all remaining
+                        // procedures are loaded.
+                        continue;
+                    };
+                    let _ = messages.insert(procedure_id, message);
+                }
+                KeyType::Commit => {
+                    finished_ids.push(procedure_id);
+                }
+                KeyType::Rollback => {
+                    let Some(message) = self.load_one_message(&parsed_key, &value) else {
+                        // We don't abort the loading process and just ignore errors to ensure all remaining
+                        // procedures are loaded.
+                        continue;
+                    };
+                    let _ = rollback_messages.insert(procedure_id, message);
+                }
             }
         }
 
-        Ok((messages, finished_ids))
+        Ok((messages, rollback_messages, finished_ids))
     }
 
     fn load_one_message(&self, key: &ParsedKey, value: &[u8]) -> Option<ProcedureMessage> {
@@ -430,6 +456,7 @@ mod tests {
             data: "no parent id".to_string(),
             parent_id: None,
             step: 4,
+            error: None,
         };
 
         let json = serde_json::to_string(&message).unwrap();
@@ -490,8 +517,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert_eq!(1, messages.len());
+        assert!(rollback_messages.is_empty());
         assert!(finished.is_empty());
         let msg = messages.get(&procedure_id).unwrap();
         let expect = ProcedureMessage {
@@ -499,6 +527,7 @@ mod tests {
             data: "test store procedure".to_string(),
             parent_id: None,
             step: 0,
+            error: None,
         };
         assert_eq!(expect, *msg);
     }
@@ -518,8 +547,9 @@ mod tests {
             .unwrap();
         store.commit_procedure(procedure_id, 1).await.unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+        assert!(rollback_messages.is_empty());
         assert_eq!(&[procedure_id], &finished[..]);
     }
 
@@ -533,14 +563,32 @@ mod tests {
         let type_name = procedure.type_name().to_string();
         let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, type_name, data, None)
+            .store_procedure(
+                procedure_id,
+                0,
+                type_name.to_string(),
+                data.to_string(),
+                None,
+            )
             .await
             .unwrap();
-        store.rollback_procedure(procedure_id, 1).await.unwrap();
+        let message = ProcedureMessage {
+            type_name,
+            data,
+            parent_id: None,
+            step: 1,
+            error: None,
+        };
+        store
+            .rollback_procedure(procedure_id, message)
+            .await
+            .unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
-        assert_eq!(&[procedure_id], &finished[..]);
+        assert_eq!(1, rollback_messages.len());
+        assert!(finished.is_empty());
+        assert!(rollback_messages.contains_key(&procedure_id));
     }
 
     #[tokio::test]
@@ -565,8 +613,9 @@ mod tests {
 
         store.delete_procedure(procedure_id).await.unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+        assert!(rollback_messages.is_empty());
         assert!(finished.is_empty());
     }
 
@@ -595,8 +644,9 @@ mod tests {
 
         store.delete_procedure(procedure_id).await.unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+        assert!(rollback_messages.is_empty());
         assert!(finished.is_empty());
     }
 
@@ -657,8 +707,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let (messages, rollback_messages, finished) = store.load_messages().await.unwrap();
         assert_eq!(2, messages.len());
+        assert!(rollback_messages.is_empty());
         assert_eq!(1, finished.len());
 
         let msg = messages.get(&id0).unwrap();

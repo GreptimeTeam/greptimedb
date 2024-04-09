@@ -40,6 +40,9 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
+use crate::handler::collect_cluster_info_handler::{
+    CollectDatanodeClusterInfoHandler, CollectFrontendClusterInfoHandler,
+};
 use crate::handler::collect_stats_handler::CollectStatsHandler;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
@@ -54,7 +57,7 @@ use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pushers};
 use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
 use crate::metasrv::{
-    ElectionRef, MetaSrv, MetaSrvOptions, MetasrvInfo, SelectorContext, SelectorRef, TABLE_ID_SEQ,
+    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
@@ -67,8 +70,8 @@ use crate::state::State;
 use crate::table_meta_alloc::MetasrvPeerAllocator;
 
 // TODO(fys): try use derive_builder macro
-pub struct MetaSrvBuilder {
-    options: Option<MetaSrvOptions>,
+pub struct MetasrvBuilder {
+    options: Option<MetasrvOptions>,
     kv_backend: Option<KvBackendRef>,
     in_memory: Option<ResettableKvBackendRef>,
     selector: Option<SelectorRef>,
@@ -81,7 +84,7 @@ pub struct MetaSrvBuilder {
     table_metadata_allocator: Option<TableMetadataAllocatorRef>,
 }
 
-impl MetaSrvBuilder {
+impl MetasrvBuilder {
     pub fn new() -> Self {
         Self {
             kv_backend: None,
@@ -98,7 +101,7 @@ impl MetaSrvBuilder {
         }
     }
 
-    pub fn options(mut self, options: MetaSrvOptions) -> Self {
+    pub fn options(mut self, options: MetasrvOptions) -> Self {
         self.options = Some(options);
         self
     }
@@ -156,10 +159,10 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<MetaSrv> {
+    pub async fn build(self) -> Result<Metasrv> {
         let started = Arc::new(AtomicBool::new(false));
 
-        let MetaSrvBuilder {
+        let MetasrvBuilder {
             election,
             meta_peer_client,
             options,
@@ -298,6 +301,8 @@ impl MetaSrvBuilder {
                 group.add_handler(CheckLeaderHandler).await;
                 group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler).await;
+                group.add_handler(CollectDatanodeClusterInfoHandler).await;
+                group.add_handler(CollectFrontendClusterInfoHandler).await;
                 group.add_handler(MailboxHandler).await;
                 group.add_handler(region_lease_handler).await;
                 group.add_handler(FilterInactiveRegionStatsHandler).await;
@@ -315,7 +320,7 @@ impl MetaSrvBuilder {
         let enable_telemetry = options.enable_telemetry;
         let metasrv_home = options.data_home.to_string();
 
-        Ok(MetaSrv {
+        Ok(Metasrv {
             state,
             started,
             options,
@@ -368,7 +373,7 @@ fn build_mailbox(kv_backend: &KvBackendRef, pushers: &Pushers) -> MailboxRef {
 }
 
 fn build_procedure_manager(
-    options: &MetaSrvOptions,
+    options: &MetasrvOptions,
     kv_backend: &KvBackendRef,
 ) -> ProcedureManagerRef {
     let manager_config = ManagerConfig {
@@ -386,7 +391,7 @@ fn build_procedure_manager(
 }
 
 fn build_ddl_manager(
-    options: &MetaSrvOptions,
+    options: &MetasrvOptions,
     datanode_clients: Option<DatanodeManagerRef>,
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
@@ -426,7 +431,7 @@ fn build_ddl_manager(
     ))
 }
 
-impl Default for MetaSrvBuilder {
+impl Default for MetasrvBuilder {
     fn default() -> Self {
         Self::new()
     }

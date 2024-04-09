@@ -17,10 +17,10 @@ use tonic::{Request, Response};
 
 use super::GrpcResult;
 use crate::lock::Opts;
-use crate::metasrv::MetaSrv;
+use crate::metasrv::Metasrv;
 
 #[async_trait::async_trait]
-impl lock_server::Lock for MetaSrv {
+impl lock_server::Lock for Metasrv {
     async fn lock(&self, request: Request<LockRequest>) -> GrpcResult<LockResponse> {
         let LockRequest {
             name, expire_secs, ..

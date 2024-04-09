@@ -23,7 +23,6 @@ pub mod stats;
 pub mod table;
 pub mod table_reference;
 pub mod test_util;
-pub mod thin_table;
 
 pub use crate::error::{Error, Result};
 pub use crate::stats::{ColumnStatistics, TableStatistics};

@@ -48,7 +48,12 @@ pub struct TableHandler {
 
 #[async_trait::async_trait]
 impl HttpHandler for CatalogsHandler {
-    async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
+    async fn handle(
+        &self,
+        _: &str,
+        _: http::Method,
+        _: &HashMap<String, String>,
+    ) -> Result<http::Response<String>> {
         let stream = self
             .table_metadata_manager
             .catalog_manager()
@@ -69,6 +74,7 @@ impl HttpHandler for SchemasHandler {
     async fn handle(
         &self,
         path: &str,
+        _: http::Method,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         if path.ends_with("/help") {
@@ -100,6 +106,7 @@ impl HttpHandler for TablesHandler {
     async fn handle(
         &self,
         path: &str,
+        _: http::Method,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         if path.ends_with("/help") {
@@ -135,6 +142,7 @@ impl HttpHandler for TableHandler {
     async fn handle(
         &self,
         path: &str,
+        _: http::Method,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         if path.ends_with("/help") {

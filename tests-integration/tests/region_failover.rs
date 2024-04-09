@@ -258,7 +258,7 @@ async fn find_region_distribution(
     cluster: &GreptimeDbCluster,
     table_id: TableId,
 ) -> RegionDistribution {
-    let manager = cluster.meta_srv.table_metadata_manager();
+    let manager = cluster.metasrv.table_metadata_manager();
     let region_distribution = manager
         .table_route_manager()
         .get_region_distribution(table_id)
@@ -343,27 +343,27 @@ async fn run_region_failover_procedure(
     failed_region: RegionIdent,
     selector: SelectorRef,
 ) {
-    let meta_srv = &cluster.meta_srv;
-    let procedure_manager = meta_srv.procedure_manager();
+    let metasrv = &cluster.metasrv;
+    let procedure_manager = metasrv.procedure_manager();
     let procedure = RegionFailoverProcedure::new(
         "greptime".into(),
         "public".into(),
         failed_region.clone(),
         RegionFailoverContext {
             region_lease_secs: 10,
-            in_memory: meta_srv.in_memory().clone(),
-            kv_backend: meta_srv.kv_backend().clone(),
-            mailbox: meta_srv.mailbox().clone(),
+            in_memory: metasrv.in_memory().clone(),
+            kv_backend: metasrv.kv_backend().clone(),
+            mailbox: metasrv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {
                 datanode_lease_secs: distributed_time_constants::REGION_LEASE_SECS,
-                server_addr: meta_srv.options().server_addr.clone(),
-                kv_backend: meta_srv.kv_backend().clone(),
-                meta_peer_client: meta_srv.meta_peer_client().clone(),
+                server_addr: metasrv.options().server_addr.clone(),
+                kv_backend: metasrv.kv_backend().clone(),
+                meta_peer_client: metasrv.meta_peer_client().clone(),
                 table_id: None,
             },
-            dist_lock: meta_srv.lock().clone(),
-            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+            dist_lock: metasrv.lock().clone(),
+            table_metadata_manager: metasrv.table_metadata_manager().clone(),
         },
     );
     let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));

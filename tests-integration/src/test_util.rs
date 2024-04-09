@@ -346,7 +346,6 @@ pub(crate) fn create_datanode_opts(
             data_home: home_dir,
             providers,
             store: default_store,
-            ..Default::default()
         },
         mode,
         wal: wal_config,

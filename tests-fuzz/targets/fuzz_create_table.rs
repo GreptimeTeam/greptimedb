@@ -61,16 +61,31 @@ impl Arbitrary<'_> for FuzzInput {
 
 fn generate_expr(input: FuzzInput) -> Result<CreateTableExpr> {
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
-    let create_table_generator = CreateTableExprGeneratorBuilder::default()
-        .name_generator(Box::new(MappedGenerator::new(
-            WordGenerator,
-            merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
-        )))
-        .columns(input.columns)
-        .engine("mito")
-        .build()
-        .unwrap();
-    create_table_generator.generate(&mut rng)
+    let metric_engine = rng.gen_bool(0.5);
+    if metric_engine {
+        let create_table_generator = CreateTableExprGeneratorBuilder::default()
+            .name_generator(Box::new(MappedGenerator::new(
+                WordGenerator,
+                merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
+            )))
+            .columns(input.columns)
+            .engine("metric")
+            .with_clause([("physical_metric_table".to_string(), "".to_string())])
+            .build()
+            .unwrap();
+        create_table_generator.generate(&mut rng)
+    } else {
+        let create_table_generator = CreateTableExprGeneratorBuilder::default()
+            .name_generator(Box::new(MappedGenerator::new(
+                WordGenerator,
+                merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
+            )))
+            .columns(input.columns)
+            .engine("mito")
+            .build()
+            .unwrap();
+        create_table_generator.generate(&mut rng)
+    }
 }
 
 async fn execute_create_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {

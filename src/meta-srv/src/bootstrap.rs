@@ -41,8 +41,8 @@ use crate::election::etcd::EtcdElection;
 use crate::error::InitExportMetricsTaskSnafu;
 use crate::lock::etcd::EtcdLock;
 use crate::lock::memory::MemLock;
-use crate::metasrv::builder::MetaSrvBuilder;
-use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
+use crate::metasrv::builder::MetasrvBuilder;
+use crate::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::SelectorType;
@@ -50,12 +50,12 @@ use crate::service::admin;
 use crate::{error, Result};
 
 #[derive(Clone)]
-pub struct MetaSrvInstance {
-    meta_srv: MetaSrv,
+pub struct MetasrvInstance {
+    metasrv: Metasrv,
 
-    http_srv: Arc<HttpServer>,
+    httpsrv: Arc<HttpServer>,
 
-    opts: MetaSrvOptions,
+    opts: MetasrvOptions,
 
     signal_sender: Option<Sender<()>>,
 
@@ -64,25 +64,25 @@ pub struct MetaSrvInstance {
     export_metrics_task: Option<ExportMetricsTask>,
 }
 
-impl MetaSrvInstance {
+impl MetasrvInstance {
     pub async fn new(
-        opts: MetaSrvOptions,
+        opts: MetasrvOptions,
         plugins: Plugins,
-        meta_srv: MetaSrv,
-    ) -> Result<MetaSrvInstance> {
-        let http_srv = Arc::new(
+        metasrv: Metasrv,
+    ) -> Result<MetasrvInstance> {
+        let httpsrv = Arc::new(
             HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
                 .with_greptime_config_options(opts.to_toml_string())
                 .build(),
         );
-        // put meta_srv into plugins for later use
-        plugins.insert::<Arc<MetaSrv>>(Arc::new(meta_srv.clone()));
+        // put metasrv into plugins for later use
+        plugins.insert::<Arc<Metasrv>>(Arc::new(metasrv.clone()));
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(InitExportMetricsTaskSnafu)?;
-        Ok(MetaSrvInstance {
-            meta_srv,
-            http_srv,
+        Ok(MetasrvInstance {
+            metasrv,
+            httpsrv,
             opts,
             signal_sender: None,
             plugins,
@@ -91,7 +91,7 @@ impl MetaSrvInstance {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        self.meta_srv.try_start().await?;
+        self.metasrv.try_start().await?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {
             t.start(None).context(InitExportMetricsTaskSnafu)?
@@ -101,23 +101,23 @@ impl MetaSrvInstance {
 
         self.signal_sender = Some(tx);
 
-        let mut router = router(self.meta_srv.clone());
-        if let Some(configurator) = self.meta_srv.plugins().get::<ConfiguratorRef>() {
+        let mut router = router(self.metasrv.clone());
+        if let Some(configurator) = self.metasrv.plugins().get::<ConfiguratorRef>() {
             router = configurator.config_grpc(router);
         }
 
-        let meta_srv = bootstrap_meta_srv_with_router(&self.opts.bind_addr, router, rx);
+        let metasrv = bootstrap_metasrv_with_router(&self.opts.bind_addr, router, rx);
         let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
             addr: &self.opts.http.addr,
         })?;
         let http_srv = async {
-            self.http_srv
+            self.httpsrv
                 .start(addr)
                 .await
                 .map(|_| ())
                 .context(error::StartHttpSnafu)
         };
-        future::try_join(meta_srv, http_srv).await?;
+        future::try_join(metasrv, http_srv).await?;
         Ok(())
     }
 
@@ -128,12 +128,12 @@ impl MetaSrvInstance {
                 .await
                 .context(error::SendShutdownSignalSnafu)?;
         }
-        self.meta_srv.shutdown().await?;
-        self.http_srv
+        self.metasrv.shutdown().await?;
+        self.httpsrv
             .shutdown()
             .await
             .context(error::ShutdownServerSnafu {
-                server: self.http_srv.name(),
+                server: self.httpsrv.name(),
             })?;
         Ok(())
     }
@@ -143,7 +143,7 @@ impl MetaSrvInstance {
     }
 }
 
-pub async fn bootstrap_meta_srv_with_router(
+pub async fn bootstrap_metasrv_with_router(
     bind_addr: &str,
     router: Router,
     mut signal: Receiver<()>,
@@ -167,22 +167,22 @@ pub async fn bootstrap_meta_srv_with_router(
     Ok(())
 }
 
-pub fn router(meta_srv: MetaSrv) -> Router {
+pub fn router(metasrv: Metasrv) -> Router {
     tonic::transport::Server::builder()
         .accept_http1(true) // for admin services
-        .add_service(HeartbeatServer::new(meta_srv.clone()))
-        .add_service(StoreServer::new(meta_srv.clone()))
-        .add_service(ClusterServer::new(meta_srv.clone()))
-        .add_service(LockServer::new(meta_srv.clone()))
-        .add_service(ProcedureServiceServer::new(meta_srv.clone()))
-        .add_service(admin::make_admin_service(meta_srv))
+        .add_service(HeartbeatServer::new(metasrv.clone()))
+        .add_service(StoreServer::new(metasrv.clone()))
+        .add_service(ClusterServer::new(metasrv.clone()))
+        .add_service(LockServer::new(metasrv.clone()))
+        .add_service(ProcedureServiceServer::new(metasrv.clone()))
+        .add_service(admin::make_admin_service(metasrv))
 }
 
 pub async fn metasrv_builder(
-    opts: &MetaSrvOptions,
+    opts: &MetasrvOptions,
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
-) -> Result<MetaSrvBuilder> {
+) -> Result<MetasrvBuilder> {
     let (kv_backend, election, lock) = match (kv_backend, opts.use_memory_store) {
         (Some(kv_backend), _) => (kv_backend, None, Some(Arc::new(MemLock::default()) as _)),
         (None, true) => (
@@ -229,7 +229,7 @@ pub async fn metasrv_builder(
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
     };
 
-    Ok(MetaSrvBuilder::new()
+    Ok(MetasrvBuilder::new()
         .options(opts.clone())
         .kv_backend(kv_backend)
         .in_memory(in_memory)
@@ -239,7 +239,7 @@ pub async fn metasrv_builder(
         .plugins(plugins))
 }
 
-async fn create_etcd_client(opts: &MetaSrvOptions) -> Result<Client> {
+async fn create_etcd_client(opts: &MetasrvOptions) -> Result<Client> {
     let etcd_endpoints = opts
         .store_addr
         .split(',')

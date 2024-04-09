@@ -13,4 +13,4 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Check License Header
-      uses: korandoru/hawkeye@v4
+      uses: korandoru/hawkeye@v5

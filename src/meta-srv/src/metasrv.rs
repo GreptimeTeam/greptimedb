@@ -33,7 +33,7 @@ use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
-use common_wal::config::MetaSrvWalConfig;
+use common_wal::config::MetasrvWalConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
@@ -63,7 +63,7 @@ pub const METASRV_HOME: &str = "/tmp/metasrv";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct MetaSrvOptions {
+pub struct MetasrvOptions {
     pub bind_addr: String,
     pub server_addr: String,
     pub store_addr: String,
@@ -77,7 +77,7 @@ pub struct MetaSrvOptions {
     pub datanode: DatanodeOptions,
     pub enable_telemetry: bool,
     pub data_home: String,
-    pub wal: MetaSrvWalConfig,
+    pub wal: MetasrvWalConfig,
     pub export_metrics: ExportMetricsOption,
     pub store_key_prefix: String,
     /// The max operations per txn
@@ -93,13 +93,13 @@ pub struct MetaSrvOptions {
     pub max_txn_ops: usize,
 }
 
-impl MetaSrvOptions {
+impl MetasrvOptions {
     pub fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["wal.broker_endpoints"])
     }
 }
 
-impl Default for MetaSrvOptions {
+impl Default for MetasrvOptions {
     fn default() -> Self {
         Self {
             bind_addr: "127.0.0.1:3002".to_string(),
@@ -124,7 +124,7 @@ impl Default for MetaSrvOptions {
             datanode: DatanodeOptions::default(),
             enable_telemetry: true,
             data_home: METASRV_HOME.to_string(),
-            wal: MetaSrvWalConfig::default(),
+            wal: MetasrvWalConfig::default(),
             export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
             max_txn_ops: 128,
@@ -132,7 +132,7 @@ impl Default for MetaSrvOptions {
     }
 }
 
-impl MetaSrvOptions {
+impl MetasrvOptions {
     pub fn to_toml_string(&self) -> String {
         toml::to_string(&self).unwrap()
     }
@@ -253,10 +253,10 @@ impl MetaStateHandler {
 }
 
 #[derive(Clone)]
-pub struct MetaSrv {
+pub struct Metasrv {
     state: StateRef,
     started: Arc<AtomicBool>,
-    options: MetaSrvOptions,
+    options: MetasrvOptions,
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
     in_memory: ResettableKvBackendRef,
@@ -279,14 +279,14 @@ pub struct MetaSrv {
     plugins: Plugins,
 }
 
-impl MetaSrv {
+impl Metasrv {
     pub async fn try_start(&self) -> Result<()> {
         if self
             .started
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
             .is_err()
         {
-            warn!("MetaSrv already started");
+            warn!("Metasrv already started");
             return Ok(());
         }
 
@@ -347,11 +347,11 @@ impl MetaSrv {
                 while started.load(Ordering::Relaxed) {
                     let res = election.campaign().await;
                     if let Err(e) = res {
-                        warn!("MetaSrv election error: {}", e);
+                        warn!("Metasrv election error: {}", e);
                     }
-                    info!("MetaSrv re-initiate election");
+                    info!("Metasrv re-initiate election");
                 }
-                info!("MetaSrv stopped");
+                info!("Metasrv stopped");
             });
         } else {
             if let Err(e) = self.wal_options_allocator.start().await {
@@ -368,7 +368,7 @@ impl MetaSrv {
                 .context(StartProcedureManagerSnafu)?;
         }
 
-        info!("MetaSrv started");
+        info!("Metasrv started");
         Ok(())
     }
 
@@ -403,7 +403,7 @@ impl MetaSrv {
     }
 
     #[inline]
-    pub fn options(&self) -> &MetaSrvOptions {
+    pub fn options(&self) -> &MetasrvOptions {
         &self.options
     }
 

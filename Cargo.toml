@@ -62,7 +62,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -104,7 +104,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "06f6297ff3cab578a1589741b504342fbad70453" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c00c73b76ed20a603e4d29fb96cb4e6ef987bba7" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -133,6 +133,7 @@ reqwest = { version = "0.11", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
     "stream",
+    "multipart",
 ] }
 rskafka = "0.5"
 rust_decimal = "1.33"

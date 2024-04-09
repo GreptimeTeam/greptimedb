@@ -25,7 +25,10 @@ use crate::expr::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
 use crate::repr::{value_to_internal_ts, Diff, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
 
+/// A batch of updates, arranged by key
 pub type Batch = BTreeMap<Row, SmallVec<[DiffRow; 2]>>;
+
+/// A spine of batches, arranged by timestamp
 pub type Spine = BTreeMap<Timestamp, Batch>;
 
 /// Determine when should a key expire according to it's event timestamp in key,
@@ -136,6 +139,7 @@ pub struct Arrangement {
 }
 
 impl Arrangement {
+    /// create a new empty arrangement
     pub fn new() -> Self {
         Self {
             spine: Default::default(),
@@ -207,7 +211,7 @@ impl Arrangement {
     }
 
     /// get the last compaction time
-    pub fn get_compaction(&self) -> Option<Timestamp> {
+    pub fn last_compaction_time(&self) -> Option<Timestamp> {
         self.last_compaction_time
     }
 
@@ -253,7 +257,7 @@ impl Arrangement {
     /// advance time to `now` and consolidate all older(`now` included) updates to the first key
     ///
     /// return the maximum expire time(already expire by how much time) of all updates if any keys is already expired
-    pub fn set_compaction(&mut self, now: Timestamp) -> Result<Option<Duration>, EvalError> {
+    pub fn compaction_to(&mut self, now: Timestamp) -> Result<Option<Duration>, EvalError> {
         let mut max_late_by: Option<Duration> = None;
 
         let should_compact = self.split_lte(&now);
@@ -453,19 +457,26 @@ pub struct ArrangeHandler {
     inner: Arc<RwLock<Arrangement>>,
 }
 impl ArrangeHandler {
+    /// create a new handler from arrangement
     pub fn from(arr: Arrangement) -> Self {
         Self {
             inner: Arc::new(RwLock::new(arr)),
         }
     }
+
+    /// write lock the arrangement
     pub fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, Arrangement> {
         self.inner.blocking_write()
     }
+
+    /// read lock the arrangement
     pub fn read(&self) -> tokio::sync::RwLockReadGuard<'_, Arrangement> {
         self.inner.blocking_read()
     }
 
     /// clone the handler, but only keep the future updates
+    ///
+    /// it's a cheap operation, since it's `Arc-ed` and only clone the `Arc`
     pub fn clone_future_only(&self) -> Option<Self> {
         if self.read().is_written {
             return None;
@@ -478,6 +489,8 @@ impl ArrangeHandler {
     /// clone the handler, but keep all updates
     /// prevent illegal clone after the arrange have been written,
     /// because that will cause loss of data before clone
+    ///
+    /// it's a cheap operation, since it's `Arc-ed` and only clone the `Arc`
     pub fn clone_full_arrange(&self) -> Option<Self> {
         if self.read().is_written {
             return None;
@@ -546,7 +559,7 @@ mod test {
                 vec![((Row::new(vec![1.into()]), Row::new(vec![2.into()])), 1, 1)]
             );
             assert_eq!(arr.spine.len(), 3);
-            arr.set_compaction(1).unwrap();
+            arr.compaction_to(1).unwrap();
             assert_eq!(arr.spine.len(), 3);
         }
 
@@ -555,7 +568,7 @@ mod test {
         {
             let mut arr = arr.write();
             assert_eq!(arr.spine.len(), 3);
-            arr.set_compaction(2).unwrap();
+            arr.compaction_to(2).unwrap();
             assert_eq!(arr.spine.len(), 2);
         }
     }
@@ -605,7 +618,7 @@ mod test {
                 ]
             );
             assert_eq!(arr.spine.len(), 3);
-            arr.set_compaction(1).unwrap();
+            arr.compaction_to(1).unwrap();
             assert_eq!(arr.spine.len(), 3);
         }
         {

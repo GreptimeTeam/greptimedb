@@ -20,6 +20,7 @@ mod id;
 mod linear;
 mod relation;
 mod scalar;
+mod signature;
 
 pub(crate) use error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
 pub(crate) use func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};

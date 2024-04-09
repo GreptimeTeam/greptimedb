@@ -364,30 +364,13 @@ impl KvBackend for MetaKvBackend {
         "MetaKvBackend"
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         self.client
             .range(req)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
-    }
-
-    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
-        let mut response = self
-            .client
-            .range(RangeRequest::new().with_key(key))
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-        Ok(response.take_kvs().get_mut(0).map(|kv| KeyValue {
-            key: kv.take_key(),
-            value: kv.take_value(),
-        }))
-    }
-
-    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
-        self.client
-            .batch_put(req)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
@@ -401,17 +384,9 @@ impl KvBackend for MetaKvBackend {
             .context(ExternalSnafu)
     }
 
-    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         self.client
-            .delete_range(req)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
-    }
-
-    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
-        self.client
-            .batch_delete(req)
+            .batch_put(req)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
@@ -436,8 +411,33 @@ impl KvBackend for MetaKvBackend {
             .context(ExternalSnafu)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        self.client
+            .delete_range(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
+    }
+
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        self.client
+            .batch_delete(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
+    }
+
+    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
+        let mut response = self
+            .client
+            .range(RangeRequest::new().with_key(key))
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        Ok(response.take_kvs().get_mut(0).map(|kv| KeyValue {
+            key: kv.take_key(),
+            value: kv.take_value(),
+        }))
     }
 }
 
