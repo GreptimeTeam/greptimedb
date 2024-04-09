@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
+use datatypes::value::Value;
 use derive_builder::Builder;
 use partition::partition::{PartitionBound, PartitionDef};
 use rand::seq::SliceRandom;
@@ -39,6 +42,8 @@ pub struct CreateTableExprGenerator<R: Rng + 'static> {
     if_not_exists: bool,
     #[builder(setter(into))]
     name: String,
+    #[builder(setter(into))]
+    with_clause: HashMap<String, String>,
     name_generator: Box<dyn Random<Ident, R>>,
     ts_column_type_generator: ConcreteDataTypeGenerator<R>,
     column_type_generator: ConcreteDataTypeGenerator<R>,
@@ -58,6 +63,7 @@ impl<R: Rng + 'static> Default for CreateTableExprGenerator<R> {
             if_not_exists: false,
             partition: 0,
             name: String::new(),
+            with_clause: HashMap::default(),
             name_generator: Box::new(MappedGenerator::new(WordGenerator, random_capitalize_map)),
             ts_column_type_generator: Box::new(TsColumnTypeGenerator),
             column_type_generator: Box::new(ColumnTypeGenerator),
@@ -182,6 +188,13 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
             builder.table_name(self.name_generator.gen(rng));
         } else {
             builder.table_name(self.name.to_string());
+        }
+        if !self.with_clause.is_empty() {
+            let mut options = HashMap::new();
+            for (key, value) in &self.with_clause {
+                options.insert(key.to_string(), Value::from(value.to_string()));
+            }
+            builder.options(options);
         }
         builder.build().context(error::BuildCreateTableExprSnafu)
     }

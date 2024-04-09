@@ -29,11 +29,12 @@ impl DslTranslator<CreateTableExpr, String> for CreateTableExprTranslator {
 
     fn translate(&self, input: &CreateTableExpr) -> Result<String> {
         Ok(format!(
-            "CREATE TABLE{}{}(\n{}\n)\n{};",
+            "CREATE TABLE{}{}(\n{}\n)\n{}{};",
             Self::create_if_not_exists(input),
             input.table_name,
             Self::format_columns(input),
-            Self::format_table_options(input)
+            Self::format_table_options(input),
+            Self::format_with_clause(input),
         ))
     }
 }
@@ -145,6 +146,18 @@ impl CreateTableExprTranslator {
         }
 
         output.join("\n")
+    }
+
+    fn format_with_clause(input: &CreateTableExpr) -> String {
+        if input.options.is_empty() {
+            String::new()
+        } else {
+            let mut output = vec![];
+            for (key, value) in &input.options {
+                output.push(format!("\"{key}\" = \"{value}\""));
+            }
+            format!(" with ({})", output.join("\n"))
+        }
     }
 }
 
