@@ -140,7 +140,7 @@ impl TableMetadataBencher {
                 let start = Instant::now();
                 let _ = self
                     .table_metadata_manager
-                    .rename_table(table_info.unwrap(), new_table_name)
+                    .rename_table(&table_info.unwrap(), new_table_name)
                     .await;
 
                 start.elapsed()

@@ -595,7 +595,7 @@ impl TableMetadataManager {
     /// and the new `TableNameKey` MUST be empty.
     pub async fn rename_table(
         &self,
-        current_table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        current_table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
         new_table_name: String,
     ) -> Result<()> {
         let current_table_info = &current_table_info_value.table_info;
@@ -629,7 +629,7 @@ impl TableMetadataManager {
         // Updates table info.
         let (update_table_info_txn, on_update_table_info_failure) = self
             .table_info_manager()
-            .build_update_txn(table_id, &current_table_info_value, &new_table_info_value)?;
+            .build_update_txn(table_id, current_table_info_value, &new_table_info_value)?;
 
         let txn = Txn::merge_all(vec![update_table_name_txn, update_table_info_txn]);
 
@@ -653,7 +653,7 @@ impl TableMetadataManager {
     /// Updates table info and returns an error if different metadata exists.
     pub async fn update_table_info(
         &self,
-        current_table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        current_table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
         new_table_info: RawTableInfo,
     ) -> Result<()> {
         let table_id = current_table_info_value.table_info.ident.table_id;
@@ -663,7 +663,7 @@ impl TableMetadataManager {
         // Updates table info.
         let (update_table_info_txn, on_update_table_info_failure) = self
             .table_info_manager()
-            .build_update_txn(table_id, &current_table_info_value, &new_table_info_value)?;
+            .build_update_txn(table_id, current_table_info_value, &new_table_info_value)?;
 
         let r = self.kv_backend.txn(update_table_info_txn).await?;
 
@@ -1229,12 +1229,12 @@ mod tests {
             DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
 
         table_metadata_manager
-            .rename_table(table_info_value.clone(), new_table_name.clone())
+            .rename_table(&table_info_value, new_table_name.clone())
             .await
             .unwrap();
         // if remote metadata was updated, it should be ok.
         table_metadata_manager
-            .rename_table(table_info_value.clone(), new_table_name.clone())
+            .rename_table(&table_info_value, new_table_name.clone())
             .await
             .unwrap();
         let mut modified_table_info = table_info.clone();
@@ -1244,7 +1244,7 @@ mod tests {
         // if the table_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
-            .rename_table(modified_table_info_value.clone(), new_table_name.clone())
+            .rename_table(&modified_table_info_value, new_table_name.clone())
             .await
             .is_err());
 
@@ -1302,12 +1302,12 @@ mod tests {
             DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
         // should be ok.
         table_metadata_manager
-            .update_table_info(current_table_info_value.clone(), new_table_info.clone())
+            .update_table_info(&current_table_info_value, new_table_info.clone())
             .await
             .unwrap();
         // if table info was updated, it should be ok.
         table_metadata_manager
-            .update_table_info(current_table_info_value.clone(), new_table_info.clone())
+            .update_table_info(&current_table_info_value, new_table_info.clone())
             .await
             .unwrap();
 
@@ -1329,7 +1329,7 @@ mod tests {
         // if the current_table_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
-            .update_table_info(wrong_table_info_value, new_table_info)
+            .update_table_info(&wrong_table_info_value, new_table_info)
             .await
             .is_err())
     }
