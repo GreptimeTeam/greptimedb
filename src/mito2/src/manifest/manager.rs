@@ -505,7 +505,7 @@ mod test {
 
         // Creates a manifest.
         let metadata = Arc::new(basic_region_metadata());
-        let manager = env
+        let mut manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap()
@@ -527,7 +527,7 @@ mod test {
     async fn region_change_add_column() {
         let metadata = Arc::new(basic_region_metadata());
         let env = TestEnv::new();
-        let manager = env
+        let mut manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap()
@@ -589,7 +589,7 @@ mod test {
 
         let manifest_dir = format!("{}/manifest", data_home_path);
 
-        let manager = env
+        let mut manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap()

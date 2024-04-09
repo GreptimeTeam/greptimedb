@@ -66,7 +66,7 @@ fn nop_action() -> RegionMetaActionList {
 
 #[tokio::test]
 async fn manager_without_checkpoint() {
-    let (_env, manager) = build_manager(0, CompressionType::Uncompressed).await;
+    let (_env, mut manager) = build_manager(0, CompressionType::Uncompressed).await;
 
     // apply 10 actions
     for _ in 0..10 {
@@ -108,7 +108,7 @@ async fn manager_without_checkpoint() {
 #[tokio::test]
 async fn manager_with_checkpoint_distance_1() {
     common_telemetry::init_default_ut_logging();
-    let (env, manager) = build_manager(1, CompressionType::Uncompressed).await;
+    let (env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
 
     // apply 10 actions
     for _ in 0..10 {
