@@ -15,7 +15,7 @@
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
-use crate::ir::create_expr::CreateTableExprBuilderError;
+use crate::ir::create_expr::{CreateDatabaseExprBuilderError, CreateTableExprBuilderError};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -33,6 +33,13 @@ pub enum Error {
     BuildCreateTableExpr {
         #[snafu(source)]
         error: CreateTableExprBuilderError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build create database expr"))]
+    BuildCreateDatabaseExpr {
+        #[snafu(source)]
+        error: CreateDatabaseExprBuilderError,
         location: Location,
     },
 

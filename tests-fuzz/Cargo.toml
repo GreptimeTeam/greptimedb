@@ -63,3 +63,10 @@ path = "targets/fuzz_alter_table.rs"
 test = false
 bench = false
 doc = false
+
+[[bin]]
+name = "fuzz_create_database"
+path = "targets/fuzz_create_database.rs"
+test = false
+bench = false
+doc = false
