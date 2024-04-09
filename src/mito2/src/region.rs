@@ -27,12 +27,11 @@ use common_wal::options::WalOptions;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
-use tokio::sync::RwLock as TokioRwLock;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::manager::RegionManifestManager;
+use crate::manifest::manager::RegionManifestManagerRef;
 use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::OnFailure;
@@ -71,11 +70,13 @@ pub(crate) struct MitoRegion {
     pub(crate) region_id: RegionId,
 
     /// Version controller for this region.
+    ///
+    /// We MUST update the version control inside the write lock of the region manifest manager.
     pub(crate) version_control: VersionControlRef,
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
     /// Manager to maintain manifest for this region.
-    pub(crate) manifest_manager: TokioRwLock<RegionManifestManager>,
+    pub(crate) manifest_manager: RegionManifestManagerRef,
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
     /// Wal options of this region.

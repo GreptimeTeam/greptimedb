@@ -21,6 +21,7 @@ mod handle_compaction;
 mod handle_create;
 mod handle_drop;
 mod handle_flush;
+mod handle_manifest;
 mod handle_open;
 mod handle_truncate;
 mod handle_write;
@@ -622,10 +623,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     edit,
                     tx,
                 } => {
-                    let result = self.edit_region(region_id, edit).await;
-                    if let Err(Err(e)) = tx.send(result) {
-                        warn!("Failed to send edit region error to caller, error: {e:?}");
-                    }
+                    self.handle_region_edit(region_id, edit, tx).await;
                 }
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
@@ -723,27 +721,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         } else {
             let _ = sender.send(SetReadonlyResponse::NotFound);
         }
-    }
-
-    async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
-        let region = self.regions.writable_region(region_id)?;
-
-        for file_meta in &edit.files_to_add {
-            let is_exist = region.access_layer.is_exist(file_meta).await?;
-            ensure!(
-                is_exist,
-                InvalidRequestSnafu {
-                    region_id,
-                    reason: format!(
-                        "trying to add a not exist file '{}' when editing region",
-                        file_meta.file_id
-                    )
-                }
-            );
-        }
-
-        // Applying region edit directly has nothing to do with memtables (at least for now).
-        region.apply_edit(edit, &[]).await
     }
 }
 

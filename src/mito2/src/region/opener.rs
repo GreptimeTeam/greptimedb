@@ -203,7 +203,7 @@ impl RegionOpener {
             region_id,
             version_control,
             access_layer: access_layer.clone(),
-            manifest_manager: RwLock::new(manifest_manager),
+            manifest_manager: Arc::new(RwLock::new(manifest_manager)),
             file_purger: Arc::new(LocalFilePurger::new(
                 self.purge_scheduler,
                 access_layer,
@@ -331,7 +331,7 @@ impl RegionOpener {
             region_id: self.region_id,
             version_control,
             access_layer,
-            manifest_manager: RwLock::new(manifest_manager),
+            manifest_manager: Arc::new(RwLock::new(manifest_manager)),
             file_purger,
             wal_options,
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
