@@ -625,7 +625,7 @@ impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
     fn try_from(pb: PbCreateDatabaseTask) -> Result<Self> {
         let CreateDatabaseExpr {
             catalog_name,
-            database_name,
+            schema_name,
             create_if_not_exists,
             options,
         } = pb.create_database.context(error::InvalidProtoMsgSnafu {
@@ -634,7 +634,7 @@ impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
 
         Ok(CreateDatabaseTask {
             catalog: catalog_name,
-            schema: database_name,
+            schema: schema_name,
             create_if_not_exists,
             options: Some(options),
         })
@@ -655,7 +655,7 @@ impl TryFrom<CreateDatabaseTask> for PbCreateDatabaseTask {
         Ok(PbCreateDatabaseTask {
             create_database: Some(CreateDatabaseExpr {
                 catalog_name: catalog,
-                database_name: schema,
+                schema_name: schema,
                 create_if_not_exists,
                 options: options.unwrap_or_default(),
             }),
