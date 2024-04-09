@@ -1548,7 +1548,10 @@ impl PromPlanner {
             })),
             token::T_ATAN2 => Ok(Box::new(|lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
-                    func_def: ScalarFunctionDefinition::BuiltIn(BuiltinScalarFunction::Atan2),
+                    // func_def: ScalarFunctionDefinition::BuiltIn(BuiltinScalarFunction::Atan2),
+                    func_def: datafusion_expr::ScalarFunctionDefinition::UDF(
+                        datafusion_functions::math::atan2(),
+                    ),
                     args: vec![lhs, rhs],
                 }))
             })),
