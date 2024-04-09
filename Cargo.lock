@@ -794,24 +794,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-test-helper"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "298f62fa902c2515c169ab0bfb56c593229f33faa01131215d58e3d4898e3aa9"
-dependencies = [
- "axum",
- "bytes",
- "http",
- "http-body",
- "hyper",
- "reqwest",
- "serde",
- "tokio",
- "tower",
- "tower-service",
-]
-
-[[package]]
 name = "backon"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3988,9 +3970,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.2.11"
+version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8947b1a6fad4393052c7ba1f4cd97bed3e953a95c79c92ad9b051a04611d9fbb"
+checksum = "601cbb57e577e2f5ef5be8e7b83f0f63994f25aa94d673e54a92d5c516d101f1"
 dependencies = [
  "bytes",
  "fnv",
@@ -9030,7 +9012,6 @@ dependencies = [
  "auth",
  "axum",
  "axum-macros",
- "axum-test-helper",
  "base64 0.21.5",
  "bytes",
  "catalog",
@@ -9061,6 +9042,7 @@ dependencies = [
  "hashbrown 0.14.3",
  "headers",
  "hostname",
+ "http",
  "http-body",
  "humantime-serde",
  "hyper",
@@ -10105,7 +10087,6 @@ dependencies = [
  "async-trait",
  "auth",
  "axum",
- "axum-test-helper",
  "catalog",
  "chrono",
  "client",

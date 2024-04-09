@@ -17,7 +17,6 @@ use std::collections::BTreeMap;
 use api::prom_store::remote::WriteRequest;
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, StatusCode};
-use axum_test_helper::TestClient;
 use common_error::status_code::StatusCode as ErrorCode;
 use prost::Message;
 use serde_json::json;
@@ -27,6 +26,7 @@ use servers::http::handler::HealthResponse;
 use servers::http::header::GREPTIME_TIMEZONE_HEADER_NAME;
 use servers::http::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
+use servers::http::test_helpers::TestClient;
 use servers::http::GreptimeQueryOutput;
 use servers::prom_store;
 use tests_integration::test_util::{

@@ -133,6 +133,7 @@ reqwest = { version = "0.11", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
     "stream",
+    "multipart",
 ] }
 rskafka = "0.5"
 rust_decimal = "1.33"
