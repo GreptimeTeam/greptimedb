@@ -49,7 +49,7 @@ use datafusion_expr::{
 use datafusion_physical_expr::aggregate::utils::down_cast_any_ref;
 use datafusion_physical_expr::expressions::create_aggregate_expr as create_aggr_expr;
 use datafusion_physical_expr::{
-    create_physical_expr, AggregateExpr, Distribution, PhysicalExpr, PhysicalSortExpr,
+    create_physical_expr, AggregateExpr, Distribution, Partitioning, PhysicalExpr, PhysicalSortExpr,
 };
 use datatypes::arrow::array::{
     Array, ArrayRef, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt32Builder,
@@ -798,6 +798,10 @@ impl RangeSelect {
             schema_before_project.clone()
         };
         let by = self.create_physical_expr_list(false, &self.by, input_dfschema, session_state)?;
+        let cache = exec_input
+            .properties()
+            .clone()
+            .with_partitioning(Partitioning::UnknownPartitioning(1));
         Ok(Arc::new(RangeSelectExec {
             input: exec_input,
             range_exec,
@@ -810,6 +814,7 @@ impl RangeSelect {
             metric: ExecutionPlanMetricsSet::new(),
             schema_before_project,
             schema_project: self.schema_project.clone(),
+            cache,
         }))
     }
 }
@@ -852,6 +857,7 @@ pub struct RangeSelectExec {
     metric: ExecutionPlanMetricsSet,
     schema_project: Option<Vec<usize>>,
     schema_before_project: SchemaRef,
+    cache: PlanProperties,
 }
 
 impl DisplayAs for RangeSelectExec {
@@ -891,7 +897,7 @@ impl ExecutionPlan for RangeSelectExec {
     }
 
     fn properties(&self) -> &PlanProperties {
-        self.input.properties()
+        &self.cache
     }
 
     fn children(&self) -> Vec<Arc<dyn DfPhysicalPlan>> {
@@ -915,6 +921,7 @@ impl ExecutionPlan for RangeSelectExec {
             metric: self.metric.clone(),
             schema_before_project: self.schema_before_project.clone(),
             schema_project: self.schema_project.clone(),
+            cache: self.cache.clone(),
         }))
     }
 
@@ -1415,6 +1422,10 @@ mod test {
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("host", DataType::Utf8, true),
         ]));
+        let cache = memory_exec
+            .properties()
+            .clone()
+            .with_partitioning(Partitioning::UnknownPartitioning(1));
         let range_select_exec = Arc::new(RangeSelectExec {
             input: memory_exec,
             range_exec: vec![
@@ -1450,6 +1461,7 @@ mod test {
             schema_project: None,
             by_schema: Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)])),
             metric: ExecutionPlanMetricsSet::new(),
+            cache,
         });
         let sort_exec = SortExec::new(
             vec![

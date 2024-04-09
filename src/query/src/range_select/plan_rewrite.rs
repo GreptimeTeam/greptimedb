@@ -27,7 +27,6 @@ use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
-use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{
     Aggregate, Analyze, Explain, Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder,
     Projection,
@@ -195,7 +194,7 @@ impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
 
     fn f_down(&mut self, node: Expr) -> DFResult<Transformed<Expr>> {
         if let Expr::ScalarFunction(func) = &node {
-            if func.func_def.name() == "range_fn" {
+            if func.name() == "range_fn" {
                 // `range_fn(func, range, fill, byc, [byv], align, to)`
                 // `[byv]` are variadic arguments, byc indicate the length of arguments
                 let range_expr = self.get_range_expr(&func.args, 0)?;
@@ -458,9 +457,7 @@ fn have_range_in_exprs(exprs: &[Expr]) -> bool {
         let mut find_range = false;
         let _ = expr.apply(&mut |expr| {
             Ok(match expr {
-                Expr::ScalarFunction(ScalarFunction { func_def, .. })
-                    if func_def.name() == "range_fn" =>
-                {
+                Expr::ScalarFunction(func) if func.name() == "range_fn" => {
                     find_range = true;
                     TreeNodeRecursion::Stop
                 }
