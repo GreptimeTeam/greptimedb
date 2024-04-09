@@ -33,6 +33,7 @@ impl AlterLogicalTablesProcedure {
             return Ok(());
         }
 
+        // Safety: must exist.
         let physical_table_info = self.data.physical_table_info.as_ref().unwrap();
 
         // Generates new table info
@@ -45,10 +46,7 @@ impl AlterLogicalTablesProcedure {
         // Updates physical table's metadata
         self.context
             .table_metadata_manager
-            .update_table_info(
-                DeserializedValueWithBytes::from_inner(physical_table_info.clone()),
-                new_raw_table_info,
-            )
+            .update_table_info(physical_table_info.clone(), new_raw_table_info)
             .await?;
 
         Ok(())
@@ -77,7 +75,9 @@ impl AlterLogicalTablesProcedure {
         Ok(())
     }
 
-    pub(crate) fn build_update_metadata(&self) -> Result<Vec<(TableInfoValue, RawTableInfo)>> {
+    pub(crate) fn build_update_metadata(
+        &self,
+    ) -> Result<Vec<(DeserializedValueWithBytes<TableInfoValue>, RawTableInfo)>> {
         let mut table_info_values_to_update = Vec::with_capacity(self.data.tasks.len());
         for (task, table) in self
             .data
@@ -94,8 +94,8 @@ impl AlterLogicalTablesProcedure {
     fn build_new_table_info(
         &self,
         task: &AlterTableTask,
-        table: &TableInfoValue,
-    ) -> Result<(TableInfoValue, RawTableInfo)> {
+        table: &DeserializedValueWithBytes<TableInfoValue>,
+    ) -> Result<(DeserializedValueWithBytes<TableInfoValue>, RawTableInfo)> {
         // Builds new_meta
         let table_info = TableInfo::try_from(table.table_info.clone())
             .context(error::ConvertRawTableInfoSnafu)?;

@@ -489,15 +489,13 @@ async fn handle_drop_table_task(
         .await?;
     let (_, table_route_value) = table_metadata_manager
         .table_route_manager()
-        .get_physical_table_route(table_id)
+        .table_route_storage()
+        .get_raw_physical_table_route(table_id)
         .await?;
 
     let table_info_value = table_info_value.with_context(|| TableInfoNotFoundSnafu {
         table: table_ref.to_string(),
     })?;
-
-    let table_route_value =
-        DeserializedValueWithBytes::from_inner(TableRouteValue::Physical(table_route_value));
 
     let (id, _) = ddl_manager
         .submit_drop_table_task(

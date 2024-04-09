@@ -209,6 +209,38 @@ impl TableInfoManager {
 
         Ok(values)
     }
+
+    /// Returns batch of `DeserializedValueWithBytes<TableInfoValue>`.
+    pub async fn batch_get_raw(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, DeserializedValueWithBytes<TableInfoValue>>> {
+        let lookup_table = table_ids
+            .iter()
+            .map(|id| (TableInfoKey::new(*id).as_raw_key(), id))
+            .collect::<HashMap<_, _>>();
+
+        let resp = self
+            .kv_backend
+            .batch_get(BatchGetRequest {
+                keys: lookup_table.keys().cloned().collect::<Vec<_>>(),
+            })
+            .await?;
+
+        let values = resp
+            .kvs
+            .iter()
+            .map(|kv| {
+                Ok((
+                    // Safety: must exist.
+                    **lookup_table.get(kv.key()).unwrap(),
+                    DeserializedValueWithBytes::from_inner_slice(&kv.value)?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        Ok(values)
+    }
 }
 
 #[cfg(test)]
