@@ -643,6 +643,7 @@ fn ty_eq_without_precision(left: ConcreteDataType, right: ConcreteDataType) -> b
             && matches!(right, ConcreteDataType::Interval(..))
 }
 
+#[allow(clippy::too_many_lines)]
 #[cfg(test)]
 mod test {
     use super::*;

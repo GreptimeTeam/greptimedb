@@ -130,6 +130,7 @@ impl AggregateFunc {
     }
 }
 
+/// Generate signature for each aggregate function
 macro_rules! generate_signature {
     ($value:ident, { $($user_arm:tt)* },
     [ $(

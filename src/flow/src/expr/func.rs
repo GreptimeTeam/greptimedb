@@ -14,10 +14,13 @@
 
 //! This module contains the definition of functions that can be used in expressions.
 
+use core::arch;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use common_time::DateTime;
+use datafusion_expr::Operator;
+use datafusion_substrait::logical_plan::consumer::name_to_op;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
@@ -316,7 +319,7 @@ impl BinaryFunc {
                         ConcreteDataType::null_datatype(),
                         ConcreteDataType::null_datatype()
                     ],
-                    output: ConcreteDataType::null_datatype(),
+                    output: ConcreteDataType::boolean_datatype(),
                     generic_fn: match self {
                         Self::Eq => GenericFn::Eq,
                         Self::NotEq => GenericFn::NotEq,
@@ -391,7 +394,44 @@ impl BinaryFunc {
             })
     }
 
+    /// try it's best to infer types from the input types and expressions
+    ///
+    /// if it can't found out types, will return None
+    pub(crate) fn infer_type_from(
+        generic: GenericFn,
+        arg_exprs: &[ScalarExpr],
+        arg_types: &[Option<ConcreteDataType>],
+    ) -> Result<ConcreteDataType, Error> {
+        let ret = match (arg_types[0].as_ref(), arg_types[1].as_ref()) {
+            (Some(t1), Some(t2)) => {
+                ensure!(
+                    t1 == t2,
+                    InvalidQuerySnafu {
+                        reason: format!(
+                            "Binary function {:?} requires both arguments to have the same type",
+                            generic
+                        ),
+                    }
+                );
+                t1.clone()
+            }
+            (Some(t), None) | (None, Some(t)) => t.clone(),
+            _ => arg_exprs[0]
+                .as_literal()
+                .map(|lit| lit.data_type())
+                .or_else(|| arg_exprs[1].as_literal().map(|lit| lit.data_type()))
+                .with_context(|| InvalidQuerySnafu {
+                    reason: format!(
+                        "Binary function {:?} requires at least one argument with known type",
+                        generic
+                    ),
+                })?,
+        };
+        Ok(ret)
+    }
+
     /// choose the appropriate specialization based on the input types
+    /// return a specialization of the binary function and it's actual input and output type(so no null type present)
     ///
     /// will try it best to extract from `arg_types` and `arg_exprs` to get the input types
     /// if `arg_types` is not enough, it will try to extract from `arg_exprs` if `arg_exprs` is literal with known type
@@ -399,24 +439,39 @@ impl BinaryFunc {
         name: &str,
         arg_exprs: &[ScalarExpr],
         arg_types: &[Option<ConcreteDataType>],
-    ) -> Result<Self, Error> {
+    ) -> Result<(Self, Signature), Error> {
+        // this `name_to_op` if error simply return a similar message of `unsupported function xxx` so
+        let op = name_to_op(name).or_else(|err| {
+            if let datafusion_common::DataFusionError::NotImplemented(msg) = err {
+                InvalidQuerySnafu {
+                    reason: format!("Unsupported binary function: {}", msg),
+                }
+                .fail()
+            } else {
+                InvalidQuerySnafu {
+                    reason: format!("Error when parsing binary function: {:?}", err),
+                }
+                .fail()
+            }
+        })?;
+
         // get first arg type and make sure if both is some, they are the same
         let generic_fn = {
-            match name {
-                "eq" => GenericFn::Eq,
-                "not_eq" => GenericFn::NotEq,
-                "lt" => GenericFn::Lt,
-                "lte" => GenericFn::Lte,
-                "gt" => GenericFn::Gt,
-                "gte" => GenericFn::Gte,
-                "add" => GenericFn::Add,
-                "sub" => GenericFn::Sub,
-                "mul" => GenericFn::Mul,
-                "div" => GenericFn::Div,
-                "mod" => GenericFn::Mod,
+            match op {
+                Operator::Eq => GenericFn::Eq,
+                Operator::NotEq => GenericFn::NotEq,
+                Operator::Lt => GenericFn::Lt,
+                Operator::LtEq => GenericFn::Lte,
+                Operator::Gt => GenericFn::Gt,
+                Operator::GtEq => GenericFn::Gte,
+                Operator::Plus => GenericFn::Add,
+                Operator::Minus => GenericFn::Sub,
+                Operator::Multiply => GenericFn::Mul,
+                Operator::Divide => GenericFn::Div,
+                Operator::Modulo => GenericFn::Mod,
                 _ => {
                     return InvalidQuerySnafu {
-                        reason: format!("Unknown binary function: {}", name),
+                        reason: format!("Unsupported binary function: {}", name),
                     }
                     .fail();
                 }
@@ -434,43 +489,25 @@ impl BinaryFunc {
             }
         );
 
-        let arg_type = match (arg_types[0].as_ref(), arg_types[1].as_ref()) {
-            (Some(t1), Some(t2)) => {
-                ensure!(
-                    t1 == t2,
-                    InvalidQuerySnafu {
-                        reason: format!(
-                            "Binary function {} requires both arguments to have the same type",
-                            name
-                        ),
-                    }
-                );
-                Some(t1.clone())
-            }
-            (Some(t), None) | (None, Some(t)) => Some(t.clone()),
-            _ => arg_exprs[0]
-                .as_literal()
-                .map(|lit| lit.data_type())
-                .or_else(|| arg_exprs[1].as_literal().map(|lit| lit.data_type())),
+        let arg_type = Self::infer_type_from(generic_fn, arg_exprs, arg_types)?;
+
+        // if type is not needed, we can erase input type to null to find correct functions for
+        // functions that do not need type
+        let query_input_type = if need_type {
+            arg_type.clone()
+        } else {
+            ConcreteDataType::null_datatype()
         };
 
-        ensure!(
-            !need_type || arg_type.is_some(),
-            InvalidQuerySnafu {
-                reason: format!(
-                    "Binary function {} requires at least one argument with known type",
-                    name
-                ),
-            }
-        );
+        let spec_fn = Self::specialization(generic_fn, query_input_type)?;
 
-        let spec_fn = Self::specialization(
+        let signature = Signature {
+            input: smallvec![arg_type.clone(), arg_type.clone()],
+            output: spec_fn.signature().output.clone(),
             generic_fn,
-            arg_type
-                .clone()
-                .unwrap_or(ConcreteDataType::null_datatype()),
-        )?;
-        Ok(spec_fn)
+        };
+
+        Ok((spec_fn, signature))
     }
 
     /// Evaluate the function with given values and expression
@@ -756,7 +793,7 @@ fn test_binary_func_spec() {
             ]
         )
         .unwrap(),
-        BinaryFunc::AddInt32
+        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
     );
 
     assert_eq!(
@@ -766,7 +803,7 @@ fn test_binary_func_spec() {
             &[Some(ConcreteDataType::int32_datatype()), None]
         )
         .unwrap(),
-        BinaryFunc::AddInt32
+        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
     );
 
     assert_eq!(
@@ -776,7 +813,7 @@ fn test_binary_func_spec() {
             &[Some(ConcreteDataType::int32_datatype()), None]
         )
         .unwrap(),
-        BinaryFunc::AddInt32
+        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
     );
 
     assert_eq!(
@@ -786,7 +823,7 @@ fn test_binary_func_spec() {
             &[Some(ConcreteDataType::int32_datatype()), None]
         )
         .unwrap(),
-        BinaryFunc::AddInt32
+        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
     );
 
     assert_eq!(
@@ -799,7 +836,31 @@ fn test_binary_func_spec() {
             &[None, None]
         )
         .unwrap(),
-        BinaryFunc::AddInt32
+        (BinaryFunc::AddInt32, BinaryFunc::AddInt32.signature())
+    );
+
+    // this testcase make sure the specialization can find actual type from expression and fill in signature
+    assert_eq!(
+        BinaryFunc::from_str_expr_and_type(
+            "equal",
+            &[
+                ScalarExpr::Literal(Value::from(1i32), ConcreteDataType::int32_datatype()),
+                ScalarExpr::Column(0)
+            ],
+            &[None, None]
+        )
+        .unwrap(),
+        (
+            BinaryFunc::Eq,
+            Signature {
+                input: smallvec![
+                    ConcreteDataType::int32_datatype(),
+                    ConcreteDataType::int32_datatype()
+                ],
+                output: ConcreteDataType::boolean_datatype(),
+                generic_fn: GenericFn::Eq
+            }
+        )
     );
 
     matches!(

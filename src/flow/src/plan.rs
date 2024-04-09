@@ -18,14 +18,16 @@
 mod join;
 mod reduce;
 
+use datatypes::arrow::ipc::Map;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use self::reduce::{AccumulablePlan, KeyValPlan, ReducePlan};
+use crate::adapter::error::Error;
 use crate::expr::{
     AggregateExpr, EvalError, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
 };
 use crate::plan::join::JoinPlan;
-use crate::repr::{DiffRow, RelationType};
+use crate::repr::{ColumnType, DiffRow, RelationType};
 
 /// A plan for a dataflow component. But with type to indicate the output type of the relation.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
@@ -34,6 +36,76 @@ pub struct TypedPlan {
     pub typ: RelationType,
     /// The untyped plan.
     pub plan: Plan,
+}
+
+impl TypedPlan {
+    /// directly apply a mfp to the plan
+    pub fn mfp(self, mfp: MapFilterProject) -> Result<Self, Error> {
+        let plan = match self.plan {
+            Plan::Mfp {
+                input,
+                mfp: old_mfp,
+            } => Plan::Mfp {
+                input,
+                mfp: MapFilterProject::compose(old_mfp, mfp)?,
+            },
+            _ => Plan::Mfp {
+                input: Box::new(self.plan),
+                mfp,
+            },
+        };
+        Ok(TypedPlan {
+            typ: self.typ,
+            plan,
+        })
+    }
+
+    /// project the plan to the given expressions
+    pub fn projection(self, exprs: Vec<(ScalarExpr, ColumnType)>) -> Result<Self, Error> {
+        let input_arity = self.typ.column_types.len();
+        let output_arity = exprs.len();
+        let (exprs, expr_typs): (Vec<_>, Vec<_>) = exprs.into_iter().unzip();
+        let mfp = MapFilterProject::new(input_arity)
+            .map(exprs)?
+            .project(input_arity..input_arity + output_arity)?;
+        // special case for mfp to compose when the plan is already mfp
+        let plan = match self.plan {
+            Plan::Mfp {
+                input,
+                mfp: old_mfp,
+            } => Plan::Mfp {
+                input,
+                mfp: MapFilterProject::compose(old_mfp, mfp)?,
+            },
+            _ => Plan::Mfp {
+                input: Box::new(self.plan),
+                mfp,
+            },
+        };
+        let typ = RelationType::new(expr_typs);
+        Ok(TypedPlan { typ, plan })
+    }
+
+    /// Add a new filter to the plan, will filter out the records that do not satisfy the filter
+    pub fn filter(self, filter: (ScalarExpr, ColumnType)) -> Result<Self, Error> {
+        let plan = match self.plan {
+            Plan::Mfp {
+                input,
+                mfp: old_mfp,
+            } => Plan::Mfp {
+                input,
+                mfp: old_mfp.filter(vec![filter.0])?,
+            },
+            _ => Plan::Mfp {
+                input: Box::new(self.plan),
+                mfp: MapFilterProject::new(self.typ.column_types.len()).filter(vec![filter.0])?,
+            },
+        };
+        Ok(TypedPlan {
+            typ: self.typ,
+            plan,
+        })
+    }
 }
 
 /// TODO(discord9): support `TableFunc`（by define FlatMap that map 1 to n)
