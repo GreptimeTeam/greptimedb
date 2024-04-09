@@ -20,15 +20,12 @@ mod update_metadata;
 use std::vec;
 
 use api::v1::alter_expr::Kind;
-use api::v1::region::region_request::Body;
-use api::v1::region::{RegionRequest, RegionRequestHeader};
-use api::v1::{AlterExpr, RenameTable};
+use api::v1::RenameTable;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
 };
-use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, info};
 use futures::future;
 use serde::{Deserialize, Serialize};
@@ -83,23 +80,14 @@ impl AlterTableProcedure {
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
         self.check_alter().await?;
         self.fill_table_info().await?;
-        let alter_kind = self.alter_kind();
-
+        // Safety: Checked in `AlterTableProcedure::new`.
+        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
         if matches!(alter_kind, Kind::RenameTable { .. }) {
             self.data.state = AlterTableState::UpdateMetadata;
         } else {
             self.data.state = AlterTableState::SubmitAlterRegionRequests;
         };
         Ok(Status::executing(true))
-    }
-
-    fn alter_expr(&self) -> &AlterExpr {
-        &self.data.task.alter_table
-    }
-
-    fn alter_kind(&self) -> &Kind {
-        // Safety: Checked in `AlterTableProcedure::new`.
-        self.alter_expr().kind.as_ref().unwrap()
     }
 
     pub async fn submit_alter_region_requests(&mut self) -> Result<Status> {
@@ -159,7 +147,9 @@ impl AlterTableProcedure {
             new_info
         );
 
-        if let Kind::RenameTable(RenameTable { new_table_name }) = self.alter_kind() {
+        // Safety: Checked in `AlterTableProcedure::new`.
+        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
+        if let Kind::RenameTable(RenameTable { new_table_name }) = alter_kind {
             self.on_update_metadata_for_rename(new_table_name.to_string(), table_info_value)
                 .await?;
         } else {
@@ -174,7 +164,8 @@ impl AlterTableProcedure {
 
     /// Broadcasts the invalidating table cache instructions.
     async fn on_broadcast(&mut self) -> Result<Status> {
-        let alter_kind = self.alter_kind();
+        // Safety: Checked in `AlterTableProcedure::new`.
+        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
         let cache_invalidator = &self.context.cache_invalidator;
         let cache_keys = if matches!(alter_kind, Kind::RenameTable { .. }) {
             vec![CacheIdent::TableName(self.data.table_ref().into())]
@@ -200,7 +191,9 @@ impl AlterTableProcedure {
         lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());
         lock_key.push(TableLock::Write(table_id).into());
 
-        if let Kind::RenameTable(RenameTable { new_table_name }) = self.alter_kind() {
+        // Safety: Checked in `AlterTableProcedure::new`.
+        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
+        if let Kind::RenameTable(RenameTable { new_table_name }) = alter_kind {
             lock_key.push(
                 TableNameLock::new(table_ref.catalog, table_ref.schema, new_table_name).into(),
             )

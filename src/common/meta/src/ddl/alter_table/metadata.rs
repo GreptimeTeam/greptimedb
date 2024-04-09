@@ -22,7 +22,7 @@ impl AlterTableProcedure {
     /// Fetches the table info.
     pub(crate) async fn fill_table_info(&mut self) -> Result<()> {
         let table_id = self.data.table_id();
-        let alter_expr = self.alter_expr();
+        let alter_expr = &self.data.task.alter_table;
         let catalog = &alter_expr.catalog_name;
         let schema = &alter_expr.schema_name;
         let table_name = &alter_expr.table_name;

@@ -26,11 +26,12 @@ impl AlterTableProcedure {
     /// - The new table name doesn't exist (rename).
     /// - Table exists.
     pub(crate) async fn check_alter(&self) -> Result<()> {
-        let alter_expr = self.alter_expr();
+        let alter_expr = &self.data.task.alter_table;
         let catalog = &alter_expr.catalog_name;
         let schema = &alter_expr.schema_name;
         let table_name = &alter_expr.table_name;
-        let alter_kind = self.alter_kind();
+        // Safety: Checked in `AlterTableProcedure::new`.
+        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
 
         let manager = &self.context.table_metadata_manager;
         if let Kind::RenameTable(RenameTable { new_table_name }) = alter_kind {

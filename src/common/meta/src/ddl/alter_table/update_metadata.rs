@@ -28,7 +28,8 @@ impl AlterTableProcedure {
         let table_info =
             TableInfo::try_from(table_info.clone()).context(error::ConvertRawTableInfoSnafu)?;
         let table_ref = self.data.table_ref();
-        let request = alter_expr_to_request(self.data.table_id(), self.alter_expr().clone())
+        let alter_expr = self.data.task.alter_table.clone();
+        let request = alter_expr_to_request(self.data.table_id(), alter_expr)
             .context(error::ConvertAlterTableRequestSnafu)?;
 
         let new_meta = table_info

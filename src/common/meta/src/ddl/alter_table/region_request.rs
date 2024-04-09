@@ -29,7 +29,8 @@ use crate::error::{InvalidProtoMsgSnafu, Result};
 impl AlterTableProcedure {
     /// Makes alter region request.
     pub(crate) fn make_alter_region_request(&self, region_id: RegionId) -> Result<RegionRequest> {
-        let alter_kind = self.alter_kind();
+        // Safety: Checked in `AlterTableProcedure::new`.
+        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
         // Safety: checked
         let table_info = self.data.table_info().unwrap();
         let kind = create_proto_alter_kind(table_info, alter_kind)?;
