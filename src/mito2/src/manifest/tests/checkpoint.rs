@@ -161,7 +161,7 @@ async fn manager_with_checkpoint_distance_1() {
 async fn test_corrupted_data_causing_checksum_error() {
     // Initialize manager
     common_telemetry::init_default_ut_logging();
-    let (_env, manager) = build_manager(1, CompressionType::Uncompressed).await;
+    let (_env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
 
     // Apply actions
     for _ in 0..10 {
@@ -171,7 +171,6 @@ async fn test_corrupted_data_causing_checksum_error() {
     // Check if there is a checkpoint
     assert!(manager
         .store()
-        .await
         .load_last_checkpoint()
         .await
         .unwrap()
@@ -180,8 +179,7 @@ async fn test_corrupted_data_causing_checksum_error() {
     // Corrupt the last checkpoint data
     let mut corrupted_bytes = manager
         .store()
-        .await
-        .read_file(&manager.store().await.last_checkpoint_path())
+        .read_file(&manager.store().last_checkpoint_path())
         .await
         .unwrap();
     corrupted_bytes[0] ^= 1;
@@ -189,13 +187,12 @@ async fn test_corrupted_data_causing_checksum_error() {
     // Overwrite the latest checkpoint data
     manager
         .store()
-        .await
         .write_last_checkpoint(9, &corrupted_bytes)
         .await
         .unwrap();
 
     // Attempt to load the corrupted checkpoint
-    let load_corrupted_result = manager.store().await.load_last_checkpoint().await;
+    let load_corrupted_result = manager.store().load_last_checkpoint().await;
 
     // Check if the result is an error and if it's of type VerifyChecksum
     assert_matches!(load_corrupted_result, Err(ChecksumMismatch { .. }));

@@ -18,11 +18,11 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info};
 use futures::TryStreamExt;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use store_api::metadata::RegionMetadataRef;
 
-use crate::error::{self, Result};
+use crate::error::{self, RegionStoppedSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
     RegionMetaActionList,
@@ -116,6 +116,7 @@ pub struct RegionManifestManager {
     /// The last version included in checkpoint file.
     last_checkpoint_version: ManifestVersion,
     manifest: Arc<RegionManifest>,
+    stopped: bool,
 }
 
 impl RegionManifestManager {
@@ -160,6 +161,7 @@ impl RegionManifestManager {
             last_version: version,
             last_checkpoint_version: MIN_VERSION,
             manifest: Arc::new(manifest),
+            stopped: false,
         })
     }
 
@@ -250,11 +252,13 @@ impl RegionManifestManager {
             last_version: version,
             last_checkpoint_version,
             manifest: Arc::new(manifest),
+            stopped: false,
         }))
     }
 
     /// Stops the manager.
     pub async fn stop(&mut self) -> Result<()> {
+        self.stopped = true;
         Ok(())
     }
 
@@ -263,6 +267,13 @@ impl RegionManifestManager {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["update"])
             .start_timer();
+
+        ensure!(
+            !self.stopped,
+            RegionStoppedSnafu {
+                region_id: self.manifest.metadata.region_id,
+            }
+        );
 
         let version = self.increase_version();
         self.store.save(version, &action_list.encode()?).await?;
