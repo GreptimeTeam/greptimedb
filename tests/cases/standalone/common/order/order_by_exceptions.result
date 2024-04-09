@@ -59,8 +59,8 @@ SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 +-------------------+----+
 | test.a % Int64(2) | b  |
 +-------------------+----+
-| 0                 | 21 |
 | 1                 | 22 |
+| 0                 | 21 |
 +-------------------+----+
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
