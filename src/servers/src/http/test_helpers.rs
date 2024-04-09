@@ -12,6 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Axum Test Client
+//!
+//! ```rust
+//! use axum::Router;
+//! use axum::http::StatusCode;
+//! use axum::routing::get;
+//! use crate::servers::http::test_helpers::TestClient;
+//!
+//! let async_block = async {
+//!     // you can replace this Router with your own app
+//!     let app = Router::new().route("/", get(|| async {}));
+//!
+//!     // initiate the TestClient with the previous declared Router
+//!     let client = TestClient::new(app);
+//!
+//!     let res = client.get("/").await;
+//!     assert_eq!(res.status(), StatusCode::OK);
+//! };
+//!
+//! // Create a runtime for executing the async block. This runtime is local
+//! // to the main function and does not require any global setup.
+//! let runtime = tokio::runtime::Builder::new_current_thread()
+//!     .enable_all()
+//!     .build()
+//!     .unwrap();
+//!
+//! // Use the local runtime to block on the async block.
+//! runtime.block_on(async_block);
+//! ```
+
 use std::convert::TryFrom;
 use std::net::{SocketAddr, TcpListener};
 
@@ -25,12 +55,14 @@ use hyper::service::Service;
 use hyper::{Body, Server};
 use tower::make::Shared;
 
+/// Test client to Axum servers.
 pub struct TestClient {
     client: reqwest::Client,
     addr: SocketAddr,
 }
 
 impl TestClient {
+    /// Create a new test client.
     pub fn new<S, ResBody>(svc: S) -> Self
     where
         S: Service<Request<Body>, Response = http::Response<ResBody>> + Clone + Send + 'static,
@@ -57,7 +89,7 @@ impl TestClient {
         TestClient { client, addr }
     }
 
-    /// returns the base URL (http://ip:port) for this TestClient
+    /// Returns the base URL (http://ip:port) for this TestClient
     ///
     /// this is useful when trying to check if Location headers in responses
     /// are generated correctly as Location contains an absolute URL
@@ -65,36 +97,42 @@ impl TestClient {
         format!("http://{}", self.addr)
     }
 
+    /// Create a GET request.
     pub fn get(&self, url: &str) -> RequestBuilder {
         RequestBuilder {
             builder: self.client.get(format!("http://{}{}", self.addr, url)),
         }
     }
 
+    /// Create a HEAD request.
     pub fn head(&self, url: &str) -> RequestBuilder {
         RequestBuilder {
             builder: self.client.head(format!("http://{}{}", self.addr, url)),
         }
     }
 
+    /// Create a POST request.
     pub fn post(&self, url: &str) -> RequestBuilder {
         RequestBuilder {
             builder: self.client.post(format!("http://{}{}", self.addr, url)),
         }
     }
 
+    /// Create a PUT request.
     pub fn put(&self, url: &str) -> RequestBuilder {
         RequestBuilder {
             builder: self.client.put(format!("http://{}{}", self.addr, url)),
         }
     }
 
+    /// Create a PATCH request.
     pub fn patch(&self, url: &str) -> RequestBuilder {
         RequestBuilder {
             builder: self.client.patch(format!("http://{}{}", self.addr, url)),
         }
     }
 
+    /// Create a DELETE request.
     pub fn delete(&self, url: &str) -> RequestBuilder {
         RequestBuilder {
             builder: self.client.delete(format!("http://{}{}", self.addr, url)),
@@ -102,6 +140,7 @@ impl TestClient {
     }
 }
 
+/// Builder for test requests.
 pub struct RequestBuilder {
     builder: reqwest::RequestBuilder,
 }
@@ -113,16 +152,19 @@ impl RequestBuilder {
         }
     }
 
+    /// Set the request body.
     pub fn body(mut self, body: impl Into<reqwest::Body>) -> Self {
         self.builder = self.builder.body(body);
         self
     }
 
+    /// Set the request forms.
     pub fn form<T: serde::Serialize + ?Sized>(mut self, form: &T) -> Self {
         self.builder = self.builder.form(&form);
         self
     }
 
+    /// Set the request JSON body.
     pub fn json<T>(mut self, json: &T) -> Self
     where
         T: serde::Serialize,
@@ -131,6 +173,7 @@ impl RequestBuilder {
         self
     }
 
+    /// Set a request header.
     pub fn header<K, V>(mut self, key: K, value: V) -> Self
     where
         HeaderName: TryFrom<K>,
@@ -142,6 +185,7 @@ impl RequestBuilder {
         self
     }
 
+    /// Set a request multipart form.
     pub fn multipart(mut self, form: reqwest::multipart::Form) -> Self {
         self.builder = self.builder.multipart(form);
         self
@@ -158,15 +202,17 @@ pub struct TestResponse {
 }
 
 impl TestResponse {
+    /// Get the response body as text.
     pub async fn text(self) -> String {
         self.response.text().await.unwrap()
     }
 
-    #[allow(dead_code)]
+    /// Get the response body as bytes.
     pub async fn bytes(self) -> Bytes {
         self.response.bytes().await.unwrap()
     }
 
+    /// Get the response body as JSON.
     pub async fn json<T>(self) -> T
     where
         T: serde::de::DeserializeOwned,
@@ -174,18 +220,22 @@ impl TestResponse {
         self.response.json().await.unwrap()
     }
 
+    /// Get the response status.
     pub fn status(&self) -> StatusCode {
         self.response.status()
     }
 
+    /// Get the response headers.
     pub fn headers(&self) -> &http::HeaderMap {
         self.response.headers()
     }
 
+    /// Get the response in chunks.
     pub async fn chunk(&mut self) -> Option<Bytes> {
         self.response.chunk().await.unwrap()
     }
 
+    /// Get the response in chunks as text.
     pub async fn chunk_text(&mut self) -> Option<String> {
         let chunk = self.chunk().await?;
         Some(String::from_utf8(chunk.to_vec()).unwrap())
