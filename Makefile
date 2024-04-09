@@ -170,7 +170,7 @@ clippy: ## Check clippy rules.
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 .PHONY: fix-clippy
-clippy: ## Fix clippy violations.
+fix-clippy: ## Fix clippy violations.
 	cargo clippy --workspace --all-targets --all-features --fix
 
 .PHONY: fmt-check
