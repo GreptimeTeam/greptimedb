@@ -226,7 +226,7 @@ impl Export {
     }
 
     async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
-        let sql = format!("show create table {}.{}.{}", catalog, schema, table);
+        let sql = format!("show create table '{}'.'{}'.'{}'", catalog, schema, table);
         let mut client = self.client.clone();
         client.set_catalog(catalog);
         client.set_schema(schema);
@@ -273,7 +273,7 @@ impl Export {
                 for (c, s, t) in table_list {
                     match self.show_create_table(&c, &s, &t).await {
                         Err(e) => {
-                            error!(e; "Failed to export table {}.{}.{}", c, s, t)
+                            error!(e; "Failed to export table '{}'.'{}'.'{}'", c, s, t)
                         }
                         Ok(create_table) => {
                             file.write_all(create_table.as_bytes())
