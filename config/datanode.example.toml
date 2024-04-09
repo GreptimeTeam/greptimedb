@@ -62,8 +62,6 @@ sync_write = false
 data_home = "/tmp/greptimedb/"
 # Storage type.
 type = "File"
-# TTL for all tables. Disabled by default.
-# global_ttl = "7d"
 
 # Cache configuration for object storage such as 'S3' etc.
 # The local file cache directory
