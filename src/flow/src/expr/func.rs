@@ -440,7 +440,7 @@ impl BinaryFunc {
         arg_exprs: &[ScalarExpr],
         arg_types: &[Option<ConcreteDataType>],
     ) -> Result<(Self, Signature), Error> {
-        // this `name_to_op` if error simply return a similiar message of `unsupported function xxx` so
+        // this `name_to_op` if error simply return a similar message of `unsupported function xxx` so
         let op = name_to_op(name).or_else(|err| {
             if let datafusion_common::DataFusionError::NotImplemented(msg) = err {
                 InvalidQuerySnafu {
