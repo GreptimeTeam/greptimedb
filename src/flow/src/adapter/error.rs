@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Error definition for flow module
+
 use std::any::Any;
 
 use common_macro::stack_trace_debug;
@@ -25,6 +27,7 @@ use snafu::{Location, Snafu};
 
 use crate::expr::EvalError;
 
+/// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -54,8 +57,25 @@ pub enum Error {
 
     #[snafu(display("No protobuf type for value: {value}"))]
     NoProtoType { value: Value, location: Location },
+
+    #[snafu(display("Not implement in flow: {reason}"))]
+    NotImplemented { reason: String, location: Location },
+
+    #[snafu(display("Flow plan error: {reason}"))]
+    Plan { reason: String, location: Location },
+
+    #[snafu(display("Unsupported temporal filter: {reason}"))]
+    UnsupportedTemporalFilter { reason: String, location: Location },
+
+    #[snafu(display("Datatypes error: {source} with extra message: {extra}"))]
+    Datatypes {
+        source: datatypes::Error,
+        extra: String,
+        location: Location,
+    },
 }
 
+/// Result type for flow module
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
@@ -64,8 +84,13 @@ impl ErrorExt for Error {
             Self::Eval { .. } | &Self::JoinTask { .. } => StatusCode::Internal,
             &Self::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. } => StatusCode::TableNotFound,
-            &Self::InvalidQuery { .. } => StatusCode::PlanQuery,
+            &Self::InvalidQuery { .. } | &Self::Plan { .. } | &Self::Datatypes { .. } => {
+                StatusCode::PlanQuery
+            }
             Self::NoProtoType { .. } => StatusCode::Unexpected,
+            &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
+                StatusCode::Unsupported
+            }
         }
     }
 

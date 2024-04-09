@@ -3421,6 +3421,7 @@ dependencies = [
  "servers",
  "smallvec",
  "snafu",
+ "strum 0.25.0",
  "tokio",
  "tonic 0.10.2",
 ]

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Scalar expressions.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use datatypes::prelude::ConcreteDataType;
@@ -19,9 +21,8 @@ use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
-use crate::expr::error::{
-    EvalError, InvalidArgumentSnafu, OptimizeSnafu, UnsupportedTemporalFilterSnafu,
-};
+use crate::adapter::error::{Error, InvalidQuerySnafu, UnsupportedTemporalFilterSnafu};
+use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 
 /// A scalar expression, which can be evaluated to a value.
@@ -64,6 +65,7 @@ pub enum ScalarExpr {
 }
 
 impl ScalarExpr {
+    /// Call a unary function on this expression.
     pub fn call_unary(self, func: UnaryFunc) -> Self {
         ScalarExpr::CallUnary {
             func,
@@ -71,6 +73,7 @@ impl ScalarExpr {
         }
     }
 
+    /// Call a binary function on this expression and another.
     pub fn call_binary(self, other: Self, func: BinaryFunc) -> Self {
         ScalarExpr::CallBinary {
             func,
@@ -79,6 +82,7 @@ impl ScalarExpr {
         }
     }
 
+    /// Eval this expression with the given values.
     pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
         match self {
             ScalarExpr::Column(index) => Ok(values[*index].clone()),
@@ -106,13 +110,13 @@ impl ScalarExpr {
     /// This method is applicable even when `permutation` is not a
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
-    pub fn permute(&mut self, permutation: &[usize]) -> Result<(), EvalError> {
+    pub fn permute(&mut self, permutation: &[usize]) -> Result<(), Error> {
         // check first so that we don't end up with a partially permuted expression
         ensure!(
             self.get_all_ref_columns()
                 .into_iter()
                 .all(|i| i < permutation.len()),
-            InvalidArgumentSnafu {
+            InvalidQuerySnafu {
                 reason: format!(
                     "permutation {:?} is not a valid permutation for expression {:?}",
                     permutation, self
@@ -134,12 +138,12 @@ impl ScalarExpr {
     /// This method is applicable even when `permutation` is not a
     /// strict permutation, and it only needs to have entries for
     /// each column referenced in `self`.
-    pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) -> Result<(), EvalError> {
+    pub fn permute_map(&mut self, permutation: &BTreeMap<usize, usize>) -> Result<(), Error> {
         // check first so that we don't end up with a partially permuted expression
         ensure!(
             self.get_all_ref_columns()
                 .is_subset(&permutation.keys().cloned().collect()),
-            InvalidArgumentSnafu {
+            InvalidQuerySnafu {
                 reason: format!(
                     "permutation {:?} is not a valid permutation for expression {:?}",
                     permutation, self
@@ -168,6 +172,21 @@ impl ScalarExpr {
         support
     }
 
+    /// Return true if the expression is a column reference.
+    pub fn is_column(&self) -> bool {
+        matches!(self, ScalarExpr::Column(_))
+    }
+
+    /// Cast the expression to a column reference if it is one.
+    pub fn as_column(&self) -> Option<usize> {
+        if let ScalarExpr::Column(i) = self {
+            Some(*i)
+        } else {
+            None
+        }
+    }
+
+    /// Cast the expression to a literal if it is one.
     pub fn as_literal(&self) -> Option<Value> {
         if let ScalarExpr::Literal(lit, _column_type) = self {
             Some(lit.clone())
@@ -176,34 +195,42 @@ impl ScalarExpr {
         }
     }
 
+    /// Return true if the expression is a literal.
     pub fn is_literal(&self) -> bool {
         matches!(self, ScalarExpr::Literal(..))
     }
 
+    /// Return true if the expression is a literal true.
     pub fn is_literal_true(&self) -> bool {
         Some(Value::Boolean(true)) == self.as_literal()
     }
 
+    /// Return true if the expression is a literal false.
     pub fn is_literal_false(&self) -> bool {
         Some(Value::Boolean(false)) == self.as_literal()
     }
 
+    /// Return true if the expression is a literal null.
     pub fn is_literal_null(&self) -> bool {
         Some(Value::Null) == self.as_literal()
     }
 
+    /// Build a literal null
     pub fn literal_null() -> Self {
         ScalarExpr::Literal(Value::Null, ConcreteDataType::null_datatype())
     }
 
+    /// Build a literal from value and type
     pub fn literal(res: Value, typ: ConcreteDataType) -> Self {
         ScalarExpr::Literal(res, typ)
     }
 
+    /// Build a literal false
     pub fn literal_false() -> Self {
         ScalarExpr::Literal(Value::Boolean(false), ConcreteDataType::boolean_datatype())
     }
 
+    /// Build a literal true
     pub fn literal_true() -> Self {
         ScalarExpr::Literal(Value::Boolean(true), ConcreteDataType::boolean_datatype())
     }
@@ -246,17 +273,17 @@ impl ScalarExpr {
         }
     }
 
-    fn visit_mut_post_nolimit<F>(&mut self, f: &mut F) -> Result<(), EvalError>
+    fn visit_mut_post_nolimit<F>(&mut self, f: &mut F) -> Result<(), Error>
     where
-        F: FnMut(&mut Self) -> Result<(), EvalError>,
+        F: FnMut(&mut Self) -> Result<(), Error>,
     {
         self.visit_mut_children(|e: &mut Self| e.visit_mut_post_nolimit(f))?;
         f(self)
     }
 
-    fn visit_mut_children<F>(&mut self, mut f: F) -> Result<(), EvalError>
+    fn visit_mut_children<F>(&mut self, mut f: F) -> Result<(), Error>
     where
-        F: FnMut(&mut Self) -> Result<(), EvalError>,
+        F: FnMut(&mut Self) -> Result<(), Error>,
     {
         match self {
             ScalarExpr::Column(_)
@@ -302,7 +329,7 @@ impl ScalarExpr {
     ///
     /// false for lower bound, true for upper bound
     /// TODO(discord9): allow simple transform like `now() + a < b` to `now() < b - a`
-    pub fn extract_bound(&self) -> Result<(Option<Self>, Option<Self>), EvalError> {
+    pub fn extract_bound(&self) -> Result<(Option<Self>, Option<Self>), Error> {
         let unsupported_err = |msg: &str| {
             UnsupportedTemporalFilterSnafu {
                 reason: msg.to_string(),
@@ -437,11 +464,11 @@ mod test {
         let mut expr = ScalarExpr::Column(4);
         let permutation = vec![1, 2, 3];
         let res = expr.permute(&permutation);
-        assert!(matches!(res, Err(EvalError::InvalidArgument { .. })));
+        assert!(matches!(res, Err(Error::InvalidQuery { .. })));
 
         let mut expr = ScalarExpr::Column(0);
         let permute_map = BTreeMap::from([(1, 2), (3, 4)]);
         let res = expr.permute_map(&permute_map);
-        assert!(matches!(res, Err(EvalError::InvalidArgument { .. })));
+        assert!(matches!(res, Err(Error::InvalidQuery { .. })));
     }
 }
