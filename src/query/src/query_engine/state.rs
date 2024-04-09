@@ -121,6 +121,9 @@ impl QueryEngineState {
             .rules
             .retain(|r| r.name() != "optimize_projections");
 
+        // For some unknown reasons, the "push_down_filter" rule will generate invalid schemas.
+        optimizer.rules.retain(|r| r.name() != "push_down_filter");
+
         let session_state = SessionState::new_with_config_rt(session_config, runtime_env)
             .with_serializer_registry(Arc::new(ExtensionSerializer))
             .with_analyzer_rules(analyzer.rules)
