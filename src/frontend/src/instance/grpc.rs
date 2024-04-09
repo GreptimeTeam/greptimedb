@@ -120,7 +120,7 @@ impl GrpcQueryHandler for Instance {
                         self.statement_executor
                             .create_database(
                                 ctx.current_catalog(),
-                                &expr.database_name,
+                                &expr.schema_name,
                                 expr.create_if_not_exists,
                             )
                             .await?
