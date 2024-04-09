@@ -169,6 +169,10 @@ check: ## Cargo check all the targets.
 clippy: ## Check clippy rules.
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+.PHONY: fix-clippy
+clippy: ## Fix clippy violations.
+	cargo clippy --workspace --all-targets --all-features --fix
+
 .PHONY: fmt-check
 fmt-check: ## Check code format.
 	cargo fmt --all -- --check
