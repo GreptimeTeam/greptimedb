@@ -435,26 +435,26 @@ mod tests {
         let mut bin_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
         bin_path.pop();
         bin_path.pop();
+        let path = bin_path.clone();
+        bin_path.push("target");
+        bin_path.push("debug");
+        bin_path.push("greptime");
 
-        if !bin_path.join("target").exists() {
-            println!("need to build greptime binary");
+        if !bin_path.exists() {
             let output = Command::new("cargo")
-                .current_dir(&bin_path)
+                .current_dir(path)
                 .args(["build", "--bin", "greptime"])
                 .output()
                 .expect("failed to build greptime binary");
             if !output.status.success() {
-                println!("Failed to build GreptimeDB, {}", output.status);
-                println!("Cargo build stdout:");
+                eprintln!("Failed to build GreptimeDB, {}", output.status);
+                eprintln!("Cargo build stdout:");
                 io::stdout().write_all(&output.stdout).unwrap();
-                println!("Cargo build stderr:");
+                eprintln!("Cargo build stderr:");
                 io::stderr().write_all(&output.stderr).unwrap();
                 panic!();
             }
         }
-        bin_path.push("target");
-        bin_path.push("debug");
-        bin_path.push("greptime");
 
         let mut standalone = Command::new(&bin_path)
             .args(["standalone", "start"])
