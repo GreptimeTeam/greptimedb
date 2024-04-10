@@ -81,10 +81,7 @@ impl DropTableProcedure {
 
     /// Register dropping regions if doesn't exist.
     fn register_dropping_regions(&mut self) -> Result<()> {
-        // Safety: filled in `on_prepare`.
-        let region_routes = self.data.region_routes().unwrap()?;
-
-        let dropping_regions = operating_leader_regions(region_routes);
+        let dropping_regions = operating_leader_regions(&self.data.region_routes);
 
         if self.dropping_regions.len() == dropping_regions.len() {
             return Ok(());
@@ -118,11 +115,7 @@ impl DropTableProcedure {
         // TODO(weny): Considers introducing a RegionStatus to indicate the region is dropping.
         let table_id = self.data.table_id();
         executor
-            .on_remove_metadata(
-                &self.context,
-                // Safety: filled in `on_prepare`.
-                self.data.region_routes().unwrap()?,
-            )
+            .on_remove_metadata(&self.context, &self.data.region_routes)
             .await?;
         info!("Deleted table metadata for table {table_id}");
         self.data.state = DropTableState::InvalidateTableCache;
@@ -139,11 +132,7 @@ impl DropTableProcedure {
 
     pub async fn on_datanode_drop_regions(&self, executor: &DropTableExecutor) -> Result<Status> {
         executor
-            .on_drop_regions(
-                &self.context,
-                // Safety: filled in `on_prepare`.
-                self.data.region_routes().unwrap()?,
-            )
+            .on_drop_regions(&self.context, &self.data.region_routes)
             .await?;
         Ok(Status::done())
     }
@@ -201,6 +190,7 @@ pub struct DropTableData {
     pub state: DropTableState,
     pub cluster_id: u64,
     pub task: DropTableTask,
+    pub region_routes: Vec<RegionRoute>,
     pub table_route_value: Option<DeserializedValueWithBytes<TableRouteValue>>,
     pub table_info_value: Option<DeserializedValueWithBytes<TableInfoValue>>,
 }
@@ -211,6 +201,7 @@ impl DropTableData {
             state: DropTableState::Prepare,
             cluster_id,
             task,
+            region_routes: vec![],
             table_route_value: None,
             table_info_value: None,
         }
@@ -218,10 +209,6 @@ impl DropTableData {
 
     fn table_ref(&self) -> TableReference {
         self.task.table_ref()
-    }
-
-    fn region_routes(&self) -> Option<Result<&Vec<RegionRoute>>> {
-        self.table_route_value.as_ref().map(|v| v.region_routes())
     }
 
     fn table_id(&self) -> TableId {

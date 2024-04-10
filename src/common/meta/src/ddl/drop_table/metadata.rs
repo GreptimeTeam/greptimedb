@@ -31,14 +31,24 @@ impl DropTableProcedure {
             .with_context(|| error::TableInfoNotFoundSnafu {
                 table: format_full_table_name(&task.catalog, &task.schema, &task.table),
             })?;
-        let (_, table_route_value) = self
+        let (_, physical_table_route_value) = self
+            .context
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(task.table_id)
+            .await?;
+        let table_route_value = self
             .context
             .table_metadata_manager
             .table_route_manager()
             .table_route_storage()
-            .get_raw_physical_table_route(task.table_id)
-            .await?;
+            .get_raw(task.table_id)
+            .await?
+            .context(error::TableRouteNotFoundSnafu {
+                table_id: task.table_id,
+            })?;
 
+        self.data.region_routes = physical_table_route_value.region_routes;
         self.data.table_info_value = Some(table_info_value);
         self.data.table_route_value = Some(table_route_value);
         Ok(())
