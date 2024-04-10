@@ -447,12 +447,9 @@ mod tests {
                 .output()
                 .expect("failed to build greptime binary");
             if !output.status.success() {
-                eprintln!("Failed to build GreptimeDB, {}", output.status);
-                eprintln!("Cargo build stdout:");
                 io::stdout().write_all(&output.stdout).unwrap();
-                eprintln!("Cargo build stderr:");
                 io::stderr().write_all(&output.stderr).unwrap();
-                panic!();
+                panic!("failed to build greptime binary");
             }
         }
 
