@@ -423,87 +423,69 @@ fn split_database(database: &str) -> Result<(String, Option<String>)> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
+    use clap::Parser;
+    use client::{Client, Database};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
-    use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use crate::error::Result;
+    use crate::options::{CliOptions, Options};
+    use crate::{cli, standalone, App};
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_export_create_table_with_quoted_names() {
-        let mut bin_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-        bin_path.pop();
-        bin_path.pop();
+    async fn test_export_create_table_with_quoted_names() -> Result<()> {
+        let output_dir = tempfile::tempdir().unwrap();
 
-        // github ci
-        bin_path.push("bins");
-        bin_path.push("greptime");
-        if !bin_path.exists() {
-            // local test
-            bin_path.pop();
-            bin_path.pop();
-            bin_path.push("target");
-            bin_path.push("debug");
-            bin_path.push("greptime");
-        }
-
-        let mut standalone = Command::new(&bin_path)
-            .args(["standalone", "start"])
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("failed to start greptime standalone");
-        // wait for fully start
-        std::thread::sleep(Duration::from_secs(3));
+        let standalone = standalone::Command::parse_from([
+            "standalone",
+            "start",
+            "--data-home",
+            &*output_dir.path().to_string_lossy(),
+        ]);
+        let Options::Standalone(standalone_opts) =
+            standalone.load_options(&CliOptions::default())?
+        else {
+            unreachable!()
+        };
+        let mut instance = standalone.build(*standalone_opts).await?;
+        instance.start().await?;
 
         let client = Client::with_urls(["127.0.0.1:4001"]);
         let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
-        let sql = r#"
-            CREATE DATABASE "cli.export.create_table";
-        "#;
-        let res = database.sql(sql).await;
-        assert!(res.is_ok());
-
-        let sql = r#"
-            CREATE TABLE "cli.export.create_table"."a.b.c"(
-                ts TIMESTAMP,
-                TIME INDEX (ts)
-            ) engine=mito;
-        "#;
-        let res = database.sql(sql).await;
-        assert!(res.is_ok());
+        database
+            .sql(r#"CREATE DATABASE "cli.export.create_table";"#)
+            .await
+            .unwrap();
+        database
+            .sql(
+                r#"CREATE TABLE "cli.export.create_table"."a.b.c"(
+                        ts TIMESTAMP,
+                        TIME INDEX (ts)
+                    ) engine=mito;
+                "#,
+            )
+            .await
+            .unwrap();
 
         let output_dir = tempfile::tempdir().unwrap();
-        let mut cli_export = Command::new(bin_path)
-            .args([
-                "cli",
-                "export",
-                "--addr",
-                "127.0.0.1:4001",
-                "--output-dir",
-                &format!("{}", output_dir.path().display()),
-                "--target",
-                "create-table",
-            ])
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("failed to run cli export");
-        std::thread::sleep(Duration::from_secs(1));
-        let _ = cli_export.kill();
+        let cli = cli::Command::parse_from([
+            "cli",
+            "export",
+            "--addr",
+            "127.0.0.1:4001",
+            "--output-dir",
+            &*output_dir.path().to_string_lossy(),
+            "--target",
+            "create-table",
+        ]);
+        let mut cli_app = cli.build().await?;
+        cli_app.start().await?;
 
-        let sql = r#"
-            DROP DATABASE "cli.export.create_table";
-        "#;
-        let res = database.sql(sql).await;
-        assert!(res.is_ok());
-
-        let _ = standalone.kill();
+        instance.stop().await?;
 
         let output_file = output_dir
             .path()
             .join("greptime-cli.export.create_table.sql");
-        let res = std::fs::read(output_file);
-        assert!(res.is_ok());
-
+        let res = std::fs::read_to_string(output_file).unwrap();
         let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
   "ts" TIMESTAMP(3) NOT NULL,
   TIME INDEX ("ts")
@@ -512,8 +494,10 @@ mod tests {
 ENGINE=mito
 WITH(
   regions = 1
-);"#;
-        let exported_data = String::from_utf8(res.unwrap()).unwrap();
-        assert_eq!(exported_data.trim(), expect);
+);
+"#;
+        assert_eq!(res.trim(), expect.trim());
+
+        Ok(())
     }
 }
