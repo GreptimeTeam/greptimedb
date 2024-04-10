@@ -226,7 +226,10 @@ impl Export {
     }
 
     async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
-        let sql = format!("show create table '{}'.'{}'.'{}'", catalog, schema, table);
+        let sql = format!(
+            "show create table \"{}\".\"{}\".\"{}\"",
+            catalog, schema, table
+        );
         let mut client = self.client.clone();
         client.set_catalog(catalog);
         client.set_schema(schema);
@@ -273,7 +276,7 @@ impl Export {
                 for (c, s, t) in table_list {
                     match self.show_create_table(&c, &s, &t).await {
                         Err(e) => {
-                            error!(e; "Failed to export table '{}'.'{}'.'{}'", c, s, t)
+                            error!(e; "Failed to export table \"{}\".\"{}\".\"{}\"", c, s, t)
                         }
                         Ok(create_table) => {
                             file.write_all(create_table.as_bytes())
@@ -415,5 +418,78 @@ fn split_database(database: &str) -> Result<(String, Option<String>)> {
         Ok((catalog.to_string(), None))
     } else {
         Ok((catalog.to_string(), Some(schema.to_string())))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_export_create_table_with_quoted_names() {
+        let mut path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        path.push("../../target/debug");
+
+        let mut standalone = Command::new("./greptime")
+            .current_dir(&path)
+            .args(["standalone", "start"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        // wait for fully start
+        std::thread::sleep(Duration::from_secs(3));
+
+        let client = Client::with_urls(["127.0.0.1:4001"]);
+        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        let sql = r#"
+            CREATE DATABASE "cli.export.create_table";
+        "#;
+        let res = database.sql(sql).await;
+        assert!(res.is_ok());
+
+        let sql = r#"
+            CREATE TABLE "cli.export.create_table"."a.b.c"(
+                ts TIMESTAMP,
+                TIME INDEX (ts)
+            ) engine=mito;
+        "#;
+        let res = database.sql(sql).await;
+        assert!(res.is_ok());
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let mut export = Command::new("./greptime")
+            .current_dir(path)
+            .args([
+                "cli",
+                "export",
+                "--addr",
+                "127.0.0.1:4001",
+                "--output-dir",
+                &format!("{}", output_dir.path().display()),
+                "--target",
+                "create-table",
+            ])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        let _ = export.kill();
+
+        let sql = r#"
+            DROP DATABASE "cli.export.create_table";
+        "#;
+        let res = database.sql(sql).await;
+        assert!(res.is_ok());
+
+        let _ = standalone.kill();
+
+        let output_file = output_dir
+            .path()
+            .join("greptime-cli.export.create_table.sql");
+        assert!(output_file.exists());
     }
 }

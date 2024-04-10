@@ -1632,6 +1632,7 @@ dependencies = [
  "substrait 0.7.2",
  "table",
  "temp-env",
+ "tempfile",
  "tikv-jemallocator",
  "tokio",
  "toml 0.8.8",
