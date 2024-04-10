@@ -56,7 +56,7 @@ pub struct RegionInfo {
     pub region_wal_options: HashMap<RegionNumber, String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct DatanodeTableKey {
     pub datanode_id: DatanodeId,
     pub table_id: TableId,
@@ -280,12 +280,9 @@ impl DatanodeTableManager {
     /// Returns batch of [DatanodeTableValue].
     pub async fn batch_get(
         &self,
-        keys: Vec<DatanodeTableKey>,
+        keys: &[DatanodeTableKey],
     ) -> Result<Vec<DeserializedValueWithBytes<DatanodeTableValue>>> {
-        let keys = keys
-            .into_iter()
-            .map(|key| key.as_raw_key())
-            .collect::<Vec<_>>();
+        let keys = keys.iter().map(|key| key.as_raw_key()).collect::<Vec<_>>();
 
         let resp = self.kv_backend.batch_get(BatchGetRequest { keys }).await?;
 

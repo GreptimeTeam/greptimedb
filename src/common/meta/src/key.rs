@@ -1690,7 +1690,7 @@ mod tests {
             .collect::<Vec<_>>();
         let datanode_table_values = table_metadata_manager
             .datanode_table_manager
-            .batch_get(datanode_table_keys.clone())
+            .batch_get(&datanode_table_keys)
             .await
             .unwrap();
         let datanode_table_values = datanode_table_keys

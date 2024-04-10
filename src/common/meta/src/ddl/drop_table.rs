@@ -18,9 +18,11 @@ mod metadata;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
+    Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
+use common_telemetry::tracing::warn;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use strum::AsRefStr;
@@ -31,6 +33,7 @@ use self::executor::DropTableExecutor;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
+use crate::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::TableRouteValue;
 use crate::key::DeserializedValueWithBytes;
@@ -183,6 +186,28 @@ impl Procedure for DropTableProcedure {
 
         LockKey::new(lock_key)
     }
+
+    fn rollback_supported(&self) -> bool {
+        !matches!(self.data.state, DropTableState::Prepare)
+    }
+
+    async fn rollback(&mut self, _: &ProcedureContext) -> ProcedureResult<()> {
+        warn!(
+            "Rolling back the drop table procedure, table: {}",
+            self.data.table_id()
+        );
+
+        // Safety: fetched in `DropTableState::Prepare` step.
+        let table_info_value = self.data.table_info_value.as_ref().unwrap();
+        let table_route_value = self.data.table_route_value.as_ref().unwrap();
+        let datanode_table_values = &self.data.datanode_table_value;
+
+        self.context
+            .table_metadata_manager
+            .restore_table_metadata(table_info_value, table_route_value, datanode_table_values)
+            .await
+            .map_err(ProcedureError::external)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -193,6 +218,10 @@ pub struct DropTableData {
     pub region_routes: Vec<RegionRoute>,
     pub table_route_value: Option<DeserializedValueWithBytes<TableRouteValue>>,
     pub table_info_value: Option<DeserializedValueWithBytes<TableInfoValue>>,
+    pub datanode_table_value: Vec<(
+        DatanodeTableKey,
+        DeserializedValueWithBytes<DatanodeTableValue>,
+    )>,
 }
 
 impl DropTableData {
@@ -204,6 +233,7 @@ impl DropTableData {
             region_routes: vec![],
             table_route_value: None,
             table_info_value: None,
+            datanode_table_value: vec![],
         }
     }
 

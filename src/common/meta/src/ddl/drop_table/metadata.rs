@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use common_catalog::format_full_table_name;
-use snafu::OptionExt;
+use snafu::{ensure, OptionExt};
 
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::error::{self, Result};
+use crate::key::datanode_table::DatanodeTableKey;
+use crate::rpc::router::region_distribution;
 
 impl DropTableProcedure {
     /// Fetches the table info and table route.
@@ -48,9 +50,37 @@ impl DropTableProcedure {
                 table_id: task.table_id,
             })?;
 
+        let distributions = region_distribution(&physical_table_route_value.region_routes);
+        let datanode_table_keys = distributions
+            .into_keys()
+            .map(|datanode_id| DatanodeTableKey::new(datanode_id, task.table_id))
+            .collect::<Vec<_>>();
+        let datanode_table_values = self
+            .context
+            .table_metadata_manager
+            .datanode_table_manager()
+            .batch_get(&datanode_table_keys)
+            .await?;
+        ensure!(
+            datanode_table_keys.len() == datanode_table_values.len(),
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "Dropping table: {}, num({}) of datanode table values should equal num({}) of keys",
+                    task.table_id,
+                    datanode_table_values.len(),
+                    datanode_table_keys.len()
+                )
+            }
+        );
+
         self.data.region_routes = physical_table_route_value.region_routes;
         self.data.table_info_value = Some(table_info_value);
         self.data.table_route_value = Some(table_route_value);
+        self.data.datanode_table_value = datanode_table_keys
+            .into_iter()
+            .zip(datanode_table_values)
+            .collect();
+
         Ok(())
     }
 }
