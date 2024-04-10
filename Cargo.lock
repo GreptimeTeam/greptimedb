@@ -3412,6 +3412,7 @@ dependencies = [
  "smallvec",
  "snafu",
  "strum 0.25.0",
+ "substrait 0.17.1",
  "substrait 0.7.2",
  "table",
  "tokio",
