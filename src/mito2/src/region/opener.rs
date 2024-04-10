@@ -15,7 +15,7 @@
 //! Region opener.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU8};
+use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info, warn};
@@ -27,7 +27,6 @@ use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{ColumnId, RegionId};
-use tokio::sync::RwLock;
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
@@ -41,7 +40,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
-use crate::region::{MitoRegion, REGION_STATE_READ_ONLY, REGION_STATE_WRITABLE};
+use crate::region::{ManifestContext, MitoRegion, REGION_STATE_READ_ONLY, REGION_STATE_WRITABLE};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
@@ -203,7 +202,11 @@ impl RegionOpener {
             region_id,
             version_control,
             access_layer: access_layer.clone(),
-            manifest_manager: Arc::new(RwLock::new(manifest_manager)),
+            // Region is writable after it is created.
+            manifest_ctx: Arc::new(ManifestContext::new(
+                manifest_manager,
+                REGION_STATE_WRITABLE,
+            )),
             file_purger: Arc::new(LocalFilePurger::new(
                 self.purge_scheduler,
                 access_layer,
@@ -211,8 +214,6 @@ impl RegionOpener {
             )),
             wal_options,
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
-            // Region is writable after it is created.
-            state: AtomicU8::new(REGION_STATE_WRITABLE),
             time_provider,
             memtable_builder,
         })
@@ -331,12 +332,14 @@ impl RegionOpener {
             region_id: self.region_id,
             version_control,
             access_layer,
-            manifest_manager: Arc::new(RwLock::new(manifest_manager)),
+            // Region is always opened in read only mode.
+            manifest_ctx: Arc::new(ManifestContext::new(
+                manifest_manager,
+                REGION_STATE_READ_ONLY,
+            )),
             file_purger,
             wal_options,
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
-            // Region is always opened in read only mode.
-            state: AtomicU8::new(REGION_STATE_READ_ONLY),
             time_provider,
             memtable_builder,
         };

@@ -35,6 +35,7 @@ use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
+use crate::region::ManifestContextRef;
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
     SenderWriteRequest, WorkerRequest,
@@ -204,6 +205,7 @@ pub(crate) struct RegionFlushTask {
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
     pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) manifest_ctx: ManifestContextRef,
 
     /// Index options for the region.
     pub(crate) index_options: IndexOptions,

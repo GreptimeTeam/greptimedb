@@ -178,6 +178,7 @@ impl<S> RegionWorkerLoop<S> {
             engine_config,
             row_group_size,
             cache_manager: self.cache_manager.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),
         }
     }

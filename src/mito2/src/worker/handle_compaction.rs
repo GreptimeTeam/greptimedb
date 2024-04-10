@@ -79,23 +79,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             };
             let action_list =
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-            if let Err(e) = region
-                .manifest_manager
-                .write()
-                .await
-                .update(action_list)
-                .await
-            {
+            let res = region
+                .manifest_ctx
+                .update_manifest(action_list, || {
+                    // Apply edit to region's version.
+                    region
+                        .version_control
+                        .apply_edit(edit, &[], region.file_purger.clone());
+                })
+                .await;
+            if let Err(e) = res {
                 error!(e; "Failed to update manifest, region: {}", region_id);
                 manifest_timer.stop_and_discard();
                 request.on_failure(e);
                 return;
             }
-
-            // Apply edit to region's version.
-            region
-                .version_control
-                .apply_edit(edit, &[], region.file_purger.clone());
         }
         // compaction finished.
         request.on_success();

@@ -138,18 +138,16 @@ async fn alter_region_schema(
         metadata: new_meta.clone(),
     };
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
-    region
-        .manifest_manager
-        .write()
-        .await
-        .update(action_list)
-        .await?;
 
-    // Apply the metadata to region's version.
     region
-        .version_control
-        .alter_schema(new_meta, &region.memtable_builder);
-    Ok(())
+        .manifest_ctx
+        .update_manifest(action_list, || {
+            // Apply the metadata to region's version.
+            region
+                .version_control
+                .alter_schema(new_meta, &region.memtable_builder);
+        })
+        .await
 }
 
 /// Creates a metadata after applying the alter `request` to the old `metadata`.

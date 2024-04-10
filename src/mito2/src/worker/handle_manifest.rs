@@ -23,10 +23,11 @@ use tokio::sync::oneshot::Sender;
 
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate};
-use crate::manifest::manager::RegionManifestManagerRef;
 use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::version::VersionControlRef;
-use crate::region::{switch_state_to_writable, MitoRegionRef, REGION_STATE_EDITING};
+use crate::region::{
+    switch_state_to_writable, ManifestContextRef, MitoRegionRef, REGION_STATE_EDITING,
+};
 use crate::request::{BackgroundNotify, OptionOutputTx, TruncateResult, WorkerRequest};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::worker::RegionWorkerLoop;
@@ -80,14 +81,14 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         let request_sender = self.sender.clone();
-        let manifest_manager = region.manifest_manager.clone();
+        let manifest_ctx = region.manifest_ctx.clone();
         let version_control = region.version_control.clone();
         let memtable_builder = region.memtable_builder.clone();
 
         // Updates manifest in background.
         common_runtime::spawn_bg(async move {
             let result = write_and_apply_truncate_action(
-                manifest_manager,
+                manifest_ctx,
                 version_control,
                 &truncate,
                 memtable_builder,
@@ -132,7 +133,7 @@ async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
 
     write_and_apply_region_edit(
         region.region_id,
-        &region.manifest_manager,
+        &region.manifest_ctx,
         &region.version_control,
         &region.file_purger,
         edit,
@@ -144,7 +145,7 @@ async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
 /// Writes it to the manifest and then applies it to the region.
 async fn write_and_apply_region_edit(
     region_id: RegionId,
-    manifest_manager: &RegionManifestManagerRef,
+    manifest_ctx: &ManifestContextRef,
     version_control: &VersionControlRef,
     file_purger: &FilePurgerRef,
     edit: RegionEdit,
@@ -152,22 +153,18 @@ async fn write_and_apply_region_edit(
 ) -> Result<()> {
     info!("Applying {edit:?} to region {}", region_id);
 
-    let mut manager = manifest_manager.write().await;
-    // TODO(yingwen): Check region state.
-    manager
-        .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
-            edit.clone(),
-        )))
-        .await?;
+    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
 
-    // Apply edit to region's version.
-    version_control.apply_edit(edit, memtables_to_remove, file_purger.clone());
-
-    Ok(())
+    manifest_ctx
+        .update_manifest(action_list, || {
+            // Applies the edit to the region.
+            version_control.apply_edit(edit, memtables_to_remove, file_purger.clone());
+        })
+        .await
 }
 
 async fn write_and_apply_truncate_action(
-    manifest_manager: RegionManifestManagerRef,
+    manifest_ctx: ManifestContextRef,
     version_control: VersionControlRef,
     truncate: &RegionTruncate,
     memtable_builder: MemtableBuilderRef,
@@ -176,16 +173,14 @@ async fn write_and_apply_truncate_action(
     let action_list =
         RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
-    // Acquires the write lock of the manifest manager.
-    let mut manifest_manager = manifest_manager.write().await;
-    manifest_manager.update(action_list).await?;
-
-    // Applies the truncate action to the region.
-    version_control.truncate(
-        truncate.truncated_entry_id,
-        truncate.truncated_sequence,
-        &memtable_builder,
-    );
-
-    Ok(())
+    manifest_ctx
+        .update_manifest(action_list, || {
+            // Applies the truncate action to the region.
+            version_control.truncate(
+                truncate.truncated_entry_id,
+                truncate.truncated_sequence,
+                &memtable_builder,
+            );
+        })
+        .await
 }

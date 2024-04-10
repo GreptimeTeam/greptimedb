@@ -31,7 +31,7 @@ use store_api::storage::RegionId;
 use crate::access_layer::AccessLayerRef;
 use crate::error::{RegionNotFoundSnafu, RegionStateSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::manager::RegionManifestManagerRef;
+use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::OnFailure;
@@ -102,16 +102,14 @@ pub(crate) struct MitoRegion {
     pub(crate) version_control: VersionControlRef,
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
-    /// Manager to maintain manifest for this region.
-    pub(crate) manifest_manager: RegionManifestManagerRef,
+    /// Context to maintain manifest for this region.
+    pub(crate) manifest_ctx: ManifestContextRef,
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
     /// Wal options of this region.
     pub(crate) wal_options: WalOptions,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
-    /// The state of the region.
-    state: AtomicU8,
     /// Provider to get current time.
     time_provider: TimeProviderRef,
     /// Memtable builder for the region.
@@ -123,7 +121,12 @@ pub(crate) type MitoRegionRef = Arc<MitoRegion>;
 impl MitoRegion {
     /// Stop background managers for this region.
     pub(crate) async fn stop(&self) -> Result<()> {
-        self.manifest_manager.write().await.stop().await?;
+        self.manifest_ctx
+            .manifest_manager
+            .write()
+            .await
+            .stop()
+            .await?;
 
         info!(
             "Stopped region manifest manager, region_id: {}",
@@ -163,12 +166,12 @@ impl MitoRegion {
 
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
-        self.state.load(Ordering::Relaxed) == REGION_STATE_WRITABLE
+        self.manifest_ctx.state.load(Ordering::Relaxed) == REGION_STATE_WRITABLE
     }
 
     /// Returns the state of the region.
     pub(crate) fn state(&self) -> u8 {
-        self.state.load(Ordering::Relaxed)
+        self.manifest_ctx.state.load(Ordering::Relaxed)
     }
 
     /// Sets the writable state.
@@ -176,14 +179,16 @@ impl MitoRegion {
         if writable {
             // Only sets the region to writable if it is read only.
             // This prevents others updating the manifest.
-            let _ = self.state.compare_exchange(
+            let _ = self.manifest_ctx.state.compare_exchange(
                 REGION_STATE_READ_ONLY,
                 REGION_STATE_WRITABLE,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             );
         } else {
-            self.state.store(REGION_STATE_READ_ONLY, Ordering::Relaxed);
+            self.manifest_ctx
+                .state
+                .store(REGION_STATE_READ_ONLY, Ordering::Relaxed);
         }
     }
 
@@ -214,7 +219,8 @@ impl MitoRegion {
     /// Sets the state of the region to given state if the current state equals to
     /// the expected.
     pub(crate) fn compare_exchange_state(&self, expect: u8, state: u8) -> Result<()> {
-        self.state
+        self.manifest_ctx
+            .state
             .compare_exchange(expect, state, Ordering::Relaxed, Ordering::Relaxed)
             .map_err(|actual| {
                 RegionStateSnafu {
@@ -238,7 +244,12 @@ impl MitoRegion {
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
 
-        let manifest_usage = self.manifest_manager.read().await.manifest_usage();
+        let manifest_usage = self
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .manifest_usage();
 
         RegionUsage {
             region_id,
@@ -254,6 +265,7 @@ impl MitoRegion {
         ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
     }
 
+    // FIXME(yingwen): Remove this.
     pub(crate) async fn apply_edit(
         &self,
         edit: RegionEdit,
@@ -261,7 +273,9 @@ impl MitoRegion {
     ) -> Result<()> {
         info!("Applying {edit:?} to region {}", self.region_id);
 
-        self.manifest_manager
+        // FIXME(yingwen): Holds the lock while applying edit.
+        self.manifest_ctx
+            .manifest_manager
             .write()
             .await
             .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
@@ -275,6 +289,56 @@ impl MitoRegion {
         Ok(())
     }
 }
+
+/// Context to update the region manifest.
+#[derive(Debug)]
+pub(crate) struct ManifestContext {
+    /// Manager to maintain manifest for this region.
+    manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
+    /// The state of the region. The region checks the state before updating
+    /// manifest.
+    state: AtomicU8,
+}
+
+impl ManifestContext {
+    pub(crate) fn new(manager: RegionManifestManager, state: u8) -> Self {
+        ManifestContext {
+            manifest_manager: tokio::sync::RwLock::new(manager),
+            state: AtomicU8::new(state),
+        }
+    }
+
+    pub(crate) async fn has_update(&self) -> Result<bool> {
+        self.manifest_manager.read().await.has_update().await
+    }
+
+    // TODO(yingwen): checks the state.
+    // TODO(yingwen): Can we update the state back? Maybe we can't.
+    /// Updates the manifest and execute the `applier` if the manifest is updated.
+    pub(crate) async fn update_manifest(
+        &self,
+        action_list: RegionMetaActionList,
+        applier: impl FnOnce(),
+    ) -> Result<()> {
+        // Acquires the write lock of the manifest manager.
+        let mut manager = self.manifest_manager.write().await;
+        manager.update(action_list).await?;
+
+        // Executes the applier. We MUST holds the write lock.
+        applier();
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl ManifestContext {
+    pub(crate) async fn manifest(&self) -> Arc<crate::manifest::action::RegionManifest> {
+        self.manifest_manager.read().await.manifest()
+    }
+}
+
+pub(crate) type ManifestContextRef = Arc<ManifestContext>;
 
 pub(crate) fn switch_state_to_writable(region: &MitoRegionRef, expect: u8) {
     if let Err(e) = region.compare_exchange_state(expect, REGION_STATE_WRITABLE) {
