@@ -25,14 +25,10 @@ use crate::error::{InvalidRequestSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
-use crate::memtable::MemtableId;
-use crate::region::version::VersionControlRef;
 use crate::region::{
-    switch_state_to_writable, ManifestContextRef, MitoRegionRef, REGION_STATE_ALTERING,
-    REGION_STATE_EDITING,
+    switch_state_to_writable, MitoRegionRef, REGION_STATE_ALTERING, REGION_STATE_EDITING,
 };
 use crate::request::{BackgroundNotify, OptionOutputTx, TruncateResult, WorkerRequest};
-use crate::sst::file_purger::FilePurgerRef;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -186,34 +182,16 @@ async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
         );
     }
 
-    write_and_apply_region_edit(
-        region.region_id,
-        &region.manifest_ctx,
-        &region.version_control,
-        &region.file_purger,
-        edit,
-        &[],
-    )
-    .await
-}
-
-/// Writes it to the manifest and then applies it to the region.
-async fn write_and_apply_region_edit(
-    region_id: RegionId,
-    manifest_ctx: &ManifestContextRef,
-    version_control: &VersionControlRef,
-    file_purger: &FilePurgerRef,
-    edit: RegionEdit,
-    memtables_to_remove: &[MemtableId],
-) -> Result<()> {
     info!("Applying {edit:?} to region {}", region_id);
 
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-
-    manifest_ctx
+    region
+        .manifest_ctx
         .update_manifest(action_list, || {
             // Applies the edit to the region.
-            version_control.apply_edit(edit, memtables_to_remove, file_purger.clone());
+            region
+                .version_control
+                .apply_edit(edit, &[], region.file_purger.clone());
         })
         .await
 }

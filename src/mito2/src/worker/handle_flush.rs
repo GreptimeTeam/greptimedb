@@ -22,9 +22,8 @@ use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::error::{RegionTruncatedSnafu, Result};
+use crate::error::Result;
 use crate::flush::{FlushReason, RegionFlushTask};
-use crate::manifest::action::RegionEdit;
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
@@ -198,29 +197,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
             return;
         };
-
-        // The flush task before truncating the region fails immediately.
-        let version_data = region.version_control.current();
-        if let Some(truncated_entry_id) = version_data.version.truncated_entry_id {
-            if truncated_entry_id >= request.flushed_entry_id {
-                request.on_failure(RegionTruncatedSnafu { region_id }.build());
-                return;
-            }
-        }
-
-        // Write region edit to manifest.
-        let edit = RegionEdit {
-            files_to_add: std::mem::take(&mut request.file_metas),
-            files_to_remove: Vec::new(),
-            compaction_time_window: None,
-            flushed_entry_id: Some(request.flushed_entry_id),
-            flushed_sequence: Some(request.flushed_sequence),
-        };
-        if let Err(e) = region.apply_edit(edit, &request.memtables_to_remove).await {
-            error!(e; "Failed to write manifest, region: {}", region_id);
-            request.on_failure(e);
-            return;
-        }
 
         region.update_flush_millis();
 

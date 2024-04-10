@@ -27,7 +27,6 @@ use common_telemetry::{info, warn};
 use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
-use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::region_engine::SetReadonlyResponse;
@@ -44,7 +43,6 @@ use crate::error::{
     FlushRegionSnafu, InvalidRequestSnafu, Result,
 };
 use crate::manifest::action::RegionEdit;
-use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
@@ -629,18 +627,10 @@ pub(crate) enum BackgroundNotify {
 pub(crate) struct FlushFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
-    /// Meta of the flushed SSTs.
-    pub(crate) file_metas: Vec<FileMeta>,
     /// Entry id of flushed data.
     pub(crate) flushed_entry_id: EntryId,
-    /// Sequence of flushed data.
-    pub(crate) flushed_sequence: SequenceNumber,
-    /// Id of memtables to remove.
-    pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Flush result senders.
     pub(crate) senders: Vec<OutputTx>,
-    /// File purger for cleaning files on failure.
-    pub(crate) file_purger: FilePurgerRef,
     /// Flush timer.
     pub(crate) _timer: HistogramTimer,
 }
@@ -661,12 +651,6 @@ impl OnFailure for FlushFinished {
             sender.send(Err(err.clone()).context(FlushRegionSnafu {
                 region_id: self.region_id,
             }));
-        }
-        // Clean flushed files.
-        for file in &self.file_metas {
-            self.file_purger.send_request(PurgeRequest {
-                file_meta: file.clone(),
-            });
         }
     }
 }

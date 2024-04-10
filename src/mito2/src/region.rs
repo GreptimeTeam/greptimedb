@@ -29,10 +29,10 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{RegionNotFoundSnafu, RegionStateSnafu, Result};
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::error::{RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result};
+use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
-use crate::memtable::{MemtableBuilderRef, MemtableId};
+use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::OnFailure;
 use crate::sst::file_purger::FilePurgerRef;
@@ -264,30 +264,6 @@ impl MitoRegion {
     fn estimated_wal_usage(&self, memtable_usage: u64) -> u64 {
         ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
     }
-
-    // FIXME(yingwen): Remove this.
-    pub(crate) async fn apply_edit(
-        &self,
-        edit: RegionEdit,
-        memtables_to_remove: &[MemtableId],
-    ) -> Result<()> {
-        info!("Applying {edit:?} to region {}", self.region_id);
-
-        // FIXME(yingwen): Holds the lock while applying edit.
-        self.manifest_ctx
-            .manifest_manager
-            .write()
-            .await
-            .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
-                edit.clone(),
-            )))
-            .await?;
-
-        // Apply edit to region's version.
-        self.version_control
-            .apply_edit(edit, memtables_to_remove, self.file_purger.clone());
-        Ok(())
-    }
 }
 
 /// Context to update the region manifest.
@@ -313,7 +289,6 @@ impl ManifestContext {
     }
 
     // TODO(yingwen): checks the state.
-    // TODO(yingwen): Can we update the state back? Maybe we can't.
     /// Updates the manifest and execute the `applier` if the manifest is updated.
     pub(crate) async fn update_manifest(
         &self,
@@ -322,6 +297,45 @@ impl ManifestContext {
     ) -> Result<()> {
         // Acquires the write lock of the manifest manager.
         let mut manager = self.manifest_manager.write().await;
+        // Gets current manifest.
+        let manifest = manager.manifest();
+
+        for action in &action_list.actions {
+            // Checks whether the edit is still applicable.
+            let RegionMetaAction::Edit(edit) = &action else {
+                continue;
+            };
+
+            // Checks whether the region is truncated.
+            let Some(truncated_entry_id) = manifest.truncated_entry_id else {
+                continue;
+            };
+
+            // This is an edit from flush.
+            if let Some(flushed_entry_id) = edit.flushed_entry_id {
+                ensure!(
+                    truncated_entry_id < flushed_entry_id,
+                    RegionTruncatedSnafu {
+                        region_id: manifest.metadata.region_id,
+                    }
+                );
+            }
+
+            // This is an edit from compaction.
+            if !edit.files_to_remove.is_empty() {
+                // Input files of the compaction task has been truncated.
+                for file in &edit.files_to_remove {
+                    ensure!(
+                        manifest.files.contains_key(&file.file_id),
+                        RegionTruncatedSnafu {
+                            region_id: manifest.metadata.region_id,
+                        }
+                    );
+                }
+            }
+        }
+
+        // Now we can update the manifest.
         manager.update(action_list).await?;
 
         // Executes the applier. We MUST holds the write lock.
