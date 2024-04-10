@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
-use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement, DEFAULT_LOOKBACK_STRING};
 use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
@@ -193,7 +193,7 @@ impl GrpcQueryHandler for DummyInstance {
                             start: promql.start,
                             end: promql.end,
                             step: promql.step,
-                            lookback: "5m".to_string(),
+                            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
                         };
                         let mut result =
                             SqlQueryHandler::do_promql_query(self, &prom_query, ctx).await;

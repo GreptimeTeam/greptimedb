@@ -18,7 +18,7 @@ use common_query::Output;
 use common_telemetry::tracing;
 use query::parser::{
     PromQuery, QueryLanguageParser, ANALYZE_NODE_NAME, ANALYZE_VERBOSE_NODE_NAME,
-    EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME,
+    DEFAULT_LOOKBACK_STRING, EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -37,14 +37,16 @@ impl StatementExecutor {
                     end: eval.end,
                     step: eval.step,
                     query: eval.query,
-                    lookback: eval.lookback.unwrap_or("5m".to_string()),
+                    lookback: eval.lookback.unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
                 };
                 QueryLanguageParser::parse_promql(&promql, &query_ctx).context(ParseQuerySnafu)?
             }
             Tql::Explain(explain) => {
                 let promql = PromQuery {
                     query: explain.query,
-                    lookback: explain.lookback.unwrap_or("5m".to_string()),
+                    lookback: explain
+                        .lookback
+                        .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
                     ..PromQuery::default()
                 };
                 let explain_node_name = if explain.is_verbose {
@@ -65,7 +67,9 @@ impl StatementExecutor {
                     end: analyze.end,
                     step: analyze.step,
                     query: analyze.query,
-                    lookback: analyze.lookback.unwrap_or("5m".to_string()),
+                    lookback: analyze
+                        .lookback
+                        .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
                 };
                 let analyze_node_name = if analyze.is_verbose {
                     ANALYZE_VERBOSE_NODE_NAME

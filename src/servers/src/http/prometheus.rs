@@ -217,7 +217,7 @@ pub async fn range_query(
         start: params.start.or(form_params.start).unwrap_or_default(),
         end: params.end.or(form_params.end).unwrap_or_default(),
         step: params.step.or(form_params.step).unwrap_or_default(),
-        lookback: "5m".to_string(),
+        lookback: DEFAULT_LOOKBACK_STRING.to_string(),
     };
 
     let result = handler.do_query(&prom_query, query_ctx).await;

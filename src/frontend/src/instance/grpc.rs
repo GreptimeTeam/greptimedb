@@ -21,7 +21,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
-use query::parser::PromQuery;
+use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -85,7 +85,7 @@ impl GrpcQueryHandler for Instance {
                             start: promql.start,
                             end: promql.end,
                             step: promql.step,
-                            lookback: "5m".to_string(),
+                            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
                         };
                         let mut result =
                             SqlQueryHandler::do_promql_query(self, &prom_query, ctx.clone()).await;

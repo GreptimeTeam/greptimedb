@@ -107,7 +107,7 @@ impl Default for PromQuery {
             start: String::from("0"),
             end: String::from("0"),
             step: String::from("5m"),
-            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
+            lookback: String::from(DEFAULT_LOOKBACK_STRING),
         }
     }
 }

@@ -26,7 +26,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_time::util::current_time_rfc3339;
 use promql_parser::parser::ValueType;
-use query::parser::PromQuery;
+use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use session::context::QueryContext;
 use snafu::OptionExt;
 use tonic::{Request, Response};
@@ -58,7 +58,7 @@ impl PrometheusGateway for PrometheusGatewayService {
                     start: range_query.start,
                     end: range_query.end,
                     step: range_query.step,
-                    lookback: "5m".to_string(),
+                    lookback: DEFAULT_LOOKBACK_STRING.to_string(),
                 }
             }
             Promql::InstantQuery(instant_query) => {
@@ -72,7 +72,7 @@ impl PrometheusGateway for PrometheusGatewayService {
                     start: time.clone(),
                     end: time,
                     step: String::from("1s"),
-                    lookback: "5m".to_string(),
+                    lookback: String::from(DEFAULT_LOOKBACK_STRING),
                 }
             }
         };
