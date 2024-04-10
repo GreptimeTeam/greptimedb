@@ -55,31 +55,35 @@ impl DropTableProcedure {
             .into_keys()
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, task.table_id))
             .collect::<Vec<_>>();
-        let datanode_table_values = self
-            .context
-            .table_metadata_manager
-            .datanode_table_manager()
-            .batch_get(&datanode_table_keys)
-            .await?;
-        ensure!(
-            datanode_table_keys.len() == datanode_table_values.len(),
-            error::UnexpectedSnafu {
-                err_msg: format!(
-                    "Dropping table: {}, num({}) of datanode table values should equal num({}) of keys",
-                    task.table_id,
-                    datanode_table_values.len(),
-                    datanode_table_keys.len()
-                )
-            }
-        );
+
+        // Only for physical table.
+        if table_route_value.is_physical() {
+            let datanode_table_values = self
+                .context
+                .table_metadata_manager
+                .datanode_table_manager()
+                .batch_get(&datanode_table_keys)
+                .await?;
+            ensure!(
+                datanode_table_keys.len() == datanode_table_values.len(),
+                error::UnexpectedSnafu {
+                    err_msg: format!(
+                        "Dropping table: {}, num({}) of datanode table values should equal num({}) of keys",
+                        task.table_id,
+                        datanode_table_values.len(),
+                        datanode_table_keys.len()
+                    )
+                }
+            );
+            self.data.datanode_table_value = datanode_table_keys
+                .into_iter()
+                .zip(datanode_table_values)
+                .collect();
+        }
 
         self.data.region_routes = physical_table_route_value.region_routes;
         self.data.table_info_value = Some(table_info_value);
         self.data.table_route_value = Some(table_route_value);
-        self.data.datanode_table_value = datanode_table_keys
-            .into_iter()
-            .zip(datanode_table_values)
-            .collect();
 
         Ok(())
     }
