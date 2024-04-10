@@ -423,7 +423,6 @@ fn split_database(database: &str) -> Result<(String, Option<String>)> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Write};
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::time::Duration;
@@ -435,22 +434,17 @@ mod tests {
         let mut bin_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
         bin_path.pop();
         bin_path.pop();
-        let path = bin_path.clone();
-        bin_path.push("target");
-        bin_path.push("debug");
-        bin_path.push("greptime");
 
+        // github ci
+        bin_path.push("bins");
+        bin_path.push("greptime");
         if !bin_path.exists() {
-            let output = Command::new("cargo")
-                .current_dir(path)
-                .args(["build", "--bin", "greptime"])
-                .output()
-                .expect("failed to build greptime binary");
-            if !output.status.success() {
-                io::stdout().write_all(&output.stdout).unwrap();
-                io::stderr().write_all(&output.stderr).unwrap();
-                panic!("failed to build greptime binary");
-            }
+            // local test
+            bin_path.pop();
+            bin_path.pop();
+            bin_path.push("target");
+            bin_path.push("debug");
+            bin_path.push("greptime");
         }
 
         let mut standalone = Command::new(&bin_path)
