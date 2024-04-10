@@ -126,7 +126,6 @@ impl TimeRangeTester {
 }
 
 #[tokio::test]
-#[ignore = "FilterPushdown rule is disabled in #3661. TODO(ruihang): enable it"]
 async fn test_range_filter() {
     let tester = create_test_engine();
     tester
