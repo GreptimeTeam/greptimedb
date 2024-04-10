@@ -427,6 +427,7 @@ impl MapFilterProject {
 /// A wrapper type which indicates it is safe to simply evaluate all expressions.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SafeMfpPlan {
+    /// the inner `MapFilterProject` that is safe to evaluate.
     pub(crate) mfp: MapFilterProject,
 }
 

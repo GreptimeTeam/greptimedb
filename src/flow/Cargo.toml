@@ -14,10 +14,13 @@ common-error.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+datafusion-substrait.workspace = true
 datatypes.workspace = true
 enum_dispatch = "0.3"
 # This fork is simply for keeping our dependency in our org, and pin the version
 # it is the same with upstream repo
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
 hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", rev = "ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94" }
 itertools.workspace = true
 num-traits = "0.2"
@@ -30,4 +33,11 @@ tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+catalog.workspace = true
+common-catalog.workspace = true
+prost.workspace = true
+query.workspace = true
 serde_json = "1.0"
+session.workspace = true
+substrait.workspace = true
+table.workspace = true
