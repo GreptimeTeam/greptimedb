@@ -70,6 +70,19 @@ impl<T> MemoryKvBackend<T> {
         let mut kvs = self.kvs.write().unwrap();
         kvs.clear();
     }
+
+    #[cfg(test)]
+    /// Returns true if the `kvs` is empty.
+    pub fn is_empty(&self) -> bool {
+        self.kvs.read().unwrap().is_empty()
+    }
+
+    #[cfg(test)]
+    /// Returns the `kvs`.
+    pub fn dump(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        let kvs = self.kvs.read().unwrap();
+        kvs.clone()
+    }
 }
 
 #[async_trait]

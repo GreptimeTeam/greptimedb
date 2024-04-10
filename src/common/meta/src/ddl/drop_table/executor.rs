@@ -110,6 +110,11 @@ impl DropTableExecutor {
             .await
     }
 
+    /// Restores the table metadata.
+    pub async fn on_restore_metadata(&self) -> Result<()> {
+        todo!()
+    }
+
     /// Invalidates frontend caches
     pub async fn invalidate_table_cache(&self, ctx: &DdlContext) -> Result<()> {
         let cache_invalidator = &ctx.cache_invalidator;

@@ -85,9 +85,12 @@ use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
+use crate::key::table_route::TableRouteKey;
 use crate::kv_backend::txn::{Txn, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
+use crate::rpc::store::BatchPutRequest;
+use crate::rpc::KeyValue;
 use crate::table_name::TableName;
 use crate::DatanodeId;
 
@@ -590,6 +593,69 @@ impl TableMetadataManager {
         Ok(())
     }
 
+    /// Restores metadata for table.
+    /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
+    pub async fn restore_table_metadata(
+        &self,
+        table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
+        table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
+        datanode_table_values: &[(
+            DatanodeTableKey,
+            DeserializedValueWithBytes<DatanodeTableValue>,
+        )],
+    ) -> Result<()> {
+        // Puts:
+        // - Table name value.
+        // - Table info value.
+        // - Table route value.
+        // - Datanode table values
+        let mut kvs = Vec::with_capacity(3 + datanode_table_values.len());
+
+        // Builds Table name key value.
+        let table_info = &table_info_value.table_info;
+        let table_id = table_info.ident.table_id;
+        let table_name_key = TableNameKey::new(
+            &table_info.catalog_name,
+            &table_info.schema_name,
+            &table_info.name,
+        );
+        let table_name_value = TableNameValue::new(table_id);
+        kvs.push(KeyValue {
+            key: table_name_key.as_raw_key(),
+            value: table_name_value.try_as_raw_value()?,
+        });
+
+        // Builds Table info key value.
+        let table_info_key = TableInfoKey::new(table_id);
+        kvs.push(KeyValue {
+            key: table_info_key.as_raw_key(),
+            value: table_info_value.bytes.to_vec(),
+        });
+
+        // Build Table route key value.
+        let table_route_key = TableRouteKey::new(table_id);
+        kvs.push(KeyValue {
+            key: table_route_key.as_raw_key(),
+            value: table_route_value.bytes.to_vec(),
+        });
+
+        // Build Datanode table values.
+        for (key, value) in datanode_table_values {
+            kvs.push(KeyValue {
+                key: key.as_raw_key(),
+                value: value.bytes.to_vec(),
+            });
+        }
+
+        let req = BatchPutRequest {
+            kvs,
+            prev_kv: false,
+        };
+        let _ = self.kv_backend.batch_put(req).await?;
+
+        Ok(())
+    }
+
     /// Renames the table name and returns an error if different metadata exists.
     /// The caller MUST ensure it has the exclusive access to old and new `TableNameKey`s,
     /// and the new `TableNameKey` MUST be empty.
@@ -907,6 +973,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_time::util::current_time_millis;
     use futures::TryStreamExt;
     use store_api::storage::RegionId;
@@ -914,6 +981,7 @@ mod tests {
 
     use super::datanode_table::DatanodeTableKey;
     use super::test_utils;
+    use crate::ddl::test_util::create_table::test_create_table_task;
     use crate::ddl::utils::region_storage_path;
     use crate::error::Result;
     use crate::key::datanode_table::RegionInfo;
@@ -1558,5 +1626,93 @@ mod tests {
             )
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_restore_table_metadata() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+        let table_id = 1025;
+        let table_name = "foo";
+        let task = test_create_table_task(table_name, table_id);
+        let options = [(0, "test".to_string())].into();
+        table_metadata_manager
+            .create_table_metadata(
+                task.table_info,
+                TableRouteValue::physical(vec![
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(table_id, 1)),
+                        leader_peer: Some(Peer::empty(1)),
+                        follower_peers: vec![Peer::empty(5)],
+                        leader_status: None,
+                        leader_down_since: None,
+                    },
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(table_id, 2)),
+                        leader_peer: Some(Peer::empty(2)),
+                        follower_peers: vec![Peer::empty(4)],
+                        leader_status: None,
+                        leader_down_since: None,
+                    },
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(table_id, 3)),
+                        leader_peer: Some(Peer::empty(3)),
+                        follower_peers: vec![],
+                        leader_status: None,
+                        leader_down_since: None,
+                    },
+                ]),
+                options,
+            )
+            .await
+            .unwrap();
+        let expected_result = mem_kv.dump();
+
+        let table_info_value = table_metadata_manager
+            .table_info_manager
+            .get(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let table_route_value = table_metadata_manager
+            .table_route_manager
+            .table_route_storage()
+            .get_raw(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let region_routes = table_route_value.region_routes().unwrap();
+        let regions = region_distribution(region_routes);
+
+        let datanode_table_keys = regions
+            .keys()
+            .map(|datanode_id| DatanodeTableKey::new(*datanode_id, table_id))
+            .collect::<Vec<_>>();
+        let datanode_table_values = table_metadata_manager
+            .datanode_table_manager
+            .batch_get(datanode_table_keys.clone())
+            .await
+            .unwrap();
+        let datanode_table_values = datanode_table_keys
+            .into_iter()
+            .zip(datanode_table_values)
+            .collect::<Vec<_>>();
+        let table_name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
+        table_metadata_manager
+            .delete_table_metadata(table_id, &table_name, region_routes)
+            .await
+            .unwrap();
+        assert!(mem_kv.is_empty());
+
+        table_metadata_manager
+            .restore_table_metadata(
+                &table_info_value,
+                &table_route_value,
+                &datanode_table_values,
+            )
+            .await
+            .unwrap();
+        let kvs = mem_kv.dump();
+        assert_eq!(kvs, expected_result);
     }
 }
