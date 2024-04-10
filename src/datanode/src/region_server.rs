@@ -831,7 +831,10 @@ impl TableProvider for DummyTableProvider {
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
         let mut request = self.scan_request.lock().unwrap().clone();
-        request.projection = projection.cloned();
+        request.projection = match projection {
+            Some(x) if !x.is_empty() => Some(x.clone()),
+            _ => None,
+        };
         request.filters = filters.iter().map(|e| Expr::from(e.clone())).collect();
         request.limit = limit;
 
