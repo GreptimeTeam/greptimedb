@@ -75,7 +75,11 @@ macro_rules! plan_err {
     };
 }
 
+mod aggr;
+mod expr;
 mod literal;
+mod plan;
+
 use literal::{from_substrait_literal, from_substrait_type};
 
 /// In Substrait, a function can be define by an u32 anchor, and the anchor can be mapped to a name
@@ -121,19 +125,6 @@ pub struct DataflowContext {
 }
 
 impl DataflowContext {
-    pub fn new() -> Self {
-        Self {
-            id_to_name: HashMap::new(),
-            name_to_id: HashMap::new(),
-            schema: HashMap::new(),
-        }
-    }
-    pub fn register_table(&mut self, id: GlobalId, name: Vec<String>) {
-        self.id_to_name.insert(id, name.clone());
-        self.name_to_id.insert(name, id);
-        todo!("Table provider etc.")
-    }
-
     /// Retrieves a GlobalId and table schema representing a table previously registered by calling the [register_table] function.
     ///
     /// Returns an error if no table has been registered with the provided names
@@ -153,569 +144,6 @@ impl DataflowContext {
                 name: name.join("."),
             })?;
         Ok((id, schema))
-    }
-}
-
-/// Convert Substrait Plan into Flow's TypedPlan
-pub fn from_substrait_plan(ctx: &mut DataflowContext, plan: &SubPlan) -> Result<TypedPlan, Error> {
-    // Register function extension
-    let function_extension = FunctionExtensions::try_from_proto(&plan.extensions)?;
-
-    // Parse relations
-    match plan.relations.len() {
-        1 => {
-            match plan.relations[0].rel_type.as_ref() {
-                Some(rt) => match rt {
-                    plan_rel::RelType::Rel(rel) => {
-                        Ok(from_substrait_rel(ctx, rel, &function_extension)?)
-                    },
-                    plan_rel::RelType::Root(root) => {
-                        let input = root.input.as_ref().with_context(|| InvalidQuerySnafu {
-                            reason: "Root relation without input",
-                        })?;
-                        Ok(from_substrait_rel(ctx, input, &function_extension)?)
-                    }
-                },
-                None => plan_err!("Cannot parse plan relation: None")
-            }
-        },
-        _ => not_impl_err!(
-            "Substrait plan with more than 1 relation trees not supported. Number of relation trees: {:?}",
-            plan.relations.len()
-        )
-    }
-}
-
-/// Convert Substrait Rel into Flow's TypedPlan
-/// TODO: SELECT DISTINCT(does it get compile with something else?)
-pub fn from_substrait_rel(
-    ctx: &mut DataflowContext,
-    rel: &Rel,
-    extensions: &FunctionExtensions,
-) -> Result<TypedPlan, Error> {
-    match &rel.rel_type {
-        Some(RelType::Project(p)) => {
-            let input = if let Some(input) = p.input.as_ref() {
-                from_substrait_rel(ctx, input, extensions)?
-            } else {
-                return not_impl_err!("Projection without an input is not supported");
-            };
-            let mut exprs: Vec<(ScalarExpr, ColumnType)> = vec![];
-            for e in &p.expressions {
-                let expr = from_substrait_rex(e, &input.typ, extensions)?;
-                exprs.push(expr);
-            }
-            let is_literal = exprs.iter().all(|(expr, _)| expr.is_literal());
-            if is_literal {
-                let (literals, lit_types): (Vec<_>, Vec<_>) = exprs.into_iter().unzip();
-                let typ = RelationType::new(lit_types);
-                let row = literals
-                    .into_iter()
-                    .map(|lit| lit.as_literal().expect("A literal"))
-                    .collect_vec();
-                let row = repr::Row::new(row);
-                let plan = Plan::Constant {
-                    rows: vec![(row, repr::Timestamp::MIN, 1)],
-                };
-                Ok(TypedPlan { typ, plan })
-            } else {
-                input.projection(exprs)
-            }
-        }
-        Some(RelType::Filter(filter)) => {
-            let input = if let Some(input) = filter.input.as_ref() {
-                from_substrait_rel(ctx, input, extensions)?
-            } else {
-                return not_impl_err!("Filter without an input is not supported");
-            };
-
-            let expr = if let Some(condition) = filter.condition.as_ref() {
-                from_substrait_rex(condition, &input.typ, extensions)?
-            } else {
-                return not_impl_err!("Filter without an condition is not valid");
-            };
-            input.filter(expr)
-        }
-        Some(RelType::Read(read)) => match &read.as_ref().read_type {
-            Some(ReadType::NamedTable(nt)) => {
-                let table_reference = nt.names.clone();
-                let table = ctx.table(&table_reference)?;
-                let get_table = Plan::Get {
-                    id: crate::expr::Id::Global(table.0),
-                };
-                let get_table = TypedPlan {
-                    typ: table.1,
-                    plan: get_table,
-                };
-
-                match &read.projection {
-                    Some(MaskExpression {
-                        select: Some(projection),
-                        ..
-                    }) => {
-                        let column_indices: Vec<usize> = projection
-                            .struct_items
-                            .iter()
-                            .map(|item| item.field as usize)
-                            .collect();
-                        let input_arity = get_table.typ.column_types.len();
-                        let mfp =
-                            MapFilterProject::new(input_arity).project(column_indices.clone())?;
-                        get_table.mfp(mfp)
-                    }
-                    _ => Ok(get_table),
-                }
-            }
-            _ => not_impl_err!("Only NamedTable reads are supported"),
-        },
-        Some(RelType::Aggregate(agg)) => from_substrait_agg_rel(ctx, agg, extensions),
-        _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
-    }
-}
-
-fn from_substrait_agg_grouping(
-    ctx: &mut DataflowContext,
-    groupings: &[Grouping],
-    typ: &RelationType,
-    extensions: &FunctionExtensions,
-) -> Result<Vec<(ScalarExpr, ColumnType)>, Error> {
-    let _ = ctx;
-    let mut group_expr = vec![];
-    match groupings.len() {
-        1 => {
-            for e in &groupings[0].grouping_expressions {
-                let x = from_substrait_rex(e, typ, extensions)?;
-                group_expr.push(x);
-            }
-        }
-        _ => {
-            return not_impl_err!(
-                "Grouping sets not support yet, use union all with group by instead."
-            );
-        }
-    };
-    Ok(group_expr)
-}
-
-fn from_substrait_agg_measures(
-    ctx: &mut DataflowContext,
-    measures: &[Measure],
-    typ: &RelationType,
-    extensions: &FunctionExtensions,
-) -> Result<Vec<AggregateExpr>, Error> {
-    let _ = ctx;
-    let mut aggr_exprs = vec![];
-
-    for m in measures {
-        let filter = match &m.filter {
-            Some(fil) => Some(from_substrait_rex(fil, typ, extensions)?),
-            None => None,
-        };
-
-        let agg_func = match &m.measure {
-            Some(f) => {
-                let distinct = match f.invocation {
-                    _ if f.invocation == AggregationInvocation::Distinct as i32 => true,
-                    _ if f.invocation == AggregationInvocation::All as i32 => false,
-                    _ => false,
-                };
-                from_substrait_agg_func(
-                    f, typ, extensions, filter, // TODO(discord9): impl order_by
-                    None, distinct,
-                )
-            }
-            None => not_impl_err!("Aggregate without aggregate function is not supported"),
-        };
-        aggr_exprs.push(agg_func?.clone());
-    }
-    Ok(aggr_exprs)
-}
-
-/// Generate KeyValPlan from AggregateExpr and group_exprs
-///
-/// will also change aggregate expr to use column ref if necessary
-fn from_substrait_gen_key_val_plan(
-    aggr_exprs: &mut [AggregateExpr],
-    group_exprs: &[(ScalarExpr, ColumnType)],
-    input_arity: usize,
-) -> Result<KeyValPlan, Error> {
-    let (group_expr_val, _group_expr_type): (Vec<_>, Vec<_>) = group_exprs.iter().cloned().unzip();
-    let output_arity = group_expr_val.len();
-    let key_plan = MapFilterProject::new(input_arity)
-        .map(group_expr_val)?
-        .project(input_arity..input_arity + output_arity)?;
-
-    // val_plan is extracted from aggr_exprs to give aggr function it's necessary input
-    // and since aggr func need inputs that is column ref, we just add a prefix mfp to transform any expr that is not into a column ref
-    let val_plan = {
-        let need_mfp = aggr_exprs.iter().any(|agg| agg.expr.as_column().is_none());
-        if need_mfp {
-            // create mfp from aggr_expr, and modify aggr_expr to use the output column of mfp
-            let input_exprs = aggr_exprs
-                .iter_mut()
-                .enumerate()
-                .map(|(idx, aggr)| {
-                    let ret = aggr.expr.clone();
-                    aggr.expr = ScalarExpr::Column(idx);
-                    ret
-                })
-                .collect_vec();
-            let aggr_arity = aggr_exprs.len();
-
-            MapFilterProject::new(input_arity)
-                .map(input_exprs.clone())?
-                .project(input_arity..input_arity + aggr_arity)?
-        } else {
-            // simply take all inputs as value
-            MapFilterProject::new(input_arity)
-        }
-    };
-    Ok(KeyValPlan {
-        key_plan: key_plan.into_safe(),
-        val_plan: val_plan.into_safe(),
-    })
-}
-
-fn from_substrait_agg_rel(
-    ctx: &mut DataflowContext,
-    agg: &proto::AggregateRel,
-    extensions: &FunctionExtensions,
-) -> Result<TypedPlan, Error> {
-    let input = if let Some(input) = agg.input.as_ref() {
-        from_substrait_rel(ctx, input, extensions)?
-    } else {
-        return not_impl_err!("Aggregate without an input is not supported");
-    };
-
-    let group_expr = from_substrait_agg_grouping(ctx, &agg.groupings, &input.typ, extensions)?;
-
-    let mut aggr_exprs = from_substrait_agg_measures(ctx, &agg.measures, &input.typ, extensions)?;
-
-    let key_val_plan = from_substrait_gen_key_val_plan(
-        &mut aggr_exprs,
-        &group_expr,
-        input.typ.column_types.len(),
-    )?;
-
-    let output_type = {
-        let mut output_types = Vec::new();
-        // first append group_expr as key, then aggr_expr as value
-        for (_expr, typ) in &group_expr {
-            output_types.push(typ.clone());
-        }
-
-        for aggr in &aggr_exprs {
-            output_types.push(ColumnType::new_nullable(
-                aggr.func.signature().output.clone(),
-            ));
-        }
-        RelationType::new(output_types)
-    };
-
-    // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
-    // also set them input/output column
-    let full_aggrs = aggr_exprs;
-    let mut simple_aggrs = Vec::new();
-    let mut distinct_aggrs = Vec::new();
-    for (output_column, aggr_expr) in full_aggrs.iter().enumerate() {
-        let input_column = aggr_expr.expr.as_column().with_context(|| PlanSnafu {
-            reason: "Expect aggregate argument to be transformed into a column at this point",
-        })?;
-        if aggr_expr.distinct {
-            distinct_aggrs.push((output_column, input_column, aggr_expr.clone()));
-        } else {
-            simple_aggrs.push((output_column, input_column, aggr_expr.clone()));
-        }
-    }
-    let accum_plan = AccumulablePlan {
-        full_aggrs,
-        simple_aggrs,
-        distinct_aggrs,
-    };
-    let plan = Plan::Reduce {
-        input: Box::new(input.plan),
-        key_val_plan,
-        reduce_plan: ReducePlan::Accumulable(accum_plan),
-    };
-    Ok(TypedPlan {
-        typ: output_type,
-        plan,
-    })
-}
-
-/// Convert AggregateFunction into Flow's AggregateExpr
-pub fn from_substrait_agg_func(
-    f: &proto::AggregateFunction,
-    input_schema: &RelationType,
-    extensions: &FunctionExtensions,
-    filter: Option<(ScalarExpr, ColumnType)>,
-    order_by: Option<Vec<(ScalarExpr, ColumnType)>>,
-    distinct: bool,
-) -> Result<AggregateExpr, Error> {
-    // TODO(discord9): impl filter
-    let _ = filter;
-    let _ = order_by;
-    let mut args = vec![];
-    for arg in &f.arguments {
-        let arg_expr = match &arg.arg_type {
-            Some(ArgType::Value(e)) => from_substrait_rex(e, input_schema, extensions),
-            _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
-        }?;
-        args.push(arg_expr);
-    }
-
-    let arg = if let Some(first) = args.first() {
-        first
-    } else {
-        return not_impl_err!("Aggregated function without arguments is not supported");
-    };
-
-    let func = match extensions.get(&f.function_reference) {
-        Some(function_name) => {
-            AggregateFunc::from_str_and_type(function_name, Some(arg.1.scalar_type.clone()))
-        }
-        None => not_impl_err!(
-            "Aggregated function not found: function anchor = {:?}",
-            f.function_reference
-        ),
-    }?;
-    Ok(AggregateExpr {
-        func,
-        expr: arg.0.clone(),
-        distinct,
-    })
-}
-
-/// Convert ScalarFunction into Flow's ScalarExpr
-pub fn from_substrait_scalar_func(
-    f: &ScalarFunction,
-    input_schema: &RelationType,
-    extensions: &FunctionExtensions,
-) -> Result<(ScalarExpr, ColumnType), Error> {
-    let fn_name = extensions.get(&f.function_reference).ok_or_else(|| {
-        NotImplementedSnafu {
-            reason: format!(
-                "Aggregated function not found: function reference = {:?}",
-                f.function_reference
-            ),
-        }
-        .build()
-    })?;
-    let arg_len = f.arguments.len();
-    let arg_exprs: Vec<(ScalarExpr, ColumnType)> = f
-        .arguments
-        .iter()
-        .map(|arg| match &arg.arg_type {
-            Some(ArgType::Value(e)) => from_substrait_rex(e, input_schema, extensions),
-            _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
-        })
-        .try_collect()?;
-
-    // literal's type is determined by the function and type of other args
-    let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_exprs
-        .into_iter()
-        .map(|(arg_val, arg_type)| {
-            if arg_val.is_literal() {
-                (arg_val, None)
-            } else {
-                (arg_val, Some(arg_type.scalar_type))
-            }
-        })
-        .unzip();
-
-    match arg_len {
-        // because variadic function can also have 1 arguments, we need to check if it's a variadic function first
-        1 if VariadicFunc::from_str_and_types(fn_name, &arg_types).is_err() => {
-            let func = UnaryFunc::from_str_and_type(fn_name, None)?;
-            let arg = arg_exprs[0].clone();
-            let ret_type = ColumnType::new_nullable(func.signature().output.clone());
-
-            Ok((arg.call_unary(func), ret_type))
-        }
-        // because variadic function can also have 2 arguments, we need to check if it's a variadic function first
-        2 if VariadicFunc::from_str_and_types(fn_name, &arg_types).is_err() => {
-            let (func, signature) =
-                BinaryFunc::from_str_expr_and_type(fn_name, &arg_exprs, &arg_types[0..2])?;
-
-            // constant folding here
-            let is_all_literal = arg_exprs.iter().all(|arg| arg.is_literal());
-            if is_all_literal {
-                let res = func
-                    .eval(&[], &arg_exprs[0], &arg_exprs[1])
-                    .context(EvalSnafu)?;
-
-                // if output type is null, it should be inferred from the input types
-                let con_typ = signature.output.clone();
-                let typ = ColumnType::new_nullable(con_typ.clone());
-                return Ok((ScalarExpr::Literal(res, con_typ), typ));
-            }
-
-            let mut arg_exprs = arg_exprs;
-            for (idx, arg_expr) in arg_exprs.iter_mut().enumerate() {
-                if let ScalarExpr::Literal(val, typ) = arg_expr {
-                    let dest_type = signature.input[idx].clone();
-
-                    // cast val to target_type
-                    let dest_val = if !dest_type.is_null() {
-                        datatypes::types::cast(val.clone(), &dest_type)
-                        .with_context(|_|
-                            DatatypesSnafu{
-                                extra: format!("Failed to implicitly cast literal {val:?} to type {dest_type:?}")
-                            })?
-                    } else {
-                        val.clone()
-                    };
-                    *val = dest_val;
-                    *typ = dest_type;
-                }
-            }
-
-            let ret_type = ColumnType::new_nullable(func.signature().output.clone());
-            let ret_expr = arg_exprs[0].clone().call_binary(arg_exprs[1].clone(), func);
-            Ok((ret_expr, ret_type))
-        }
-        _var => {
-            if let Ok(func) = VariadicFunc::from_str_and_types(fn_name, &arg_types) {
-                let ret_type = ColumnType::new_nullable(func.signature().output.clone());
-                Ok((
-                    ScalarExpr::CallVariadic {
-                        func,
-                        exprs: arg_exprs,
-                    },
-                    ret_type,
-                ))
-            } else if let Ok(func) = UnmaterializableFunc::from_str(fn_name) {
-                let ret_type = ColumnType::new_nullable(func.signature().output.clone());
-                Ok((ScalarExpr::CallUnmaterializable(func), ret_type))
-            } else {
-                not_impl_err!("Unsupported function {fn_name} with {arg_len} arguments")
-            }
-        }
-    }
-}
-
-/// Convert IfThen into Flow's ScalarExpr
-pub fn from_substrait_ifthen_rex(
-    if_then: &IfThen,
-    input_schema: &RelationType,
-    extensions: &FunctionExtensions,
-) -> Result<(ScalarExpr, ColumnType), Error> {
-    let ifs: Vec<_> = if_then
-        .ifs
-        .iter()
-        .map(|if_clause| {
-            let proto_if = if_clause.r#if.as_ref().with_context(|| InvalidQuerySnafu {
-                reason: "IfThen clause without if",
-            })?;
-            let proto_then = if_clause.then.as_ref().with_context(|| InvalidQuerySnafu {
-                reason: "IfThen clause without then",
-            })?;
-            let cond = from_substrait_rex(proto_if, input_schema, extensions)?;
-            let then = from_substrait_rex(proto_then, input_schema, extensions)?;
-            Ok((cond, then))
-        })
-        .try_collect()?;
-    // if no else is presented
-    let els = if_then
-        .r#else
-        .as_ref()
-        .map(|e| from_substrait_rex(e, input_schema, extensions))
-        .transpose()?
-        .unwrap_or_else(|| {
-            (
-                ScalarExpr::literal_null(),
-                ColumnType::new_nullable(CDT::null_datatype()),
-            )
-        });
-    fn build_if_then(
-        mut next_if_then: impl Iterator<Item = ((ScalarExpr, ColumnType), (ScalarExpr, ColumnType))>,
-        els: (ScalarExpr, ColumnType),
-    ) -> (ScalarExpr, ColumnType) {
-        if let Some((cond, then)) = next_if_then.next() {
-            // always assume the type of `if`` expr is the same with the `then`` expr
-            (
-                ScalarExpr::If {
-                    cond: Box::new(cond.0),
-                    then: Box::new(then.0),
-                    els: Box::new(build_if_then(next_if_then, els).0),
-                },
-                then.1,
-            )
-        } else {
-            els
-        }
-    }
-    let expr_if = build_if_then(ifs.into_iter(), els);
-    Ok(expr_if)
-}
-/// Convert Substrait Rex into Flow's ScalarExpr
-pub fn from_substrait_rex(
-    e: &Expression,
-    input_schema: &RelationType,
-    extensions: &FunctionExtensions,
-) -> Result<(ScalarExpr, ColumnType), Error> {
-    match &e.rex_type {
-        Some(RexType::Literal(lit)) => {
-            let lit = from_substrait_literal(lit)?;
-            Ok((
-                ScalarExpr::Literal(lit.0, lit.1.clone()),
-                ColumnType::new_nullable(lit.1),
-            ))
-        }
-        Some(RexType::SingularOrList(s)) => {
-            let substrait_expr = s.value.as_ref().with_context(|| InvalidQuerySnafu {
-                reason: "SingularOrList expression without value",
-            })?;
-            // Note that we didn't impl support to in list expr
-            if !s.options.is_empty() {
-                return not_impl_err!("In list expression is not supported");
-            }
-            from_substrait_rex(substrait_expr, input_schema, extensions)
-        }
-        Some(RexType::Selection(field_ref)) => match &field_ref.reference_type {
-            Some(DirectReference(direct)) => match &direct.reference_type.as_ref() {
-                Some(StructField(x)) => match &x.child.as_ref() {
-                    Some(_) => {
-                        not_impl_err!("Direct reference StructField with child is not supported")
-                    }
-                    None => {
-                        let column = x.field as usize;
-                        let column_type = input_schema.column_types[column].clone();
-                        Ok((ScalarExpr::Column(column), column_type))
-                    }
-                },
-                _ => not_impl_err!(
-                    "Direct reference with types other than StructField is not supported"
-                ),
-            },
-            _ => not_impl_err!("unsupported field ref type"),
-        },
-        Some(RexType::ScalarFunction(f)) => from_substrait_scalar_func(f, input_schema, extensions),
-        Some(RexType::IfThen(if_then)) => {
-            from_substrait_ifthen_rex(if_then, input_schema, extensions)
-        }
-        Some(RexType::Cast(cast)) => {
-            let input = cast.input.as_ref().with_context(|| InvalidQuerySnafu {
-                reason: "Cast expression without input",
-            })?;
-            let input = from_substrait_rex(input, input_schema, extensions)?;
-            let cast_type =
-                from_substrait_type(cast.r#type.as_ref().with_context(|| InvalidQuerySnafu {
-                    reason: "Cast expression without type",
-                })?)?;
-            let func = UnaryFunc::from_str_and_type("cast", Some(cast_type.clone()))?;
-            Ok((
-                input.0.call_unary(func),
-                ColumnType::new_nullable(cast_type),
-            ))
-        }
-        Some(RexType::WindowFunction(_)) => PlanSnafu {
-            reason:
-                "Window function is not supported yet. Please use aggregation function instead."
-                    .to_string(),
-        }
-        .fail(),
-        _ => not_impl_err!("unsupported rex_type"),
     }
 }
 
@@ -789,7 +217,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)]),
@@ -812,7 +240,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let filter = ScalarExpr::CallVariadic {
             func: VariadicFunc::And,
@@ -853,7 +281,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::boolean_datatype(), true)]),
@@ -877,7 +305,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
@@ -905,7 +333,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)]),
@@ -934,7 +362,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
@@ -960,7 +388,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
@@ -987,7 +415,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -1034,7 +462,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -1087,7 +515,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,

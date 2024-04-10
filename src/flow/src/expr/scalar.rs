@@ -24,6 +24,20 @@ use snafu::ensure;
 use crate::adapter::error::{Error, InvalidQuerySnafu, UnsupportedTemporalFilterSnafu};
 use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
+use crate::repr::ColumnType;
+
+/// A scalar expression with a known type.
+#[derive(Debug, Clone)]
+pub struct TypedExpr {
+    pub expr: ScalarExpr,
+    pub typ: ColumnType,
+}
+
+impl TypedExpr {
+    pub fn new(expr: ScalarExpr, typ: ColumnType) -> Self {
+        Self { expr, typ }
+    }
+}
 
 /// A scalar expression, which can be evaluated to a value.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

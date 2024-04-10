@@ -27,4 +27,4 @@ pub(crate) use func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc}
 pub(crate) use id::{GlobalId, Id, LocalId};
 pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
 pub(crate) use relation::{AggregateExpr, AggregateFunc};
-pub(crate) use scalar::ScalarExpr;
+pub(crate) use scalar::{ScalarExpr, TypedExpr};
