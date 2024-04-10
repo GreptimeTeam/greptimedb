@@ -100,30 +100,6 @@ impl QueryEngineState {
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
-        // For some unknown reasons, the "optimize_projections" rule will make the projections
-        // disappeared when facing the `SELECT COUNT(*)` query.
-        //
-        // For example, for a simple query `select count(*) from foo` against a simple table created
-        // by `create table foo (ts timestamp time index)`, before the rule, the plan is:
-        //
-        // Projection: COUNT(UInt8(1))
-        //   Aggregate: groupBy=[[]], aggr=[[COUNT(UInt8(1))]]
-        //     TableScan: greptime.public.foo projection=[ts]
-        //
-        // after the rule, it becomes:
-        //
-        // Aggregate: groupBy=[[]], aggr=[[COUNT(UInt8(1))]]
-        //   TableScan: greptime.public.foo projection=[]
-        //
-        // Which could cause some errors when later been executed.
-        // TODO(LFC): Add the "optimize_projections" rule back.
-        optimizer
-            .rules
-            .retain(|r| r.name() != "optimize_projections");
-
-        // For some unknown reasons, the "push_down_filter" rule will generate invalid schemas.
-        optimizer.rules.retain(|r| r.name() != "push_down_filter");
-
         let session_state = SessionState::new_with_config_rt(session_config, runtime_env)
             .with_serializer_registry(Arc::new(ExtensionSerializer))
             .with_analyzer_rules(analyzer.rules)

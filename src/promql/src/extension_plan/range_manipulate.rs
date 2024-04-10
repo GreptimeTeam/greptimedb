@@ -28,9 +28,10 @@ use datafusion::common::{DFField, DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
 use datafusion::sql::TableReference;
@@ -148,6 +149,12 @@ impl RangeManipulate {
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        let output_schema: SchemaRef = SchemaRef::new(self.output_schema.as_ref().into());
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
         Arc::new(RangeManipulateExec {
             start: self.start,
             end: self.end,
@@ -157,8 +164,9 @@ impl RangeManipulate {
             time_range_column: self.range_timestamp_name(),
             field_columns: self.field_columns.clone(),
             input: exec_input,
-            output_schema: SchemaRef::new(self.output_schema.as_ref().into()),
+            output_schema,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
         })
     }
 
@@ -247,6 +255,7 @@ pub struct RangeManipulateExec {
     input: Arc<dyn ExecutionPlan>,
     output_schema: SchemaRef,
     metric: ExecutionPlanMetricsSet,
+    properties: PlanProperties,
 }
 
 impl ExecutionPlan for RangeManipulateExec {
@@ -259,7 +268,7 @@ impl ExecutionPlan for RangeManipulateExec {
     }
 
     fn properties(&self) -> &PlanProperties {
-        self.input.properties()
+        &self.properties
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -286,6 +295,7 @@ impl ExecutionPlan for RangeManipulateExec {
             output_schema: self.output_schema.clone(),
             input: children[0].clone(),
             metric: self.metric.clone(),
+            properties: self.properties.clone(),
         }))
     }
 
@@ -554,6 +564,11 @@ mod test {
             .as_ref()
             .into(),
         );
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(manipulate_output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
         let normalize_exec = Arc::new(RangeManipulateExec {
             start,
             end,
@@ -565,6 +580,7 @@ mod test {
             time_index_column: time_index,
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
         });
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())

@@ -628,12 +628,6 @@ mod tests {
                 true
             )
         );
-        assert_eq!(
-            r#"Projection: SUM(numbers.number)
-  Limit: skip=0, fetch=20
-    Aggregate: groupBy=[[]], aggr=[[SUM(CAST(numbers.number AS UInt64))]]
-      TableScan: numbers"#,
-            format!("{}", logical_plan.display_indent())
-        );
+        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[SUM(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
     }
 }
