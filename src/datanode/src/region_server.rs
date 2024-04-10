@@ -545,9 +545,7 @@ impl RegionServerInner {
         match region_change {
             RegionChange::None => {}
             RegionChange::Register(_, _) | RegionChange::Deregisters => {
-                self.region_map
-                    .remove(&region_id)
-                    .map(|(id, engine)| engine.set_writable(id, false));
+                self.region_map.remove(&region_id);
             }
         }
     }
