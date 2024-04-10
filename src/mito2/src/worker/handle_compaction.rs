@@ -16,9 +16,8 @@ use common_telemetry::{error, info, warn};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::metrics::{COMPACTION_REQUEST_COUNT, COMPACTION_STAGE_ELAPSED};
-use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
+use crate::metrics::COMPACTION_REQUEST_COUNT;
+use crate::request::{CompactionFailed, CompactionFinished, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -38,7 +37,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             &region.access_layer,
             &region.file_purger,
             sender,
-            self.config.clone(),
+            &region.manifest_ctx,
         ) {
             error!(e; "Failed to schedule compaction task for region: {}", region_id);
         } else {
@@ -65,42 +64,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        {
-            let manifest_timer = COMPACTION_STAGE_ELAPSED
-                .with_label_values(&["write_manifest"])
-                .start_timer();
-            // Write region edit to manifest.
-            let edit = RegionEdit {
-                files_to_add: std::mem::take(&mut request.compaction_outputs),
-                files_to_remove: std::mem::take(&mut request.compacted_files),
-                compaction_time_window: request.compaction_time_window,
-                flushed_entry_id: None,
-                flushed_sequence: None,
-            };
-            let action_list =
-                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-            let res = region
-                .manifest_ctx
-                .update_manifest(action_list, || {
-                    // Apply edit to region's version.
-                    region
-                        .version_control
-                        .apply_edit(edit, &[], region.file_purger.clone());
-                })
-                .await;
-            if let Err(e) = res {
-                error!(e; "Failed to update manifest, region: {}", region_id);
-                manifest_timer.stop_and_discard();
-                request.on_failure(e);
-                return;
-            }
-        }
         // compaction finished.
         request.on_success();
 
         // Schedule next compaction if necessary.
         self.compaction_scheduler
-            .on_compaction_finished(region_id, self.config.clone());
+            .on_compaction_finished(region_id, &region.manifest_ctx);
     }
 
     /// When compaction fails, we simply log the error.

@@ -37,6 +37,7 @@ use crate::error::{
 use crate::metrics::COMPACTION_STAGE_ELAPSED;
 use crate::region::options::CompactionOptions;
 use crate::region::version::{VersionControlRef, VersionRef};
+use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::FilePurgerRef;
@@ -54,6 +55,8 @@ pub struct CompactionRequest {
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
     pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) manifest_ctx: ManifestContextRef,
+    pub(crate) version_control: VersionControlRef,
 }
 
 impl CompactionRequest {
@@ -88,6 +91,7 @@ pub(crate) struct CompactionScheduler {
     /// Request sender of the worker that this scheduler belongs to.
     request_sender: Sender<WorkerRequest>,
     cache_manager: CacheManagerRef,
+    engine_config: Arc<MitoConfig>,
 }
 
 impl CompactionScheduler {
@@ -95,12 +99,14 @@ impl CompactionScheduler {
         scheduler: SchedulerRef,
         request_sender: Sender<WorkerRequest>,
         cache_manager: CacheManagerRef,
+        engine_config: Arc<MitoConfig>,
     ) -> Self {
         Self {
             scheduler,
             region_status: HashMap::new(),
             request_sender,
             cache_manager,
+            engine_config,
         }
     }
 
@@ -112,7 +118,7 @@ impl CompactionScheduler {
         access_layer: &AccessLayerRef,
         file_purger: &FilePurgerRef,
         waiter: OptionOutputTx,
-        engine_config: Arc<MitoConfig>,
+        manifest_ctx: &ManifestContextRef,
     ) -> Result<()> {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             // Region is compacting. Add the waiter to pending list.
@@ -130,8 +136,9 @@ impl CompactionScheduler {
         let request = status.new_compaction_request(
             self.request_sender.clone(),
             waiter,
-            engine_config,
+            self.engine_config.clone(),
             self.cache_manager.clone(),
+            manifest_ctx,
         );
         self.region_status.insert(region_id, status);
         self.schedule_compaction_request(request)
@@ -141,7 +148,7 @@ impl CompactionScheduler {
     pub(crate) fn on_compaction_finished(
         &mut self,
         region_id: RegionId,
-        engine_config: Arc<MitoConfig>,
+        manifest_ctx: &ManifestContextRef,
     ) {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
@@ -150,8 +157,9 @@ impl CompactionScheduler {
         let request = status.new_compaction_request(
             self.request_sender.clone(),
             OptionOutputTx::none(),
-            engine_config,
+            self.engine_config.clone(),
             self.cache_manager.clone(),
+            manifest_ctx,
         );
         // Try to schedule next compaction task for this region.
         if let Err(e) = self.schedule_compaction_request(request) {
@@ -325,6 +333,7 @@ impl CompactionStatus {
         waiter: OptionOutputTx,
         engine_config: Arc<MitoConfig>,
         cache_manager: CacheManagerRef,
+        manifest_ctx: &ManifestContextRef,
     ) -> CompactionRequest {
         let current_version = self.version_control.current().version;
         let start_time = Instant::now();
@@ -337,6 +346,8 @@ impl CompactionStatus {
             file_purger: self.file_purger.clone(),
             start_time,
             cache_manager,
+            manifest_ctx: manifest_ctx.clone(),
+            version_control: self.version_control.clone(),
         };
 
         if let Some(pending) = self.pending_compaction.take() {
@@ -371,6 +382,9 @@ mod tests {
         let version_control = Arc::new(builder.build());
         let (output_tx, output_rx) = oneshot::channel();
         let waiter = OptionOutputTx::from(output_tx);
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
         scheduler
             .schedule_compaction(
                 builder.region_id(),
@@ -378,7 +392,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 waiter,
-                Arc::new(MitoConfig::default()),
+                &manifest_ctx,
             )
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
@@ -396,7 +410,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 waiter,
-                Arc::new(MitoConfig::default()),
+                &manifest_ctx,
             )
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
@@ -448,6 +462,9 @@ mod tests {
                 .push_l0_file(90, end)
                 .build(),
         );
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
         scheduler
             .schedule_compaction(
                 region_id,
@@ -455,7 +472,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 OptionOutputTx::none(),
-                Arc::new(MitoConfig::default()),
+                &manifest_ctx,
             )
             .unwrap();
         // Should schedule 1 compaction.
@@ -483,7 +500,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 OptionOutputTx::none(),
-                Arc::new(MitoConfig::default()),
+                &manifest_ctx,
             )
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
@@ -496,7 +513,7 @@ mod tests {
             .is_some());
 
         // On compaction finished and schedule next compaction.
-        scheduler.on_compaction_finished(region_id, Arc::new(MitoConfig::default()));
+        scheduler.on_compaction_finished(region_id, &manifest_ctx);
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(2, job_scheduler.num_jobs());
         // 5 files for next compaction.
@@ -514,7 +531,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 OptionOutputTx::none(),
-                Arc::new(MitoConfig::default()),
+                &manifest_ctx,
             )
             .unwrap();
         assert_eq!(2, job_scheduler.num_jobs());

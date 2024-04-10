@@ -367,7 +367,7 @@ impl<S: LogStore> WorkerStarter<S> {
             running: running.clone(),
             memtable_builder_provider: MemtableBuilderProvider::new(
                 Some(self.write_buffer_manager.clone()),
-                self.config,
+                self.config.clone(),
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
@@ -376,6 +376,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.scheduler,
                 sender.clone(),
                 self.cache_manager.clone(),
+                self.config,
             ),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,

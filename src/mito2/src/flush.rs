@@ -723,13 +723,10 @@ impl FlushStatus {
 
 #[cfg(test)]
 mod tests {
-    use common_datasource::compression::CompressionType;
     use tokio::sync::oneshot;
 
     use super::*;
     use crate::cache::CacheManager;
-    use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-    use crate::region::{ManifestContext, REGION_STATE_WRITABLE};
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::version_util::VersionControlBuilder;
 
@@ -806,20 +803,9 @@ mod tests {
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
             cache_manager: Arc::new(CacheManager::default()),
-            manifest_ctx: Arc::new(ManifestContext::new(
-                RegionManifestManager::new(
-                    version_control.current().version.metadata.clone(),
-                    RegionManifestOptions {
-                        manifest_dir: "".to_string(),
-                        object_store: env.access_layer.object_store().clone(),
-                        compress_type: CompressionType::Uncompressed,
-                        checkpoint_distance: 10,
-                    },
-                )
-                .await
-                .unwrap(),
-                REGION_STATE_WRITABLE,
-            )),
+            manifest_ctx: env
+                .mock_manifest_context(version_control.current().version.metadata.clone())
+                .await,
             index_options: IndexOptions::default(),
         };
         task.push_sender(OptionOutputTx::from(output_tx));

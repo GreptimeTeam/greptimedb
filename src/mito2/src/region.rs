@@ -336,7 +336,9 @@ impl ManifestContext {
         }
 
         // Now we can update the manifest.
-        manager.update(action_list).await?;
+        manager.update(action_list).await.inspect_err(
+            |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
+        )?;
 
         // Executes the applier. We MUST holds the write lock.
         applier();

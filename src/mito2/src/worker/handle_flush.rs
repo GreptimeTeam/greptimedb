@@ -240,7 +240,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             &region.access_layer,
             &region.file_purger,
             OptionOutputTx::none(),
-            self.config.clone(),
+            &region.manifest_ctx,
         ) {
             warn!(
                 "Failed to schedule compaction after flush, region: {}, err: {}",
