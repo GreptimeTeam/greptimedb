@@ -107,47 +107,26 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
-        // Now we can alter the region directly.
-        if let Err(e) = alter_region_schema(&region, &version, request).await {
-            error!(e; "Failed to alter region schema, region_id: {}", region_id);
-            sender.send(Err(e));
-            return;
-        }
-
         info!(
-            "Schema of region {} is altered from {} to {}",
+            "Try to alter region {} from version {} to {}",
             region_id,
             version.metadata.schema_version,
             region.metadata().schema_version
         );
 
-        // Notifies waiters.
-        sender.send(Ok(0));
+        let new_meta = match metadata_after_alteration(&version.metadata, request) {
+            Ok(new_meta) => new_meta,
+            Err(e) => {
+                sender.send(Err(e));
+                return;
+            }
+        };
+        // Persist the metadata to region's manifest.
+        let change = RegionChange {
+            metadata: new_meta.clone(),
+        };
+        self.handle_manifest_region_change(region, change, sender)
     }
-}
-
-/// Alter the schema of the region.
-async fn alter_region_schema(
-    region: &MitoRegionRef,
-    version: &Version,
-    request: RegionAlterRequest,
-) -> Result<()> {
-    let new_meta = metadata_after_alteration(&version.metadata, request)?;
-    // Persist the metadata to region's manifest.
-    let change = RegionChange {
-        metadata: new_meta.clone(),
-    };
-    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
-
-    region
-        .manifest_ctx
-        .update_manifest(action_list, || {
-            // Apply the metadata to region's version.
-            region
-                .version_control
-                .alter_schema(new_meta, &region.memtable_builder);
-        })
-        .await
 }
 
 /// Creates a metadata after applying the alter `request` to the old `metadata`.

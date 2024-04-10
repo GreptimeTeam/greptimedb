@@ -22,11 +22,14 @@ use store_api::storage::RegionId;
 use tokio::sync::oneshot::Sender;
 
 use crate::error::{InvalidRequestSnafu, Result};
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate};
+use crate::manifest::action::{
+    RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
+};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::version::VersionControlRef;
 use crate::region::{
-    switch_state_to_writable, ManifestContextRef, MitoRegionRef, REGION_STATE_EDITING,
+    switch_state_to_writable, ManifestContextRef, MitoRegionRef, REGION_STATE_ALTERING,
+    REGION_STATE_EDITING,
 };
 use crate::request::{BackgroundNotify, OptionOutputTx, TruncateResult, WorkerRequest};
 use crate::sst::file_purger::FilePurgerRef;
@@ -54,6 +57,7 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
+        // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_bg(async move {
             let result = edit_region(&region, edit).await;
@@ -79,6 +83,7 @@ impl<S> RegionWorkerLoop<S> {
             let _ = sender.send(Err(e));
             return;
         }
+        // Now the region is in truncating state.
 
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
@@ -87,13 +92,20 @@ impl<S> RegionWorkerLoop<S> {
 
         // Updates manifest in background.
         common_runtime::spawn_bg(async move {
-            let result = write_and_apply_truncate_action(
-                manifest_ctx,
-                version_control,
-                &truncate,
-                memtable_builder,
-            )
-            .await;
+            // Write region truncated to manifest.
+            let action_list =
+                RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
+
+            let result = manifest_ctx
+                .update_manifest(action_list, || {
+                    // Applies the truncate action to the region.
+                    version_control.truncate(
+                        truncate.truncated_entry_id,
+                        truncate.truncated_sequence,
+                        &memtable_builder,
+                    );
+                })
+                .await;
 
             // Sends the result back to the request sender.
             let truncate_result = TruncateResult {
@@ -110,6 +122,49 @@ impl<S> RegionWorkerLoop<S> {
                 })
                 .await
                 .inspect_err(|_| warn!("failed to send truncate result"));
+        });
+    }
+
+    /// Writes region change action to the manifest and then applies it to the region in background.
+    pub(crate) fn handle_manifest_region_change(
+        &self,
+        region: MitoRegionRef,
+        change: RegionChange,
+        sender: OptionOutputTx,
+    ) {
+        // Marks the region as altering.
+        if let Err(e) = region.set_altering() {
+            let _ = sender.send(Err(e));
+            return;
+        }
+
+        // Now the region is in altering state.
+        common_runtime::spawn_bg(async move {
+            let new_meta = change.metadata.clone();
+            let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
+
+            let result = region
+                .manifest_ctx
+                .update_manifest(action_list, || {
+                    // Apply the metadata to region's version.
+                    region
+                        .version_control
+                        .alter_schema(new_meta, &region.memtable_builder);
+                })
+                .await;
+
+            // Sets the region as writable.
+            switch_state_to_writable(&region, REGION_STATE_ALTERING);
+
+            if result.is_ok() {
+                info!(
+                    "Region {} is altered, schema version is {}",
+                    region.region_id,
+                    region.metadata().schema_version
+                );
+            }
+
+            sender.send(result.map(|_| 0));
         });
     }
 }
@@ -159,28 +214,6 @@ async fn write_and_apply_region_edit(
         .update_manifest(action_list, || {
             // Applies the edit to the region.
             version_control.apply_edit(edit, memtables_to_remove, file_purger.clone());
-        })
-        .await
-}
-
-async fn write_and_apply_truncate_action(
-    manifest_ctx: ManifestContextRef,
-    version_control: VersionControlRef,
-    truncate: &RegionTruncate,
-    memtable_builder: MemtableBuilderRef,
-) -> Result<()> {
-    // Write region truncated to manifest.
-    let action_list =
-        RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
-
-    manifest_ctx
-        .update_manifest(action_list, || {
-            // Applies the truncate action to the region.
-            version_control.truncate(
-                truncate.truncated_entry_id,
-                truncate.truncated_sequence,
-                &memtable_builder,
-            );
         })
         .await
 }
