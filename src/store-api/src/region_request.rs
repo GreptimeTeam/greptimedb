@@ -50,24 +50,6 @@ pub enum RegionRequest {
 }
 
 impl RegionRequest {
-    /// Returns the type name of the [RegionRequest].
-    #[inline]
-    pub fn request_type(&self) -> &'static str {
-        match &self {
-            RegionRequest::Put(_) => "put",
-            RegionRequest::Delete(_) => "delete",
-            RegionRequest::Create(_) => "create",
-            RegionRequest::Drop(_) => "drop",
-            RegionRequest::Open(_) => "open",
-            RegionRequest::Close(_) => "close",
-            RegionRequest::Alter(_) => "alter",
-            RegionRequest::Flush(_) => "flush",
-            RegionRequest::Compact(_) => "compact",
-            RegionRequest::Truncate(_) => "truncate",
-            RegionRequest::Catchup(_) => "catchup",
-        }
-    }
-
     /// Convert [Body](region_request::Body) to a group of [RegionRequest] with region id.
     /// Inserts/Deletes request might become multiple requests. Others are one-to-one.
     pub fn try_from_request_body(body: region_request::Body) -> Result<Vec<(RegionId, Self)>> {
@@ -89,7 +71,7 @@ impl RegionRequest {
     }
 
     /// Returns the type name of the request.
-    pub fn type_name(&self) -> &'static str {
+    pub fn request_type(&self) -> &'static str {
         self.into()
     }
 }

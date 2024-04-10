@@ -29,6 +29,12 @@ store_key_prefix = ""
 max_retry_times = 12
 # Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
+# Auto split large value
+# GreptimeDB procedure uses etcd as the default metadata storage backend.
+# The etcd the maximum size of any request is 1.5 MiB
+# 1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)
+# Comments out the `max_metadata_value_size`, for don't split large value (no limit).
+max_metadata_value_size = "1500KiB"
 
 # Failure detectors options.
 [failure_detector]

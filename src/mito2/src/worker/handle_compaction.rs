@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -55,7 +55,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: CompactionFinished,
     ) {
+        self.listener.on_handle_compaction_finished(region_id).await;
+
         let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
+            warn!(
+                "Unable to finish the compaction task for a read only region {}",
+                region_id
+            );
             return;
         };
 

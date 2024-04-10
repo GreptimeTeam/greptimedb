@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use api::v1::{ColumnSchema, Rows};
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
@@ -23,8 +24,10 @@ use store_api::region_request::{
     RegionCompactRequest, RegionDeleteRequest, RegionFlushRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
+use crate::engine::listener::CompactionListener;
 use crate::engine::MitoEngine;
 use crate::test_util::{
     build_rows_for_key, column_metadata_to_column_schema, put_rows, CreateRequestBuilder, TestEnv,
@@ -144,4 +147,74 @@ async fn test_compaction_region() {
 
     let vec = collect_stream_ts(stream).await;
     assert_eq!((0..25).map(|v| v * 1000).collect::<Vec<_>>(), vec);
+}
+
+// For issue https://github.com/GreptimeTeam/greptimedb/issues/3633
+#[tokio::test]
+async fn test_readonly_during_compaction() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new();
+    let listener = Arc::new(CompactionListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                // Ensure there is only one background worker for purge task.
+                max_background_jobs: 1,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.max_active_window_files", "1")
+        .build();
+
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Flush 2 SSTs for compaction.
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+
+    // Waits until the engine receives compaction finished request.
+    listener.wait_handle_finished().await;
+
+    // Sets the region to read only mode.
+    engine.set_writable(region_id, false).unwrap();
+    // Wakes up the listener.
+    listener.wake();
+
+    let notify = Arc::new(Notify::new());
+    // We already sets max background jobs to 1, so we can submit a task to the
+    // purge scheduler to ensure all purge tasks are finished.
+    let job_notify = notify.clone();
+    engine
+        .purge_scheduler()
+        .schedule(Box::pin(async move {
+            job_notify.notify_one();
+        }))
+        .unwrap();
+    notify.notified().await;
+
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(
+        2,
+        scanner.num_files(),
+        "unexpected files: {:?}",
+        scanner.file_ids()
+    );
+    let stream = scanner.scan().await.unwrap();
+
+    let vec = collect_stream_ts(stream).await;
+    assert_eq!((0..20).map(|v| v * 1000).collect::<Vec<_>>(), vec);
 }

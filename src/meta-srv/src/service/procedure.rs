@@ -27,11 +27,11 @@ use tonic::{Request, Response};
 
 use super::GrpcResult;
 use crate::error;
-use crate::metasrv::MetaSrv;
+use crate::metasrv::Metasrv;
 use crate::procedure::region_migration::manager::RegionMigrationProcedureTask;
 
 #[async_trait::async_trait]
-impl procedure_service_server::ProcedureService for MetaSrv {
+impl procedure_service_server::ProcedureService for Metasrv {
     async fn query(
         &self,
         request: Request<QueryProcedureRequest>,

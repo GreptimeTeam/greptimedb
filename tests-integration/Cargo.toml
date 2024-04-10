@@ -16,7 +16,6 @@ arrow-flight.workspace = true
 async-trait = "0.1"
 auth.workspace = true
 axum.workspace = true
-axum-test-helper = "0.3.0"
 catalog.workspace = true
 chrono.workspace = true
 client = { workspace = true, features = ["testing"] }
@@ -36,7 +35,7 @@ common-test-util.workspace = true
 common-wal.workspace = true
 datanode = { workspace = true }
 datatypes.workspace = true
-dotenv = "0.15"
+dotenv.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 meta-client.workspace = true
@@ -46,6 +45,7 @@ mysql_async = { version = "0.33", default-features = false, features = [
 ] }
 object-store.workspace = true
 operator.workspace = true
+prost.workspace = true
 query.workspace = true
 rstest = "0.17"
 rstest_reuse = "0.5"
@@ -68,6 +68,7 @@ tokio.workspace = true
 tonic.workspace = true
 tower = "0.4"
 uuid.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 datafusion.workspace = true

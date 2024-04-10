@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::hash::{Hash, Hasher};
+use std::mem::size_of;
 
 use store_api::logstore::entry::{Entry, Id as EntryId};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
@@ -82,5 +83,26 @@ impl Entry for EntryImpl {
             id: self.namespace_id,
             ..Default::default()
         }
+    }
+
+    fn estimated_size(&self) -> usize {
+        size_of::<Self>() + self.data.capacity() * size_of::<u8>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::size_of;
+
+    use store_api::logstore::entry::Entry;
+
+    use crate::raft_engine::protos::logstore::EntryImpl;
+
+    #[test]
+    fn test_estimated_size() {
+        let entry = EntryImpl::create(1, 1, Vec::with_capacity(100));
+        let expected = size_of::<EntryImpl>() + 100;
+        let got = entry.estimated_size();
+        assert_eq!(expected, got);
     }
 }

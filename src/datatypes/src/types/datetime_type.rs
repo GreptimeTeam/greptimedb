@@ -23,9 +23,16 @@ use crate::prelude::{LogicalTypeId, MutableVector, ScalarVectorBuilder, Value, V
 use crate::types::LogicalPrimitiveType;
 use crate::vectors::{DateTimeVector, DateTimeVectorBuilder, PrimitiveVector};
 
+const MILLISECOND_VARIATION: u64 = 3;
 /// Data type for [`DateTime`].
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DateTimeType;
+
+impl DateTimeType {
+    pub fn precision(&self) -> u64 {
+        MILLISECOND_VARIATION
+    }
+}
 
 impl DataType for DateTimeType {
     fn name(&self) -> String {

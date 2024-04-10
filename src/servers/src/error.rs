@@ -219,11 +219,18 @@ pub enum Error {
         error: prost::DecodeError,
     },
 
-    #[snafu(display("Failed to decompress prometheus remote request"))]
-    DecompressPromRemoteRequest {
+    #[snafu(display("Failed to decompress snappy prometheus remote request"))]
+    DecompressSnappyPromRemoteRequest {
         location: Location,
         #[snafu(source)]
         error: snap::Error,
+    },
+
+    #[snafu(display("Failed to decompress zstd prometheus remote request"))]
+    DecompressZstdPromRemoteRequest {
+        location: Location,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Failed to send prometheus remote request"))]
@@ -504,7 +511,8 @@ impl ErrorExt for Error {
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
             | CompressPromRemoteRequest { .. }
-            | DecompressPromRemoteRequest { .. }
+            | DecompressSnappyPromRemoteRequest { .. }
+            | DecompressZstdPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidExportMetricsConfig { .. }
             | InvalidFlightTicket { .. }
@@ -657,7 +665,8 @@ impl IntoResponse for Error {
             | Error::InvalidOpentsdbJsonRequest { .. }
             | Error::DecodePromRemoteRequest { .. }
             | Error::DecodeOtlpRequest { .. }
-            | Error::DecompressPromRemoteRequest { .. }
+            | Error::DecompressSnappyPromRemoteRequest { .. }
+            | Error::DecompressZstdPromRemoteRequest { .. }
             | Error::InvalidPromRemoteRequest { .. }
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => HttpStatusCode::BAD_REQUEST,

@@ -363,7 +363,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("MetaSrv has no leader at this moment"))]
+    #[snafu(display("Metasrv has no leader at this moment"))]
     NoLeader { location: Location },
 
     #[snafu(display("Table {} not found", name))]
@@ -654,6 +654,18 @@ pub enum Error {
         err_msg: String,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to save cluster info"))]
+    SaveClusterInfo {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Invalid cluster info format"))]
+    InvalidClusterInfoFormat {
+        location: Location,
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -746,6 +758,8 @@ impl ErrorExt for Error {
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::SaveClusterInfo { source, .. }
+            | Error::InvalidClusterInfoFormat { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. }

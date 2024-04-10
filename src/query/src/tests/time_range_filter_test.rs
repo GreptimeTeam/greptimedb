@@ -31,8 +31,7 @@ use store_api::storage::ScanRequest;
 use table::metadata::FilterPushDownType;
 use table::predicate::TimeRangePredicateBuilder;
 use table::test_util::MemTable;
-use table::thin_table::{ThinTable, ThinTableAdapter};
-use table::TableRef;
+use table::{Table, TableRef};
 
 use crate::tests::exec_selection;
 use crate::{QueryEngineFactory, QueryEngineRef};
@@ -42,16 +41,13 @@ struct MemTableWrapper;
 impl MemTableWrapper {
     pub fn table(table: TableRef, filter: Arc<RwLock<Vec<Expr>>>) -> TableRef {
         let table_info = table.table_info();
-        let thin_table_adapter = table.as_any().downcast_ref::<ThinTableAdapter>().unwrap();
-        let data_source = thin_table_adapter.data_source();
-
-        let thin_table = ThinTable::new(table_info, FilterPushDownType::Exact);
+        let data_source = table.data_source();
         let data_source = Arc::new(DataSourceWrapper {
             inner: data_source,
             filter,
         });
-
-        Arc::new(ThinTableAdapter::new(thin_table, data_source))
+        let table = Table::new(table_info, FilterPushDownType::Exact, data_source);
+        Arc::new(table)
     }
 }
 

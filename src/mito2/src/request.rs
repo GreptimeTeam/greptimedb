@@ -717,7 +717,7 @@ impl OnFailure for CompactionFinished {
                 region_id: self.region_id,
             }));
         }
-        for file in &self.compacted_files {
+        for file in &self.compaction_outputs {
             warn!(
                 "Cleaning region {} compaction output file: {}",
                 self.region_id, file.file_id

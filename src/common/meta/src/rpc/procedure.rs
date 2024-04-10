@@ -56,6 +56,12 @@ pub fn procedure_state_to_pb_response(state: &ProcedureState) -> PbProcedureStat
         ProcedureState::Done { .. } => (PbProcedureStatus::Done, String::default()),
         ProcedureState::Retrying { error } => (PbProcedureStatus::Retrying, error.to_string()),
         ProcedureState::Failed { error } => (PbProcedureStatus::Failed, error.to_string()),
+        ProcedureState::PrepareRollback { error } => {
+            (PbProcedureStatus::PrepareRollback, error.to_string())
+        }
+        ProcedureState::RollingBack { error } => {
+            (PbProcedureStatus::RollingBack, error.to_string())
+        }
     };
 
     PbProcedureStateResponse {

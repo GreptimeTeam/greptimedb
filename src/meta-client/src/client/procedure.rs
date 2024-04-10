@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
-    DdlTaskRequest, DdlTaskResponse, ErrorCode, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureId, ProcedureStateResponse, QueryProcedureRequest, ResponseHeader, Role,
+    DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureId,
+    ProcedureStateResponse, QueryProcedureRequest, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
@@ -27,10 +27,10 @@ use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
-use tonic::{Code, Status};
+use tonic::Status;
 
 use crate::client::ask_leader::AskLeader;
-use crate::client::Id;
+use crate::client::{util, Id};
 use crate::error;
 use crate::error::Result;
 
@@ -59,11 +59,6 @@ impl Client {
     {
         let mut inner = self.inner.write().await;
         inner.start(urls).await
-    }
-
-    pub async fn is_started(&self) -> bool {
-        let inner = self.inner.read().await;
-        inner.is_started()
     }
 
     pub async fn submit_ddl_task(&self, req: DdlTaskRequest) -> Result<DdlTaskResponse> {
@@ -173,7 +168,7 @@ impl Inner {
                 let client = self.make_client(leader)?;
                 match body_fn(client).await {
                     Ok(res) => {
-                        if is_not_leader(get_header(&res)) {
+                        if util::is_not_leader(get_header(&res)) {
                             warn!("Failed to {task} to {leader}, not a leader");
                             let leader = ask_leader.ask_leader().await?;
                             info!("DDL client updated to new leader addr: {leader}");
@@ -184,7 +179,7 @@ impl Inner {
                     }
                     Err(status) => {
                         // The leader may be unreachable.
-                        if is_unreachable(&status) {
+                        if util::is_unreachable(&status) {
                             warn!("Failed to {task} to {leader}, source: {status}");
                             let leader = ask_leader.ask_leader().await?;
                             info!("Procedure client updated to new leader addr: {leader}");
@@ -281,18 +276,4 @@ impl Inner {
         )
         .await
     }
-}
-
-fn is_unreachable(status: &Status) -> bool {
-    status.code() == Code::Unavailable || status.code() == Code::DeadlineExceeded
-}
-
-fn is_not_leader(header: &Option<ResponseHeader>) -> bool {
-    if let Some(header) = header {
-        if let Some(err) = header.error.as_ref() {
-            return err.code == ErrorCode::NotLeader as i32;
-        }
-    }
-
-    false
 }

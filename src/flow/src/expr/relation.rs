@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Describes an aggregation function and it's input expression.
+
 pub(crate) use func::AggregateFunc;
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +28,8 @@ pub struct AggregateExpr {
     /// Names the aggregation function.
     pub func: AggregateFunc,
     /// An expression which extracts from each row the input to `func`.
-    /// TODO(discord9): currently unused, it only used in generate KeyValPlan from AggregateExpr
+    /// TODO(discord9): currently unused in render phase(because AccumulablePlan remember each Aggr Expr's input/output column),
+    /// so it only used in generate KeyValPlan from AggregateExpr
     pub expr: ScalarExpr,
     /// Should the aggregation be applied only to distinct results in each group.
     #[serde(default)]

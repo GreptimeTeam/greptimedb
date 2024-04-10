@@ -36,7 +36,7 @@ Hence, we choose the third option, and use a simple logical plan that's anagonis
 ## Deploy mode and protocol
 - Greptime Flow is an independent streaming compute component. It can be used either within a standalone node or as a dedicated node at the same level as frontend in distributed mode.
 - It accepts insert request Rows, which is used between frontend and datanode.
-- New flow job is submitted in the format of modified SQL query like snowflake do, like: `CREATE TASK avg_over_5m WINDOW_SIZE = "5m" AS SELECT avg(value) FROM table WHERE time > now() - 5m GROUP BY time(1m)`. Flow job then got stored in MetaSrv.
+- New flow job is submitted in the format of modified SQL query like snowflake do, like: `CREATE TASK avg_over_5m WINDOW_SIZE = "5m" AS SELECT avg(value) FROM table WHERE time > now() - 5m GROUP BY time(1m)`. Flow job then got stored in Metasrv.
 - It also persists results in the format of Rows to frontend.
 - The query plan uses Substrait as codec format. It's the same with GreptimeDB's query engine.
 - Greptime Flow needs a WAL for recovering. It's possible to reuse datanode's.

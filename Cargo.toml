@@ -62,7 +62,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -99,11 +99,13 @@ datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.g
 datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 derive_builder = "0.12"
+dotenv = "0.15"
 etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "06f6297ff3cab578a1589741b504342fbad70453" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "b97efbf92a0bf9abcfa1d8fe0ffe8741a2e7309e" }
+humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -131,6 +133,7 @@ reqwest = { version = "0.11", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
     "stream",
+    "multipart",
 ] }
 rskafka = "0.5"
 rust_decimal = "1.33"
@@ -153,6 +156,7 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.10", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
+zstd = "0.13"
 
 ## workspaces members
 api = { path = "src/api" }

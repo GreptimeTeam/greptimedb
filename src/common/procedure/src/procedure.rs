@@ -23,7 +23,7 @@ use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
 
-use crate::error::{Error, Result};
+use crate::error::{self, Error, Result};
 use crate::watcher::Watcher;
 
 pub type Output = Arc<dyn Any + Send + Sync>;
@@ -124,6 +124,18 @@ pub trait Procedure: Send {
     ///
     /// The implementation must be idempotent.
     async fn execute(&mut self, ctx: &Context) -> Result<Status>;
+
+    /// Rollback the failed procedure.
+    ///
+    /// The implementation must be idempotent.
+    async fn rollback(&mut self, _: &Context) -> Result<()> {
+        error::RollbackNotSupportedSnafu {}.fail()
+    }
+
+    /// Indicates whether it supports rolling back the procedure.
+    fn rollback_supported(&self) -> bool {
+        false
+    }
 
     /// Dump the state of the procedure to a string.
     fn dump(&self) -> Result<String>;
@@ -289,6 +301,10 @@ pub enum ProcedureState {
     Done { output: Option<Output> },
     /// The procedure is failed and can be retried.
     Retrying { error: Arc<Error> },
+    /// The procedure is failed and commits state before rolling back the procedure.
+    PrepareRollback { error: Arc<Error> },
+    /// The procedure is failed and can be rollback.
+    RollingBack { error: Arc<Error> },
     /// The procedure is failed and cannot proceed anymore.
     Failed { error: Arc<Error> },
 }
@@ -297,6 +313,16 @@ impl ProcedureState {
     /// Returns a [ProcedureState] with failed state.
     pub fn failed(error: Arc<Error>) -> ProcedureState {
         ProcedureState::Failed { error }
+    }
+
+    /// Returns a [ProcedureState] with prepare rollback state.
+    pub fn prepare_rollback(error: Arc<Error>) -> ProcedureState {
+        ProcedureState::PrepareRollback { error }
+    }
+
+    /// Returns a [ProcedureState] with rolling back state.
+    pub fn rolling_back(error: Arc<Error>) -> ProcedureState {
+        ProcedureState::RollingBack { error }
     }
 
     /// Returns a [ProcedureState] with retrying state.
@@ -324,14 +350,32 @@ impl ProcedureState {
         matches!(self, ProcedureState::Retrying { .. })
     }
 
+    /// Returns true if the procedure state is rolling back.
+    pub fn is_rolling_back(&self) -> bool {
+        matches!(self, ProcedureState::RollingBack { .. })
+    }
+
+    /// Returns true if the procedure state is prepare rollback.
+    pub fn is_prepare_rollback(&self) -> bool {
+        matches!(self, ProcedureState::PrepareRollback { .. })
+    }
+
     /// Returns the error.
     pub fn error(&self) -> Option<&Arc<Error>> {
         match self {
             ProcedureState::Failed { error } => Some(error),
             ProcedureState::Retrying { error } => Some(error),
+            ProcedureState::RollingBack { error } => Some(error),
             _ => None,
         }
     }
+}
+
+/// The initial procedure state.
+#[derive(Debug, Clone)]
+pub enum InitProcedureState {
+    Running,
+    RollingBack,
 }
 
 // TODO(yingwen): Shutdown

@@ -26,6 +26,8 @@ runs:
   using: composite
   steps:
     - uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install rust toolchain
       uses: dtolnay/rust-toolchain@master

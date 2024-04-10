@@ -33,6 +33,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         "memtable.partition_tree.index_max_keys_per_shard",
         "memtable.partition_tree.data_freeze_threshold",
         "memtable.partition_tree.fork_dictionary_bytes",
+        "append_mode",
     ]
     .contains(&key)
 }
@@ -70,6 +71,7 @@ mod tests {
         assert!(is_mito_engine_option_key(
             "memtable.partition_tree.fork_dictionary_bytes"
         ));
+        assert!(is_mito_engine_option_key("append_mode"));
         assert!(!is_mito_engine_option_key("foo"));
     }
 }
