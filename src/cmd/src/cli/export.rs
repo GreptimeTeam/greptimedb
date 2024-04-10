@@ -227,7 +227,7 @@ impl Export {
 
     async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
         let sql = format!(
-            "show create table \"{}\".\"{}\".\"{}\"",
+            r#"show create table "{}"."{}"."{}""#,
             catalog, schema, table
         );
         let mut client = self.client.clone();
@@ -276,7 +276,7 @@ impl Export {
                 for (c, s, t) in table_list {
                     match self.show_create_table(&c, &s, &t).await {
                         Err(e) => {
-                            error!(e; "Failed to export table \"{}\".\"{}\".\"{}\"", c, s, t)
+                            error!(e; r#"Failed to export table "{}"."{}"."{}""#, c, s, t)
                         }
                         Ok(create_table) => {
                             file.write_all(create_table.as_bytes())
@@ -421,8 +421,9 @@ fn split_database(database: &str) -> Result<(String, Option<String>)> {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::time::Duration;
@@ -431,15 +432,35 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_export_create_table_with_quoted_names() {
-        let mut path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-        path.push("../../target/debug");
+        let mut bin_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        bin_path.pop();
+        bin_path.pop();
 
-        let mut standalone = Command::new("./greptime")
-            .current_dir(&path)
+        if !bin_path.join("target").exists() {
+            println!("need to build greptime binary");
+            let output = Command::new("cargo")
+                .current_dir(&bin_path)
+                .args(["build", "--bin", "greptime"])
+                .output()
+                .expect("failed to build greptime binary");
+            if !output.status.success() {
+                println!("Failed to build GreptimeDB, {}", output.status);
+                println!("Cargo build stdout:");
+                io::stdout().write_all(&output.stdout).unwrap();
+                println!("Cargo build stderr:");
+                io::stderr().write_all(&output.stderr).unwrap();
+                panic!();
+            }
+        }
+        bin_path.push("target");
+        bin_path.push("debug");
+        bin_path.push("greptime");
+
+        let mut standalone = Command::new(&bin_path)
             .args(["standalone", "start"])
             .stdout(Stdio::null())
             .spawn()
-            .unwrap();
+            .expect("failed to start greptime standalone");
         // wait for fully start
         std::thread::sleep(Duration::from_secs(3));
 
@@ -461,8 +482,7 @@ mod tests {
         assert!(res.is_ok());
 
         let output_dir = tempfile::tempdir().unwrap();
-        let mut export = Command::new("./greptime")
-            .current_dir(path)
+        let mut cli_export = Command::new(bin_path)
             .args([
                 "cli",
                 "export",
@@ -475,9 +495,9 @@ mod tests {
             ])
             .stdout(Stdio::null())
             .spawn()
-            .unwrap();
+            .expect("failed to run cli export");
         std::thread::sleep(Duration::from_secs(1));
-        let _ = export.kill();
+        let _ = cli_export.kill();
 
         let sql = r#"
             DROP DATABASE "cli.export.create_table";
@@ -490,6 +510,19 @@ mod tests {
         let output_file = output_dir
             .path()
             .join("greptime-cli.export.create_table.sql");
-        assert!(output_file.exists());
+        let res = std::fs::read(output_file);
+        assert!(res.is_ok());
+
+        let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  TIME INDEX ("ts")
+)
+
+ENGINE=mito
+WITH(
+  regions = 1
+);"#;
+        let exported_data = String::from_utf8(res.unwrap()).unwrap();
+        assert_eq!(exported_data.trim(), expect);
     }
 }
