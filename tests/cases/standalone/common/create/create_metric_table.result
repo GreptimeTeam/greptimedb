@@ -71,7 +71,26 @@ DESC TABLE t2;
 | val    | Float64              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
--- TODO(ruihang): add a case that drops phy before t1
+-- should be failed
+-- SQLNESS REPLACE (region\s\d+\(\d+\,\s\d+\)) region
+DROP TABLE phy;
+
+Error: 1004(InvalidArguments), Physical region is busy, there are still some logical regions using it
+
+-- metadata should be restored
+DESC TABLE phy;
+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| ts         | TimestampMillisecond |     | NO   |         | FIELD         |
+| val        | Float64              |     | YES  |         | FIELD         |
+| __table_id | UInt32               | PRI | NO   |         | TAG           |
+| __tsid     | UInt64               | PRI | NO   |         | TAG           |
+| host       | String               | PRI | YES  |         | TAG           |
+| job        | String               | PRI | YES  |         | TAG           |
++------------+----------------------+-----+------+---------+---------------+
+
 DROP TABLE t1;
 
 Affected Rows: 0
