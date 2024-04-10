@@ -28,15 +28,16 @@ use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 
 use super::state::Scheduler;
-use crate::adapter::error::{Error, EvalSnafu, InvalidQuerySnafu};
+use crate::adapter::error::{Error, EvalSnafu, InvalidQuerySnafu, PlanSnafu};
 use crate::compute::state::DataflowState;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
+use crate::expr::error::InternalSnafu;
 use crate::expr::{
     self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, SafeMfpPlan, ScalarExpr,
 };
-use crate::plan::Plan;
+use crate::plan::{KeyValPlan, Plan, ReducePlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
-use crate::utils::{ArrangeHandler, Arrangement};
+use crate::utils::{ArrangeHandler, ArrangeReader, Arrangement};
 
 /// The Context for build a Operator with id of `GlobalId`
 pub struct Context<'referred, 'df> {
@@ -177,12 +178,15 @@ impl<'referred, 'df> Context<'referred, 'df> {
         // need arrange or not, or does this added complexity worth it
         let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff>("mfp");
         let input_arity = mfp.input_arity;
+        let output_arity = mfp.output_arity();
 
         // default to have a arrange with only future updates, so it can be empty if no temporal filter is applied
         // as stream only sends current updates and etc.
         let arrange = Arrangement::new();
-        let arrange_handler = ArrangeHandler::from(arrange.clone());
-        let arrange_handler_inner = ArrangeHandler::from(arrange);
+        let arrange_handler = ArrangeHandler::from(arrange);
+        let arrange_handler_inner = arrange_handler
+            .clone_future_only()
+            .expect("No write is expected at this point");
 
         // This closure capture following variables:
         let mfp_plan = MfpPlan::create_from(mfp)?;
@@ -218,7 +222,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
         scheduler.set_cur_subgraph(subgraph);
 
         let arranged = BTreeMap::from([(
-            (0..input_arity).map(ScalarExpr::Column).collect_vec(),
+            (0..output_arity).map(ScalarExpr::Column).collect_vec(),
             Arranged::new(arrange_handler),
         )]);
 
@@ -228,6 +232,163 @@ impl<'referred, 'df> Context<'referred, 'df> {
         };
         Ok(bundle)
     }
+
+    /// render `Plan::Reduce` into executable dataflow
+    pub fn render_reduce(
+        &mut self,
+        input: Box<Plan>,
+        key_val_plan: KeyValPlan,
+        reduce_plan: ReducePlan,
+    ) -> Result<CollectionBundle, Error> {
+        let input = self.render_plan(*input)?;
+        // first assembly key&val that's ((Row, Row), tick, diff)
+        // Then stream kvs through a reduce operator
+
+        // the output is concat from key and val
+        let output_arity =
+            key_val_plan.key_plan.output_arity() + key_val_plan.val_plan.output_arity();
+
+        // TODO: config global expire time from self
+        let arrange = Arrangement::new();
+        let arrange_handler = ArrangeHandler::from(arrange);
+        // reduce need full arrangement to be able to query all keys
+        let arrange_handler_inner = arrange_handler
+            .clone_full_arrange()
+            .expect("No write is expected at this point");
+
+        let now = self.compute_state.current_time_ref();
+
+        let err_collector = self.err_collector.clone();
+
+        let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff>("reduce");
+
+        let subgraph = self.df.add_subgraph_in_out(
+            "reduce",
+            input.collection.into_inner(),
+            out_send_port,
+            move |_ctx, recv, send| {
+                // mfp only need to passively receive updates from recvs
+                let data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
+
+                reduce_subgraph(
+                    &arrange_handler_inner,
+                    data,
+                    &key_val_plan,
+                    &reduce_plan,
+                    *now.borrow(),
+                    &err_collector,
+                    send,
+                );
+            },
+        );
+
+        let arranged = BTreeMap::from([(
+            (0..output_arity).map(ScalarExpr::Column).collect_vec(),
+            Arranged::new(arrange_handler),
+        )]);
+
+        let bundle = CollectionBundle {
+            collection: Collection::from_port(out_recv_port),
+            arranged,
+        };
+        Ok(bundle)
+    }
+}
+
+/// reduce subgraph, reduce the input data into a single row
+/// output is concat from key and val
+fn reduce_subgraph(
+    arrange: &ArrangeHandler,
+    data: impl IntoIterator<Item = DiffRow>,
+    key_val_plan: &KeyValPlan,
+    reduce_plan: &ReducePlan,
+    now: repr::Timestamp,
+    err_collector: &ErrCollector,
+    send: &PortCtx<SEND, Toff>,
+) {
+    let run_reduce = || {
+        let mut row_buf = Row::empty();
+        let key_val = data.into_iter().filter_map(|(row, sys_time, diff)| {
+            // error is collected and then ignored
+            err_collector
+                .run(|| {
+                    if let Some(key) = key_val_plan
+                        .key_plan
+                        .evaluate_into(&mut row.inner.clone(), &mut row_buf)?
+                    {
+                        // val_plan is not supported to carry any filter predicate,
+                        let val = key_val_plan
+                            .val_plan
+                            .evaluate_into(&mut row.inner.clone(), &mut row_buf)?
+                            .with_context(|| InternalSnafu {
+                                reason: "val_plan should not contain any filter predicate",
+                            })?;
+                        Ok(Some(((key, val), sys_time, diff)))
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .flatten()
+        });
+        let resul_updates = match reduce_plan {
+            ReducePlan::Distinct => {
+                eval_reduce_distinct(&arrange.read(), key_val, now, err_collector)
+            }
+            ReducePlan::Accumulable(_) => todo!(),
+        };
+        arrange.write().apply_updates(now, resul_updates)?;
+        Ok(())
+    };
+    err_collector.run(run_reduce);
+
+    // Deal with output:
+
+    // 1. Read all updates that were emitted between the last time this arrangement had updates and the current time.
+    let from = arrange.read().last_compaction_time().map(|n| n + 1);
+    let from = from.unwrap_or(repr::Timestamp::MIN);
+    let output_kv = arrange.read().get_updates_in_range(from..=now);
+
+    // 2. Output the updates.
+    // output is concat from key and val
+    let output = output_kv
+        .into_iter()
+        .map(|((mut key, v), ts, diff)| {
+            key.extend(v.into_iter());
+            (key, ts, diff)
+        })
+        .collect_vec();
+    send.give(output);
+
+    // 3. Truncate all updates stored in arrangement within that range.
+    let run_compaction = || {
+        arrange.write().compaction_to(now)?;
+        Ok(())
+    };
+    err_collector.run(run_compaction);
+
+    // no need to schedule since reduce is not suppose to recv or send any future updates
+    // TODO: rethink if this is the correct behavior
+}
+
+/// eval distinct reduce plan, and output all updates(which should be insert of new distinct row or deletion of old distinct row)
+fn eval_reduce_distinct(
+    arrange: &ArrangeReader,
+    kv: impl IntoIterator<Item = KeyValDiffRow>,
+    now: repr::Timestamp,
+    err_collector: &ErrCollector,
+) -> Vec<KeyValDiffRow> {
+    kv.into_iter()
+        .filter_map(|((key, val), ts, diff)| {
+            let old_val = arrange.get(now, &key);
+            match (old_val, diff) {
+                // a new distinct row
+                (None, 1) => Some(((key, val), ts, diff)),
+                // delete old_val
+                (Some(old_val), -1) if old_val.0 == val => Some(((key, val), ts, -1)),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn mfp_subgraph(

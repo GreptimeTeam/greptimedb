@@ -151,12 +151,16 @@ impl ErrCollector {
         self.inner.borrow_mut().push_back(err)
     }
 
-    pub fn run<F>(&self, f: F)
+    pub fn run<F, R>(&self, f: F) -> Option<R>
     where
-        F: FnOnce() -> Result<(), EvalError>,
+        F: FnOnce() -> Result<R, EvalError>,
     {
-        if let Err(e) = f() {
-            self.push_err(e)
+        match f() {
+            Ok(r) => Some(r),
+            Err(e) => {
+                self.push_err(e);
+                None
+            }
         }
     }
 }

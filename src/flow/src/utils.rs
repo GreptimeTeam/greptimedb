@@ -453,6 +453,9 @@ fn compact_diff_row(old_row: Option<DiffRow>, new_row: &DiffRow) -> Option<DiffR
     }
 }
 
+pub type ArrangeReader<'a> = tokio::sync::RwLockReadGuard<'a, Arrangement>;
+pub type ArrangeWriter<'a> = tokio::sync::RwLockWriteGuard<'a, Arrangement>;
+
 /// A handler to the inner Arrangement, can be cloned and shared, useful for query it's inner state
 #[derive(Debug)]
 pub struct ArrangeHandler {
@@ -497,9 +500,8 @@ impl ArrangeHandler {
         if self.read().is_written {
             return None;
         }
-        let mut arr = self.write();
-        arr.full_arrangement = true;
-        drop(arr);
+
+        self.write().full_arrangement = true;
         Some(Self {
             inner: self.inner.clone(),
         })
