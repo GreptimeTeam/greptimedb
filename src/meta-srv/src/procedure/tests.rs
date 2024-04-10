@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use api::v1::meta::Partition;
-use api::v1::region::region_request::{self, Body as PbRegionRequest};
+use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{CreateRequest as PbCreateRegionRequest, RegionColumnDef};
 use api::v1::{ColumnDataType, ColumnDef as PbColumnDef, SemanticType};
 use client::client_manager::DatanodeClients;
@@ -24,18 +24,13 @@ use common_catalog::consts::MITO2_ENGINE;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, CreateTablesState};
 use common_meta::ddl::create_table::*;
-use common_meta::ddl::drop_table::executor::DropTableExecutor;
-use common_meta::ddl::drop_table::DropTableProcedure;
 use common_meta::ddl::test_util::columns::TestColumnDefBuilder;
 use common_meta::ddl::test_util::create_table::{
     build_raw_table_info_from_expr, TestCreateTableExprBuilder,
 };
-use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
-use common_meta::key::DeserializedValueWithBytes;
-use common_meta::rpc::ddl::{CreateTableTask, DropTableTask};
+use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::{find_leaders, RegionRoute};
-use common_meta::table_name::TableName;
 use common_procedure::Status;
 use store_api::storage::RegionId;
 
@@ -309,63 +304,4 @@ async fn test_on_datanode_create_logical_regions() {
 
     let status = procedure.on_create_metadata().await.unwrap();
     assert!(status.is_done());
-}
-
-#[tokio::test]
-async fn test_on_datanode_drop_regions() {
-    let drop_table_task = DropTableTask {
-        catalog: "my_catalog".to_string(),
-        schema: "my_schema".to_string(),
-        table: "my_table".to_string(),
-        table_id: 42,
-        drop_if_exists: false,
-    };
-    let drop_table_executor = DropTableExecutor::new(
-        TableName::new("my_catalog", "my_schema", "my_table"),
-        42,
-        false,
-    );
-    let (region_server, mut rx) = EchoRegionServer::new();
-    let region_routes = test_data::new_region_routes();
-    let datanode_manager = new_datanode_manager(&region_server, &region_routes).await;
-
-    let procedure = DropTableProcedure::new(
-        1,
-        drop_table_task,
-        DeserializedValueWithBytes::from_inner(TableRouteValue::physical(region_routes)),
-        DeserializedValueWithBytes::from_inner(TableInfoValue::new(test_data::new_table_info())),
-        test_data::new_ddl_context(datanode_manager),
-    );
-
-    let expected_dropped_regions = Arc::new(Mutex::new(HashSet::from([
-        RegionId::new(42, 1),
-        RegionId::new(42, 2),
-        RegionId::new(42, 3),
-    ])));
-    let handle = tokio::spawn({
-        let expected_dropped_regions = expected_dropped_regions.clone();
-        let mut max_recv = expected_dropped_regions.lock().unwrap().len();
-        async move {
-            while let Some(region_request::Body::Drop(request)) = rx.recv().await {
-                let region_id = RegionId::from_u64(request.region_id);
-
-                expected_dropped_regions.lock().unwrap().remove(&region_id);
-
-                max_recv -= 1;
-                if max_recv == 0 {
-                    break;
-                }
-            }
-        }
-    });
-
-    let status = procedure
-        .on_datanode_drop_regions(&drop_table_executor)
-        .await
-        .unwrap();
-    assert!(status.is_done());
-
-    handle.await.unwrap();
-
-    assert!(expected_dropped_regions.lock().unwrap().is_empty());
 }

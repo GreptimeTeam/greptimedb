@@ -15,6 +15,7 @@
 pub mod alter_table;
 pub mod columns;
 pub mod create_table;
+pub mod datanode_handler;
 
 use std::collections::HashMap;
 

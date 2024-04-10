@@ -17,3 +17,4 @@ mod alter_table;
 mod create_logical_tables;
 mod create_table;
 mod drop_database;
+mod drop_table;
