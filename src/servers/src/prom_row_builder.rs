@@ -210,7 +210,9 @@ mod tests {
     use api::prom_store::remote::Sample;
     use api::v1::value::ValueData;
     use api::v1::Value;
+    use arrow::datatypes::ToByteSlice;
     use bytes::Bytes;
+    use prost::DecodeError;
 
     use crate::prom_row_builder::TableBuilder;
     use crate::proto::PromLabel;
@@ -295,5 +297,21 @@ mod tests {
             ],
             rows[1].values
         );
+
+        let invalid_utf8_bytes = &[0xFF, 0xFF, 0xFF];
+
+        //let bytes = invalid_utf8_string.as_bytes();
+        let res = builder.add_labels_and_samples(
+            &[PromLabel {
+                name: Bytes::from("tag0"),
+                value: invalid_utf8_bytes.to_byte_slice().into(),
+            }],
+            &[Sample {
+                value: 0.1,
+                timestamp: 1,
+            }],
+            with_strict_mode,
+        );
+        assert_eq!(res, Err(DecodeError::new("invalid utf-8")));
     }
 }
