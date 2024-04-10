@@ -23,7 +23,8 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::ddl::drop_table::DropTableProcedure;
-use crate::ddl::tests::alter_table::{test_create_table_task, DatanodeWatcher};
+use crate::ddl::test_util::create_table::test_create_table_task;
+use crate::ddl::test_util::datanode_handler::DatanodeWatcher;
 use crate::key::table_route::TableRouteValue;
 use crate::peer::Peer;
 use crate::rpc::ddl::DropTableTask;

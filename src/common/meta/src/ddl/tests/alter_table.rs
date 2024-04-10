@@ -17,8 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::alter_expr::Kind;
-use api::v1::meta::Partition;
-use api::v1::region::{region_request, QueryRequest, RegionRequest};
+use api::v1::region::{region_request, RegionRequest};
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
     DropColumns, SemanticType,
@@ -26,70 +25,19 @@ use api::v1::{
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::debug;
 use store_api::storage::RegionId;
-use table::metadata::TableId;
 use tokio::sync::mpsc::{self};
 
-use crate::datanode_manager::HandleResponse;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
-use crate::ddl::test_util::columns::TestColumnDefBuilder;
-use crate::ddl::test_util::create_table::{
-    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
-};
-use crate::error::Result;
+use crate::ddl::test_util::create_table::test_create_table_task;
+use crate::ddl::test_util::datanode_handler::DatanodeWatcher;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::peer::Peer;
-use crate::rpc::ddl::{AlterTableTask, CreateTableTask};
+use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{Region, RegionRoute};
-use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
-
-pub(crate) fn test_create_table_task(name: &str, table_id: TableId) -> CreateTableTask {
-    let create_table = TestCreateTableExprBuilder::default()
-        .column_defs([
-            TestColumnDefBuilder::default()
-                .name("ts")
-                .data_type(ColumnDataType::TimestampMillisecond)
-                .semantic_type(SemanticType::Timestamp)
-                .build()
-                .unwrap()
-                .into(),
-            TestColumnDefBuilder::default()
-                .name("host")
-                .data_type(ColumnDataType::String)
-                .semantic_type(SemanticType::Tag)
-                .build()
-                .unwrap()
-                .into(),
-            TestColumnDefBuilder::default()
-                .name("cpu")
-                .data_type(ColumnDataType::Float64)
-                .semantic_type(SemanticType::Field)
-                .build()
-                .unwrap()
-                .into(),
-        ])
-        .table_id(table_id)
-        .time_index("ts")
-        .primary_keys(["host".into()])
-        .table_name(name)
-        .build()
-        .unwrap()
-        .into();
-    let table_info = build_raw_table_info_from_expr(&create_table);
-    CreateTableTask {
-        create_table,
-        // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
-        table_info,
-    }
-}
+use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
 fn test_rename_alter_table_task(table_name: &str, new_table_name: &str) -> AlterTableTask {
     let builder = TestAlterTableExprBuilder::default()
@@ -135,26 +83,6 @@ async fn test_on_prepare_table_not_exists_err() {
     let mut procedure = AlterTableProcedure::new(cluster_id, 1024, task, ddl_context).unwrap();
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err.status_code(), StatusCode::TableNotFound);
-}
-
-#[derive(Clone)]
-pub struct DatanodeWatcher(pub mpsc::Sender<(Peer, RegionRequest)>);
-
-#[async_trait::async_trait]
-impl MockDatanodeHandler for DatanodeWatcher {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<HandleResponse> {
-        debug!("Returning Ok(0) for request: {request:?}, peer: {peer:?}");
-        self.0.send((peer.clone(), request)).await.unwrap();
-        Ok(HandleResponse::new(0))
-    }
-
-    async fn handle_query(
-        &self,
-        _peer: &Peer,
-        _request: QueryRequest,
-    ) -> Result<SendableRecordBatchStream> {
-        unreachable!()
-    }
 }
 
 #[tokio::test]
