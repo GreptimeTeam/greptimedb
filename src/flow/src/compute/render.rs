@@ -177,16 +177,19 @@ impl<'referred, 'df> Context<'referred, 'df> {
         // TODO(discord9): consider if check if contain temporal to determine if
         // need arrange or not, or does this added complexity worth it
         let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff>("mfp");
-        let input_arity = mfp.input_arity;
+
         let output_arity = mfp.output_arity();
 
         // default to have a arrange with only future updates, so it can be empty if no temporal filter is applied
         // as stream only sends current updates and etc.
         let arrange = Arrangement::new();
         let arrange_handler = ArrangeHandler::from(arrange);
-        let arrange_handler_inner = arrange_handler
-            .clone_future_only()
-            .expect("No write is expected at this point");
+        let arrange_handler_inner =
+            arrange_handler
+                .clone_future_only()
+                .with_context(|| PlanSnafu {
+                    reason: "No write is expected at this point",
+                })?;
 
         // This closure capture following variables:
         let mfp_plan = MfpPlan::create_from(mfp)?;
@@ -245,16 +248,18 @@ impl<'referred, 'df> Context<'referred, 'df> {
         // Then stream kvs through a reduce operator
 
         // the output is concat from key and val
-        let output_arity =
-            key_val_plan.key_plan.output_arity() + key_val_plan.val_plan.output_arity();
+        let output_key_arity = key_val_plan.key_plan.output_arity();
 
         // TODO: config global expire time from self
         let arrange = Arrangement::new();
         let arrange_handler = ArrangeHandler::from(arrange);
         // reduce need full arrangement to be able to query all keys
-        let arrange_handler_inner = arrange_handler
-            .clone_full_arrange()
-            .expect("No write is expected at this point");
+        let arrange_handler_inner =
+            arrange_handler
+                .clone_full_arrange()
+                .with_context(|| PlanSnafu {
+                    reason: "No write is expected at this point",
+                })?;
 
         let now = self.compute_state.current_time_ref();
 
@@ -262,7 +267,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
         let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff>("reduce");
 
-        let subgraph = self.df.add_subgraph_in_out(
+        let _subgraph = self.df.add_subgraph_in_out(
             "reduce",
             input.collection.into_inner(),
             out_send_port,
@@ -282,8 +287,9 @@ impl<'referred, 'df> Context<'referred, 'df> {
             },
         );
 
+        // by default the key of output arrange
         let arranged = BTreeMap::from([(
-            (0..output_arity).map(ScalarExpr::Column).collect_vec(),
+            (0..output_key_arity).map(ScalarExpr::Column).collect_vec(),
             Arranged::new(arrange_handler),
         )]);
 
@@ -377,6 +383,7 @@ fn eval_reduce_distinct(
     now: repr::Timestamp,
     err_collector: &ErrCollector,
 ) -> Vec<KeyValDiffRow> {
+    let _ = err_collector;
     kv.into_iter()
         .filter_map(|((key, val), ts, diff)| {
             let old_val = arrange.get(now, &key);
