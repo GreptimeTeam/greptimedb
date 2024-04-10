@@ -358,18 +358,35 @@ impl Metasrv {
                 state_handler.on_become_follower().await;
             });
 
-            let election = election.clone();
-            let started = self.started.clone();
-            let _handle = common_runtime::spawn_bg(async move {
-                while started.load(Ordering::Relaxed) {
-                    let res = election.campaign().await;
-                    if let Err(e) = res {
-                        warn!("Metasrv election error: {}", e);
+            // Register candidate and keep lease in background.
+            {
+                let election = election.clone();
+                let started = self.started.clone();
+                let _handle = common_runtime::spawn_bg(async move {
+                    while started.load(Ordering::Relaxed) {
+                        let res = election.register_candidate().await;
+                        if let Err(e) = res {
+                            warn!("Metasrv register candidate error: {}", e);
+                        }
                     }
-                    info!("Metasrv re-initiate election");
-                }
-                info!("Metasrv stopped");
-            });
+                });
+            }
+
+            // Campaign
+            {
+                let election = election.clone();
+                let started = self.started.clone();
+                let _handle = common_runtime::spawn_bg(async move {
+                    while started.load(Ordering::Relaxed) {
+                        let res = election.campaign().await;
+                        if let Err(e) = res {
+                            warn!("Metasrv election error: {}", e);
+                        }
+                        info!("Metasrv re-initiate election");
+                    }
+                    info!("Metasrv stopped");
+                });
+            }
         } else {
             if let Err(e) = self.wal_options_allocator.start().await {
                 error!(e; "Failed to start wal options allocator");

@@ -27,12 +27,24 @@ use crate::error::{
 use crate::peer::Peer;
 
 const CLUSTER_NODE_INFO_PREFIX: &str = "__meta_cluster_node_info";
+const CLUSTER_METASRV_INFO_PREFIX: &str = "__meta_cluster_metasrv_info";
 
 lazy_static! {
     static ref CLUSTER_NODE_INFO_PREFIX_PATTERN: Regex = Regex::new(&format!(
         "^{CLUSTER_NODE_INFO_PREFIX}-([0-9]+)-([0-9]+)-([0-9]+)$"
     ))
     .unwrap();
+}
+
+pub fn metasrv_node_key(target: &str) -> Vec<u8> {
+    format!("{}-{}", CLUSTER_METASRV_INFO_PREFIX, target).into_bytes()
+}
+
+pub fn metasrv_node_info(target: &str, is_leader: bool) -> (Vec<u8>, NodeStatus) {
+    (
+        metasrv_node_key(target),
+        NodeStatus::Metasrv(MetasrvStatus { is_leader }),
+    )
 }
 
 /// [ClusterInfo] provides information about the cluster.
