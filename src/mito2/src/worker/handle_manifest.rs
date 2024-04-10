@@ -25,7 +25,7 @@ use crate::error::{InvalidRequestSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
-use crate::memtable::{MemtableBuilderRef, MemtableId};
+use crate::memtable::MemtableId;
 use crate::region::version::VersionControlRef;
 use crate::region::{
     switch_state_to_writable, ManifestContextRef, MitoRegionRef, REGION_STATE_ALTERING,

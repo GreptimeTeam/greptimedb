@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
@@ -26,9 +26,7 @@ use crate::error::{
     InvalidMetadataSnafu, InvalidRegionRequestSchemaVersionSnafu, InvalidRegionRequestSnafu, Result,
 };
 use crate::flush::FlushReason;
-use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
-use crate::region::version::Version;
-use crate::region::MitoRegionRef;
+use crate::manifest::action::RegionChange;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
