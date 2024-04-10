@@ -42,7 +42,6 @@ use crate::error::{
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::table_route::TableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::DdlTask::{
@@ -284,18 +283,10 @@ impl DdlManager {
         &self,
         cluster_id: ClusterId,
         drop_table_task: DropTableTask,
-        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        table_route_value: DeserializedValueWithBytes<TableRouteValue>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = DropTableProcedure::new(
-            cluster_id,
-            drop_table_task,
-            table_route_value,
-            table_info_value,
-            context,
-        );
+        let procedure = DropTableProcedure::new(cluster_id, drop_table_task, context);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -475,30 +466,8 @@ async fn handle_drop_table_task(
     drop_table_task: DropTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = drop_table_task.table_id;
-    let table_metadata_manager = &ddl_manager.table_metadata_manager();
-    let table_ref = drop_table_task.table_ref();
-
-    let table_info_value = table_metadata_manager
-        .table_info_manager()
-        .get(table_id)
-        .await?;
-    let (_, table_route_value) = table_metadata_manager
-        .table_route_manager()
-        .table_route_storage()
-        .get_raw_physical_table_route(table_id)
-        .await?;
-
-    let table_info_value = table_info_value.with_context(|| TableInfoNotFoundSnafu {
-        table: table_ref.to_string(),
-    })?;
-
     let (id, _) = ddl_manager
-        .submit_drop_table_task(
-            cluster_id,
-            drop_table_task,
-            table_info_value,
-            table_route_value,
-        )
+        .submit_drop_table_task(cluster_id, drop_table_task)
         .await?;
 
     info!("Table: {table_id} is dropped via procedure_id {id:?}");

@@ -47,7 +47,7 @@ use crate::rpc::ddl::{AlterTableTask, CreateTableTask};
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
 
-fn test_create_table_task(name: &str, table_id: TableId) -> CreateTableTask {
+pub(crate) fn test_create_table_task(name: &str, table_id: TableId) -> CreateTableTask {
     let create_table = TestCreateTableExprBuilder::default()
         .column_defs([
             TestColumnDefBuilder::default()
@@ -138,7 +138,7 @@ async fn test_on_prepare_table_not_exists_err() {
 }
 
 #[derive(Clone)]
-pub struct DatanodeWatcher(mpsc::Sender<(Peer, RegionRequest)>);
+pub struct DatanodeWatcher(pub mpsc::Sender<(Peer, RegionRequest)>);
 
 #[async_trait::async_trait]
 impl MockDatanodeHandler for DatanodeWatcher {
