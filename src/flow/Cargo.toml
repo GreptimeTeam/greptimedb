@@ -29,12 +29,9 @@ servers.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
 strum.workspace = true
+substrait.workspace = true
 tokio.workspace = true
 tonic.workspace = true
-
-[dependencies.substrait_proto]
-package = "substrait"
-version = "0.17"
 
 [dev-dependencies]
 catalog.workspace = true

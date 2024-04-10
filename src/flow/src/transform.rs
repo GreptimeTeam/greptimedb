@@ -30,18 +30,20 @@ use datatypes::value::Value;
 use hydroflow::futures::future::Map;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
-use substrait_proto::proto::aggregate_function::AggregationInvocation;
-use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
-use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
-use substrait_proto::proto::expression::literal::LiteralType;
-use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
-use substrait_proto::proto::expression::{Literal, MaskExpression, RexType, ScalarFunction};
-use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
-use substrait_proto::proto::function_argument::ArgType;
-use substrait_proto::proto::r#type::Kind;
-use substrait_proto::proto::read_rel::ReadType;
-use substrait_proto::proto::rel::RelType;
-use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
+use substrait::substrait_proto::proto::aggregate_function::AggregationInvocation;
+use substrait::substrait_proto::proto::aggregate_rel::{Grouping, Measure};
+use substrait::substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
+use substrait::substrait_proto::proto::expression::literal::LiteralType;
+use substrait::substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
+use substrait::substrait_proto::proto::expression::{
+    Literal, MaskExpression, RexType, ScalarFunction,
+};
+use substrait::substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
+use substrait::substrait_proto::proto::function_argument::ArgType;
+use substrait::substrait_proto::proto::r#type::Kind;
+use substrait::substrait_proto::proto::read_rel::ReadType;
+use substrait::substrait_proto::proto::rel::RelType;
+use substrait::substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{
     DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
@@ -758,7 +760,7 @@ pub fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Error> {
     Ok(scalar_value)
 }
 
-fn from_substrait_type(null_type: &substrait_proto::proto::Type) -> Result<CDT, Error> {
+fn from_substrait_type(null_type: &substrait::substrait_proto::proto::Type) -> Result<CDT, Error> {
     if let Some(kind) = &null_type.kind {
         match kind {
             Kind::Bool(_) => Ok(CDT::boolean_datatype()),
