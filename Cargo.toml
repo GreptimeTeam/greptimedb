@@ -132,6 +132,7 @@ opentelemetry-proto = { version = "0.5", features = [
     "trace",
 ] }
 parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
+parking_lot = "0.12"
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }

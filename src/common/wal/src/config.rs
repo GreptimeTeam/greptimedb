@@ -81,6 +81,7 @@ impl From<StandaloneWalConfig> for DatanodeWalConfig {
             StandaloneWalConfig::RaftEngine(config) => Self::RaftEngine(config),
             StandaloneWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
+                num_partitions: config.num_partitions,
                 compression: config.compression,
                 max_batch_size: config.max_batch_size,
                 linger: config.linger,
@@ -189,6 +190,7 @@ mod tests {
         let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
         let expected = DatanodeKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
+            num_partitions: 1,
             compression: Compression::default(),
             max_batch_size: ReadableSize::mb(1),
             linger: Duration::from_millis(200),

@@ -4952,6 +4952,7 @@ dependencies = [
  "futures-util",
  "itertools 0.10.5",
  "lazy_static",
+ "parking_lot 0.12.1",
  "prometheus",
  "protobuf",
  "protobuf-build",

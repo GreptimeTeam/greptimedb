@@ -65,7 +65,7 @@ once_cell.workspace = true
 openmetrics-parser = "0.4"
 opensrv-mysql = "0.7.0"
 opentelemetry-proto.workspace = true
-parking_lot = "0.12"
+parking_lot.workspace = true
 pgwire = "0.20"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }

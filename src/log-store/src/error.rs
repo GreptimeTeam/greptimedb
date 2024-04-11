@@ -159,6 +159,22 @@ pub enum Error {
         error: rskafka::client::producer::Error,
     },
 
+    #[snafu(display(
+        "Failed to produce records to Kafka, topic: {}, partition: {}",
+        topic,
+        partition,
+    ))]
+    Flush {
+        topic: String,
+        partition: i32,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to produce records to Kafka, source: {}", error,))]
+    Produce { location: Location, error: String },
+
     #[snafu(display("Failed to read a record from Kafka, ns: {}", ns))]
     ConsumeRecord {
         ns: KafkaNamespace,
@@ -194,6 +210,17 @@ pub enum Error {
 
     #[snafu(display("The record sequence is not legal, error: {}", error))]
     IllegalSequence { location: Location, error: String },
+
+    #[snafu(display(
+        "The entry is too large, entry size: {}, buffer capacity: {}",
+        entry_size,
+        capacity
+    ))]
+    EntryTooLarge {
+        entry_size: usize,
+        capacity: usize,
+        location: Location,
+    },
 
     #[snafu(display(
         "Attempt to append discontinuous log entry, region: {}, last index: {}, attempt index: {}",

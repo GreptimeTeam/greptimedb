@@ -27,6 +27,8 @@ use crate::BROKER_ENDPOINT;
 pub struct DatanodeKafkaConfig {
     /// The broker endpoints of the Kafka cluster.
     pub broker_endpoints: Vec<String>,
+    /// The number of partitions per topic.
+    pub num_partitions: i32,
     /// The compression algorithm used to compress kafka records.
     #[serde(skip)]
     pub compression: Compression,
@@ -47,6 +49,7 @@ impl Default for DatanodeKafkaConfig {
     fn default() -> Self {
         Self {
             broker_endpoints: vec![BROKER_ENDPOINT.to_string()],
+            num_partitions: 1,
             compression: Compression::NoCompression,
             // Warning: Kafka has a default limit of 1MB per message in a topic.
             max_batch_size: ReadableSize::mb(1),

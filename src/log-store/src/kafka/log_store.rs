@@ -27,8 +27,10 @@ use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
+use super::producer::maybe_split_entry;
 use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
+use crate::kafka::producer::{ProducerId, ProducerManager};
 use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
 use crate::kafka::{EntryImpl, NamespaceImpl};
@@ -40,6 +42,7 @@ pub struct KafkaLogStore {
     config: DatanodeKafkaConfig,
     /// Manages kafka clients through which the log store contact the Kafka cluster.
     client_manager: ClientManagerRef,
+    producer_manager: Arc<ProducerManager>,
 }
 
 impl KafkaLogStore {
@@ -47,6 +50,7 @@ impl KafkaLogStore {
     pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
         Ok(Self {
             client_manager: Arc::new(ClientManager::try_new(config).await?),
+            producer_manager: Arc::new(ProducerManager::try_new(config).await?),
             config: config.clone(),
         })
     }
@@ -87,6 +91,10 @@ impl LogStore for KafkaLogStore {
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
+        if entries.is_empty() {
+            return Ok(AppendBatchResponse::default());
+        }
+
         metrics::METRIC_KAFKA_APPEND_BATCH_CALLS_TOTAL.inc();
         metrics::METRIC_KAFKA_APPEND_BATCH_BYTES_TOTAL.inc_by(
             entries
@@ -96,35 +104,40 @@ impl LogStore for KafkaLogStore {
         );
         let _timer = metrics::METRIC_KAFKA_APPEND_BATCH_ELAPSED.start_timer();
 
-        if entries.is_empty() {
-            return Ok(AppendBatchResponse::default());
-        }
+        let (region_ids, tasks): (Vec<_>, Vec<_>) = entries
+            .into_iter()
+            .flat_map(|entry| {
+                maybe_split_entry(entry, self.config.max_batch_size.as_bytes() as usize)
+            })
+            .map(|entry| {
+                let producer_manager = self.producer_manager.clone();
+                let region_id = entry.ns.region_id;
+                let task = async move {
+                    let id = ProducerId::new(
+                        entry.ns.topic.clone(),
+                        producer_manager.allocate_partition(),
+                    );
+                    let producer = producer_manager.get_or_insert(&id).await?;
+                    producer.produce(entry).await
+                };
+                (region_id, task)
+            })
+            .unzip();
+        let offsets = futures::future::try_join_all(tasks).await?;
 
-        // Groups entries by region id and pushes them to an associated record producer.
-        let mut producers = HashMap::with_capacity(entries.len());
-        for entry in entries {
-            producers
-                .entry(entry.ns.region_id)
-                .or_insert_with(|| RecordProducer::new(entry.ns.clone()))
-                .push(entry);
-        }
-
-        // Produces entries for each region and gets the offset those entries written to.
-        // The returned offset is then converted into an entry id.
-        let last_entry_ids = futures::future::try_join_all(producers.into_iter().map(
-            |(region_id, producer)| async move {
-                let entry_id = producer
-                    .produce(&self.client_manager)
-                    .await
-                    .map(TryInto::try_into)??;
-                Ok((region_id, entry_id))
-            },
-        ))
-        .await?
-        .into_iter()
-        .collect::<HashMap<_, _>>();
-
-        Ok(AppendBatchResponse { last_entry_ids })
+        let mut region_last_offset = HashMap::with_capacity(region_ids.len());
+        region_ids
+            .into_iter()
+            .zip(offsets)
+            .for_each(|(region_id, offset)| {
+                region_last_offset
+                    .entry(region_id)
+                    .and_modify(|last_offset| *last_offset = (offset as u64).max(*last_offset))
+                    .or_insert(offset as u64);
+            });
+        Ok(AppendBatchResponse {
+            last_entry_ids: region_last_offset,
+        })
     }
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids
@@ -136,6 +149,8 @@ impl LogStore for KafkaLogStore {
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
         metrics::METRIC_KAFKA_READ_CALLS_TOTAL.inc();
         let _timer = metrics::METRIC_KAFKA_READ_ELAPSED.start_timer();
+
+        // TODO(niebayes): refactor ProducerManager to incorporate Producer and Consumer.
 
         // Gets the client associated with the topic.
         let client = self

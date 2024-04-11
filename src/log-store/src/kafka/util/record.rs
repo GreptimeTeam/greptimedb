@@ -146,6 +146,7 @@ impl RecordProducer {
     }
 
     /// Pushes an entry into the entry buffer.
+    #[allow(unused)]
     pub(crate) fn push(&mut self, entry: EntryImpl) {
         self.entries.push(entry);
     }

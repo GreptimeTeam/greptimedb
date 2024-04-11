@@ -14,7 +14,9 @@
 
 use std::mem::size_of;
 pub(crate) mod client_manager;
+pub(crate) mod entry_buffer;
 pub mod log_store;
+pub(crate) mod producer;
 pub(crate) mod util;
 
 use std::fmt::Display;
