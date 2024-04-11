@@ -364,6 +364,7 @@ impl ManifestContext {
 
 pub(crate) type ManifestContextRef = Arc<ManifestContext>;
 
+/// Switches the region state to `REGION_STATE_WRITABLE` if the current state is `expect`.
 pub(crate) fn switch_state_to_writable(region: &MitoRegionRef, expect: u8) {
     if let Err(e) = region.compare_exchange_state(expect, REGION_STATE_WRITABLE) {
         error!(e; "failed to switch region state to writable, expect state is {}", region_state_to_str(expect));
