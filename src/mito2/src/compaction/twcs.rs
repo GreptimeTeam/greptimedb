@@ -439,9 +439,7 @@ impl TwcsCompactionTask {
             merge_time,
         );
 
-        self.listener
-            .on_handle_compaction_finished(self.region_id)
-            .await;
+        self.listener.on_merge_ssts_finished(self.region_id).await;
 
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])

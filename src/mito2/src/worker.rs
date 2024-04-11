@@ -811,10 +811,10 @@ impl WorkerListener {
         let _ = removed;
     }
 
-    pub(crate) async fn on_handle_compaction_finished(&self, region_id: RegionId) {
+    pub(crate) async fn on_merge_ssts_finished(&self, region_id: RegionId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
-            listener.on_handle_compaction_finished(region_id).await;
+            listener.on_merge_ssts_finished(region_id).await;
         }
         // Avoid compiler warning.
         let _ = region_id;
