@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
+use common_error::ext::ErrorExt;
 use common_query::Output;
 use query::QueryEngineRef;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -215,7 +216,10 @@ mod python {
             self.create_scripts_table_if_need(query_ctx.current_catalog())
                 .await
                 .map_err(|e| {
-                    error!(e; "Failed to create scripts table");
+                    if e.status_code().should_log_error() {
+                        error!(e; "Failed to create scripts table");
+                    }
+
                     servers::error::InternalSnafu {
                         err_msg: e.to_string(),
                     }
@@ -232,7 +236,10 @@ mod python {
                 )
                 .await
                 .map_err(|e| {
-                    error!(e; "Failed to insert script");
+                    if e.status_code().should_log_error() {
+                        error!(e; "Failed to insert script");
+                    }
+
                     BoxedError::new(e)
                 })
                 .context(servers::error::InsertScriptSnafu { name })?;
@@ -265,7 +272,10 @@ mod python {
                 )
                 .await
                 .map_err(|e| {
-                    error!(e; "Failed to execute script");
+                    if e.status_code().should_log_error() {
+                        error!(e; "Failed to execute script");
+                    }
+
                     BoxedError::new(e)
                 })
                 .context(servers::error::ExecuteScriptSnafu { name })

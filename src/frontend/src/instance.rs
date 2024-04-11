@@ -31,7 +31,7 @@ use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
@@ -324,7 +324,9 @@ impl SqlQueryHandler for Instance {
                         }
                         Err(e) => {
                             let redacted = sql::util::redact_sql_secrets(query.as_ref());
-                            error!(e; "Failed to execute query: {redacted}");
+                            if e.status_code().should_log_error() {
+                                error!(e; "Failed to execute query: {redacted}");
+                            }
 
                             results.push(Err(e));
                             break;
