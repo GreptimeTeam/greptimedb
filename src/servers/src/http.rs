@@ -128,7 +128,7 @@ pub struct HttpOptions {
 
     pub body_limit: ReadableSize,
 
-    pub strict_mode: bool,
+    pub is_strict_mode: bool,
 }
 
 impl Default for HttpOptions {
@@ -138,7 +138,7 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(30),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
-            strict_mode: false,
+            is_strict_mode: false,
         }
     }
 }
