@@ -30,6 +30,7 @@ fn bench_decode_prom_request(c: &mut Criterion) {
 
     let mut request = WriteRequest::default();
     let mut prom_request = PromWriteRequest::default();
+    let strict_mode = true;
     c.benchmark_group("decode")
         .measurement_time(Duration::from_secs(3))
         .bench_function("write_request", |b| {
@@ -43,7 +44,7 @@ fn bench_decode_prom_request(c: &mut Criterion) {
         .bench_function("prom_write_request", |b| {
             b.iter(|| {
                 let data = data.clone();
-                prom_request.merge(data).unwrap();
+                prom_request.merge(data, strict_mode).unwrap();
                 prom_request.as_row_insert_requests();
             });
         });
