@@ -194,7 +194,7 @@ pub async fn remote_write_without_strict_mode(
 
     let is_zstd = content_encoding.contains(VM_ENCODING);
     let (request, samples) =
-        decode_remote_write_request_to_row_inserts(is_zstd, body, true).await?;
+        decode_remote_write_request_to_row_inserts(is_zstd, body, false).await?;
 
     if let Some(physical_table) = params.physical_table {
         let mut new_query_ctx = query_ctx.as_ref().clone();
