@@ -27,6 +27,7 @@ use crate::manifest::action::{
 };
 use crate::region::{
     switch_state_to_writable, MitoRegionRef, REGION_STATE_ALTERING, REGION_STATE_EDITING,
+    REGION_STATE_TRUNCATING,
 };
 use crate::request::{BackgroundNotify, OptionOutputTx, TruncateResult, WorkerRequest};
 use crate::worker::RegionWorkerLoop;
@@ -93,7 +94,7 @@ impl<S> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
             let result = manifest_ctx
-                .update_manifest(action_list, || {
+                .update_manifest(REGION_STATE_TRUNCATING, action_list, || {
                     // Applies the truncate action to the region.
                     version_control.truncate(
                         truncate.truncated_entry_id,
@@ -141,7 +142,7 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = region
                 .manifest_ctx
-                .update_manifest(action_list, || {
+                .update_manifest(REGION_STATE_ALTERING, action_list, || {
                     // Apply the metadata to region's version.
                     region
                         .version_control
@@ -187,7 +188,7 @@ async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
     region
         .manifest_ctx
-        .update_manifest(action_list, || {
+        .update_manifest(REGION_STATE_EDITING, action_list, || {
             // Applies the edit to the region.
             region
                 .version_control

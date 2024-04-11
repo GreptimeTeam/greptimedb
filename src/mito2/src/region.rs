@@ -296,10 +296,11 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
-    // TODO(yingwen): checks the state.
-    /// Updates the manifest and execute the `applier` if the manifest is updated.
+    /// Updates the manifest if current state is `expect_state` and executes
+    /// the `applier` if the manifest is updated.
     pub(crate) async fn update_manifest(
         &self,
+        expect_state: u8,
         action_list: RegionMetaActionList,
         applier: impl FnOnce(),
     ) -> Result<()> {
@@ -307,6 +308,16 @@ impl ManifestContext {
         let mut manager = self.manifest_manager.write().await;
         // Gets current manifest.
         let manifest = manager.manifest();
+        // Checks state inside the lock. This is to ensure that we won't update the manifest
+        // after `set_readonly_gracefully()` is called.
+        let current_state = self.state.load(Ordering::Relaxed);
+        ensure!(
+            current_state == expect_state,
+            RegionStateSnafu {
+                region_id: manifest.metadata.region_id,
+                state: current_state,
+            }
+        );
 
         for action in &action_list.actions {
             // Checks whether the edit is still applicable.

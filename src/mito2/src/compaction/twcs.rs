@@ -41,7 +41,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::{BoxedBatchReader, Source};
 use crate::region::options::IndexOptions;
 use crate::region::version::VersionControlRef;
-use crate::region::ManifestContextRef;
+use crate::region::{ManifestContextRef, REGION_STATE_WRITABLE};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
@@ -450,7 +450,7 @@ impl TwcsCompactionTask {
         // We might leak files if we fail to update manifest. We can add a cleanup task to
         // remove them later.
         self.manifest_ctx
-            .update_manifest(action_list, || {
+            .update_manifest(REGION_STATE_WRITABLE, action_list, || {
                 self.version_control
                     .apply_edit(edit, &[], self.file_purger.clone());
             })
