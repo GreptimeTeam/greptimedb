@@ -205,6 +205,7 @@ pub struct PromqlQuery {
     pub start: String,
     pub end: String,
     pub step: String,
+    pub lookback: Option<String>,
     pub db: Option<String>,
 }
 
@@ -215,7 +216,9 @@ impl From<PromqlQuery> for PromQuery {
             start: query.start,
             end: query.end,
             step: query.step,
-            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
+            lookback: query
+                .lookback
+                .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
         }
     }
 }

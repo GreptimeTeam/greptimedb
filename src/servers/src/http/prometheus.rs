@@ -152,6 +152,7 @@ pub async fn build_info_query() -> PrometheusJsonResponse {
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct InstantQuery {
     query: Option<String>,
+    lookback: Option<String>,
     time: Option<String>,
     timeout: Option<String>,
     db: Option<String>,
@@ -178,7 +179,10 @@ pub async fn instant_query(
         start: time.clone(),
         end: time,
         step: "1s".to_string(),
-        lookback: "5m".to_string(),
+        lookback: params
+            .lookback
+            .or(form_params.lookback)
+            .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
     };
 
     let result = handler.do_query(&prom_query, query_ctx).await;
@@ -197,6 +201,7 @@ pub struct RangeQuery {
     start: Option<String>,
     end: Option<String>,
     step: Option<String>,
+    lookback: Option<String>,
     timeout: Option<String>,
     db: Option<String>,
 }
@@ -217,7 +222,10 @@ pub async fn range_query(
         start: params.start.or(form_params.start).unwrap_or_default(),
         end: params.end.or(form_params.end).unwrap_or_default(),
         step: params.step.or(form_params.step).unwrap_or_default(),
-        lookback: DEFAULT_LOOKBACK_STRING.to_string(),
+        lookback: params
+            .lookback
+            .or(form_params.lookback)
+            .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
     };
 
     let result = handler.do_query(&prom_query, query_ctx).await;
@@ -237,6 +245,7 @@ struct Matches(Vec<String>);
 pub struct LabelsQuery {
     start: Option<String>,
     end: Option<String>,
+    lookback: Option<String>,
     #[serde(flatten)]
     matches: Matches,
     db: Option<String>,
@@ -312,6 +321,11 @@ pub async fn labels_query(
         .or(form_params.end)
         .unwrap_or_else(current_time_rfc3339);
 
+    let lookback = params
+        .lookback
+        .or(form_params.lookback)
+        .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string());
+
     let mut labels = HashSet::new();
     let _ = labels.insert(METRIC_NAME.to_string());
 
@@ -322,7 +336,7 @@ pub async fn labels_query(
             start: start.clone(),
             end: end.clone(),
             step: DEFAULT_LOOKBACK_STRING.to_string(),
-            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
+            lookback: lookback.clone(),
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
@@ -549,6 +563,7 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
 pub struct LabelValueQuery {
     start: Option<String>,
     end: Option<String>,
+    lookback: Option<String>,
     #[serde(flatten)]
     matches: Matches,
     db: Option<String>,
@@ -590,6 +605,9 @@ pub async fn label_values_query(
 
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
     let end = params.end.unwrap_or_else(current_time_rfc3339);
+    let lookback = params
+        .lookback
+        .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string());
 
     let mut label_values = HashSet::new();
 
@@ -600,7 +618,7 @@ pub async fn label_values_query(
             start: start.clone(),
             end: end.clone(),
             step: DEFAULT_LOOKBACK_STRING.to_string(),
-            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
+            lookback: lookback.clone(),
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
         if let Err(err) =
@@ -699,6 +717,7 @@ async fn retrieve_label_values_from_record_batch(
 pub struct SeriesQuery {
     start: Option<String>,
     end: Option<String>,
+    lookback: Option<String>,
     #[serde(flatten)]
     matches: Matches,
     db: Option<String>,
@@ -730,6 +749,10 @@ pub async fn series_query(
         .end
         .or(form_params.end)
         .unwrap_or_else(current_time_rfc3339);
+    let lookback = params
+        .lookback
+        .or(form_params.lookback)
+        .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string());
 
     let mut series = Vec::new();
     let mut merge_map = HashMap::new();
@@ -741,7 +764,7 @@ pub async fn series_query(
             end: end.clone(),
             // TODO: find a better value for step
             step: DEFAULT_LOOKBACK_STRING.to_string(),
-            lookback: DEFAULT_LOOKBACK_STRING.to_string(),
+            lookback: lookback.clone(),
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 
