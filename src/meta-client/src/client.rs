@@ -26,6 +26,9 @@ use api::v1::meta::Role;
 use cluster::Client as ClusterClient;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::cluster::{
+    ClusterInfo, MetasrvStatus, NodeInfo, NodeInfoKey, NodeStatus, Role as ClusterRole,
+};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
@@ -46,8 +49,9 @@ use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
-use crate::error;
-use crate::error::{ConvertMetaResponseSnafu, Result};
+use crate::error::{
+    ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error, NotStartedSnafu, Result,
+};
 
 pub type Id = (u64, u64);
 
@@ -239,6 +243,57 @@ impl ProcedureExecutor for MetaClient {
     }
 }
 
+#[async_trait::async_trait]
+impl ClusterInfo for MetaClient {
+    type Error = Error;
+
+    async fn list_nodes(&self, role: Option<ClusterRole>) -> Result<Vec<NodeInfo>> {
+        let cluster_client = self.cluster_client()?;
+
+        let (get_metasrv_nodes, nodes_key_prefix) = match role {
+            None => (
+                true,
+                Some(NodeInfoKey::key_prefix_with_cluster_id(self.id.0)),
+            ),
+            Some(ClusterRole::Metasrv) => (true, None),
+            Some(role) => (
+                false,
+                Some(NodeInfoKey::key_prefix_with_role(self.id.0, role)),
+            ),
+        };
+
+        let mut nodes = if get_metasrv_nodes {
+            let last_activity_ts = -1; // Metasrv does not provide this information.
+            let (leader, followers) = cluster_client.get_metasrv_peers().await?;
+            followers
+                .into_iter()
+                .map(|peer| NodeInfo {
+                    peer,
+                    last_activity_ts,
+                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
+                })
+                .chain(leader.into_iter().map(|leader| NodeInfo {
+                    peer: leader,
+                    last_activity_ts,
+                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
+                }))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        if let Some(prefix) = nodes_key_prefix {
+            let req = RangeRequest::new().with_prefix(prefix);
+            let res = cluster_client.range(req).await?;
+            for kv in res.kvs {
+                nodes.push(NodeInfo::try_from(kv.value).context(ConvertMetaResponseSnafu)?);
+            }
+        }
+
+        Ok(nodes)
+    }
+}
+
 impl MetaClient {
     pub fn new(id: Id) -> Self {
         Self {
@@ -405,31 +460,31 @@ impl MetaClient {
     ) -> Result<SubmitDdlTaskResponse> {
         let res = self
             .procedure_client()?
-            .submit_ddl_task(req.try_into().context(error::ConvertMetaRequestSnafu)?)
+            .submit_ddl_task(req.try_into().context(ConvertMetaRequestSnafu)?)
             .await?
             .try_into()
-            .context(error::ConvertMetaResponseSnafu)?;
+            .context(ConvertMetaResponseSnafu)?;
 
         Ok(res)
     }
 
     #[inline]
     pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {
-        self.heartbeat.clone().context(error::NotStartedSnafu {
+        self.heartbeat.clone().context(NotStartedSnafu {
             name: "heartbeat_client",
         })
     }
 
     #[inline]
     pub fn store_client(&self) -> Result<StoreClient> {
-        self.store.clone().context(error::NotStartedSnafu {
+        self.store.clone().context(NotStartedSnafu {
             name: "store_client",
         })
     }
 
     #[inline]
     pub fn lock_client(&self) -> Result<LockClient> {
-        self.lock.clone().context(error::NotStartedSnafu {
+        self.lock.clone().context(NotStartedSnafu {
             name: "lock_client",
         })
     }
@@ -438,7 +493,14 @@ impl MetaClient {
     pub fn procedure_client(&self) -> Result<ProcedureClient> {
         self.procedure
             .clone()
-            .context(error::NotStartedSnafu { name: "ddl_client" })
+            .context(NotStartedSnafu { name: "ddl_client" })
+    }
+
+    #[inline]
+    pub fn cluster_client(&self) -> Result<ClusterClient> {
+        self.cluster.clone().context(NotStartedSnafu {
+            name: "cluster_client",
+        })
     }
 
     #[inline]
@@ -460,7 +522,7 @@ mod tests {
     use meta_srv::Result as MetaResult;
 
     use super::*;
-    use crate::mocks;
+    use crate::{error, mocks};
 
     const TEST_KEY_PREFIX: &str = "__unit_test__meta__";
 

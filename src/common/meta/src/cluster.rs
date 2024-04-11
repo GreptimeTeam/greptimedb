@@ -27,24 +27,12 @@ use crate::error::{
 use crate::peer::Peer;
 
 const CLUSTER_NODE_INFO_PREFIX: &str = "__meta_cluster_node_info";
-const CLUSTER_METASRV_INFO_PREFIX: &str = "__meta_cluster_metasrv_info";
 
 lazy_static! {
     static ref CLUSTER_NODE_INFO_PREFIX_PATTERN: Regex = Regex::new(&format!(
         "^{CLUSTER_NODE_INFO_PREFIX}-([0-9]+)-([0-9]+)-([0-9]+)$"
     ))
     .unwrap();
-}
-
-pub fn metasrv_node_key(target: &str) -> Vec<u8> {
-    format!("{}-{}", CLUSTER_METASRV_INFO_PREFIX, target).into_bytes()
-}
-
-pub fn metasrv_node_info(target: &str, is_leader: bool) -> (Vec<u8>, NodeStatus) {
-    (
-        metasrv_node_key(target),
-        NodeStatus::Metasrv(MetasrvStatus { is_leader }),
-    )
 }
 
 /// [ClusterInfo] provides information about the cluster.
@@ -62,11 +50,13 @@ pub trait ClusterInfo {
 }
 
 /// The key of [NodeInfo] in the storage. The format is `__meta_cluster_node_info-{cluster_id}-{role}-{node_id}`.
+/// This key cannot be used to describe the `Metasrv` because the `Metasrv` does not have
+/// a `cluster_id`, it serves multiple clusters.
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct NodeInfoKey {
     /// The cluster id.
     pub cluster_id: u64,
-    /// The role of the node. It can be [Role::Datanode], [Role::Frontend], or [Role::Metasrv].
+    /// The role of the node. It can be [Role::Datanode] or [Role::Frontend].
     pub role: Role,
     /// The node id.
     pub node_id: u64,

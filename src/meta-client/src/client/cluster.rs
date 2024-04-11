@@ -17,10 +17,9 @@ use std::sync::Arc;
 
 use api::greptime_proto::v1;
 use api::v1::meta::cluster_client::ClusterClient;
-use api::v1::meta::{ResponseHeader, Role};
+use api::v1::meta::{MetasrvPeersRequest, ResponseHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
-use common_meta::cluster;
-use common_meta::cluster::{ClusterInfo, NodeInfo, NodeInfoKey};
+use common_meta::peer::Peer;
 use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse, RangeRequest, RangeResponse};
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
@@ -72,27 +71,10 @@ impl Client {
         let inner = self.inner.read().await;
         inner.batch_get(req).await
     }
-}
 
-#[async_trait::async_trait]
-impl ClusterInfo for Client {
-    type Error = Error;
-
-    async fn list_nodes(&self, role: Option<cluster::Role>) -> Result<Vec<NodeInfo>> {
-        let cluster_id = self.inner.read().await.id.0;
-        let key_prefix = match role {
-            None => NodeInfoKey::key_prefix_with_cluster_id(cluster_id),
-            Some(role) => NodeInfoKey::key_prefix_with_role(cluster_id, role),
-        };
-
-        let req = RangeRequest::new().with_prefix(key_prefix);
-
-        let res = self.range(req).await?;
-
-        res.kvs
-            .into_iter()
-            .map(|kv| NodeInfo::try_from(kv.value).context(ConvertMetaResponseSnafu))
-            .collect::<Result<Vec<_>>>()
+    pub async fn get_metasrv_peers(&self) -> Result<(Option<Peer>, Vec<Peer>)> {
+        let inner = self.inner.read().await;
+        inner.get_metasrv_peers().await
     }
 }
 
@@ -238,5 +220,28 @@ impl Inner {
         .await?
         .try_into()
         .context(ConvertMetaResponseSnafu)
+    }
+
+    async fn get_metasrv_peers(&self) -> Result<(Option<Peer>, Vec<Peer>)> {
+        self.with_retry(
+            "get_metasrv_peers",
+            move |mut client| {
+                let inner_req = tonic::Request::new(MetasrvPeersRequest::default());
+
+                async move {
+                    client
+                        .metasrv_peers(inner_req)
+                        .await
+                        .map(|res| res.into_inner())
+                }
+            },
+            |res| &res.header,
+        )
+        .await
+        .map(|res| {
+            let leader = res.leader.map(|x| x.into());
+            let peers = res.followers.into_iter().map(|x| x.into()).collect();
+            (leader, peers)
+        })
     }
 }
