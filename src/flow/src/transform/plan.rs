@@ -151,3 +151,39 @@ impl TypedPlan {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::expr::{GlobalId, ScalarExpr};
+    use crate::plan::{Plan, TypedPlan};
+    use crate::repr::{self, ColumnType, RelationType};
+    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+    use crate::transform::CDT;
+
+    #[tokio::test]
+    async fn test_select() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT number FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Get {
+                    id: crate::expr::Id::Global(GlobalId::User(0)),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0)])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+}

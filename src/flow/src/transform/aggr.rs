@@ -285,3 +285,161 @@ impl TypedPlan {
         })
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::plan::{Plan, TypedPlan};
+    use crate::repr::{self, ColumnType, RelationType};
+    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+
+    #[tokio::test]
+    async fn test_sum() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT sum(number) FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Reduce {
+                    input: Box::new(Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }),
+                    key_val_plan: KeyValPlan {
+                        key_plan: MapFilterProject::new(1)
+                            .project(vec![])
+                            .unwrap()
+                            .into_safe(),
+                        val_plan: MapFilterProject::new(1)
+                            .project(vec![0])
+                            .unwrap()
+                            .into_safe(),
+                    },
+                    reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                        full_aggrs: vec![aggr_expr.clone()],
+                        simple_aggrs: vec![(0, 0, aggr_expr.clone())],
+                        distinct_aggrs: vec![],
+                    }),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0)])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_sum_group_by() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT sum(number), number FROM numbers GROUP BY number";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![
+                ColumnType::new(CDT::uint32_datatype(), true),
+                ColumnType::new(CDT::uint32_datatype(), false),
+            ]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Reduce {
+                    input: Box::new(Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }),
+                    key_val_plan: KeyValPlan {
+                        key_plan: MapFilterProject::new(1)
+                            .map(vec![ScalarExpr::Column(0)])
+                            .unwrap()
+                            .project(vec![1])
+                            .unwrap()
+                            .into_safe(),
+                        val_plan: MapFilterProject::new(1)
+                            .project(vec![0])
+                            .unwrap()
+                            .into_safe(),
+                    },
+                    reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                        full_aggrs: vec![aggr_expr.clone()],
+                        simple_aggrs: vec![(0, 0, aggr_expr.clone())],
+                        distinct_aggrs: vec![],
+                    }),
+                }),
+                mfp: MapFilterProject::new(2)
+                    .map(vec![ScalarExpr::Column(1), ScalarExpr::Column(0)])
+                    .unwrap()
+                    .project(vec![2, 3])
+                    .unwrap(),
+            },
+        };
+
+        assert_eq!(flow_plan, expected);
+    }
+
+    #[tokio::test]
+    async fn test_sum_add() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT sum(number+number) FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Reduce {
+                    input: Box::new(Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }),
+                    key_val_plan: KeyValPlan {
+                        key_plan: MapFilterProject::new(1)
+                            .project(vec![])
+                            .unwrap()
+                            .into_safe(),
+                        val_plan: MapFilterProject::new(1)
+                            .map(vec![ScalarExpr::Column(0)
+                                .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)])
+                            .unwrap()
+                            .project(vec![1])
+                            .unwrap()
+                            .into_safe(),
+                    },
+                    reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                        full_aggrs: vec![aggr_expr.clone()],
+                        simple_aggrs: vec![(0, 0, aggr_expr.clone())],
+                        distinct_aggrs: vec![],
+                    }),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0)])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+}

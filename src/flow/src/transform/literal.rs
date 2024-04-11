@@ -158,3 +158,34 @@ pub fn from_substrait_type(
         not_impl_err!("Null type without kind is not supported")
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::plan::{Plan, TypedPlan};
+    use crate::repr::{self, ColumnType, RelationType};
+    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+    /// test if literal in substrait plan can be correctly converted to flow plan
+    #[tokio::test]
+    async fn test_literal() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT 1 FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)]),
+            plan: Plan::Constant {
+                rows: vec![(
+                    repr::Row::new(vec![Value::Int64(1)]),
+                    repr::Timestamp::MIN,
+                    1,
+                )],
+            },
+        };
+
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+}

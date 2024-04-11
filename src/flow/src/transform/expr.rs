@@ -281,3 +281,168 @@ impl TypedExpr {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use datatypes::value::Value;
+
+    use super::*;
+    use crate::expr::{GlobalId, MapFilterProject};
+    use crate::plan::{Plan, TypedPlan};
+    use crate::repr::{self, ColumnType, RelationType};
+    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+    /// test if `WHERE` condition can be converted to Flow's ScalarExpr in mfp's filter
+    #[tokio::test]
+    async fn test_where_and() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT number FROM numbers WHERE number >= 1 AND number <= 3 AND number!=2";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        // optimize binary and to variadic and
+        let filter = ScalarExpr::CallVariadic {
+            func: VariadicFunc::And,
+            exprs: vec![
+                ScalarExpr::Column(0).call_binary(
+                    ScalarExpr::Literal(Value::from(1u32), CDT::uint32_datatype()),
+                    BinaryFunc::Gte,
+                ),
+                ScalarExpr::Column(0).call_binary(
+                    ScalarExpr::Literal(Value::from(3u32), CDT::uint32_datatype()),
+                    BinaryFunc::Lte,
+                ),
+                ScalarExpr::Column(0).call_binary(
+                    ScalarExpr::Literal(Value::from(2u32), CDT::uint32_datatype()),
+                    BinaryFunc::NotEq,
+                ),
+            ],
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Get {
+                    id: crate::expr::Id::Global(GlobalId::User(0)),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0)])
+                    .unwrap()
+                    .filter(vec![filter])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    /// case: binary functions&constant folding can happen in converting substrait plan
+    #[tokio::test]
+    async fn test_binary_func_and_constant_folding() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT 1+1*2-1/1+1%2==3 FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::boolean_datatype(), true)]),
+            plan: Plan::Constant {
+                rows: vec![(
+                    repr::Row::new(vec![Value::from(true)]),
+                    repr::Timestamp::MIN,
+                    1,
+                )],
+            },
+        };
+
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    /// test if the type of the literal is correctly inferred, i.e. in here literal is decoded to be int64, but need to be uint32,
+    #[tokio::test]
+    async fn test_implicitly_cast() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT number+1 FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Get {
+                    id: crate::expr::Id::Global(GlobalId::User(0)),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0).call_binary(
+                        ScalarExpr::Literal(Value::from(1u32), CDT::uint32_datatype()),
+                        BinaryFunc::AddUInt32,
+                    )])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_cast() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT CAST(1 AS INT16) FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Get {
+                    id: crate::expr::Id::Global(GlobalId::User(0)),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Literal(
+                        Value::Int64(1),
+                        CDT::int64_datatype(),
+                    )
+                    .call_unary(UnaryFunc::Cast(CDT::int16_datatype()))])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_select_add() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT number+number FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(Plan::Get {
+                    id: crate::expr::Id::Global(GlobalId::User(0)),
+                }),
+                mfp: MapFilterProject::new(1)
+                    .map(vec![ScalarExpr::Column(0)
+                        .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)])
+                    .unwrap()
+                    .project(vec![1])
+                    .unwrap(),
+            },
+        };
+
+        assert_eq!(flow_plan.unwrap(), expected);
+    }
+}
