@@ -705,23 +705,28 @@ impl HttpServer {
         strict_mode: bool,
     ) -> Router<S> {
         let mut router = Router::new().route("/read", routing::post(prom_store::remote_read));
-        if prom_store_with_metric_engine && strict_mode {
-            router = router.route("/write", routing::post(prom_store::remote_write));
-        } else if prom_store_with_metric_engine && !strict_mode {
-            router = router.route(
-                "/write",
-                routing::post(prom_store::remote_write_without_strict_mode),
-            );
-        } else if !prom_store_with_metric_engine && strict_mode {
-            router = router.route(
-                "/write",
-                routing::post(prom_store::route_write_without_metric_engine),
-            );
-        } else {
-            router = router.route(
-                "/write",
-                routing::post(prom_store::route_write_without_metric_engine_and_strict_mode),
-            );
+        match (prom_store_with_metric_engine, strict_mode) {
+            (true, true) => {
+                router = router.route("/write", routing::post(prom_store::remote_write))
+            }
+            (true, false) => {
+                router = router.route(
+                    "/write",
+                    routing::post(prom_store::remote_write_without_strict_mode),
+                )
+            }
+            (false, true) => {
+                router = router.route(
+                    "/write",
+                    routing::post(prom_store::route_write_without_metric_engine),
+                )
+            }
+            (false, false) => {
+                router = router.route(
+                    "/write",
+                    routing::post(prom_store::route_write_without_metric_engine_and_strict_mode),
+                )
+            }
         }
         router.with_state(prom_handler)
     }
