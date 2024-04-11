@@ -626,4 +626,82 @@ mod tests {
         assert_eq!(b"test_key".to_vec(), delete.key);
         let _ = delete.options.unwrap();
     }
+
+    use crate::kv_backend::test::{
+        prepare_kv, test_kv_batch_delete, test_kv_batch_get, test_kv_compare_and_put,
+        test_kv_delete_range, test_kv_put, test_kv_range, test_kv_range_2,
+    };
+
+    async fn build_kv_backend() -> EtcdStore {
+        let endpoints = std::env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+        let endpoints = endpoints
+            .split(',')
+            .map(|s| s.to_string())
+            .collect::<Vec<String>>();
+        println!("etcd endpoints: {:?}", endpoints);
+
+        let client = Client::connect(endpoints, None)
+            .await
+            .expect("malformed endpoints");
+        EtcdStore {
+            client,
+            max_txn_ops: 128,
+        }
+    }
+
+    async fn mock_etcd_store_with_data() -> EtcdStore {
+        let kv_backend = build_kv_backend().await;
+        prepare_kv(&kv_backend).await;
+
+        kv_backend
+    }
+
+    #[tokio::test]
+    async fn test_put() {
+        let kv_backend = mock_etcd_store_with_data().await;
+
+        test_kv_put(kv_backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_range() {
+        let kv_backend = mock_etcd_store_with_data().await;
+
+        test_kv_range(kv_backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_range_2() {
+        let kv = build_kv_backend().await;
+
+        test_kv_range_2(kv).await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_get() {
+        let kv_backend = mock_etcd_store_with_data().await;
+
+        test_kv_batch_get(kv_backend).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compare_and_put() {
+        let kv_backend = Arc::new(build_kv_backend().await);
+
+        test_kv_compare_and_put(kv_backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_range() {
+        let kv_backend = mock_etcd_store_with_data().await;
+
+        test_kv_delete_range(kv_backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete() {
+        let kv_backend = mock_etcd_store_with_data().await;
+
+        test_kv_batch_delete(kv_backend).await;
+    }
 }
