@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod run;
 mod buckets;
 pub mod compactor;
 pub mod picker;
