@@ -159,14 +159,9 @@ pub enum Error {
         error: rskafka::client::producer::Error,
     },
 
-    #[snafu(display(
-        "Failed to produce records to Kafka, topic: {}, partition: {}",
-        topic,
-        partition,
-    ))]
+    #[snafu(display("Failed to produce records to Kafka, topic: {}", topic,))]
     Flush {
         topic: String,
-        partition: i32,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,

@@ -30,7 +30,7 @@ use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 use super::producer::maybe_split_entry;
 use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::producer::{ProducerId, ProducerManager};
+use crate::kafka::producer::ProducerManager;
 use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
 use crate::kafka::{EntryImpl, NamespaceImpl};
@@ -104,20 +104,21 @@ impl LogStore for KafkaLogStore {
         );
         let _timer = metrics::METRIC_KAFKA_APPEND_BATCH_ELAPSED.start_timer();
 
+        let timestamp = chrono::Utc::now().timestamp_millis();
         let (region_ids, tasks): (Vec<_>, Vec<_>) = entries
             .into_iter()
             .flat_map(|entry| {
-                maybe_split_entry(entry, self.config.max_batch_size.as_bytes() as usize)
+                maybe_split_entry(
+                    entry,
+                    self.config.max_batch_size.as_bytes() as usize,
+                    timestamp,
+                )
             })
             .map(|entry| {
                 let producer_manager = self.producer_manager.clone();
                 let region_id = entry.ns.region_id;
                 let task = async move {
-                    let id = ProducerId::new(
-                        entry.ns.topic.clone(),
-                        producer_manager.allocate_partition(),
-                    );
-                    let producer = producer_manager.get_or_insert(&id).await?;
+                    let producer = producer_manager.get_or_insert(&entry.ns.topic).await?;
                     producer.produce(entry).await
                 };
                 (region_id, task)

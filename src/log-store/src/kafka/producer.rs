@@ -13,11 +13,10 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::ops::Rem;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::DateTime;
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
@@ -38,6 +37,7 @@ use crate::kafka::{EntryImpl, NamespaceImpl};
 type Sequence = u8;
 
 const RECORD_VERSION: u32 = 0;
+const DEFAULT_PARTITION: i32 = 0;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EntryInner {
@@ -45,15 +45,21 @@ pub struct EntryInner {
     id: EntryId,
     seq: Sequence,
     pub ns: NamespaceImpl,
+    timestamp: i64,
 }
 
-pub fn maybe_split_entry(entry: EntryImpl, max_entry_size: usize) -> Vec<EntryInner> {
+pub fn maybe_split_entry(
+    entry: EntryImpl,
+    max_entry_size: usize,
+    timestamp: i64,
+) -> Vec<EntryInner> {
     if entry.data.len() <= max_entry_size {
         return vec![EntryInner {
             data: entry.data,
             id: entry.id,
             seq: 0,
             ns: entry.ns,
+            timestamp,
         }];
     }
 
@@ -66,48 +72,14 @@ pub fn maybe_split_entry(entry: EntryImpl, max_entry_size: usize) -> Vec<EntryIn
             id: entry.id,
             seq: i as u8,
             ns: entry.ns.clone(),
+            timestamp,
         })
         .collect()
 }
 
 #[derive(Debug)]
-struct PartitionAllocator {
-    next_partition: AtomicU32,
-    num_partitions: u32,
-}
-
-impl PartitionAllocator {
-    fn new(num_partitions: u32) -> Self {
-        Self {
-            next_partition: AtomicU32::new(0),
-            num_partitions,
-        }
-    }
-
-    fn allocate(&self) -> i32 {
-        self.next_partition
-            .fetch_add(1, Ordering::Relaxed)
-            .rem(self.num_partitions) as i32
-    }
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
-pub struct ProducerId {
-    topic: String,
-    partition: i32,
-}
-
-impl ProducerId {
-    pub fn new(topic: String, partition: i32) -> Self {
-        Self { topic, partition }
-    }
-}
-
-#[derive(Debug)]
 pub struct ProducerManager {
-    // TODO(niebayes): properly locate the partition allocator.
-    partition_allocator: PartitionAllocator,
-    producers: RwLock<HashMap<ProducerId, Producer>>,
+    producers: RwLock<HashMap<String, Producer>>,
     client_factory: Client,
     buffer_capacity: usize,
     linger: Duration,
@@ -129,7 +101,6 @@ impl ProducerManager {
                 broker_endpoints: config.broker_endpoints.clone(),
             })?;
         Ok(Self {
-            partition_allocator: PartitionAllocator::new(config.num_partitions as u32),
             producers: RwLock::new(HashMap::new()),
             client_factory: client,
             buffer_capacity: config.max_batch_size.as_bytes() as usize,
@@ -138,40 +109,35 @@ impl ProducerManager {
         })
     }
 
-    pub fn allocate_partition(&self) -> i32 {
-        self.partition_allocator.allocate()
-    }
-
-    pub async fn get_or_insert(&self, id: &ProducerId) -> Result<Producer> {
+    pub async fn get_or_insert(&self, topic: &str) -> Result<Producer> {
         {
             let producer_map = self.producers.read().await;
-            if let Some(producer) = producer_map.get(id) {
+            if let Some(producer) = producer_map.get(topic) {
                 return Ok(producer.clone());
             }
         }
 
         let mut producer_map = self.producers.write().await;
-        match producer_map.get(id) {
+        match producer_map.get(topic) {
             Some(producer) => Ok(producer.clone()),
             None => {
                 let client = self
                     .client_factory
-                    .partition_client(id.topic.clone(), id.partition, UnknownTopicHandling::Retry)
+                    .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)
                     .await
-                    .context(BuildPartitionClientSnafu {
-                        topic: id.topic.clone(),
-                        partition: id.partition,
+                    .with_context(|_| BuildPartitionClientSnafu {
+                        topic,
+                        partition: DEFAULT_PARTITION,
                     })?;
                 let producer = Producer {
                     linger: self.linger,
                     inner: Arc::new(parking_lot::Mutex::new(ProducerInner::new(
-                        id.clone(),
                         client,
                         self.buffer_capacity,
                         self.compression,
                     ))),
                 };
-                producer_map.insert(id.clone(), producer.clone());
+                producer_map.insert(topic.to_string(), producer.clone());
                 Ok(producer)
             }
         }
@@ -206,7 +172,7 @@ impl Producer {
                 });
 
                 tokio::select! {
-                    // TODO(niebayes): maybe handle join error.
+                    // FIXME(niebayes): handle join error.
                     linger_result = linger => {
                         linger_result.unwrap()?;
                         notifier.wait().await
@@ -221,7 +187,6 @@ impl Producer {
 
 #[derive(Debug)]
 struct ProducerInner {
-    id: ProducerId,
     buffer: Option<EntryBuffer>,
     buffer_id: usize,
     has_linger_waiter: bool,
@@ -266,14 +231,8 @@ impl ProduceResultNotifier {
 }
 
 impl ProducerInner {
-    fn new(
-        id: ProducerId,
-        client: PartitionClient,
-        buffer_capacity: usize,
-        compression: Compression,
-    ) -> Self {
+    fn new(client: PartitionClient, buffer_capacity: usize, compression: Compression) -> Self {
         Self {
-            id,
             buffer: Some(EntryBuffer::new(buffer_capacity)),
             buffer_id: 0,
             pending_flush_tasks: Vec::new(),
@@ -321,7 +280,7 @@ impl ProducerInner {
             .buffer
             .replace(EntryBuffer::new(self.buffer.as_ref().unwrap().capacity))
             .unwrap()
-            .start_background_flush(self.id.clone(), self.client.clone(), self.compression);
+            .start_background_flush(self.client.clone(), self.compression);
         self.pending_flush_tasks.push(flush_task);
 
         self.buffer_id = self.buffer_id.wrapping_add(1);
@@ -382,7 +341,6 @@ impl EntryBuffer {
 
     pub fn start_background_flush(
         self,
-        id: ProducerId,
         client: Arc<PartitionClient>,
         compression: Compression,
     ) -> JoinHandle<Result<()>> {
@@ -395,8 +353,7 @@ impl EntryBuffer {
                     .await
                     .map(|offsets| offsets[0])
                     .with_context(|_| FlushSnafu {
-                        topic: id.topic,
-                        partition: id.partition,
+                        topic: client.topic(),
                     })
                     .map_err(|e| e.to_string());
                 self.notifier.notify_waiters(result).await;
@@ -406,45 +363,51 @@ impl EntryBuffer {
     }
 
     fn build_record(entries: Vec<EntryInner>) -> Result<Record> {
-        let mut builder = RecordBuilder::new(entries.len(), RECORD_VERSION);
+        let mut builder = RecordBuilder::new(entries.len(), RECORD_VERSION, entries[0].timestamp);
         entries.into_iter().for_each(|entry| builder.push(entry));
         builder.try_build()
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct EntryMeta {
+    id: EntryId,
+    seq: Sequence,
+    ns: NamespaceImpl,
+    length: usize,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct RecordMeta {
     version: u32,
-    entry_ids: Vec<EntryId>,
-    sequences: Vec<Sequence>,
-    namespaces: Vec<NamespaceImpl>,
-    lengths: Vec<usize>,
+    entry_metas: Vec<EntryMeta>,
 }
 
 struct RecordBuilder {
+    timestamp: i64,
     meta: RecordMeta,
     data: Vec<Vec<u8>>,
 }
 
 impl RecordBuilder {
-    fn new(capacity: usize, version: u32) -> Self {
+    fn new(capacity: usize, version: u32, timestamp: i64) -> Self {
         Self {
+            timestamp,
             meta: RecordMeta {
                 version,
-                entry_ids: Vec::with_capacity(capacity),
-                sequences: Vec::with_capacity(capacity),
-                namespaces: Vec::with_capacity(capacity),
-                lengths: Vec::with_capacity(capacity),
+                entry_metas: Vec::with_capacity(capacity),
             },
             data: Vec::with_capacity(capacity),
         }
     }
 
     fn push(&mut self, entry: EntryInner) {
-        self.meta.entry_ids.push(entry.id);
-        self.meta.sequences.push(entry.seq);
-        self.meta.namespaces.push(entry.ns);
-        self.meta.lengths.push(entry.data.len());
+        self.meta.entry_metas.push(EntryMeta {
+            id: entry.id,
+            seq: entry.seq,
+            ns: entry.ns,
+            length: entry.data.len(),
+        });
         self.data.push(entry.data);
     }
 
@@ -454,8 +417,7 @@ impl RecordBuilder {
             key: Some(encoded_meta),
             value: Some(self.data.into_iter().flatten().collect()),
             headers: Default::default(),
-            // TODO(niebayes): pass in the timestamp of the append_batch rather than each record sets by itself.
-            timestamp: chrono::Utc::now(),
+            timestamp: DateTime::from_timestamp_millis(self.timestamp).unwrap(),
         })
     }
 }
