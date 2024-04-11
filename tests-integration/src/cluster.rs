@@ -174,6 +174,7 @@ impl GreptimeDbClusterBuilder {
                 // We only make max_retry_times and retry_delay large than the default in tests.
                 max_retry_times: 5,
                 retry_delay: Duration::from_secs(1),
+                max_metadata_value_size: None,
             },
             wal: self.metasrv_wal_config.clone(),
             ..Default::default()

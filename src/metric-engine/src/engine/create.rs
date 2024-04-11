@@ -405,6 +405,7 @@ impl MetricEngineInner {
         request: &RegionCreateRequest,
     ) -> RegionCreateRequest {
         let mut data_region_request = request.clone();
+        let mut primary_key = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
 
         // concat region dir
         data_region_request.region_dir = join_dir(&request.region_dir, DATA_REGION_SUBDIR);
@@ -416,6 +417,7 @@ impl MetricEngineInner {
             .for_each(|metadata| {
                 if metadata.semantic_type == SemanticType::Tag {
                     metadata.column_schema.set_nullable();
+                    primary_key.push(metadata.column_id);
                 }
             });
 
@@ -423,8 +425,7 @@ impl MetricEngineInner {
         let [table_id_col, tsid_col] = Self::internal_column_metadata();
         data_region_request.column_metadatas.push(table_id_col);
         data_region_request.column_metadatas.push(tsid_col);
-        data_region_request.primary_key =
-            vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
+        data_region_request.primary_key = primary_key;
 
         // set index options
         set_index_options_for_data_region(&mut data_region_request.options);
@@ -608,7 +609,7 @@ mod test {
         assert_eq!(data_region_request.column_metadatas.len(), 4);
         assert_eq!(
             data_region_request.primary_key,
-            vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()]
+            vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 1]
         );
     }
 }

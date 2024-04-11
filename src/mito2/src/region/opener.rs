@@ -56,7 +56,7 @@ pub(crate) struct RegionOpener {
     memtable_builder_provider: MemtableBuilderProvider,
     object_store_manager: ObjectStoreManagerRef,
     region_dir: String,
-    scheduler: SchedulerRef,
+    purge_scheduler: SchedulerRef,
     options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
@@ -71,7 +71,7 @@ impl RegionOpener {
         region_dir: &str,
         memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
-        scheduler: SchedulerRef,
+        purge_scheduler: SchedulerRef,
         intermediate_manager: IntermediateManager,
     ) -> RegionOpener {
         RegionOpener {
@@ -80,7 +80,7 @@ impl RegionOpener {
             memtable_builder_provider,
             object_store_manager,
             region_dir: normalize_dir(region_dir),
-            scheduler,
+            purge_scheduler,
             options: None,
             cache_manager: None,
             skip_wal_replay: false,
@@ -204,7 +204,7 @@ impl RegionOpener {
             access_layer: access_layer.clone(),
             manifest_manager,
             file_purger: Arc::new(LocalFilePurger::new(
-                self.scheduler,
+                self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
             )),
@@ -277,7 +277,7 @@ impl RegionOpener {
             self.intermediate_manager.clone(),
         ));
         let file_purger = Arc::new(LocalFilePurger::new(
-            self.scheduler.clone(),
+            self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
         ));
