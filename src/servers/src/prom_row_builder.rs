@@ -300,7 +300,6 @@ mod tests {
 
         let invalid_utf8_bytes = &[0xFF, 0xFF, 0xFF];
 
-        //let bytes = invalid_utf8_string.as_bytes();
         let res = builder.add_labels_and_samples(
             &[PromLabel {
                 name: Bytes::from("tag0"),
