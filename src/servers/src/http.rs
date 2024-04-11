@@ -505,12 +505,12 @@ impl HttpServerBuilder {
         self,
         handler: PromStoreProtocolHandlerRef,
         prom_store_with_metric_engine: bool,
-        strict_mode: bool,
+        is_strict_mode: bool,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus"),
-                HttpServer::route_prom(handler, prom_store_with_metric_engine, strict_mode),
+                HttpServer::route_prom(handler, prom_store_with_metric_engine, is_strict_mode),
             ),
             ..self
         }
@@ -702,10 +702,10 @@ impl HttpServer {
     fn route_prom<S>(
         prom_handler: PromStoreProtocolHandlerRef,
         prom_store_with_metric_engine: bool,
-        strict_mode: bool,
+        is_strict_mode: bool,
     ) -> Router<S> {
         let mut router = Router::new().route("/read", routing::post(prom_store::remote_read));
-        match (prom_store_with_metric_engine, strict_mode) {
+        match (prom_store_with_metric_engine, is_strict_mode) {
             (true, true) => {
                 router = router.route("/write", routing::post(prom_store::remote_write))
             }

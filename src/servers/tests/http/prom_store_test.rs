@@ -135,11 +135,11 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         ..Default::default()
     };
 
-    let strict_mode = false;
+    let is_strict_mode = false;
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(instance.clone(), None)
-        .with_prom_handler(instance, true, strict_mode)
+        .with_prom_handler(instance, true, is_strict_mode)
         .build();
     server.build(server.make_app())
 }

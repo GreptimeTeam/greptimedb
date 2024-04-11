@@ -150,7 +150,7 @@ impl PromTimeSeries {
         tag: u32,
         wire_type: WireType,
         buf: &mut Bytes,
-        strict_mode: bool,
+        is_strict_mode: bool,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromTimeSeries";
         match tag {
@@ -176,7 +176,7 @@ impl PromTimeSeries {
                     return Err(DecodeError::new("delimited length exceeded"));
                 }
                 if label.name.deref() == METRIC_NAME_LABEL_BYTES {
-                    let table_name = if strict_mode {
+                    let table_name = if is_strict_mode {
                         match String::from_utf8(label.value.to_vec()) {
                             Ok(s) => s,
                             Err(_) => return Err(DecodeError::new("invalid utf-8")),
@@ -205,7 +205,7 @@ impl PromTimeSeries {
         }
     }
 
-    fn add_to_table_data(&mut self, table_builders: &mut TablesBuilder, strict_mode: bool) {
+    fn add_to_table_data(&mut self, table_builders: &mut TablesBuilder, is_strict_mode: bool) {
         let label_num = self.labels.len();
         let row_num = self.samples.len();
         let table_data = table_builders.get_or_create_table_builder(
@@ -216,7 +216,7 @@ impl PromTimeSeries {
         let _ = table_data.add_labels_and_samples(
             self.labels.as_slice(),
             self.samples.as_slice(),
-            strict_mode,
+            is_strict_mode,
         );
         self.labels.clear();
         self.samples.clear();
@@ -241,7 +241,7 @@ impl PromWriteRequest {
     }
 
     // todo(hl): maybe use &[u8] can reduce the overhead introduced with Bytes.
-    pub fn merge(&mut self, mut buf: Bytes, strict_mode: bool) -> Result<(), DecodeError> {
+    pub fn merge(&mut self, mut buf: Bytes, is_strict_mode: bool) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
@@ -262,13 +262,13 @@ impl PromWriteRequest {
                     while buf.remaining() > limit {
                         let (tag, wire_type) = decode_key(&mut buf)?;
                         self.series
-                            .merge_field(tag, wire_type, &mut buf, strict_mode)?;
+                            .merge_field(tag, wire_type, &mut buf, is_strict_mode)?;
                     }
                     if buf.remaining() != limit {
                         return Err(DecodeError::new("delimited length exceeded"));
                     }
                     self.series
-                        .add_to_table_data(&mut self.table_data, strict_mode);
+                        .add_to_table_data(&mut self.table_data, is_strict_mode);
                 }
                 3u32 => {
                     // todo(hl): metadata are skipped.

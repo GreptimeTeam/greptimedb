@@ -105,6 +105,7 @@ pub async fn route_write_without_metric_engine(
 }
 
 /// Same with [remote_write] but won't store data to metric engine.
+/// And without strict_mode on will not check invalid UTF-8.
 #[axum_macros::debug_handler]
 pub async fn route_write_without_metric_engine_and_strict_mode(
     State(handler): State<PromStoreProtocolHandlerRef>,
@@ -254,7 +255,7 @@ pub async fn remote_read(
 async fn decode_remote_write_request_to_row_inserts(
     is_zstd: bool,
     body: Body,
-    strict_mode: bool,
+    is_strict_mode: bool,
 ) -> Result<(RowInsertRequests, usize)> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
     let body = hyper::body::to_bytes(body)
@@ -269,7 +270,7 @@ async fn decode_remote_write_request_to_row_inserts(
 
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
     request
-        .merge(buf, strict_mode)
+        .merge(buf, is_strict_mode)
         .context(error::DecodePromRemoteRequestSnafu)?;
     Ok(request.as_row_insert_requests())
 }
@@ -277,7 +278,7 @@ async fn decode_remote_write_request_to_row_inserts(
 async fn decode_remote_write_request(
     is_zstd: bool,
     body: Body,
-    strict_mode: bool,
+    is_strict_mode: bool,
 ) -> Result<(RowInsertRequests, usize)> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
     let body = hyper::body::to_bytes(body)
@@ -292,7 +293,7 @@ async fn decode_remote_write_request(
 
     let mut request = PromWriteRequest::default();
     request
-        .merge(buf, strict_mode)
+        .merge(buf, is_strict_mode)
         .context(error::DecodePromRemoteRequestSnafu)?;
     Ok(request.as_row_insert_requests())
 }

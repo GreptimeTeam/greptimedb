@@ -123,26 +123,24 @@ impl TableBuilder {
         &mut self,
         labels: &[PromLabel],
         samples: &[Sample],
-        strict_mode: bool,
+        is_strict_mode: bool,
     ) -> Result<(), DecodeError> {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
-            let tag_name;
-            let tag_value;
-            let (tag_name, tag_value) = if strict_mode {
-                tag_name = match String::from_utf8(name.to_vec()) {
+            let (tag_name, tag_value) = if is_strict_mode {
+                let tag_name = match String::from_utf8(name.to_vec()) {
                     Ok(s) => s,
                     Err(_) => return Err(DecodeError::new("invalid utf-8")),
                 };
-                tag_value = match String::from_utf8(value.to_vec()) {
+                let tag_value = match String::from_utf8(value.to_vec()) {
                     Ok(s) => s,
                     Err(_) => return Err(DecodeError::new("invalid utf-8")),
                 };
                 (tag_name, tag_value)
             } else {
-                tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
-                tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
+                let tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
+                let tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
                 (tag_name, tag_value)
             };
 
@@ -219,7 +217,7 @@ mod tests {
     #[test]
     fn test_table_builder() {
         let mut builder = TableBuilder::default();
-        let with_strict_mode = true;
+        let is_strict_mode = true;
         let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
@@ -235,7 +233,7 @@ mod tests {
                 value: 0.0,
                 timestamp: 0,
             }],
-            with_strict_mode,
+            is_strict_mode,
         );
 
         let _ = builder.add_labels_and_samples(
@@ -253,7 +251,7 @@ mod tests {
                 value: 0.1,
                 timestamp: 1,
             }],
-            with_strict_mode,
+            is_strict_mode,
         );
 
         let request = builder.as_row_insert_request("test".to_string());
@@ -309,7 +307,7 @@ mod tests {
                 value: 0.1,
                 timestamp: 1,
             }],
-            with_strict_mode,
+            is_strict_mode,
         );
         assert_eq!(res, Err(DecodeError::new("invalid utf-8")));
     }
