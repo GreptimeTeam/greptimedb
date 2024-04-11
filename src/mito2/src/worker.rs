@@ -719,10 +719,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         sender: oneshot::Sender<SetReadonlyResponse>,
     ) {
         if let Some(region) = self.regions.get_region(region_id) {
-            region.set_writable(false);
+            // We need to do this in background as we need the manifest lock.
+            common_runtime::spawn_bg(async move {
+                region.set_readonly_gracefully().await;
 
-            let last_entry_id = region.version_control.current().last_entry_id;
-            let _ = sender.send(SetReadonlyResponse::success(Some(last_entry_id)));
+                let last_entry_id = region.version_control.current().last_entry_id;
+                let _ = sender.send(SetReadonlyResponse::success(Some(last_entry_id)));
+            });
         } else {
             let _ = sender.send(SetReadonlyResponse::NotFound);
         }

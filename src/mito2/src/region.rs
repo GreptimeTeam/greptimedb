@@ -216,20 +216,12 @@ impl MitoRegion {
         self.compare_exchange_state(REGION_STATE_WRITABLE, REGION_STATE_EDITING)
     }
 
-    /// Sets the state of the region to given state if the current state equals to
-    /// the expected.
-    pub(crate) fn compare_exchange_state(&self, expect: u8, state: u8) -> Result<()> {
-        self.manifest_ctx
-            .state
-            .compare_exchange(expect, state, Ordering::Relaxed, Ordering::Relaxed)
-            .map_err(|actual| {
-                RegionStateSnafu {
-                    region_id: self.region_id,
-                    state: actual,
-                }
-                .build()
-            })?;
-        Ok(())
+    /// Sets the region to readonly gracefully. This acquires the manifest write lock.
+    pub(crate) async fn set_readonly_gracefully(&self) {
+        let _manager = self.manifest_ctx.manifest_manager.write().await;
+        // We acquires the write lock of the manifest manager to ensure that no one is updating the manifest.
+        // Then we change the state.
+        self.set_writable(false);
     }
 
     /// Returns the region usage in bytes.
@@ -263,6 +255,22 @@ impl MitoRegion {
     /// Use the memtables size to estimate the size of wal.
     fn estimated_wal_usage(&self, memtable_usage: u64) -> u64 {
         ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
+    }
+
+    /// Sets the state of the region to given state if the current state equals to
+    /// the expected.
+    fn compare_exchange_state(&self, expect: u8, state: u8) -> Result<()> {
+        self.manifest_ctx
+            .state
+            .compare_exchange(expect, state, Ordering::Relaxed, Ordering::Relaxed)
+            .map_err(|actual| {
+                RegionStateSnafu {
+                    region_id: self.region_id,
+                    state: actual,
+                }
+                .build()
+            })?;
+        Ok(())
     }
 }
 
