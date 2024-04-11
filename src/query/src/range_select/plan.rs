@@ -33,7 +33,7 @@ use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::udaf::create_aggregate_expr as create_aggr_udf_expr;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use datafusion::physical_planner::create_physical_sort_expr;
@@ -49,7 +49,8 @@ use datafusion_expr::{
 use datafusion_physical_expr::aggregate::utils::down_cast_any_ref;
 use datafusion_physical_expr::expressions::create_aggregate_expr as create_aggr_expr;
 use datafusion_physical_expr::{
-    create_physical_expr, AggregateExpr, Distribution, Partitioning, PhysicalExpr, PhysicalSortExpr,
+    create_physical_expr, AggregateExpr, Distribution, EquivalenceProperties, Partitioning,
+    PhysicalExpr, PhysicalSortExpr,
 };
 use datatypes::arrow::array::{
     Array, ArrayRef, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt32Builder,
@@ -555,6 +556,8 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
         self.range_expr
             .iter()
             .map(|expr| expr.expr.clone())
+            .chain([self.time_expr.clone()])
+            .chain(self.by.clone())
             .collect()
     }
 
@@ -578,18 +581,32 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
+    fn from_template(&self, exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
         assert!(!inputs.is_empty());
-
+        assert!(exprs.len() == self.range_expr.len() + self.by.len() + 1);
+        let range_expr = exprs
+            .iter()
+            .zip(self.range_expr.iter())
+            .map(|(e, range)| RangeFn {
+                name: range.name.clone(),
+                data_type: range.data_type.clone(),
+                expr: e.clone(),
+                range: range.range,
+                fill: range.fill.clone(),
+                need_cast: range.need_cast,
+            })
+            .collect();
+        let time_expr = exprs[self.range_expr.len()].clone();
+        let by = exprs[self.range_expr.len() + 1..].to_vec();
         Self {
             align: self.align,
             align_to: self.align_to,
-            range_expr: self.range_expr.clone(),
+            range_expr,
             input: Arc::new(inputs[0].clone()),
             time_index: self.time_index.clone(),
-            time_expr: self.time_expr.clone(),
+            time_expr,
             schema: self.schema.clone(),
-            by: self.by.clone(),
+            by,
             by_schema: self.by_schema.clone(),
             schema_project: self.schema_project.clone(),
             schema_before_project: self.schema_before_project.clone(),
@@ -798,10 +815,11 @@ impl RangeSelect {
             schema_before_project.clone()
         };
         let by = self.create_physical_expr_list(false, &self.by, input_dfschema, session_state)?;
-        let cache = exec_input
-            .properties()
-            .clone()
-            .with_partitioning(Partitioning::UnknownPartitioning(1));
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
         Ok(Arc::new(RangeSelectExec {
             input: exec_input,
             range_exec,
@@ -971,7 +989,7 @@ impl ExecutionPlan for RangeSelectExec {
     }
 
     fn statistics(&self) -> DataFusionResult<Statistics> {
-        self.input.statistics()
+        Ok(Statistics::new_unknown(self.schema.as_ref()))
     }
 }
 
@@ -1422,10 +1440,11 @@ mod test {
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("host", DataType::Utf8, true),
         ]));
-        let cache = memory_exec
-            .properties()
-            .clone()
-            .with_partitioning(Partitioning::UnknownPartitioning(1));
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
         let range_select_exec = Arc::new(RangeSelectExec {
             input: memory_exec,
             range_exec: vec![
