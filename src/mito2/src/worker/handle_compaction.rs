@@ -54,8 +54,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: CompactionFinished,
     ) {
-        self.listener.on_handle_compaction_finished(region_id).await;
-
         let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
             warn!(
                 "Unable to finish the compaction task for a read only region {}",

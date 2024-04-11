@@ -34,6 +34,7 @@ use crate::region::{ManifestContext, ManifestContextRef, REGION_STATE_WRITABLE};
 use crate::request::WorkerRequest;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::worker::WorkerListener;
 
 /// Scheduler mocker.
 pub(crate) struct SchedulerEnv {
@@ -83,6 +84,7 @@ impl SchedulerEnv {
             request_sender,
             Arc::new(CacheManager::default()),
             Arc::new(MitoConfig::default()),
+            WorkerListener::default(),
         )
     }
 

@@ -187,6 +187,7 @@ async fn test_readonly_during_compaction() {
     put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
 
     // Waits until the engine receives compaction finished request.
+    // TODO(yingwen): We need to wait in the background job.
     listener.wait_handle_finished().await;
 
     // Sets the region to read only mode.

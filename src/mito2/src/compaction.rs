@@ -41,6 +41,7 @@ use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::FilePurgerRef;
+use crate::worker::WorkerListener;
 
 /// Region compaction request.
 pub struct CompactionRequest {
@@ -57,6 +58,7 @@ pub struct CompactionRequest {
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) manifest_ctx: ManifestContextRef,
     pub(crate) version_control: VersionControlRef,
+    pub(crate) listener: WorkerListener,
 }
 
 impl CompactionRequest {
@@ -92,6 +94,7 @@ pub(crate) struct CompactionScheduler {
     request_sender: Sender<WorkerRequest>,
     cache_manager: CacheManagerRef,
     engine_config: Arc<MitoConfig>,
+    listener: WorkerListener,
 }
 
 impl CompactionScheduler {
@@ -100,6 +103,7 @@ impl CompactionScheduler {
         request_sender: Sender<WorkerRequest>,
         cache_manager: CacheManagerRef,
         engine_config: Arc<MitoConfig>,
+        listener: WorkerListener,
     ) -> Self {
         Self {
             scheduler,
@@ -107,6 +111,7 @@ impl CompactionScheduler {
             request_sender,
             cache_manager,
             engine_config,
+            listener,
         }
     }
 
@@ -139,6 +144,7 @@ impl CompactionScheduler {
             self.engine_config.clone(),
             self.cache_manager.clone(),
             manifest_ctx,
+            self.listener.clone(),
         );
         self.region_status.insert(region_id, status);
         self.schedule_compaction_request(request)
@@ -160,6 +166,7 @@ impl CompactionScheduler {
             self.engine_config.clone(),
             self.cache_manager.clone(),
             manifest_ctx,
+            self.listener.clone(),
         );
         // Try to schedule next compaction task for this region.
         if let Err(e) = self.schedule_compaction_request(request) {
@@ -334,6 +341,7 @@ impl CompactionStatus {
         engine_config: Arc<MitoConfig>,
         cache_manager: CacheManagerRef,
         manifest_ctx: &ManifestContextRef,
+        listener: WorkerListener,
     ) -> CompactionRequest {
         let current_version = self.version_control.current().version;
         let start_time = Instant::now();
@@ -348,6 +356,7 @@ impl CompactionStatus {
             cache_manager,
             manifest_ctx: manifest_ctx.clone(),
             version_control: self.version_control.clone(),
+            listener,
         };
 
         if let Some(pending) = self.pending_compaction.take() {

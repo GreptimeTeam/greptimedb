@@ -49,6 +49,7 @@ use crate::sst::file::{FileHandle, FileId, FileMeta, IndexType, Level};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::LevelMeta;
+use crate::worker::WorkerListener;
 
 const MAX_PARALLEL_COMPACTION: usize = 8;
 
@@ -138,6 +139,7 @@ impl Picker for TwcsPicker {
             cache_manager,
             manifest_ctx,
             version_control,
+            listener,
         } = req;
 
         let region_metadata = current_version.metadata.clone();
@@ -197,6 +199,7 @@ impl Picker for TwcsPicker {
             append_mode: current_version.options.append_mode,
             manifest_ctx,
             version_control,
+            listener,
         };
         Some(Box::new(task))
     }
@@ -270,6 +273,8 @@ pub(crate) struct TwcsCompactionTask {
     pub(crate) manifest_ctx: ManifestContextRef,
     /// Version control to update.
     pub(crate) version_control: VersionControlRef,
+    /// Event listener.
+    pub(crate) listener: WorkerListener,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -425,13 +430,18 @@ impl TwcsCompactionTask {
         deleted.extend(self.expired_ssts.iter().map(FileHandle::meta));
         let merge_time = merge_timer.stop_and_record();
         info!(
-            "Compacted SST files, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}, merge_time: {}s",
+            "Compacted SST files, region_id: {}, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}, merge_time: {}s",
+            self.region_id,
             deleted,
             added,
             self.compaction_time_window,
             self.waiters.len(),
             merge_time,
         );
+
+        self.listener
+            .on_handle_compaction_finished(self.region_id)
+            .await;
 
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])

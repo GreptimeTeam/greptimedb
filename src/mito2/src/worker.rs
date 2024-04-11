@@ -377,6 +377,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 sender.clone(),
                 self.cache_manager.clone(),
                 self.config,
+                self.listener.clone(),
             ),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
