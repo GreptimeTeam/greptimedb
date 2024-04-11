@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_runtime::Runtime;
-use common_telemetry::logging::{error, warn};
+use common_telemetry::logging::{debug, error, warn};
 use futures::StreamExt;
 use tokio::sync::broadcast;
 
@@ -100,7 +100,7 @@ impl OpentsdbServer {
                             }
                         });
                     }
-                    Err(error) => warn!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
+                    Err(error) => debug!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                 };
             }
         })
