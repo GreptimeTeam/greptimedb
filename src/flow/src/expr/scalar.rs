@@ -29,7 +29,9 @@ use crate::repr::ColumnType;
 /// A scalar expression with a known type.
 #[derive(Debug, Clone)]
 pub struct TypedExpr {
+    /// The expression.
     pub expr: ScalarExpr,
+    /// The type of the expression.
     pub typ: ColumnType,
 }
 
@@ -76,6 +78,38 @@ pub enum ScalarExpr {
         then: Box<ScalarExpr>,
         els: Box<ScalarExpr>,
     },
+}
+
+impl ScalarExpr {
+    /// apply optimization to the expression, like flatten variadic function
+    pub fn optimize(&mut self) {
+        self.flatten_varidic_fn();
+    }
+
+    /// Because Substrait's `And`/`Or` function is binary, but FlowPlan's
+    /// `And`/`Or` function is variadic, we need to flatten the `And` function if multiple `And`/`Or` functions are nested.
+    fn flatten_varidic_fn(&mut self) {
+        if let ScalarExpr::CallVariadic { func, exprs } = self {
+            let mut new_exprs = vec![];
+            for expr in std::mem::take(exprs) {
+                if let ScalarExpr::CallVariadic {
+                    func: inner_func,
+                    exprs: mut inner_exprs,
+                } = expr
+                {
+                    if *func == inner_func {
+                        for inner_expr in inner_exprs.iter_mut() {
+                            inner_expr.flatten_varidic_fn();
+                        }
+                        new_exprs.extend(inner_exprs);
+                    }
+                } else {
+                    new_exprs.push(expr);
+                }
+            }
+            *exprs = new_exprs;
+        }
+    }
 }
 
 impl ScalarExpr {

@@ -132,13 +132,12 @@ impl TypedExpr {
             _var => {
                 if let Ok(func) = VariadicFunc::from_str_and_types(fn_name, &arg_types) {
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
-                    Ok(TypedExpr::new(
-                        ScalarExpr::CallVariadic {
-                            func,
-                            exprs: arg_exprs,
-                        },
-                        ret_type,
-                    ))
+                    let mut expr = ScalarExpr::CallVariadic {
+                        func,
+                        exprs: arg_exprs,
+                    };
+                    expr.optimize();
+                    Ok(TypedExpr::new(expr, ret_type))
                 } else if let Ok(func) = UnmaterializableFunc::from_str(fn_name) {
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     Ok(TypedExpr::new(

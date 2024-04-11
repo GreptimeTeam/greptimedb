@@ -234,14 +234,15 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_where() {
+    async fn test_where_and() {
         let engine = create_test_query_engine();
-        let sql = "SELECT number FROM numbers WHERE number >= 1 AND number <= 3";
+        let sql = "SELECT number FROM numbers WHERE number >= 1 AND number <= 3 AND number!=2";
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
+        // TODO(discord9): optimize binary and to variadic and
         let filter = ScalarExpr::CallVariadic {
             func: VariadicFunc::And,
             exprs: vec![
@@ -252,6 +253,10 @@ mod test {
                 ScalarExpr::Column(0).call_binary(
                     ScalarExpr::Literal(Value::from(3u32), CDT::uint32_datatype()),
                     BinaryFunc::Lte,
+                ),
+                ScalarExpr::Column(0).call_binary(
+                    ScalarExpr::Literal(Value::from(2u32), CDT::uint32_datatype()),
+                    BinaryFunc::NotEq,
                 ),
             ],
         };
