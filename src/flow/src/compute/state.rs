@@ -21,6 +21,7 @@ use hydroflow::scheduled::SubgraphId;
 
 use crate::compute::types::ErrCollector;
 use crate::repr::{self, Timestamp};
+use crate::utils::{ArrangeHandler, Arrangement};
 
 /// input/output of a dataflow
 /// One `ComputeState` manage the input/output/schedule of one `Hydroflow`
@@ -41,6 +42,13 @@ pub struct DataflowState {
 }
 
 impl DataflowState {
+    pub fn new_arrange(&mut self, name: Option<Vec<String>>) -> ArrangeHandler {
+        let arrange = Arrangement::new();
+
+        // TODO: add handler to compute state for monitoring and debugging
+        ArrangeHandler::from(arrange)
+    }
+
     /// schedule all subgraph that need to run with time <= `as_of` and run_available()
     ///
     /// return true if any subgraph actually executed

@@ -138,6 +138,7 @@ pub struct Arrangement {
     expire_state: Option<KeyExpiryManager>,
     /// the time that the last compaction happened, also know as current time
     last_compaction_time: Option<Timestamp>,
+    name: Option<Vec<String>>,
 }
 
 impl Arrangement {
@@ -149,6 +150,18 @@ impl Arrangement {
             is_written: false,
             expire_state: None,
             last_compaction_time: None,
+            name: None,
+        }
+    }
+
+    pub fn new_with_name(name: Vec<String>) -> Self {
+        Self {
+            spine: Default::default(),
+            full_arrangement: false,
+            is_written: false,
+            expire_state: None,
+            last_compaction_time: None,
+            name: Some(name),
         }
     }
 

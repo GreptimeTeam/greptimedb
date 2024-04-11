@@ -35,7 +35,7 @@ use crate::expr::error::InternalSnafu;
 use crate::expr::{
     self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, SafeMfpPlan, ScalarExpr,
 };
-use crate::plan::{KeyValPlan, Plan, ReducePlan};
+use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, Arrangement};
 
@@ -182,8 +182,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
         // default to have a arrange with only future updates, so it can be empty if no temporal filter is applied
         // as stream only sends current updates and etc.
-        let arrange = Arrangement::new();
-        let arrange_handler = ArrangeHandler::from(arrange);
+        let arrange_handler = self.compute_state.new_arrange(None);
         let arrange_handler_inner =
             arrange_handler
                 .clone_future_only()
@@ -251,8 +250,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
         let output_key_arity = key_val_plan.key_plan.output_arity();
 
         // TODO: config global expire time from self
-        let arrange = Arrangement::new();
-        let arrange_handler = ArrangeHandler::from(arrange);
+        let arrange_handler = self.compute_state.new_arrange(None);
         // reduce need full arrangement to be able to query all keys
         let arrange_handler_inner =
             arrange_handler
@@ -260,6 +258,13 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 .with_context(|| PlanSnafu {
                     reason: "No write is expected at this point",
                 })?;
+
+        let distinct_input = self.add_accum_distinct_input_arrange(&reduce_plan);
+
+        let reduce_arrange = ReduceArrange {
+            output_arrange: arrange_handler_inner,
+            distinct_input,
+        };
 
         let now = self.compute_state.current_time_ref();
 
@@ -276,7 +281,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 let data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
 
                 reduce_subgraph(
-                    &arrange_handler_inner,
+                    &reduce_arrange,
                     data,
                     &key_val_plan,
                     &reduce_plan,
@@ -299,12 +304,72 @@ impl<'referred, 'df> Context<'referred, 'df> {
         };
         Ok(bundle)
     }
+
+    /// Contrast to it name, it's for adding distinct input for
+    /// accumulable reduce plan with distinct input,
+    /// like `select COUNT(DISTINCT col) from table`
+    fn add_accum_distinct_input_arrange(
+        &mut self,
+        reduce_plan: &ReducePlan,
+    ) -> Option<Vec<ArrangeHandler>> {
+        match reduce_plan {
+            ReducePlan::Distinct => None,
+            ReducePlan::Accumulable(AccumulablePlan { distinct_aggrs, .. }) => {
+                if distinct_aggrs.is_empty() {
+                    None
+                } else {
+                    Some(
+                        (0..distinct_aggrs.len())
+                            .map(|_| self.compute_state.new_arrange(None))
+                            .collect(),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// All arrange(aka state) used in reduce operator
+pub struct ReduceArrange {
+    /// The output arrange of reduce operator
+    output_arrange: ArrangeHandler,
+    /// The distinct input arrangement for accumulable reduce plan
+    /// only used when accumulable reduce plan has distinct aggregation
+    distinct_input: Option<Vec<ArrangeHandler>>,
+}
+
+/// split a row into key and val by evaluate the key and val plan
+fn split_row_to_key_val(
+    row: Row,
+    sys_time: repr::Timestamp,
+    diff: repr::Diff,
+    key_val_plan: &KeyValPlan,
+    row_buf: &mut Row,
+) -> Result<Option<KeyValDiffRow>, EvalError> {
+    if let Some(key) = key_val_plan
+        .key_plan
+        .evaluate_into(&mut row.inner.clone(), row_buf)?
+    {
+        // val_plan is not supported to carry any filter predicate,
+        let val = key_val_plan
+            .val_plan
+            .evaluate_into(&mut row.inner.clone(), row_buf)?
+            .with_context(|| InternalSnafu {
+                reason: "val_plan should not contain any filter predicate",
+            })?;
+        Ok(Some(((key, val), sys_time, diff)))
+    } else {
+        Ok(None)
+    }
 }
 
 /// reduce subgraph, reduce the input data into a single row
 /// output is concat from key and val
 fn reduce_subgraph(
-    arrange: &ArrangeHandler,
+    ReduceArrange {
+        output_arrange: arrange,
+        distinct_input,
+    }: &ReduceArrange,
     data: impl IntoIterator<Item = DiffRow>,
     key_val_plan: &KeyValPlan,
     reduce_plan: &ReducePlan,
@@ -317,30 +382,21 @@ fn reduce_subgraph(
         let key_val = data.into_iter().filter_map(|(row, sys_time, diff)| {
             // error is collected and then ignored
             err_collector
-                .run(|| {
-                    if let Some(key) = key_val_plan
-                        .key_plan
-                        .evaluate_into(&mut row.inner.clone(), &mut row_buf)?
-                    {
-                        // val_plan is not supported to carry any filter predicate,
-                        let val = key_val_plan
-                            .val_plan
-                            .evaluate_into(&mut row.inner.clone(), &mut row_buf)?
-                            .with_context(|| InternalSnafu {
-                                reason: "val_plan should not contain any filter predicate",
-                            })?;
-                        Ok(Some(((key, val), sys_time, diff)))
-                    } else {
-                        Ok(None)
-                    }
-                })
+                .run(|| split_row_to_key_val(row, sys_time, diff, key_val_plan, &mut row_buf))
                 .flatten()
         });
         let resul_updates = match reduce_plan {
             ReducePlan::Distinct => {
                 eval_reduce_distinct(&arrange.read(), key_val, now, err_collector)
             }
-            ReducePlan::Accumulable(_) => todo!(),
+            ReducePlan::Accumulable(accum_plan) => eval_reduce_accum(
+                &arrange.read(),
+                distinct_input,
+                key_val,
+                accum_plan,
+                now,
+                err_collector,
+            ),
         };
         arrange.write().apply_updates(now, resul_updates)?;
         Ok(())
@@ -396,6 +452,20 @@ fn eval_reduce_distinct(
             }
         })
         .collect()
+}
+
+/// eval accumulable reduce plan by eval aggregate function and reduce the result
+///
+/// TODO: eval distinct by adding distinct input arrangement
+fn eval_reduce_accum(
+    arrange: &ArrangeReader,
+    distinct_input: &Option<Vec<ArrangeHandler>>,
+    kv: impl IntoIterator<Item = KeyValDiffRow>,
+    accum_plan: &AccumulablePlan,
+    now: repr::Timestamp,
+    err_collector: &ErrCollector,
+) -> Vec<KeyValDiffRow> {
+    todo!()
 }
 
 fn mfp_subgraph(
