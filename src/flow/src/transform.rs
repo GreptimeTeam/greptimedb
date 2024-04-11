@@ -13,50 +13,13 @@
 // limitations under the License.
 
 //! Transform Substrait into execution plan
-
 use std::collections::HashMap;
 
-use common_decimal::Decimal128;
-use common_time::{Date, Timestamp};
-use datafusion_substrait::variation_const::{
-    DATE_32_TYPE_REF, DATE_64_TYPE_REF, DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF,
-    TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
-    UNSIGNED_INTEGER_TYPE_REF,
-};
-use datatypes::arrow::compute::kernels::window;
-use datatypes::arrow::ipc::Binary;
 use datatypes::data_type::ConcreteDataType as CDT;
-use datatypes::value::Value;
-use hydroflow::futures::future::Map;
-use itertools::Itertools;
-use snafu::{OptionExt, ResultExt};
-use substrait::substrait_proto::proto::aggregate_function::AggregationInvocation;
-use substrait::substrait_proto::proto::aggregate_rel::{Grouping, Measure};
-use substrait::substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
-use substrait::substrait_proto::proto::expression::literal::LiteralType;
-use substrait::substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
-use substrait::substrait_proto::proto::expression::{
-    IfThen, Literal, MaskExpression, RexType, ScalarFunction,
-};
-use substrait::substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
-use substrait::substrait_proto::proto::extensions::SimpleExtensionDeclaration;
-use substrait::substrait_proto::proto::function_argument::ArgType;
-use substrait::substrait_proto::proto::r#type::Kind;
-use substrait::substrait_proto::proto::read_rel::ReadType;
-use substrait::substrait_proto::proto::rel::RelType;
-use substrait::substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
-use crate::adapter::error::{
-    DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
-    TableNotFoundSnafu,
-};
-use crate::expr::{
-    AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
-    UnaryFunc, UnmaterializableFunc, VariadicFunc,
-};
-use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan, TypedPlan};
-use crate::repr::{self, ColumnType, RelationType};
-
+use crate::adapter::error::{Error, NotImplementedSnafu, TableNotFoundSnafu};
+use crate::expr::GlobalId;
+use crate::repr::RelationType;
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -81,6 +44,9 @@ mod literal;
 mod plan;
 
 use literal::{from_substrait_literal, from_substrait_type};
+use snafu::OptionExt;
+use substrait::substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
+use substrait::substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 /// In Substrait, a function can be define by an u32 anchor, and the anchor can be mapped to a name
 ///
@@ -158,10 +124,12 @@ mod test {
     use query::plan::LogicalPlan;
     use query::QueryEngine;
     use session::context::QueryContext;
+    use substrait::substrait_proto::proto;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
+    use crate::repr::ColumnType;
 
     pub fn create_test_ctx() -> DataflowContext {
         let gid = GlobalId::User(0);

@@ -501,8 +501,8 @@ impl BinaryFunc {
         let spec_fn = Self::specialization(generic_fn, query_input_type)?;
 
         let signature = Signature {
-            input: smallvec![arg_type.clone(), arg_type.clone()],
-            output: spec_fn.signature().output.clone(),
+            input: smallvec![arg_type.clone(), arg_type],
+            output: spec_fn.signature().output,
             generic_fn,
         };
 
@@ -767,7 +767,7 @@ fn test_num_ops() {
     assert_eq!(res, Value::from(30));
     let res = div::<i32>(left.clone(), right.clone()).unwrap();
     assert_eq!(res, Value::from(3));
-    let res = rem::<i32>(left.clone(), right.clone()).unwrap();
+    let res = rem::<i32>(left, right).unwrap();
     assert_eq!(res, Value::from(1));
 
     let values = vec![Value::from(true), Value::from(false)];

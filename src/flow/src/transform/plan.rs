@@ -112,8 +112,8 @@ impl TypedPlan {
                 };
                 input.filter(expr)
             }
-            Some(RelType::Read(read)) => match &read.as_ref().read_type {
-                Some(ReadType::NamedTable(nt)) => {
+            Some(RelType::Read(read)) => {
+                if let Some(ReadType::NamedTable(nt)) = &read.as_ref().read_type {
                     let table_reference = nt.names.clone();
                     let table = ctx.table(&table_reference)?;
                     let get_table = Plan::Get {
@@ -124,26 +124,27 @@ impl TypedPlan {
                         plan: get_table,
                     };
 
-                    match &read.projection {
-                        Some(MaskExpression {
-                            select: Some(projection),
-                            ..
-                        }) => {
-                            let column_indices: Vec<usize> = projection
-                                .struct_items
-                                .iter()
-                                .map(|item| item.field as usize)
-                                .collect();
-                            let input_arity = get_table.typ.column_types.len();
-                            let mfp = MapFilterProject::new(input_arity)
-                                .project(column_indices.clone())?;
-                            get_table.mfp(mfp)
-                        }
-                        _ => Ok(get_table),
+                    if let Some(MaskExpression {
+                        select: Some(projection),
+                        ..
+                    }) = &read.projection
+                    {
+                        let column_indices: Vec<usize> = projection
+                            .struct_items
+                            .iter()
+                            .map(|item| item.field as usize)
+                            .collect();
+                        let input_arity = get_table.typ.column_types.len();
+                        let mfp =
+                            MapFilterProject::new(input_arity).project(column_indices.clone())?;
+                        get_table.mfp(mfp)
+                    } else {
+                        Ok(get_table)
                     }
+                } else {
+                    not_impl_err!("Only NamedTable reads are supported")
                 }
-                _ => not_impl_err!("Only NamedTable reads are supported"),
-            },
+            }
             Some(RelType::Aggregate(agg)) => {
                 TypedPlan::from_substrait_agg_rel(ctx, agg, extensions)
             }

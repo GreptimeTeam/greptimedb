@@ -93,10 +93,11 @@ impl AggregateExpr {
         let mut aggr_exprs = vec![];
 
         for m in measures {
-            let filter = match &m.filter {
-                Some(fil) => Some(TypedExpr::from_substrait_rex(fil, typ, extensions)?),
-                None => None,
-            };
+            let filter = &m
+                .filter
+                .as_ref()
+                .map(|fil| TypedExpr::from_substrait_rex(fil, typ, extensions))
+                .transpose()?;
 
             let agg_func = match &m.measure {
                 Some(f) => {
@@ -107,12 +108,12 @@ impl AggregateExpr {
                     };
                     AggregateExpr::from_substrait_agg_func(
                         f, typ, extensions, filter, // TODO(discord9): impl order_by
-                        None, distinct,
+                        &None, distinct,
                     )
                 }
                 None => not_impl_err!("Aggregate without aggregate function is not supported"),
-            };
-            aggr_exprs.push(agg_func?.clone());
+            }?;
+            aggr_exprs.push(agg_func);
         }
         Ok(aggr_exprs)
     }
@@ -122,8 +123,8 @@ impl AggregateExpr {
         f: &proto::AggregateFunction,
         input_schema: &RelationType,
         extensions: &FunctionExtensions,
-        filter: Option<TypedExpr>,
-        order_by: Option<Vec<TypedExpr>>,
+        filter: &Option<TypedExpr>,
+        order_by: &Option<Vec<TypedExpr>>,
         distinct: bool,
     ) -> Result<AggregateExpr, Error> {
         // TODO(discord9): impl filter
@@ -172,11 +173,11 @@ impl KeyValPlan {
         group_exprs: &[TypedExpr],
         input_arity: usize,
     ) -> Result<KeyValPlan, Error> {
-        let (group_expr_val, _group_expr_type): (Vec<_>, Vec<_>) = group_exprs
+        let group_expr_val = group_exprs
             .iter()
             .cloned()
-            .map(|TypedExpr { expr, typ }| (expr, typ))
-            .unzip();
+            .map(|expr| expr.expr.clone())
+            .collect_vec();
         let output_arity = group_expr_val.len();
         let key_plan = MapFilterProject::new(input_arity)
             .map(group_expr_val)?
@@ -200,7 +201,7 @@ impl KeyValPlan {
                 let aggr_arity = aggr_exprs.len();
 
                 MapFilterProject::new(input_arity)
-                    .map(input_exprs.clone())?
+                    .map(input_exprs)?
                     .project(input_arity..input_arity + aggr_arity)?
             } else {
                 // simply take all inputs as value

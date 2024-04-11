@@ -40,15 +40,15 @@ impl TypedExpr {
         input_schema: &RelationType,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
-        let fn_name = extensions.get(&f.function_reference).ok_or_else(|| {
-            NotImplementedSnafu {
-                reason: format!(
-                    "Aggregated function not found: function reference = {:?}",
-                    f.function_reference
-                ),
-            }
-            .build()
-        })?;
+        let fn_name =
+            extensions
+                .get(&f.function_reference)
+                .with_context(|| NotImplementedSnafu {
+                    reason: format!(
+                        "Aggregated function not found: function reference = {:?}",
+                        f.function_reference
+                    ),
+                })?;
         let arg_len = f.arguments.len();
         let arg_exprs: Vec<TypedExpr> = f
             .arguments
@@ -184,7 +184,8 @@ impl TypedExpr {
                     ColumnType::new_nullable(CDT::null_datatype()),
                 )
             });
-        fn build_if_then(
+
+        fn build_if_then_recur(
             mut next_if_then: impl Iterator<Item = (TypedExpr, TypedExpr)>,
             els: TypedExpr,
         ) -> TypedExpr {
@@ -194,7 +195,7 @@ impl TypedExpr {
                     ScalarExpr::If {
                         cond: Box::new(cond.expr),
                         then: Box::new(then.expr),
-                        els: Box::new(build_if_then(next_if_then, els).expr),
+                        els: Box::new(build_if_then_recur(next_if_then, els).expr),
                     },
                     then.typ,
                 )
@@ -202,7 +203,7 @@ impl TypedExpr {
                 els
             }
         }
-        let expr_if = build_if_then(ifs.into_iter(), els);
+        let expr_if = build_if_then_recur(ifs.into_iter(), els);
         Ok(expr_if)
     }
     /// Convert Substrait Rex into Flow's ScalarExpr
