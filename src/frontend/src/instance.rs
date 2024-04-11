@@ -40,8 +40,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::logging::info;
-use common_telemetry::{error, tracing};
+use common_telemetry::{debug, error, info, tracing};
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
@@ -326,6 +325,8 @@ impl SqlQueryHandler for Instance {
                             let redacted = sql::util::redact_sql_secrets(query.as_ref());
                             if e.status_code().should_log_error() {
                                 error!(e; "Failed to execute query: {redacted}");
+                            } else {
+                                debug!("Failed to execute query: {redacted}, {e}");
                             }
 
                             results.push(Err(e));
