@@ -12,8 +12,8 @@ workspace = true
 
 [dependencies]
 api.workspace = true
-arrow.workspace = true
 arrow-schema.workspace = true
+arrow.workspace = true
 async-stream.workspace = true
 async-trait = "0.1"
 common-catalog.workspace = true

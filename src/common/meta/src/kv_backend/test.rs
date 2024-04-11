@@ -35,6 +35,10 @@ pub fn mock_kvs() -> Vec<KeyValue> {
             key: b"key3".to_vec(),
             value: b"val3".to_vec(),
         },
+        KeyValue {
+            key: b"key11".to_vec(),
+            value: b"val11".to_vec(),
+        },
     ]
 }
 
@@ -47,18 +51,20 @@ pub async fn prepare_kv(kv_backend: &impl KvBackend) {
         })
         .await
         .is_ok());
+}
 
+pub async fn unprepare_kv(kv_backend: &impl KvBackend) {
+    let keys = mock_kvs().iter().map(|kv| kv.key.clone()).collect();
     assert!(kv_backend
-        .put(PutRequest {
-            key: b"key11".to_vec(),
-            value: b"val11".to_vec(),
+        .batch_delete(BatchDeleteRequest {
+            keys,
             ..Default::default()
         })
         .await
         .is_ok());
 }
 
-pub async fn test_kv_put(kv_backend: impl KvBackend) {
+pub async fn test_kv_put(kv_backend: &impl KvBackend) {
     let resp = kv_backend
         .put(PutRequest {
             key: b"key11".to_vec(),
@@ -82,7 +88,7 @@ pub async fn test_kv_put(kv_backend: impl KvBackend) {
     assert_eq!(b"val12", prev_kv.value());
 }
 
-pub async fn test_kv_range(kv_backend: impl KvBackend) {
+pub async fn test_kv_range(kv_backend: &impl KvBackend) {
     let key = b"key1".to_vec();
     let range_end = util::get_prefix_end_key(b"key1");
 
@@ -218,6 +224,13 @@ pub async fn test_kv_range_2(kv_backend: impl KvBackend) {
         .unwrap();
     assert_eq!(result.kvs.len(), 2);
     assert!(!result.more);
+
+    let req = BatchDeleteRequest {
+        keys: vec![b"atest".to_vec(), b"test".to_vec()],
+        prev_kv: false,
+    };
+    let resp = kv_backend.batch_delete(req).await.unwrap();
+    assert!(resp.prev_kvs.is_empty());
 }
 
 pub async fn test_kv_batch_get(kv_backend: impl KvBackend) {
