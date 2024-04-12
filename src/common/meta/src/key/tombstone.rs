@@ -56,11 +56,6 @@ impl<T: TableMetaKey> TombstoneKey<&T> {
         let key = self.0.as_raw_key();
         to_tombstone(&key)
     }
-
-    /// Returns the tombstone key.
-    fn into_tombstone_key(self) -> Vec<u8> {
-        self.to_tombstone_key()
-    }
 }
 
 impl<T: TableMetaKey> TableMetaKeyGetTxnOp for TombstoneKey<&T> {
@@ -83,6 +78,16 @@ pub(crate) enum Key<T> {
 }
 
 impl<T> Key<T> {
+    /// Returns a new [Key::Atomic].
+    pub(crate) fn atomic(key: T) -> Self {
+        Self::Atomic(key)
+    }
+
+    /// Returns a new [Key::Other].
+    pub(crate) fn other(key: T) -> Self {
+        Self::Other(key)
+    }
+
     fn get_inner(&self) -> &T {
         match self {
             Key::Atomic(key) => key,
@@ -228,5 +233,230 @@ impl TombstoneManager {
         // Always success.
         let _ = self.kv_backend.txn(txn).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use std::sync::Arc;
+
+    use crate::key::tombstone::{Key, TombstoneKey, TombstoneManager};
+    use crate::key::txn_helper::TxnOpGetResponseSet;
+    use crate::key::{TableMetaKey, TableMetaKeyGetTxnOp};
+    use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::kv_backend::txn::TxnOp;
+    use crate::kv_backend::KvBackend;
+    use crate::rpc::store::PutRequest;
+
+    impl TableMetaKey for &str {
+        fn as_raw_key(&self) -> Vec<u8> {
+            self.as_bytes().to_vec()
+        }
+    }
+
+    impl TableMetaKeyGetTxnOp for &str {
+        fn build_get_op(
+            &self,
+        ) -> (
+            TxnOp,
+            impl for<'a> FnMut(&'a mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
+        ) {
+            let raw_key = self.as_raw_key();
+            (
+                TxnOp::Get(raw_key.clone()),
+                TxnOpGetResponseSet::filter(raw_key),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_tombstone() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        kv_backend
+            .put(PutRequest::new().with_key("bar").with_value("baz"))
+            .await
+            .unwrap();
+        kv_backend
+            .put(PutRequest::new().with_key("foo").with_value("hi"))
+            .await
+            .unwrap();
+        assert!(tombstone_manager
+            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .await
+            .unwrap());
+        assert!(!kv_backend.exists(b"bar").await.unwrap());
+        assert!(!kv_backend.exists(b"foo").await.unwrap());
+        assert_eq!(
+            kv_backend
+                .get(&TombstoneKey(&"bar").to_tombstone_key())
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            b"baz"
+        );
+        assert_eq!(
+            kv_backend
+                .get(&TombstoneKey(&"foo").to_tombstone_key())
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            b"hi"
+        );
+        assert_eq!(kv_backend.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_create_tombstone_without_atomic_key() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        kv_backend
+            .put(PutRequest::new().with_key("bar").with_value("baz"))
+            .await
+            .unwrap();
+        kv_backend
+            .put(PutRequest::new().with_key("foo").with_value("hi"))
+            .await
+            .unwrap();
+        assert!(tombstone_manager
+            .create(vec![Key::other("bar"), Key::other("foo")])
+            .await
+            .unwrap());
+        assert!(!kv_backend.exists(b"bar").await.unwrap());
+        assert!(!kv_backend.exists(b"foo").await.unwrap());
+        assert_eq!(
+            kv_backend
+                .get(&TombstoneKey(&"bar").to_tombstone_key())
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            b"baz"
+        );
+        assert_eq!(
+            kv_backend
+                .get(&TombstoneKey(&"foo").to_tombstone_key())
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            b"hi"
+        );
+        assert_eq!(kv_backend.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_create_tombstone_origin_value_not_found_err() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+
+        kv_backend
+            .put(PutRequest::new().with_key("bar").with_value("baz"))
+            .await
+            .unwrap();
+        kv_backend
+            .put(PutRequest::new().with_key("foo").with_value("hi"))
+            .await
+            .unwrap();
+
+        let err = tombstone_manager
+            .create(vec![Key::atomic("bar"), Key::other("baz")])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Missing value"));
+    }
+
+    #[tokio::test]
+    async fn test_restore_tombstone() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        kv_backend
+            .put(PutRequest::new().with_key("bar").with_value("baz"))
+            .await
+            .unwrap();
+        kv_backend
+            .put(PutRequest::new().with_key("foo").with_value("hi"))
+            .await
+            .unwrap();
+        let expected_kvs = kv_backend.dump();
+        assert!(tombstone_manager
+            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .await
+            .unwrap());
+        assert!(tombstone_manager
+            .restore(vec![Key::atomic("bar"), Key::other("foo")])
+            .await
+            .unwrap());
+        assert_eq!(expected_kvs, kv_backend.dump());
+    }
+
+    #[tokio::test]
+    async fn test_restore_tombstone_without_atomic_key() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        kv_backend
+            .put(PutRequest::new().with_key("bar").with_value("baz"))
+            .await
+            .unwrap();
+        kv_backend
+            .put(PutRequest::new().with_key("foo").with_value("hi"))
+            .await
+            .unwrap();
+        let expected_kvs = kv_backend.dump();
+        assert!(tombstone_manager
+            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .await
+            .unwrap());
+        assert!(tombstone_manager
+            .restore(vec![Key::other("bar"), Key::other("foo")])
+            .await
+            .unwrap());
+        assert_eq!(expected_kvs, kv_backend.dump());
+    }
+
+    #[tokio::test]
+    async fn test_restore_tombstone_origin_value_not_found_err() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        kv_backend
+            .put(PutRequest::new().with_key("bar").with_value("baz"))
+            .await
+            .unwrap();
+        kv_backend
+            .put(PutRequest::new().with_key("foo").with_value("hi"))
+            .await
+            .unwrap();
+        assert!(tombstone_manager
+            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .await
+            .unwrap());
+        let err = tombstone_manager
+            .restore(vec![Key::other("bar"), Key::other("baz")])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Missing value"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_tombstone() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        kv_backend
+            .put(PutRequest::new().with_key("bar").with_value("baz"))
+            .await
+            .unwrap();
+        kv_backend
+            .put(PutRequest::new().with_key("foo").with_value("hi"))
+            .await
+            .unwrap();
+        assert!(tombstone_manager
+            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .await
+            .unwrap());
+        tombstone_manager.delete(vec!["bar", "foo"]).await.unwrap();
+        assert!(kv_backend.is_empty());
     }
 }

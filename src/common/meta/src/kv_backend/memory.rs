@@ -83,6 +83,12 @@ impl<T> MemoryKvBackend<T> {
         let kvs = self.kvs.read().unwrap();
         kvs.clone()
     }
+
+    #[cfg(test)]
+    /// Returns the length of `kvs`
+    pub fn len(&self) -> usize {
+        self.kvs.read().unwrap().len()
+    }
 }
 
 #[async_trait]

@@ -20,7 +20,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use super::txn_helper::TxnOpGetResponseSet;
 use super::{txn_helper, DeserializedValueWithBytes, TableMetaValue};
 use crate::error::{
     self, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
