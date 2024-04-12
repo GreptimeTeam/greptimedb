@@ -22,7 +22,6 @@ use snafu::OptionExt;
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
-use super::DeserializedValueWithBytes;
 use crate::error::{InvalidTableMetadataSnafu, Result};
 use crate::key::{
     RegionDistribution, TableMetaKey, TableMetaValue, DATANODE_TABLE_KEY_PATTERN,
@@ -31,7 +30,7 @@ use crate::key::{
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::{BatchGetRequest, RangeRequest};
+use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 use crate::DatanodeId;
 
@@ -275,23 +274,6 @@ impl DatanodeTableManager {
         let txn = Txn::new().and_then(txns);
 
         Ok(txn)
-    }
-
-    /// Returns batch of [DatanodeTableValue].
-    pub async fn batch_get(
-        &self,
-        keys: &[DatanodeTableKey],
-    ) -> Result<Vec<DeserializedValueWithBytes<DatanodeTableValue>>> {
-        let keys = keys.iter().map(|key| key.as_raw_key()).collect::<Vec<_>>();
-
-        let resp = self.kv_backend.batch_get(BatchGetRequest { keys }).await?;
-
-        let values = resp
-            .kvs
-            .iter()
-            .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(values)
     }
 }
 
