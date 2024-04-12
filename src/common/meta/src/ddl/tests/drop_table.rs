@@ -67,8 +67,7 @@ async fn test_on_prepare_table_not_exists_err() {
     };
 
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context);
-    let executor = procedure.executor();
-    let err = procedure.on_prepare(&executor).await.unwrap_err();
+    let err = procedure.on_prepare().await.unwrap_err();
     assert_eq!(err.status_code(), StatusCode::TableNotFound);
 }
 
@@ -101,8 +100,7 @@ async fn test_on_prepare_table() {
 
     // Drop if exists
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
-    let executor = procedure.executor();
-    procedure.on_prepare(&executor).await.unwrap();
+    procedure.on_prepare().await.unwrap();
 
     let task = DropTableTask {
         catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -114,8 +112,7 @@ async fn test_on_prepare_table() {
 
     // Drop table
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context);
-    let executor = procedure.executor();
-    procedure.on_prepare(&executor).await.unwrap();
+    procedure.on_prepare().await.unwrap();
 }
 
 #[tokio::test]
@@ -170,9 +167,8 @@ async fn test_on_datanode_drop_regions() {
     };
     // Drop table
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context);
-    let executor = procedure.executor();
-    procedure.on_prepare(&executor).await.unwrap();
-    procedure.on_datanode_drop_regions(&executor).await.unwrap();
+    procedure.on_prepare().await.unwrap();
+    procedure.on_datanode_drop_regions().await.unwrap();
 
     let check = |peer: Peer,
                  request: RegionRequest,
@@ -259,9 +255,8 @@ async fn test_on_rollback() {
             drop_if_exists: false,
         };
         let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
-        let executor = procedure.executor();
-        procedure.on_prepare(&executor).await.unwrap();
-        procedure.on_remove_metadata(&executor).await.unwrap();
+        procedure.on_prepare().await.unwrap();
+        procedure.on_remove_metadata().await.unwrap();
         let ctx = ProcedureContext {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
@@ -282,9 +277,8 @@ async fn test_on_rollback() {
         drop_if_exists: false,
     };
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
-    let executor = procedure.executor();
-    procedure.on_prepare(&executor).await.unwrap();
-    procedure.on_remove_metadata(&executor).await.unwrap();
+    procedure.on_prepare().await.unwrap();
+    procedure.on_remove_metadata().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
