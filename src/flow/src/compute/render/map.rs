@@ -174,3 +174,162 @@ fn eval_mfp_core(
     }
     all_updates
 }
+
+#[cfg(test)]
+mod test {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use datatypes::data_type::ConcreteDataType;
+    use hydroflow::scheduled::graph::Hydroflow;
+
+    use super::*;
+    use crate::compute::render::test::harness_test_ctx;
+    use crate::compute::state::DataflowState;
+    use crate::expr::{self, BinaryFunc, GlobalId};
+    /// test if temporal filter works properly
+    /// namely: if mfp operator can schedule a delete at the correct time
+    #[test]
+    fn test_render_mfp_with_temporal() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let rows = vec![
+            (Row::new(vec![1i64.into()]), 1, 1),
+            (Row::new(vec![2i64.into()]), 2, 1),
+            (Row::new(vec![3i64.into()]), 3, 1),
+        ];
+        let collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(1), collection);
+        let input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(1)),
+        };
+        // temporal filter: now <= col(0) < now + 4
+        let mfp = MapFilterProject::new(1)
+            .filter(vec![
+                ScalarExpr::Column(0)
+                    .call_unary(expr::UnaryFunc::Cast(ConcreteDataType::datetime_datatype()))
+                    .call_binary(
+                        ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),
+                        BinaryFunc::Gte,
+                    ),
+                ScalarExpr::Column(0)
+                    .call_binary(
+                        ScalarExpr::literal(4i64.into(), ConcreteDataType::int64_datatype()),
+                        BinaryFunc::SubInt64,
+                    )
+                    .call_unary(expr::UnaryFunc::Cast(ConcreteDataType::datetime_datatype()))
+                    .call_binary(
+                        ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),
+                        BinaryFunc::Lt,
+                    ),
+            ])
+            .unwrap();
+
+        let mut bundle = ctx
+            .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
+            .unwrap();
+        let collection = bundle.collection;
+        let _arranged = bundle.arranged.pop_first().unwrap().1;
+        let output = Rc::new(RefCell::new(vec![]));
+        let output_inner = output.clone();
+        let _subgraph = ctx.df.add_subgraph_sink(
+            "test_render_constant",
+            collection.into_inner(),
+            move |_ctx, recv| {
+                let data = recv.take_inner();
+                let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
+                output_inner.borrow_mut().clear();
+                output_inner.borrow_mut().extend(res);
+            },
+        );
+        // drop ctx here to simulate actual process of compile first, run later scenario
+        drop(ctx);
+        // expected output at given time
+        let expected_output = BTreeMap::from([
+            (
+                0, // time
+                vec![
+                    (Row::new(vec![1i64.into()]), 0, 1),
+                    (Row::new(vec![2i64.into()]), 0, 1),
+                    (Row::new(vec![3i64.into()]), 0, 1),
+                ],
+            ),
+            (
+                2, // time
+                vec![(Row::new(vec![1i64.into()]), 2, -1)],
+            ),
+            (
+                3, // time
+                vec![(Row::new(vec![2i64.into()]), 3, -1)],
+            ),
+            (
+                4, // time
+                vec![(Row::new(vec![3i64.into()]), 4, -1)],
+            ),
+        ]);
+
+        for now in 0i64..5 {
+            state.set_current_ts(now);
+            state.run_available_with_schedule(&mut df);
+            assert!(state.get_err_collector().inner.borrow().is_empty());
+            if let Some(expected) = expected_output.get(&now) {
+                assert_eq!(*output.borrow(), *expected);
+            } else {
+                assert_eq!(*output.borrow(), vec![]);
+            };
+            output.borrow_mut().clear();
+        }
+    }
+
+    /// test if mfp operator without temporal filter works properly
+    /// that is it filter the rows correctly
+    #[test]
+    fn test_render_mfp() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let rows = vec![
+            (Row::new(vec![1.into()]), 1, 1),
+            (Row::new(vec![2.into()]), 2, 1),
+            (Row::new(vec![3.into()]), 3, 1),
+        ];
+        let collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(1), collection);
+        let input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(1)),
+        };
+        // filter: col(0)>1
+        let mfp = MapFilterProject::new(1)
+            .filter(vec![ScalarExpr::Column(0).call_binary(
+                ScalarExpr::literal(1.into(), ConcreteDataType::int32_datatype()),
+                BinaryFunc::Gt,
+            )])
+            .unwrap();
+        let bundle = ctx
+            .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
+            .unwrap();
+        let collection = bundle.collection.clone(ctx.df);
+
+        ctx.df.add_subgraph_sink(
+            "test_render_constant",
+            collection.into_inner(),
+            move |_ctx, recv| {
+                let data = recv.take_inner();
+                let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
+                assert_eq!(
+                    res,
+                    vec![
+                        (Row::new(vec![2.into()]), 0, 1),
+                        (Row::new(vec![3.into()]), 0, 1),
+                    ]
+                )
+            },
+        );
+        drop(ctx);
+
+        df.run_available();
+    }
+}
