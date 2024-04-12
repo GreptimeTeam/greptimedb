@@ -628,9 +628,9 @@ mod tests {
     }
 
     use crate::kv_backend::test::{
-        prepare_kv_with_perfix, test_kv_batch_delete_with_perfix, test_kv_batch_get_with_perfix,
-        test_kv_compare_and_put_with_perfix, test_kv_delete_range_with_perfix,
-        test_kv_put_with_perfix, test_kv_range_2_with_perfix, test_kv_range_with_perfix,
+        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
+        test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
+        test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
         unprepare_kv,
     };
 
@@ -660,10 +660,10 @@ mod tests {
     async fn test_put() {
         match build_kv_backend().await {
             Some(kv_backend) => {
-                let perfix = b"put/";
-                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
-                test_kv_put_with_perfix(&kv_backend, perfix.to_vec()).await;
-                unprepare_kv(&kv_backend, perfix).await;
+                let prefix = b"put/";
+                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+                test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
+                unprepare_kv(&kv_backend, prefix).await;
             }
             None => {}
         }
@@ -673,10 +673,10 @@ mod tests {
     async fn test_range() {
         match build_kv_backend().await {
             Some(kv_backend) => {
-                let perfix = b"range/";
-                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
-                test_kv_range_with_perfix(&kv_backend, perfix.to_vec()).await;
-                unprepare_kv(&kv_backend, perfix).await;
+                let prefix = b"range/";
+                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+                test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+                unprepare_kv(&kv_backend, prefix).await;
             }
             None => {}
         }
@@ -686,7 +686,7 @@ mod tests {
     async fn test_range_2() {
         match build_kv_backend().await {
             Some(kv_backend) => {
-                test_kv_range_2_with_perfix(kv_backend, b"range2/".to_vec()).await;
+                test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
             }
             None => {}
         }
@@ -696,10 +696,10 @@ mod tests {
     async fn test_batch_get() {
         match build_kv_backend().await {
             Some(kv_backend) => {
-                let perfix = b"batchGet/";
-                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
-                test_kv_batch_get_with_perfix(&kv_backend, perfix.to_vec()).await;
-                unprepare_kv(&kv_backend, perfix).await;
+                let prefix = b"batchGet/";
+                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+                test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
+                unprepare_kv(&kv_backend, prefix).await;
             }
             None => {}
         }
@@ -710,7 +710,7 @@ mod tests {
         match build_kv_backend().await {
             Some(kv_backend) => {
                 let kv_backend = Arc::new(kv_backend);
-                test_kv_compare_and_put_with_perfix(kv_backend, b"compareAndPut/".to_vec()).await;
+                test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
             }
             None => {}
         }
@@ -720,9 +720,9 @@ mod tests {
     async fn test_delete_range() {
         match build_kv_backend().await {
             Some(kv_backend) => {
-                let perfix = b"deleteRange/";
-                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
-                test_kv_delete_range_with_perfix(kv_backend, perfix.to_vec()).await;
+                let prefix = b"deleteRange/";
+                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+                test_kv_delete_range_with_prefix(kv_backend, prefix.to_vec()).await;
             }
             None => {}
         }
@@ -732,9 +732,9 @@ mod tests {
     async fn test_batch_delete() {
         match build_kv_backend().await {
             Some(kv_backend) => {
-                let perfix = b"batchDelete/";
-                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
-                test_kv_batch_delete_with_perfix(kv_backend, perfix.to_vec()).await;
+                let prefix = b"batchDelete/";
+                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+                test_kv_batch_delete_with_prefix(kv_backend, prefix.to_vec()).await;
             }
             None => {}
         }

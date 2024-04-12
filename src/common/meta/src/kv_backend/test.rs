@@ -21,33 +21,33 @@ use crate::rpc::store::{BatchGetRequest, PutRequest};
 use crate::rpc::KeyValue;
 use crate::util;
 
-pub fn mock_kvs(perfix: Vec<u8>) -> Vec<KeyValue> {
+pub fn mock_kvs(prefix: Vec<u8>) -> Vec<KeyValue> {
     vec![
         KeyValue {
-            key: [perfix.clone(), b"key1".to_vec()].concat(),
+            key: [prefix.clone(), b"key1".to_vec()].concat(),
             value: b"val1".to_vec(),
         },
         KeyValue {
-            key: [perfix.clone(), b"key2".to_vec()].concat(),
+            key: [prefix.clone(), b"key2".to_vec()].concat(),
             value: b"val2".to_vec(),
         },
         KeyValue {
-            key: [perfix.clone(), b"key3".to_vec()].concat(),
+            key: [prefix.clone(), b"key3".to_vec()].concat(),
             value: b"val3".to_vec(),
         },
         KeyValue {
-            key: [perfix.clone(), b"key11".to_vec()].concat(),
+            key: [prefix.clone(), b"key11".to_vec()].concat(),
             value: b"val11".to_vec(),
         },
     ]
 }
 
 pub async fn prepare_kv(kv_backend: &impl KvBackend) {
-    prepare_kv_with_perfix(kv_backend, vec![]).await;
+    prepare_kv_with_prefix(kv_backend, vec![]).await;
 }
 
-pub async fn prepare_kv_with_perfix(kv_backend: &impl KvBackend, perfix: Vec<u8>) {
-    let kvs = mock_kvs(perfix);
+pub async fn prepare_kv_with_prefix(kv_backend: &impl KvBackend, prefix: Vec<u8>) {
+    let kvs = mock_kvs(prefix);
     assert!(kv_backend
         .batch_put(BatchPutRequest {
             kvs,
@@ -57,11 +57,11 @@ pub async fn prepare_kv_with_perfix(kv_backend: &impl KvBackend, perfix: Vec<u8>
         .is_ok());
 }
 
-pub async fn unprepare_kv(kv_backend: &impl KvBackend, perfix: &[u8]) {
-    let range_end = util::get_prefix_end_key(perfix);
+pub async fn unprepare_kv(kv_backend: &impl KvBackend, prefix: &[u8]) {
+    let range_end = util::get_prefix_end_key(prefix);
     assert!(kv_backend
         .delete_range(DeleteRangeRequest {
-            key: perfix.to_vec(),
+            key: prefix.to_vec(),
             range_end,
             ..Default::default()
         })
@@ -70,11 +70,11 @@ pub async fn unprepare_kv(kv_backend: &impl KvBackend, perfix: &[u8]) {
 }
 
 pub async fn test_kv_put(kv_backend: &impl KvBackend) {
-    test_kv_put_with_perfix(kv_backend, vec![]).await;
+    test_kv_put_with_prefix(kv_backend, vec![]).await;
 }
 
-pub async fn test_kv_put_with_perfix(kv_backend: &impl KvBackend, perfix: Vec<u8>) {
-    let put_key = [perfix.clone(), b"key11".to_vec()].concat();
+pub async fn test_kv_put_with_prefix(kv_backend: &impl KvBackend, prefix: Vec<u8>) {
+    let put_key = [prefix.clone(), b"key11".to_vec()].concat();
     let resp = kv_backend
         .put(PutRequest {
             key: put_key.clone(),
@@ -99,12 +99,12 @@ pub async fn test_kv_put_with_perfix(kv_backend: &impl KvBackend, perfix: Vec<u8
 }
 
 pub async fn test_kv_range(kv_backend: &impl KvBackend) {
-    test_kv_range_with_perfix(kv_backend, vec![]).await;
+    test_kv_range_with_prefix(kv_backend, vec![]).await;
 }
 
-pub async fn test_kv_range_with_perfix(kv_backend: &impl KvBackend, perfix: Vec<u8>) {
-    let key = [perfix.clone(), b"key1".to_vec()].concat();
-    let key11 = [perfix.clone(), b"key11".to_vec()].concat();
+pub async fn test_kv_range_with_prefix(kv_backend: &impl KvBackend, prefix: Vec<u8>) {
+    let key = [prefix.clone(), b"key1".to_vec()].concat();
+    let key11 = [prefix.clone(), b"key11".to_vec()].concat();
     let range_end = util::get_prefix_end_key(&key);
 
     let resp = kv_backend
@@ -169,12 +169,12 @@ pub async fn test_kv_range_with_perfix(kv_backend: &impl KvBackend, perfix: Vec<
 }
 
 pub async fn test_kv_range_2(kv_backend: impl KvBackend) {
-    test_kv_range_2_with_perfix(kv_backend, vec![]).await;
+    test_kv_range_2_with_prefix(kv_backend, vec![]).await;
 }
 
-pub async fn test_kv_range_2_with_perfix(kv_backend: impl KvBackend, perfix: Vec<u8>) {
-    let atest = [perfix.clone(), b"atest".to_vec()].concat();
-    let test = [perfix.clone(), b"test".to_vec()].concat();
+pub async fn test_kv_range_2_with_prefix(kv_backend: impl KvBackend, prefix: Vec<u8>) {
+    let atest = [prefix.clone(), b"atest".to_vec()].concat();
+    let test = [prefix.clone(), b"test".to_vec()].concat();
 
     kv_backend
         .put(
@@ -191,11 +191,11 @@ pub async fn test_kv_range_2_with_perfix(kv_backend: impl KvBackend, perfix: Vec
         .unwrap();
 
     // If both key and range_end are ‘\0’, then range represents all keys.
-    let all_start = [perfix.clone(), b"\0".to_vec()].concat();
-    let all_end = if perfix.is_empty() {
+    let all_start = [prefix.clone(), b"\0".to_vec()].concat();
+    let all_end = if prefix.is_empty() {
         b"\0".to_vec()
     } else {
-        util::get_prefix_end_key(&perfix)
+        util::get_prefix_end_key(&prefix)
     };
     let result = kv_backend
         .range(RangeRequest::new().with_range(all_start, all_end.clone()))
@@ -206,7 +206,7 @@ pub async fn test_kv_range_2_with_perfix(kv_backend: impl KvBackend, perfix: Vec
     assert!(!result.more);
 
     // If range_end is ‘\0’, the range is all keys greater than or equal to the key argument.
-    let a_start = [perfix.clone(), b"a".to_vec()].concat();
+    let a_start = [prefix.clone(), b"a".to_vec()].concat();
     let result = kv_backend
         .range(RangeRequest::new().with_range(a_start.clone(), all_end.clone()))
         .await
@@ -214,7 +214,7 @@ pub async fn test_kv_range_2_with_perfix(kv_backend: impl KvBackend, perfix: Vec
 
     assert_eq!(result.kvs.len(), 2);
 
-    let b_start = [perfix.clone(), b"b".to_vec()].concat();
+    let b_start = [prefix.clone(), b"b".to_vec()].concat();
     let result = kv_backend
         .range(RangeRequest::new().with_range(b_start, all_end.clone()))
         .await
@@ -268,10 +268,10 @@ pub async fn test_kv_range_2_with_perfix(kv_backend: impl KvBackend, perfix: Vec
 }
 
 pub async fn test_kv_batch_get(kv_backend: &impl KvBackend) {
-    test_kv_batch_get_with_perfix(kv_backend, vec![]).await;
+    test_kv_batch_get_with_prefix(kv_backend, vec![]).await;
 }
 
-pub async fn test_kv_batch_get_with_perfix(kv_backend: &impl KvBackend, perfix: Vec<u8>) {
+pub async fn test_kv_batch_get_with_prefix(kv_backend: &impl KvBackend, prefix: Vec<u8>) {
     let keys = vec![];
     let resp = kv_backend
         .batch_get(BatchGetRequest { keys })
@@ -280,7 +280,7 @@ pub async fn test_kv_batch_get_with_perfix(kv_backend: &impl KvBackend, perfix: 
 
     assert!(resp.kvs.is_empty());
 
-    let key10 = [perfix.clone(), b"key10".to_vec()].concat();
+    let key10 = [prefix.clone(), b"key10".to_vec()].concat();
     let keys = vec![key10];
     let resp = kv_backend
         .batch_get(BatchGetRequest { keys })
@@ -289,9 +289,9 @@ pub async fn test_kv_batch_get_with_perfix(kv_backend: &impl KvBackend, perfix: 
 
     assert!(resp.kvs.is_empty());
 
-    let key1 = [perfix.clone(), b"key1".to_vec()].concat();
-    let key3 = [perfix.clone(), b"key3".to_vec()].concat();
-    let key4 = [perfix.clone(), b"key4".to_vec()].concat();
+    let key1 = [prefix.clone(), b"key1".to_vec()].concat();
+    let key3 = [prefix.clone(), b"key3".to_vec()].concat();
+    let key4 = [prefix.clone(), b"key4".to_vec()].concat();
     let keys = vec![key1.clone(), key3.clone(), key4];
     let resp = kv_backend
         .batch_get(BatchGetRequest { keys })
@@ -306,15 +306,15 @@ pub async fn test_kv_batch_get_with_perfix(kv_backend: &impl KvBackend, perfix: 
 }
 
 pub async fn test_kv_compare_and_put(kv_backend: Arc<dyn KvBackend<Error = Error>>) {
-    test_kv_compare_and_put_with_perfix(kv_backend, vec![]).await;
+    test_kv_compare_and_put_with_prefix(kv_backend, vec![]).await;
 }
 
-pub async fn test_kv_compare_and_put_with_perfix(
+pub async fn test_kv_compare_and_put_with_prefix(
     kv_backend: Arc<dyn KvBackend<Error = Error>>,
-    perfix: Vec<u8>,
+    prefix: Vec<u8>,
 ) {
     let success = Arc::new(AtomicU8::new(0));
-    let key = [perfix.clone(), b"key".to_vec()].concat();
+    let key = [prefix.clone(), b"key".to_vec()].concat();
 
     let mut joins = vec![];
     for _ in 0..20 {
@@ -347,11 +347,11 @@ pub async fn test_kv_compare_and_put_with_perfix(
 }
 
 pub async fn test_kv_delete_range(kv_backend: impl KvBackend) {
-    test_kv_delete_range_with_perfix(kv_backend, vec![]).await;
+    test_kv_delete_range_with_prefix(kv_backend, vec![]).await;
 }
 
-pub async fn test_kv_delete_range_with_perfix(kv_backend: impl KvBackend, perfix: Vec<u8>) {
-    let key3 = [perfix.clone(), b"key3".to_vec()].concat();
+pub async fn test_kv_delete_range_with_prefix(kv_backend: impl KvBackend, prefix: Vec<u8>) {
+    let key3 = [prefix.clone(), b"key3".to_vec()].concat();
     let req = DeleteRangeRequest {
         key: key3.clone(),
         range_end: vec![],
@@ -367,7 +367,7 @@ pub async fn test_kv_delete_range_with_perfix(kv_backend: impl KvBackend, perfix
     let resp = kv_backend.get(&key3).await.unwrap();
     assert!(resp.is_none());
 
-    let key2 = [perfix.clone(), b"key2".to_vec()].concat();
+    let key2 = [prefix.clone(), b"key2".to_vec()].concat();
     let req = DeleteRangeRequest {
         key: key2.clone(),
         range_end: vec![],
@@ -381,7 +381,7 @@ pub async fn test_kv_delete_range_with_perfix(kv_backend: impl KvBackend, perfix
     let resp = kv_backend.get(&key2).await.unwrap();
     assert!(resp.is_none());
 
-    let key = [perfix.clone(), b"key1".to_vec()].concat();
+    let key = [prefix.clone(), b"key1".to_vec()].concat();
     let range_end = util::get_prefix_end_key(&key);
 
     let req = DeleteRangeRequest {
@@ -402,12 +402,12 @@ pub async fn test_kv_delete_range_with_perfix(kv_backend: impl KvBackend, perfix
 }
 
 pub async fn test_kv_batch_delete(kv_backend: impl KvBackend) {
-    test_kv_batch_delete_with_perfix(kv_backend, vec![]).await;
+    test_kv_batch_delete_with_prefix(kv_backend, vec![]).await;
 }
 
-pub async fn test_kv_batch_delete_with_perfix(kv_backend: impl KvBackend, perfix: Vec<u8>) {
-    let key1 = [perfix.clone(), b"key1".to_vec()].concat();
-    let key100 = [perfix.clone(), b"key100".to_vec()].concat();
+pub async fn test_kv_batch_delete_with_prefix(kv_backend: impl KvBackend, prefix: Vec<u8>) {
+    let key1 = [prefix.clone(), b"key1".to_vec()].concat();
+    let key100 = [prefix.clone(), b"key100".to_vec()].concat();
     assert!(kv_backend.get(&key1).await.unwrap().is_some());
     assert!(kv_backend.get(&key100).await.unwrap().is_none());
 
@@ -426,9 +426,9 @@ pub async fn test_kv_batch_delete_with_perfix(kv_backend: impl KvBackend, perfix
     );
     assert!(kv_backend.get(&key1).await.unwrap().is_none());
 
-    let key2 = [perfix.clone(), b"key2".to_vec()].concat();
-    let key3 = [perfix.clone(), b"key3".to_vec()].concat();
-    let key11 = [perfix.clone(), b"key11".to_vec()].concat();
+    let key2 = [prefix.clone(), b"key2".to_vec()].concat();
+    let key3 = [prefix.clone(), b"key3".to_vec()].concat();
+    let key11 = [prefix.clone(), b"key11".to_vec()].concat();
     assert!(kv_backend.get(&key2).await.unwrap().is_some());
     assert!(kv_backend.get(&key3).await.unwrap().is_some());
     assert!(kv_backend.get(&key11).await.unwrap().is_some());
