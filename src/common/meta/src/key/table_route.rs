@@ -20,6 +20,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
+use super::txn_helper::TxnOpGetResponseSet;
 use super::{txn_helper, DeserializedValueWithBytes, TableMetaValue};
 use crate::error::{
     self, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
@@ -423,21 +424,6 @@ pub struct TableRouteStorage {
 impl TableRouteStorage {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
-    }
-
-    /// Builds a get table route transaction(readonly).
-    pub(crate) fn build_get_txn(
-        &self,
-        table_id: TableId,
-    ) -> (
-        Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
-    ) {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-        let txn = Txn::new().and_then(vec![TxnOp::Get(raw_key.clone())]);
-
-        (txn, txn_helper::build_txn_response_decoder_fn(raw_key))
     }
 
     /// Builds a create table route transaction,

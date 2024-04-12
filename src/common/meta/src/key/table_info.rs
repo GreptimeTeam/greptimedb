@@ -18,9 +18,10 @@ use serde::{Deserialize, Serialize};
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
-use super::{txn_helper, DeserializedValueWithBytes, TableMetaValue, TABLE_INFO_KEY_PREFIX};
 use crate::error::Result;
-use crate::key::TableMetaKey;
+use crate::key::{
+    txn_helper, DeserializedValueWithBytes, TableMetaKey, TableMetaValue, TABLE_INFO_KEY_PREFIX,
+};
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
@@ -99,20 +100,6 @@ pub struct TableInfoManager {
 impl TableInfoManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
-    }
-
-    pub(crate) fn build_get_txn(
-        &self,
-        table_id: TableId,
-    ) -> (
-        Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>,
-    ) {
-        let key = TableInfoKey::new(table_id);
-        let raw_key = key.as_raw_key();
-        let txn = Txn::new().and_then(vec![TxnOp::Get(raw_key.clone())]);
-
-        (txn, txn_helper::build_txn_response_decoder_fn(raw_key))
     }
 
     /// Builds a create table info transaction, it expected the `__table_info/{table_id}` wasn't occupied.

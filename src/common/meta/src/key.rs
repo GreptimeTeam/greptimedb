@@ -56,6 +56,7 @@ pub mod table_region;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
+mod tombstone;
 mod txn_helper;
 
 use std::collections::{BTreeMap, HashMap};
@@ -83,10 +84,12 @@ use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::datanode_table::RegionInfo;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
+use self::tombstone::TombstoneManager;
 use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::table_route::TableRouteKey;
-use crate::kv_backend::txn::{Txn, TxnOpResponse};
+use crate::key::txn_helper::TxnOpGetResponseSet;
+use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
 use crate::rpc::store::BatchPutRequest;
@@ -100,7 +103,6 @@ pub const MAINTENANCE_KEY: &str = "maintenance";
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
 
-pub const REMOVED_PREFIX: &str = "__removed";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
 pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
@@ -148,6 +150,15 @@ pub trait TableMetaKey {
     fn as_raw_key(&self) -> Vec<u8>;
 }
 
+pub(crate) trait TableMetaKeyGetTxnOp {
+    fn build_get_op(
+        &self,
+    ) -> (
+        TxnOp,
+        impl for<'a> FnMut(&'a mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
+    );
+}
+
 pub trait TableMetaValue {
     fn try_from_raw_value(raw_value: &[u8]) -> Result<Self>
     where
@@ -165,6 +176,7 @@ pub struct TableMetadataManager {
     catalog_manager: CatalogManager,
     schema_manager: SchemaManager,
     table_route_manager: TableRouteManager,
+    tombstone_manager: TombstoneManager,
     kv_backend: KvBackendRef,
 }
 
@@ -306,6 +318,7 @@ impl TableMetadataManager {
             catalog_manager: CatalogManager::new(kv_backend.clone()),
             schema_manager: SchemaManager::new(kv_backend.clone()),
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
+            tombstone_manager: TombstoneManager::new(kv_backend.clone()),
             kv_backend,
         }
     }
@@ -366,19 +379,16 @@ impl TableMetadataManager {
         Option<DeserializedValueWithBytes<TableInfoValue>>,
         Option<DeserializedValueWithBytes<TableRouteValue>>,
     )> {
-        let (get_table_route_txn, table_route_decoder) = self
-            .table_route_manager
-            .table_route_storage()
-            .build_get_txn(table_id);
-        let (get_table_info_txn, table_info_decoder) =
-            self.table_info_manager.build_get_txn(table_id);
+        let table_info_key = TableInfoKey::new(table_id);
+        let table_route_key = TableRouteKey::new(table_id);
+        let (table_info_txn, table_info_filter) = table_info_key.build_get_op();
+        let (table_route_txn, table_route_filter) = table_route_key.build_get_op();
 
-        let txn = Txn::merge_all(vec![get_table_route_txn, get_table_info_txn]);
-        let res = self.kv_backend.txn(txn).await?;
-
-        let table_info_value = table_info_decoder(&res.responses)?;
-        let table_route_value = table_route_decoder(&res.responses)?;
-
+        let txn = Txn::new().and_then(vec![table_info_txn, table_route_txn]);
+        let mut res = self.kv_backend.txn(txn).await?;
+        let mut set = TxnOpGetResponseSet::from(&mut res.responses);
+        let table_info_value = TxnOpGetResponseSet::decode_with(table_info_filter)(&mut set)?;
+        let table_route_value = TxnOpGetResponseSet::decode_with(table_route_filter)(&mut set)?;
         Ok((table_info_value, table_route_value))
     }
 
@@ -937,6 +947,38 @@ macro_rules! impl_table_meta_value {
             }
         )*
     }
+}
+
+macro_rules! impl_table_meta_key_get_txn_op {
+    ($($key: ty), *) => {
+        $(
+            impl $crate::key::TableMetaKeyGetTxnOp for $key {
+                /// Returns a [TxnOp] to retrieve the corresponding value
+                /// and a filter to retrieve the value from the [TxnOpGetResponseSet]
+                fn build_get_op(
+                    &self,
+                ) -> (
+                    TxnOp,
+                    impl for<'a> FnMut(
+                        &'a mut TxnOpGetResponseSet,
+                    ) -> Option<Vec<u8>>,
+                ) {
+                    let raw_key = self.as_raw_key();
+                    (
+                        TxnOp::Get(raw_key.clone()),
+                        TxnOpGetResponseSet::filter(raw_key),
+                    )
+                }
+            }
+        )*
+    }
+}
+
+impl_table_meta_key_get_txn_op! {
+    TableNameKey<'_>,
+    TableInfoKey,
+    TableRouteKey,
+    DatanodeTableKey
 }
 
 #[macro_export]
