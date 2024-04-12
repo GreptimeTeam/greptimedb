@@ -56,6 +56,8 @@ pub mod table_region;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
+// TODO(weny): remove it.
+#[allow(dead_code)]
 mod tombstone;
 mod txn_helper;
 
@@ -88,12 +90,11 @@ use self::tombstone::TombstoneManager;
 use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::table_route::TableRouteKey;
+use crate::key::tombstone::Key;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
-use crate::rpc::store::BatchPutRequest;
-use crate::rpc::KeyValue;
 use crate::table_name::TableName;
 use crate::DatanodeId;
 
@@ -157,6 +158,24 @@ pub(crate) trait TableMetaKeyGetTxnOp {
         TxnOp,
         impl for<'a> FnMut(&'a mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
     );
+}
+
+impl TableMetaKey for String {
+    fn as_raw_key(&self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
+}
+
+impl TableMetaKeyGetTxnOp for String {
+    fn build_get_op(
+        &self,
+    ) -> (
+        TxnOp,
+        impl for<'a> FnMut(&'a mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
+    ) {
+        let key = self.as_raw_key();
+        (TxnOp::Get(key.clone()), TxnOpGetResponseSet::filter(key))
+    }
 }
 
 pub trait TableMetaValue {
@@ -564,42 +583,41 @@ impl TableMetadataManager {
         &self,
         table_id: TableId,
         table_name: &TableName,
-        region_routes: &[RegionRoute],
+        table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        // Deletes table name.
-        let table_name = TableNameKey::new(
+        // Builds keys
+        let datanode_ids = if table_route_value.is_physical() {
+            region_distribution(table_route_value.region_routes()?)
+                .into_keys()
+                .collect()
+        } else {
+            vec![]
+        };
+        let mut keys: Vec<Key<_>> = Vec::with_capacity(3 + datanode_ids.len());
+        let table_name_key = TableNameKey::new(
             &table_name.catalog_name,
             &table_name.schema_name,
             &table_name.table_name,
         );
+        let table_info_key = TableInfoKey::new(table_id);
+        let table_route_key = TableRouteKey::new(table_id);
+        let datanode_table_keys = datanode_ids
+            .into_iter()
+            .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
+            .collect::<Vec<_>>();
 
-        let delete_table_name_txn = self.table_name_manager().build_delete_txn(&table_name)?;
-
-        // Deletes table info.
-        let delete_table_info_txn = self.table_info_manager().build_delete_txn(table_id)?;
-
-        // Deletes datanode table key value pairs.
-        let distribution = region_distribution(region_routes);
-        let delete_datanode_txn = self
-            .datanode_table_manager()
-            .build_delete_txn(table_id, distribution)?;
-
-        // Deletes table route.
-        let delete_table_route_txn = self
-            .table_route_manager()
-            .table_route_storage()
-            .build_delete_txn(table_id)?;
-
-        let txn = Txn::merge_all(vec![
-            delete_table_name_txn,
-            delete_table_info_txn,
-            delete_datanode_txn,
-            delete_table_route_txn,
-        ]);
-
-        // It's always successes.
-        let _ = self.kv_backend.txn(txn).await?;
-
+        keys.push(Key::atomic(table_name_key.to_string()));
+        keys.push(Key::other(table_info_key.to_string()));
+        keys.push(Key::other(table_route_key.to_string()));
+        for key in &datanode_table_keys {
+            keys.push(Key::other(key.to_string()));
+        }
+        ensure!(
+            self.tombstone_manager.create(keys).await?,
+            error::UnexpectedSnafu {
+                err_msg: format!("Failed to delete table: {table_name_key}({table_id})")
+            }
+        );
         Ok(())
     }
 
@@ -607,62 +625,44 @@ impl TableMetadataManager {
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn restore_table_metadata(
         &self,
-        table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
-        table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
-        datanode_table_values: &[(
-            DatanodeTableKey,
-            DeserializedValueWithBytes<DatanodeTableValue>,
-        )],
+        table_id: TableId,
+        table_name: &TableName,
+        table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        // Puts:
-        // - Table name value.
-        // - Table info value.
-        // - Table route value.
-        // - Datanode table values
-        let mut kvs = Vec::with_capacity(3 + datanode_table_values.len());
-
-        // Builds Table name key value.
-        let table_info = &table_info_value.table_info;
-        let table_id = table_info.ident.table_id;
-        let table_name_key = TableNameKey::new(
-            &table_info.catalog_name,
-            &table_info.schema_name,
-            &table_info.name,
-        );
-        let table_name_value = TableNameValue::new(table_id);
-        kvs.push(KeyValue {
-            key: table_name_key.as_raw_key(),
-            value: table_name_value.try_as_raw_value()?,
-        });
-
-        // Builds Table info key value.
-        let table_info_key = TableInfoKey::new(table_id);
-        kvs.push(KeyValue {
-            key: table_info_key.as_raw_key(),
-            value: table_info_value.bytes.to_vec(),
-        });
-
-        // Build Table route key value.
-        let table_route_key = TableRouteKey::new(table_id);
-        kvs.push(KeyValue {
-            key: table_route_key.as_raw_key(),
-            value: table_route_value.bytes.to_vec(),
-        });
-
-        // Build Datanode table values.
-        for (key, value) in datanode_table_values {
-            kvs.push(KeyValue {
-                key: key.as_raw_key(),
-                value: value.bytes.to_vec(),
-            });
-        }
-
-        let req = BatchPutRequest {
-            kvs,
-            prev_kv: false,
+        // TODO(weny): check table name tombstone exists.
+        // Builds keys
+        let datanode_ids = if table_route_value.is_physical() {
+            region_distribution(table_route_value.region_routes()?)
+                .into_keys()
+                .collect()
+        } else {
+            vec![]
         };
-        let _ = self.kv_backend.batch_put(req).await?;
+        let mut keys: Vec<Key<_>> = Vec::with_capacity(3 + datanode_ids.len());
+        let table_name = TableNameKey::new(
+            &table_name.catalog_name,
+            &table_name.schema_name,
+            &table_name.table_name,
+        );
+        let table_info_key = TableInfoKey::new(table_id);
+        let table_route_key = TableRouteKey::new(table_id);
+        let datanode_table_keys = datanode_ids
+            .into_iter()
+            .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
+            .collect::<Vec<_>>();
 
+        keys.push(Key::atomic(table_name.to_string()));
+        keys.push(Key::other(table_info_key.to_string()));
+        keys.push(Key::other(table_route_key.to_string()));
+        for key in &datanode_table_keys {
+            keys.push(Key::other(key.to_string()));
+        }
+        ensure!(
+            self.tombstone_manager.restore(keys).await?,
+            error::UnexpectedSnafu {
+                err_msg: format!("Failed to delete table: {table_name}({table_id})")
+            }
+        );
         Ok(())
     }
 
@@ -1265,15 +1265,10 @@ mod tests {
             table_info.schema_name,
             table_info.name,
         );
+        let table_route_value = &TableRouteValue::physical(region_routes.clone());
         // deletes metadata.
         table_metadata_manager
-            .delete_table_metadata(table_id, &table_name, region_routes)
-            .await
-            .unwrap();
-
-        // if metadata was already deleted, it should be ok.
-        table_metadata_manager
-            .delete_table_metadata(table_id, &table_name, region_routes)
+            .delete_table_metadata(table_id, &table_name, table_route_value)
             .await
             .unwrap();
 
@@ -1709,13 +1704,6 @@ mod tests {
             .await
             .unwrap();
         let expected_result = mem_kv.dump();
-
-        let table_info_value = table_metadata_manager
-            .table_info_manager
-            .get(table_id)
-            .await
-            .unwrap()
-            .unwrap();
         let table_route_value = table_metadata_manager
             .table_route_manager
             .table_route_storage()
@@ -1724,34 +1712,14 @@ mod tests {
             .unwrap()
             .unwrap();
         let region_routes = table_route_value.region_routes().unwrap();
-        let regions = region_distribution(region_routes);
-
-        let datanode_table_keys = regions
-            .keys()
-            .map(|datanode_id| DatanodeTableKey::new(*datanode_id, table_id))
-            .collect::<Vec<_>>();
-        let datanode_table_values = table_metadata_manager
-            .datanode_table_manager
-            .batch_get(&datanode_table_keys)
-            .await
-            .unwrap();
-        let datanode_table_values = datanode_table_keys
-            .into_iter()
-            .zip(datanode_table_values)
-            .collect::<Vec<_>>();
         let table_name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
+        let table_route_value = TableRouteValue::physical(region_routes.clone());
         table_metadata_manager
-            .delete_table_metadata(table_id, &table_name, region_routes)
+            .delete_table_metadata(table_id, &table_name, &table_route_value)
             .await
             .unwrap();
-        assert!(mem_kv.is_empty());
-
         table_metadata_manager
-            .restore_table_metadata(
-                &table_info_value,
-                &table_route_value,
-                &datanode_table_values,
-            )
+            .restore_table_metadata(table_id, &table_name, &table_route_value)
             .await
             .unwrap();
         let kvs = mem_kv.dump();

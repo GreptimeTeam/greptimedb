@@ -22,7 +22,7 @@ use crate::error::Result;
 use crate::key::{
     txn_helper, DeserializedValueWithBytes, TableMetaKey, TableMetaValue, TABLE_INFO_KEY_PREFIX,
 };
-use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
+use crate::kv_backend::txn::{Txn, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
 use crate::table_name::TableName;
@@ -141,16 +141,6 @@ impl TableInfoManager {
         let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
 
         Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
-    }
-
-    /// Builds a delete table info transaction.
-    pub(crate) fn build_delete_txn(&self, table_id: TableId) -> Result<Txn> {
-        let key = TableInfoKey::new(table_id);
-        let raw_key = key.as_raw_key();
-
-        let txn = Txn::new().and_then(vec![TxnOp::Delete(raw_key)]);
-
-        Ok(txn)
     }
 
     pub async fn get(

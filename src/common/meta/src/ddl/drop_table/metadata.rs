@@ -12,27 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_catalog::format_full_table_name;
-use snafu::{ensure, OptionExt};
+use snafu::OptionExt;
 
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::error::{self, Result};
-use crate::key::datanode_table::DatanodeTableKey;
-use crate::rpc::router::region_distribution;
 
 impl DropTableProcedure {
     /// Fetches the table info and table route.
     pub(crate) async fn fill_table_metadata(&mut self) -> Result<()> {
         let task = &self.data.task;
-        let table_info_value = self
-            .context
-            .table_metadata_manager
-            .table_info_manager()
-            .get(task.table_id)
-            .await?
-            .with_context(|| error::TableInfoNotFoundSnafu {
-                table: format_full_table_name(&task.catalog, &task.schema, &task.table),
-            })?;
         let (_, physical_table_route_value) = self
             .context
             .table_metadata_manager
@@ -44,45 +32,13 @@ impl DropTableProcedure {
             .table_metadata_manager
             .table_route_manager()
             .table_route_storage()
-            .get_raw(task.table_id)
+            .get(task.table_id)
             .await?
             .context(error::TableRouteNotFoundSnafu {
                 table_id: task.table_id,
             })?;
 
-        let distributions = region_distribution(&physical_table_route_value.region_routes);
-        let datanode_table_keys = distributions
-            .into_keys()
-            .map(|datanode_id| DatanodeTableKey::new(datanode_id, task.table_id))
-            .collect::<Vec<_>>();
-
-        // Only for physical table.
-        if table_route_value.is_physical() {
-            let datanode_table_values = self
-                .context
-                .table_metadata_manager
-                .datanode_table_manager()
-                .batch_get(&datanode_table_keys)
-                .await?;
-            ensure!(
-                datanode_table_keys.len() == datanode_table_values.len(),
-                error::UnexpectedSnafu {
-                    err_msg: format!(
-                        "Dropping table: {}, num({}) of datanode table values should equal num({}) of keys",
-                        task.table_id,
-                        datanode_table_values.len(),
-                        datanode_table_keys.len()
-                    )
-                }
-            );
-            self.data.datanode_table_value = datanode_table_keys
-                .into_iter()
-                .zip(datanode_table_values)
-                .collect();
-        }
-
         self.data.region_routes = physical_table_route_value.region_routes;
-        self.data.table_info_value = Some(table_info_value);
         self.data.table_route_value = Some(table_route_value);
 
         Ok(())

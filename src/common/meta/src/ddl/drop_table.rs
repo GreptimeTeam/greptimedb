@@ -33,10 +33,7 @@ use self::executor::DropTableExecutor;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
-use crate::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
-use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::TableRouteValue;
-use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
@@ -120,8 +117,10 @@ impl DropTableProcedure {
 
         // TODO(weny): Considers introducing a RegionStatus to indicate the region is dropping.
         let table_id = self.data.table_id();
+        // Safety: checked
+        let table_route_value = self.data.table_route_value.as_ref().unwrap();
         executor
-            .on_remove_metadata(&self.context, &self.data.region_routes)
+            .on_remove_metadata(&self.context, table_route_value)
             .await?;
         info!("Deleted table metadata for table {table_id}");
         self.data.state = DropTableState::InvalidateTableCache;
@@ -201,13 +200,13 @@ impl Procedure for DropTableProcedure {
         );
 
         // Safety: fetched in `DropTableState::Prepare` step.
-        let table_info_value = self.data.table_info_value.as_ref().unwrap();
         let table_route_value = self.data.table_route_value.as_ref().unwrap();
-        let datanode_table_values = &self.data.datanode_table_value;
 
+        let table_id = self.data.table_id();
+        let table_name = self.data.task.table_name();
         self.context
             .table_metadata_manager
-            .restore_table_metadata(table_info_value, table_route_value, datanode_table_values)
+            .restore_table_metadata(table_id, &table_name, table_route_value)
             .await
             .map_err(ProcedureError::external)
     }
@@ -219,12 +218,7 @@ pub struct DropTableData {
     pub cluster_id: u64,
     pub task: DropTableTask,
     pub region_routes: Vec<RegionRoute>,
-    pub table_route_value: Option<DeserializedValueWithBytes<TableRouteValue>>,
-    pub table_info_value: Option<DeserializedValueWithBytes<TableInfoValue>>,
-    pub datanode_table_value: Vec<(
-        DatanodeTableKey,
-        DeserializedValueWithBytes<DatanodeTableValue>,
-    )>,
+    pub table_route_value: Option<TableRouteValue>,
 }
 
 impl DropTableData {
@@ -235,8 +229,6 @@ impl DropTableData {
             task,
             region_routes: vec![],
             table_route_value: None,
-            table_info_value: None,
-            datanode_table_value: vec![],
         }
     }
 

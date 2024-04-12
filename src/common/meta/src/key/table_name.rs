@@ -194,14 +194,6 @@ impl TableNameManager {
         Ok(txn)
     }
 
-    /// Builds a delete table name transaction. It only executes while the primary keys comparing successes.
-    pub(crate) fn build_delete_txn(&self, key: &TableNameKey<'_>) -> Result<Txn> {
-        let raw_key = key.as_raw_key();
-        let txn = Txn::new().and_then(vec![TxnOp::Delete(raw_key)]);
-
-        Ok(txn)
-    }
-
     pub async fn get(&self, key: TableNameKey<'_>) -> Result<Option<TableNameValue>> {
         let raw_key = key.as_raw_key();
         self.kv_backend

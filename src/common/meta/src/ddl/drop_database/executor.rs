@@ -26,6 +26,7 @@ use crate::ddl::drop_database::State;
 use crate::ddl::drop_table::executor::DropTableExecutor;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
+use crate::key::table_route::TableRouteValue;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::router::{operating_leader_regions, RegionRoute};
 use crate::table_name::TableName;
@@ -34,6 +35,7 @@ use crate::table_name::TableName;
 pub(crate) struct DropDatabaseExecutor {
     table_id: TableId,
     table_name: TableName,
+    pub(crate) table_route_value: TableRouteValue,
     pub(crate) region_routes: Vec<RegionRoute>,
     pub(crate) target: DropTableTarget,
     #[serde(skip)]
@@ -46,12 +48,14 @@ impl DropDatabaseExecutor {
         table_id: TableId,
         table_name: TableName,
         region_routes: Vec<RegionRoute>,
+        table_route_value: TableRouteValue,
         target: DropTableTarget,
     ) -> Self {
         Self {
-            table_name,
             table_id,
+            table_name,
             region_routes,
+            table_route_value,
             target,
             dropping_regions: vec![],
         }
@@ -88,7 +92,7 @@ impl State for DropDatabaseExecutor {
         self.register_dropping_regions(ddl_ctx)?;
         let executor = DropTableExecutor::new(self.table_name.clone(), self.table_id, true);
         executor
-            .on_remove_metadata(ddl_ctx, &self.region_routes)
+            .on_remove_metadata(ddl_ctx, &self.table_route_value)
             .await?;
         executor.invalidate_table_cache(ddl_ctx).await?;
         executor
@@ -122,6 +126,7 @@ mod tests {
     use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
     use crate::ddl::test_util::{create_logical_table, create_physical_table};
     use crate::error::{self, Error, Result};
+    use crate::key::table_route::TableRouteValue;
     use crate::peer::Peer;
     use crate::table_name::TableName;
     use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
@@ -160,6 +165,7 @@ mod tests {
                 physical_table_id,
                 TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy"),
                 table_route.region_routes.clone(),
+                TableRouteValue::Physical(table_route.clone()),
                 DropTableTarget::Physical,
             );
             let mut ctx = DropDatabaseContext {
@@ -183,7 +189,8 @@ mod tests {
         let mut state = DropDatabaseExecutor::new(
             physical_table_id,
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy"),
-            table_route.region_routes,
+            table_route.region_routes.clone(),
+            TableRouteValue::Physical(table_route),
             DropTableTarget::Physical,
         );
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
@@ -199,6 +206,14 @@ mod tests {
         let physical_table_id = create_physical_table(ddl_context.clone(), 0, "phy").await;
         create_logical_table(ddl_context.clone(), 0, physical_table_id, "metric").await;
         let logical_table_id = physical_table_id + 1;
+        let logical_table_route_value = ddl_context
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .get(logical_table_id)
+            .await
+            .unwrap()
+            .unwrap();
         let (_, table_route) = ddl_context
             .table_metadata_manager
             .table_route_manager()
@@ -210,6 +225,7 @@ mod tests {
                 physical_table_id,
                 TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "metric"),
                 table_route.region_routes.clone(),
+                logical_table_route_value.clone(),
                 DropTableTarget::Logical,
             );
             let mut ctx = DropDatabaseContext {
@@ -232,8 +248,9 @@ mod tests {
         };
         let mut state = DropDatabaseExecutor::new(
             physical_table_id,
-            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy"),
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "metric"),
             table_route.region_routes,
+            logical_table_route_value.clone(),
             DropTableTarget::Logical,
         );
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
@@ -272,6 +289,14 @@ mod tests {
         let datanode_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
         let ddl_context = new_ddl_context(datanode_manager);
         let physical_table_id = create_physical_table(ddl_context.clone(), 0, "phy").await;
+        let table_route_value = ddl_context
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .get(physical_table_id)
+            .await
+            .unwrap()
+            .unwrap();
         let (_, table_route) = ddl_context
             .table_metadata_manager
             .table_route_manager()
@@ -282,6 +307,7 @@ mod tests {
             physical_table_id,
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy"),
             table_route.region_routes,
+            table_route_value,
             DropTableTarget::Physical,
         );
         let mut ctx = DropDatabaseContext {

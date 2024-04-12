@@ -30,6 +30,7 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
+use crate::key::table_route::TableRouteValue;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 use crate::table_name::TableName;
 
@@ -103,16 +104,24 @@ impl DropTableExecutor {
     pub async fn on_remove_metadata(
         &self,
         ctx: &DdlContext,
-        region_routes: &[RegionRoute],
+        table_route_value: &TableRouteValue,
     ) -> Result<()> {
+        let table_name_key = TableNameKey::new(
+            &self.table.catalog_name,
+            &self.table.schema_name,
+            &self.table.table_name,
+        );
+        if !ctx
+            .table_metadata_manager
+            .table_name_manager()
+            .exists(table_name_key)
+            .await?
+        {
+            return Ok(());
+        }
         ctx.table_metadata_manager
-            .delete_table_metadata(self.table_id, &self.table, region_routes)
+            .delete_table_metadata(self.table_id, &self.table, table_route_value)
             .await
-    }
-
-    /// Restores the table metadata.
-    pub async fn on_restore_metadata(&self) -> Result<()> {
-        todo!()
     }
 
     /// Invalidates frontend caches

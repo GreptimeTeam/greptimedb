@@ -26,7 +26,7 @@ use crate::error::{
     UnexpectedLogicalRouteTableSnafu,
 };
 use crate::key::{RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
-use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
+use crate::kv_backend::txn::{Txn, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
 use crate::rpc::store::BatchGetRequest;
@@ -466,17 +466,6 @@ impl TableRouteStorage {
         let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
 
         Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
-    }
-
-    /// Builds a delete table route transaction,
-    /// it expected the remote value equals the `table_route_value`.
-    pub(crate) fn build_delete_txn(&self, table_id: TableId) -> Result<Txn> {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-
-        let txn = Txn::new().and_then(vec![TxnOp::Delete(raw_key)]);
-
-        Ok(txn)
     }
 
     /// Returns the [`TableRouteValue`].

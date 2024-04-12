@@ -79,6 +79,7 @@ impl DropDatabaseCursor {
                         table_id,
                         TableName::new(&ctx.catalog, &ctx.schema, &table_name),
                         table_route.region_routes,
+                        TableRouteValue::Logical(route),
                         self.target,
                     )),
                     Status::executing(true),
@@ -88,7 +89,8 @@ impl DropDatabaseCursor {
                 Box::new(DropDatabaseExecutor::new(
                     table_id,
                     TableName::new(&ctx.catalog, &ctx.schema, &table_name),
-                    table_route.region_routes,
+                    table_route.region_routes.clone(),
+                    TableRouteValue::Physical(table_route),
                     self.target,
                 )),
                 Status::executing(true),
