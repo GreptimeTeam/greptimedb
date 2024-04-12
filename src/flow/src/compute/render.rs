@@ -344,7 +344,7 @@ mod test {
             (Row::new(vec![2i64.into()]), 2, 1),
             (Row::new(vec![3i64.into()]), 3, 1),
         ];
-        let collection = ctx.render_constant(rows.clone());
+        let collection = ctx.render_constant(rows);
         ctx.insert_global(GlobalId::User(1), collection);
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
@@ -440,7 +440,7 @@ mod test {
             (Row::new(vec![2.into()]), 2, 1),
             (Row::new(vec![3.into()]), 3, 1),
         ];
-        let collection = ctx.render_constant(rows.clone());
+        let collection = ctx.render_constant(rows);
         ctx.insert_global(GlobalId::User(1), collection);
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
@@ -490,7 +490,7 @@ mod test {
             (Row::empty(), 2, 1),
             (Row::empty(), 3, 1),
         ];
-        let collection = ctx.render_constant(rows.clone());
+        let collection = ctx.render_constant(rows);
         let collection = collection.collection.clone(ctx.df);
         let cnt = Rc::new(RefCell::new(0));
         let cnt_inner = cnt.clone();

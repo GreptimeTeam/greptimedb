@@ -17,12 +17,12 @@
 mod df_substrait;
 pub mod error;
 pub mod extension_serializer;
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use datafusion::catalog::CatalogList;
+pub use substrait_proto;
 
 pub use crate::df_substrait::DFLogicalSubstraitConvertor;
 

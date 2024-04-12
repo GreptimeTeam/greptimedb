@@ -27,4 +27,5 @@ mod compute;
 mod expr;
 mod plan;
 mod repr;
+mod transform;
 mod utils;

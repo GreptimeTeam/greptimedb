@@ -29,6 +29,7 @@ servers.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
 strum.workspace = true
+substrait.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 
@@ -39,5 +40,4 @@ prost.workspace = true
 query.workspace = true
 serde_json = "1.0"
 session.workspace = true
-substrait.workspace = true
 table.workspace = true

@@ -73,6 +73,13 @@ pub enum Error {
         extra: String,
         location: Location,
     },
+
+    #[snafu(display("Datafusion error: {raw:?} in context: {context}"))]
+    Datafusion {
+        raw: datafusion_common::DataFusionError,
+        context: String,
+        location: Location,
+    },
 }
 
 /// Result type for flow module
@@ -81,7 +88,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::Eval { .. } | &Self::JoinTask { .. } => StatusCode::Internal,
+            Self::Eval { .. } | &Self::JoinTask { .. } | &Self::Datafusion { .. } => {
+                StatusCode::Internal
+            }
             &Self::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. } => StatusCode::TableNotFound,
             &Self::InvalidQuery { .. } | &Self::Plan { .. } | &Self::Datatypes { .. } => {
