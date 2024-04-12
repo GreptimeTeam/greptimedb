@@ -105,19 +105,11 @@ impl EtcdElection {
     }
 
     fn election_key(&self) -> String {
-        if self.store_key_prefix.is_empty() {
-            ELECTION_KEY.to_string()
-        } else {
-            format!("{}{}", self.store_key_prefix, ELECTION_KEY)
-        }
+        format!("{}{}", self.store_key_prefix, ELECTION_KEY)
     }
 
     fn candidate_root(&self) -> String {
-        if self.store_key_prefix.is_empty() {
-            CANDIDATES_ROOT.to_string()
-        } else {
-            format!("{}{}", self.store_key_prefix, CANDIDATES_ROOT)
-        }
+        format!("{}{}", self.store_key_prefix, CANDIDATES_ROOT)
     }
 
     fn candidate_key(&self) -> String {
