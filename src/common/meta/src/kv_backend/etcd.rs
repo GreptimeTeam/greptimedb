@@ -516,6 +516,7 @@ impl TryFrom<DeleteRangeRequest> for Delete {
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout)]
 mod tests {
     use super::*;
 
@@ -658,85 +659,64 @@ mod tests {
 
     #[tokio::test]
     async fn test_put() {
-        match build_kv_backend().await {
-            Some(kv_backend) => {
-                let prefix = b"put/";
-                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-                test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
-                unprepare_kv(&kv_backend, prefix).await;
-            }
-            None => {}
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"put/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
         }
     }
 
     #[tokio::test]
     async fn test_range() {
-        match build_kv_backend().await {
-            Some(kv_backend) => {
-                let prefix = b"range/";
-                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-                test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
-                unprepare_kv(&kv_backend, prefix).await;
-            }
-            None => {}
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"range/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
         }
     }
 
     #[tokio::test]
     async fn test_range_2() {
-        match build_kv_backend().await {
-            Some(kv_backend) => {
-                test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
-            }
-            None => {}
+        if let Some(kv_backend) = build_kv_backend().await {
+            test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
         }
     }
 
     #[tokio::test]
     async fn test_batch_get() {
-        match build_kv_backend().await {
-            Some(kv_backend) => {
-                let prefix = b"batchGet/";
-                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-                test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
-                unprepare_kv(&kv_backend, prefix).await;
-            }
-            None => {}
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"batchGet/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compare_and_put() {
-        match build_kv_backend().await {
-            Some(kv_backend) => {
-                let kv_backend = Arc::new(kv_backend);
-                test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
-            }
-            None => {}
+        if let Some(kv_backend) = build_kv_backend().await {
+            let kv_backend = Arc::new(kv_backend);
+            test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
         }
     }
 
     #[tokio::test]
     async fn test_delete_range() {
-        match build_kv_backend().await {
-            Some(kv_backend) => {
-                let prefix = b"deleteRange/";
-                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-                test_kv_delete_range_with_prefix(kv_backend, prefix.to_vec()).await;
-            }
-            None => {}
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"deleteRange/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_delete_range_with_prefix(kv_backend, prefix.to_vec()).await;
         }
     }
 
     #[tokio::test]
     async fn test_batch_delete() {
-        match build_kv_backend().await {
-            Some(kv_backend) => {
-                let prefix = b"batchDelete/";
-                prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-                test_kv_batch_delete_with_prefix(kv_backend, prefix.to_vec()).await;
-            }
-            None => {}
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"batchDelete/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_batch_delete_with_prefix(kv_backend, prefix.to_vec()).await;
         }
     }
 }
