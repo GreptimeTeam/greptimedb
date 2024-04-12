@@ -113,6 +113,8 @@ pub struct CollectionBundle {
     ///
     /// The `Arranged` is the actual data source, it can be used to read the data from the collection by
     /// using the key indicated by the `Vec<ScalarExpr>`
+    // There is a false positive in using `Vec<ScalarExpr>` as key due to `Value` have `bytes` variant
+    #[allow(clippy::mutable_key_type)]
     pub arranged: BTreeMap<Vec<ScalarExpr>, Arranged>,
 }
 

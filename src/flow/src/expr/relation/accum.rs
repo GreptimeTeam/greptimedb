@@ -885,7 +885,9 @@ mod test {
                 let mut acc = Accum::new_accum(&aggr_fn)?;
                 acc.update_batch(&aggr_fn, input.clone())?;
                 let row = acc.into_state();
-                let acc = Accum::try_into_accum(&aggr_fn, row)?;
+                let acc = Accum::try_into_accum(&aggr_fn, row.clone())?;
+                let alter_acc = Accum::try_from_iter(&aggr_fn, &mut row.into_iter())?;
+                assert_eq!(acc, alter_acc);
                 Ok(acc)
             };
             let acc = match create_and_insert() {

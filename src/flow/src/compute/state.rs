@@ -45,6 +45,7 @@ impl DataflowState {
     pub fn new_arrange(&mut self, name: Option<Vec<String>>) -> ArrangeHandler {
         let arrange = Arrangement::new();
 
+        let _ = name;
         // TODO: add handler to compute state for monitoring and debugging
         ArrangeHandler::from(arrange)
     }

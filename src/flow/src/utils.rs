@@ -466,7 +466,9 @@ fn compact_diff_row(old_row: Option<DiffRow>, new_row: &DiffRow) -> Option<DiffR
     }
 }
 
+/// Simply a newtype for ReadGuard of Arrangement
 pub type ArrangeReader<'a> = tokio::sync::RwLockReadGuard<'a, Arrangement>;
+/// Simply a newtype for WriteGuard of Arrangement
 pub type ArrangeWriter<'a> = tokio::sync::RwLockWriteGuard<'a, Arrangement>;
 
 /// A handler to the inner Arrangement, can be cloned and shared, useful for query it's inner state
