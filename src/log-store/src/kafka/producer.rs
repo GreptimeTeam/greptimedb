@@ -18,34 +18,29 @@ use std::time::Duration;
 
 use chrono::DateTime;
 use common_wal::config::kafka::DatanodeKafkaConfig;
-use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
-use rskafka::client::{Client, ClientBuilder};
+use rskafka::client::partition::{Compression, PartitionClient};
 use rskafka::record::Record;
-use rskafka::BackoffConfig;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::EntryId;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use crate::error::{
-    BuildClientSnafu, BuildPartitionClientSnafu, EncodeJsonSnafu, EntryTooLargeSnafu, FlushSnafu,
-    ProduceSnafu, Result,
-};
+use super::client_manager::ClientManager;
+use crate::error::{EncodeJsonSnafu, EntryTooLargeSnafu, FlushSnafu, ProduceSnafu, Result};
 use crate::kafka::{EntryImpl, NamespaceImpl};
 
 type Sequence = u8;
 
 const RECORD_VERSION: u32 = 0;
-const DEFAULT_PARTITION: i32 = 0;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EntryInner {
-    data: Vec<u8>,
-    id: EntryId,
-    seq: Sequence,
+    pub data: Vec<u8>,
+    pub id: EntryId,
+    pub seq: Sequence,
     pub ns: NamespaceImpl,
-    timestamp: i64,
+    pub timestamp: i64,
 }
 
 pub fn maybe_split_entry(
@@ -80,33 +75,21 @@ pub fn maybe_split_entry(
 #[derive(Debug)]
 pub struct ProducerManager {
     producers: RwLock<HashMap<String, Producer>>,
-    client_factory: Client,
     buffer_capacity: usize,
     linger: Duration,
     compression: Compression,
+    client_manager: Arc<ClientManager>,
 }
 
 impl ProducerManager {
-    pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
-        let client = ClientBuilder::new(config.broker_endpoints.clone())
-            .backoff_config(BackoffConfig {
-                init_backoff: config.backoff.init,
-                max_backoff: config.backoff.max,
-                base: config.backoff.base as f64,
-                deadline: config.backoff.deadline,
-            })
-            .build()
-            .await
-            .with_context(|_| BuildClientSnafu {
-                broker_endpoints: config.broker_endpoints.clone(),
-            })?;
-        Ok(Self {
+    pub fn new(config: &DatanodeKafkaConfig, client_manager: Arc<ClientManager>) -> Self {
+        Self {
             producers: RwLock::new(HashMap::new()),
-            client_factory: client,
             buffer_capacity: config.max_batch_size.as_bytes() as usize,
             linger: config.linger,
             compression: config.compression,
-        })
+            client_manager,
+        }
     }
 
     pub async fn get_or_insert(&self, topic: &str) -> Result<Producer> {
@@ -121,18 +104,10 @@ impl ProducerManager {
         match producer_map.get(topic) {
             Some(producer) => Ok(producer.clone()),
             None => {
-                let client = self
-                    .client_factory
-                    .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)
-                    .await
-                    .with_context(|_| BuildPartitionClientSnafu {
-                        topic,
-                        partition: DEFAULT_PARTITION,
-                    })?;
                 let producer = Producer {
                     linger: self.linger,
                     inner: Arc::new(parking_lot::Mutex::new(ProducerInner::new(
-                        client,
+                        self.client_manager.get_or_insert(topic).await?,
                         self.buffer_capacity,
                         self.compression,
                     ))),
@@ -231,13 +206,13 @@ impl ProduceResultNotifier {
 }
 
 impl ProducerInner {
-    fn new(client: PartitionClient, buffer_capacity: usize, compression: Compression) -> Self {
+    fn new(client: Arc<PartitionClient>, buffer_capacity: usize, compression: Compression) -> Self {
         Self {
             buffer: Some(EntryBuffer::new(buffer_capacity)),
             buffer_id: 0,
             pending_flush_tasks: Vec::new(),
             has_linger_waiter: false,
-            client: Arc::new(client),
+            client,
             compression,
         }
     }
@@ -370,17 +345,18 @@ impl EntryBuffer {
 }
 
 #[derive(Serialize, Deserialize)]
-struct EntryMeta {
-    id: EntryId,
-    seq: Sequence,
-    ns: NamespaceImpl,
-    length: usize,
+pub struct EntryMeta {
+    pub id: EntryId,
+    pub seq: Sequence,
+    pub ns: NamespaceImpl,
+    pub length: usize,
 }
 
+// TODO(niebayes): make necessary things common.
 #[derive(Default, Serialize, Deserialize)]
-struct RecordMeta {
-    version: u32,
-    entry_metas: Vec<EntryMeta>,
+pub struct RecordMeta {
+    pub version: u32,
+    pub entry_metas: Vec<EntryMeta>,
 }
 
 struct RecordBuilder {

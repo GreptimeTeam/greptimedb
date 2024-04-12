@@ -15,24 +15,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::options::WalOptions;
-use futures_util::StreamExt;
-use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
-use rskafka::client::partition::OffsetAt;
-use snafu::ResultExt;
+use futures::StreamExt;
 use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
-use super::producer::maybe_split_entry;
-use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result};
-use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::producer::ProducerManager;
-use crate::kafka::util::offset::Offset;
-use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
+use crate::error::{Error, Result};
+use crate::kafka::client_manager::ClientManager;
+use crate::kafka::consumer::ConsumerManager;
+use crate::kafka::producer::{maybe_split_entry, ProducerManager};
 use crate::kafka::{EntryImpl, NamespaceImpl};
 use crate::metrics;
 
@@ -40,17 +34,17 @@ use crate::metrics;
 #[derive(Debug)]
 pub struct KafkaLogStore {
     config: DatanodeKafkaConfig,
-    /// Manages kafka clients through which the log store contact the Kafka cluster.
-    client_manager: ClientManagerRef,
     producer_manager: Arc<ProducerManager>,
+    consumer_manager: Arc<ConsumerManager>,
 }
 
 impl KafkaLogStore {
     /// Tries to create a Kafka log store.
     pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
+        let client_manager = ClientManager::try_new(config).await.map(Arc::new)?;
         Ok(Self {
-            client_manager: Arc::new(ClientManager::try_new(config).await?),
-            producer_manager: Arc::new(ProducerManager::try_new(config).await?),
+            producer_manager: Arc::new(ProducerManager::new(config, client_manager.clone())),
+            consumer_manager: Arc::new(ConsumerManager::new(config, client_manager)),
             config: config.clone(),
         })
     }
@@ -74,18 +68,6 @@ impl LogStore for KafkaLogStore {
             id: entry_id,
             ns,
         }
-    }
-
-    /// Appends an entry to the log store and returns a response containing the entry id of the appended entry.
-    async fn append(&self, entry: Self::Entry) -> Result<AppendResponse> {
-        let entry_id = RecordProducer::new(entry.ns.clone())
-            .with_entries(vec![entry])
-            .produce(&self.client_manager)
-            .await
-            .map(TryInto::try_into)??;
-        Ok(AppendResponse {
-            last_entry_id: entry_id,
-        })
     }
 
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
@@ -143,6 +125,7 @@ impl LogStore for KafkaLogStore {
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids
     /// starting from `entry_id`. The generated entries will be filtered by the namespace.
+    // TODO(niebayes): add necessary logs.
     async fn read(
         &self,
         ns: &Self::Namespace,
@@ -151,107 +134,19 @@ impl LogStore for KafkaLogStore {
         metrics::METRIC_KAFKA_READ_CALLS_TOTAL.inc();
         let _timer = metrics::METRIC_KAFKA_READ_ELAPSED.start_timer();
 
-        // TODO(niebayes): refactor ProducerManager to incorporate Producer and Consumer.
-
-        // Gets the client associated with the topic.
-        let client = self
-            .client_manager
-            .get_or_insert(&ns.topic)
-            .await?
-            .raw_client
-            .clone();
-
-        // Gets the offset of the latest record in the topic. Actually, it's the latest record of the single partition in the topic.
-        // The read operation terminates when this record is consumed.
-        // Warning: the `get_offset` returns the end offset of the latest record. For our usage, it should be decremented.
-        // See: https://kafka.apache.org/36/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html#endOffsets(java.util.Collection)
-        let end_offset = client
-            .get_offset(OffsetAt::Latest)
-            .await
-            .context(GetOffsetSnafu { ns: ns.clone() })?
-            - 1;
-        // Reads entries with offsets in the range [start_offset, end_offset].
-        let start_offset = Offset::try_from(entry_id)?.0;
-
-        debug!(
-            "Start reading entries in range [{}, {}] for ns {}",
-            start_offset, end_offset, ns
-        );
-
-        // Abort if there're no new entries.
-        // FIXME(niebayes): how come this case happens?
-        if start_offset > end_offset {
-            warn!(
-                "No new entries for ns {} in range [{}, {}]",
-                ns, start_offset, end_offset
-            );
+        let Some(mut consumer) = self.consumer_manager.consumer(ns.clone(), entry_id).await? else {
             return Ok(futures_util::stream::empty().boxed());
-        }
-
-        let mut stream_consumer = StreamConsumerBuilder::new(client, StartOffset::At(start_offset))
-            .with_max_batch_size(self.config.max_batch_size.as_bytes() as i32)
-            .with_max_wait_ms(self.config.consumer_wait_timeout.as_millis() as i32)
-            .build();
-
-        debug!(
-            "Built a stream consumer for ns {} to consume entries in range [{}, {}]",
-            ns, start_offset, end_offset
-        );
-
-        // Key: entry id, Value: the records associated with the entry.
-        let mut entry_records: HashMap<_, Vec<_>> = HashMap::new();
-        let ns_clone = ns.clone();
-        let stream = async_stream::stream!({
-            while let Some(consume_result) = stream_consumer.next().await {
-                // Each next on the stream consumer produces a `RecordAndOffset` and a high watermark offset.
-                // The `RecordAndOffset` contains the record data and its start offset.
-                // The high watermark offset is the offset of the last record plus one.
-                let (record_and_offset, high_watermark) =
-                    consume_result.with_context(|_| ConsumeRecordSnafu {
-                        ns: ns_clone.clone(),
-                    })?;
-                let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
-
-                metrics::METRIC_KAFKA_READ_RECORD_BYTES_TOTAL
-                    .inc_by(kafka_record.approximate_size() as u64);
-
-                debug!(
-                    "Read a record at offset {} for ns {}, high watermark: {}",
-                    offset, ns_clone, high_watermark
-                );
-
-                // Ignores no-op records.
-                if kafka_record.value.is_none() {
-                    if check_termination(offset, end_offset, &entry_records)? {
-                        break;
-                    }
-                    continue;
-                }
-
-                // Filters records by namespace.
-                let record = Record::try_from(kafka_record)?;
-                if record.meta.ns != ns_clone {
-                    if check_termination(offset, end_offset, &entry_records)? {
-                        break;
-                    }
-                    continue;
-                }
-
-                // Tries to construct an entry from records consumed so far.
-                if let Some(mut entry) = maybe_emit_entry(record, &mut entry_records)? {
-                    // We don't rely on the EntryId generated by mito2.
-                    // Instead, we use the offset return from Kafka as EntryId.
-                    // Therefore, we MUST overwrite the EntryId with RecordOffset.
-                    entry.id = offset as u64;
-                    yield Ok(vec![entry]);
-                }
-
-                if check_termination(offset, end_offset, &entry_records)? {
+        };
+        let stream = async_stream::stream! {
+            loop {
+                let entries = consumer.next().await?;
+                if entries.is_empty() {
                     break;
                 }
+                yield Ok(entries);
             }
-        });
-        Ok(Box::pin(stream))
+        };
+        Ok(stream.boxed())
     }
 
     /// Creates a namespace of the associated Namespace type.
@@ -266,6 +161,11 @@ impl LogStore for KafkaLogStore {
             region_id: ns_id,
             topic: kafka_options.topic.clone(),
         }
+    }
+
+    /// Appends an entry to the log store and returns a response containing the entry id of the appended entry.
+    async fn append(&self, _entry: Self::Entry) -> Result<AppendResponse> {
+        todo!()
     }
 
     /// Creates a new `Namespace` from the given ref.
@@ -296,30 +196,11 @@ impl LogStore for KafkaLogStore {
     }
 }
 
-fn check_termination(
-    offset: i64,
-    end_offset: i64,
-    entry_records: &HashMap<EntryId, Vec<Record>>,
-) -> Result<bool> {
-    // Terminates the stream if the entry with the end offset was read.
-    if offset >= end_offset {
-        debug!("Stream consumer terminates at offset {}", offset);
-        // There must have no records when the stream terminates.
-        if !entry_records.is_empty() {
-            return IllegalSequenceSnafu {
-                error: "Found records leftover",
-            }
-            .fail();
-        }
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use common_base::readable_size::ReadableSize;
+    use common_telemetry::warn;
+    use futures::StreamExt;
     use rand::seq::IteratorRandom;
 
     use super::*;
