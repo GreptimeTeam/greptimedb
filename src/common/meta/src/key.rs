@@ -660,7 +660,7 @@ impl TableMetadataManager {
         ensure!(
             self.tombstone_manager.restore(keys).await?,
             error::UnexpectedSnafu {
-                err_msg: format!("Failed to delete table: {table_name}({table_id})")
+                err_msg: format!("Failed to restore table: {table_name}({table_id})")
             }
         );
         Ok(())
