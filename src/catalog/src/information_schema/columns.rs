@@ -274,8 +274,8 @@ impl InformationSchemaColumnsBuilder {
                     };
 
                     self.add_column(
-                        idx,
                         &predicates,
+                        idx,
                         &catalog_name,
                         &schema_name,
                         &table.table_info().name,
@@ -292,8 +292,8 @@ impl InformationSchemaColumnsBuilder {
     #[allow(clippy::too_many_arguments)]
     fn add_column(
         &mut self,
-        index: usize,
         predicates: &Predicates,
+        index: usize,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
