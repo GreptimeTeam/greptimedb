@@ -628,82 +628,115 @@ mod tests {
     }
 
     use crate::kv_backend::test::{
-        prepare_kv, test_kv_batch_delete, test_kv_batch_get, test_kv_compare_and_put,
-        test_kv_delete_range, test_kv_put, test_kv_range, test_kv_range_2, unprepare_kv,
+        prepare_kv_with_perfix, test_kv_batch_delete_with_perfix, test_kv_batch_get_with_perfix,
+        test_kv_compare_and_put_with_perfix, test_kv_delete_range_with_perfix,
+        test_kv_put_with_perfix, test_kv_range_2_with_perfix, test_kv_range_with_perfix,
+        unprepare_kv,
     };
 
-    async fn build_kv_backend() -> EtcdStore {
+    async fn build_kv_backend() -> Option<EtcdStore> {
         let endpoints = std::env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+        if endpoints.is_empty() {
+            return None;
+        }
         let endpoints = endpoints
             .split(',')
             .map(|s| s.to_string())
             .collect::<Vec<String>>();
 
+        std::panic::set_hook(Box::new(|_| {
+            println!("panic: malformed endpoints");
+        }));
         let client = Client::connect(endpoints, None)
             .await
             .expect("malformed endpoints");
-        EtcdStore {
+        Some(EtcdStore {
             client,
             max_txn_ops: 128,
-        }
+        })
     }
 
     #[tokio::test]
     async fn test_put() {
-        let kv_backend = build_kv_backend().await;
-
-        prepare_kv(&kv_backend).await;
-        test_kv_put(&kv_backend).await;
-        unprepare_kv(&kv_backend).await;
+        match build_kv_backend().await {
+            Some(kv_backend) => {
+                let perfix = b"put/";
+                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
+                test_kv_put_with_perfix(&kv_backend, perfix.to_vec()).await;
+                unprepare_kv(&kv_backend, perfix).await;
+            }
+            None => {}
+        }
     }
 
     #[tokio::test]
     async fn test_range() {
-        let kv_backend = build_kv_backend().await;
-
-        prepare_kv(&kv_backend).await;
-        test_kv_range(&kv_backend).await;
-        unprepare_kv(&kv_backend).await;
+        match build_kv_backend().await {
+            Some(kv_backend) => {
+                let perfix = b"range/";
+                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
+                test_kv_range_with_perfix(&kv_backend, perfix.to_vec()).await;
+                unprepare_kv(&kv_backend, perfix).await;
+            }
+            None => {}
+        }
     }
 
     #[tokio::test]
     async fn test_range_2() {
-        let kv = build_kv_backend().await;
-
-        test_kv_range_2(kv).await;
+        match build_kv_backend().await {
+            Some(kv_backend) => {
+                test_kv_range_2_with_perfix(kv_backend, b"range2/".to_vec()).await;
+            }
+            None => {}
+        }
     }
 
     #[tokio::test]
     async fn test_batch_get() {
-        let kv_backend = build_kv_backend().await;
-
-        prepare_kv(&kv_backend).await;
-
-        test_kv_batch_get(kv_backend).await;
+        match build_kv_backend().await {
+            Some(kv_backend) => {
+                let perfix = b"batchGet/";
+                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
+                test_kv_batch_get_with_perfix(&kv_backend, perfix.to_vec()).await;
+                unprepare_kv(&kv_backend, perfix).await;
+            }
+            None => {}
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compare_and_put() {
-        let kv_backend = Arc::new(build_kv_backend().await);
-
-        test_kv_compare_and_put(kv_backend).await;
+        match build_kv_backend().await {
+            Some(kv_backend) => {
+                let kv_backend = Arc::new(kv_backend);
+                test_kv_compare_and_put_with_perfix(kv_backend, b"compareAndPut/".to_vec()).await;
+            }
+            None => {}
+        }
     }
 
     #[tokio::test]
     async fn test_delete_range() {
-        let kv_backend = build_kv_backend().await;
-
-        prepare_kv(&kv_backend).await;
-
-        test_kv_delete_range(kv_backend).await;
+        match build_kv_backend().await {
+            Some(kv_backend) => {
+                let perfix = b"deleteRange/";
+                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
+                test_kv_delete_range_with_perfix(kv_backend, perfix.to_vec()).await;
+            }
+            None => {}
+        }
     }
 
     #[tokio::test]
     async fn test_batch_delete() {
-        let kv_backend = build_kv_backend().await;
-
-        prepare_kv(&kv_backend).await;
-
-        test_kv_batch_delete(kv_backend).await;
+        match build_kv_backend().await {
+            Some(kv_backend) => {
+                let perfix = b"batchDelete/";
+                prepare_kv_with_perfix(&kv_backend, perfix.to_vec()).await;
+                test_kv_batch_delete_with_perfix(kv_backend, perfix.to_vec()).await;
+            }
+            None => {}
+        }
     }
 }

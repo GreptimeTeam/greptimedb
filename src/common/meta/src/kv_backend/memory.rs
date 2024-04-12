@@ -378,7 +378,7 @@ mod tests {
     async fn test_batch_get() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_batch_get(kv_backend).await;
+        test_kv_batch_get(&kv_backend).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

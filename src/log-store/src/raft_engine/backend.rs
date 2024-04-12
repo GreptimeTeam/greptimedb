@@ -701,7 +701,7 @@ mod tests {
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
         prepare_kv(&backend).await;
 
-        test_kv_batch_get(backend).await;
+        test_kv_batch_get(&backend).await;
     }
 
     #[tokio::test]
