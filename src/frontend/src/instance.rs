@@ -31,7 +31,7 @@ use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
@@ -40,8 +40,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::logging::info;
-use common_telemetry::{error, tracing};
+use common_telemetry::{debug, error, info, tracing};
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
@@ -324,7 +323,11 @@ impl SqlQueryHandler for Instance {
                         }
                         Err(e) => {
                             let redacted = sql::util::redact_sql_secrets(query.as_ref());
-                            error!(e; "Failed to execute query: {redacted}");
+                            if e.status_code().should_log_error() {
+                                error!(e; "Failed to execute query: {redacted}");
+                            } else {
+                                debug!("Failed to execute query: {redacted}, {e}");
+                            }
 
                             results.push(Err(e));
                             break;
