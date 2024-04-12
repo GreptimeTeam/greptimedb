@@ -267,6 +267,8 @@ async fn test_on_rollback() {
             provider: Arc::new(MockContextProvider::default()),
         };
         procedure.rollback(&ctx).await.unwrap();
+        // Rollback again
+        procedure.rollback(&ctx).await.unwrap();
         let kvs = kv_backend.dump();
         assert_eq!(kvs, expected_kvs);
     }
@@ -287,6 +289,8 @@ async fn test_on_rollback() {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
     };
+    procedure.rollback(&ctx).await.unwrap();
+    // Rollback again
     procedure.rollback(&ctx).await.unwrap();
     let kvs = kv_backend.dump();
     assert_eq!(kvs, expected_kvs);

@@ -199,14 +199,11 @@ impl Procedure for DropTableProcedure {
             self.data.table_id()
         );
 
+        let executor = self.executor();
         // Safety: fetched in `DropTableState::Prepare` step.
         let table_route_value = self.data.table_route_value.as_ref().unwrap();
-
-        let table_id = self.data.table_id();
-        let table_name = self.data.task.table_name();
-        self.context
-            .table_metadata_manager
-            .restore_table_metadata(table_id, &table_name, table_route_value)
+        executor
+            .on_restore_metadata(&self.context, table_route_value)
             .await
             .map_err(ProcedureError::external)
     }
