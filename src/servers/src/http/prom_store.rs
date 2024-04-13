@@ -188,6 +188,11 @@ pub async fn remote_write_without_strict_mode(
     content_encoding: TypedHeader<headers::ContentEncoding>,
     RawBody(body): RawBody,
 ) -> Result<impl IntoResponse> {
+    // VictoriaMetrics handshake
+    if let Some(_vm_handshake) = params.get_vm_proto_version {
+        return Ok(VM_PROTO_VERSION.into_response());
+    }
+
     let db = params.db.clone().unwrap_or_default();
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])

@@ -205,7 +205,11 @@ impl PromTimeSeries {
         }
     }
 
-    fn add_to_table_data(&mut self, table_builders: &mut TablesBuilder, is_strict_mode: bool) {
+    fn add_to_table_data(
+        &mut self,
+        table_builders: &mut TablesBuilder,
+        is_strict_mode: bool,
+    ) -> Result<(), DecodeError> {
         let label_num = self.labels.len();
         let row_num = self.samples.len();
         let table_data = table_builders.get_or_create_table_builder(
@@ -213,13 +217,15 @@ impl PromTimeSeries {
             label_num,
             row_num,
         );
-        let _ = table_data.add_labels_and_samples(
+        table_data.add_labels_and_samples(
             self.labels.as_slice(),
             self.samples.as_slice(),
             is_strict_mode,
-        );
+        )?;
         self.labels.clear();
         self.samples.clear();
+
+        Ok(())
     }
 }
 
@@ -268,7 +274,7 @@ impl PromWriteRequest {
                         return Err(DecodeError::new("delimited length exceeded"));
                     }
                     self.series
-                        .add_to_table_data(&mut self.table_data, is_strict_mode);
+                        .add_to_table_data(&mut self.table_data, is_strict_mode)?;
                 }
                 3u32 => {
                     // todo(hl): metadata are skipped.
