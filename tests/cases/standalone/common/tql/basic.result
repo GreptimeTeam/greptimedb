@@ -76,7 +76,6 @@ TQL EVAL (0, 10, '5s') test{k="a"};
 | 2.0 | 1970-01-01T00:00:10 | a |
 +-----+---------------------+---+
 
--- 'lookback' parameter is not fully supported, the test has to be updated
 TQL EVAL (0, 10, '1s', '2s') test{k="a"};
 
 +-----+---------------------+---+
