@@ -790,6 +790,7 @@ CREATE TABLE {table_name} (
                 start: "1672557973".to_owned(),
                 end: "1672557978".to_owned(),
                 step: "1s".to_owned(),
+                lookback: "5m".to_string(),
             })),
         });
         let output = query(instance, request).await;

@@ -504,6 +504,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     let instant_query = PromInstantQuery {
         query: "test".to_string(),
         time: "5".to_string(),
+        lookback: "5m".to_string(),
     };
     let instant_query_request = PromqlRequest {
         header: Some(header.clone()),
@@ -555,6 +556,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         start: "0".to_string(),
         end: "10".to_string(),
         step: "5s".to_string(),
+        lookback: "5m".to_string(),
     };
     let range_query_request: PromqlRequest = PromqlRequest {
         header: Some(header.clone()),
@@ -605,6 +607,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         start: "1000000000".to_string(),
         end: "1000001000".to_string(),
         step: "5s".to_string(),
+        lookback: "5m".to_string(),
     };
     let range_query_request: PromqlRequest = PromqlRequest {
         header: Some(header),

@@ -215,6 +215,7 @@ impl Database {
                 start: start.to_string(),
                 end: end.to_string(),
                 step: step.to_string(),
+                lookback: "".to_string(),
             })),
         }))
         .await
