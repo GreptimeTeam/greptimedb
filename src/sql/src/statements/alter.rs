@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_query::AddColumnLocation;
-use sqlparser::ast::{ColumnDef, Ident, ObjectName, TableConstraint};
+use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
@@ -52,4 +52,9 @@ pub enum AlterTableOperation {
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
     RenameTable { new_table_name: String },
+    /// `MODIFY <name> <target_type>`
+    ModifyColumnType {
+        column_name: Ident,
+        target_type: DataType,
+    },
 }

@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -85,7 +86,7 @@ pub(crate) fn has_same_columns(left: &RegionMetadata, right: &RegionMetadata) ->
     }
 
     for (left_col, right_col) in left.column_metadatas.iter().zip(&right.column_metadatas) {
-        if left_col.column_id != right_col.column_id {
+        if left_col != right_col {
             return false;
         }
         debug_assert_eq!(
@@ -156,7 +157,20 @@ impl CompatFields {
             .index_or_defaults
             .iter()
             .map(|index_or_default| match index_or_default {
-                IndexOrDefault::Index(index) => batch.fields()[*index].clone(),
+                IndexOrDefault::Index { pos, cast_type } => {
+                    let old_column = &batch.fields()[*pos];
+
+                    let data = if let Some(ty) = cast_type {
+                        // Safety: We ensure type can be converted and the new batch should be valid.
+                        old_column.data.cast(ty).unwrap()
+                    } else {
+                        old_column.data.clone()
+                    };
+                    BatchColumn {
+                        column_id: old_column.column_id,
+                        data,
+                    }
+                }
                 IndexOrDefault::DefaultValue {
                     column_id,
                     default_vector,
@@ -239,9 +253,10 @@ fn may_compat_fields(
     mapper: &ProjectionMapper,
     actual: &RegionMetadata,
 ) -> Result<Option<CompatFields>> {
+    let expect = mapper.metadata();
     let expect_fields = mapper.batch_fields();
     let actual_fields = Batch::projected_fields(actual, mapper.column_ids());
-    if expect_fields == actual_fields {
+    if expect.schema == actual.schema {
         return Ok(None);
     }
 
@@ -255,8 +270,21 @@ fn may_compat_fields(
         .iter()
         .map(|column_id| {
             if let Some(index) = source_field_index.get(column_id) {
+                // TODO(kould): more Modify case, e.g. column name
+                let mut modify_type = None;
+
+                // Safety: check on [`TableMeta::modify_columns`].
+                let expect_column = expect.column_by_id(*column_id).unwrap();
+                let actual_column = actual.column_by_id(*column_id).unwrap();
+
+                if expect_column != actual_column {
+                    modify_type = Some(expect_column.column_schema.data_type.clone())
+                }
                 // Source has this field.
-                Ok(IndexOrDefault::Index(*index))
+                Ok(IndexOrDefault::Index {
+                    pos: *index,
+                    cast_type: modify_type,
+                })
             } else {
                 // Safety: mapper must have this column.
                 let column = mapper.metadata().column_by_id(*column_id).unwrap();
@@ -293,7 +321,10 @@ fn may_compat_fields(
 #[derive(Debug)]
 enum IndexOrDefault {
     /// Index of the column in source batch.
-    Index(usize),
+    Index {
+        pos: usize,
+        cast_type: Option<ConcreteDataType>,
+    },
     /// Default value for the column.
     DefaultValue {
         /// Id of the column.

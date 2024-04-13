@@ -156,8 +156,8 @@ impl ProjectionMapper {
     }
 
     /// Returns the schema of converted [RecordBatch].
-    pub(crate) fn output_schema(&self) -> SchemaRef {
-        self.output_schema.clone()
+    pub(crate) fn output_schema(&self) -> &SchemaRef {
+        &self.output_schema
     }
 
     /// Converts a [Batch] to a [RecordBatch].

@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::region::RegionColumnDef;
-use api::v1::SemanticType;
+use api::v1::{ColumnDef, SemanticType};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -33,7 +33,7 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
-use crate::region_request::{AddColumn, AddColumnLocation, AlterKind};
+use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ModifyColumn};
 use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
 
@@ -61,18 +61,7 @@ impl fmt::Debug for ColumnMetadata {
 }
 
 impl ColumnMetadata {
-    /// Construct `Self` from protobuf struct [RegionColumnDef]
-    pub fn try_from_column_def(column_def: RegionColumnDef) -> Result<Self> {
-        let column_id = column_def.column_id;
-
-        let column_def = column_def
-            .column_def
-            .context(InvalidRawRegionRequestSnafu {
-                err: "column_def is absent",
-            })?;
-
-        let semantic_type = column_def.semantic_type();
-
+    pub(crate) fn inner_try_from_column_def(column_def: ColumnDef) -> Result<ColumnSchema> {
         let default_constrain = if column_def.default_constraint.is_empty() {
             None
         } else {
@@ -86,9 +75,22 @@ impl ColumnMetadata {
             column_def.datatype_extension.clone(),
         )
         .into();
-        let column_schema = ColumnSchema::new(column_def.name, data_type, column_def.is_nullable)
+        ColumnSchema::new(column_def.name, data_type, column_def.is_nullable)
             .with_default_constraint(default_constrain)
-            .context(ConvertDatatypesSnafu)?;
+            .context(ConvertDatatypesSnafu)
+    }
+
+    /// Construct `Self` from protobuf struct [RegionColumnDef]
+    pub fn try_from_column_def(column_def: RegionColumnDef) -> Result<Self> {
+        let column_id = column_def.column_id;
+        let column_def = column_def
+            .column_def
+            .context(InvalidRawRegionRequestSnafu {
+                err: "column_def is absent",
+            })?;
+        let semantic_type = column_def.semantic_type();
+        let column_schema = Self::inner_try_from_column_def(column_def)?;
+
         Ok(Self {
             column_schema,
             semantic_type,
@@ -535,6 +537,7 @@ impl RegionMetadataBuilder {
         match kind {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
+            AlterKind::ModifyColumns { columns } => self.modify_columns(columns)?,
         }
         Ok(self)
     }
@@ -614,6 +617,21 @@ impl RegionMetadataBuilder {
         let name_set: HashSet<_> = names.iter().collect();
         self.column_metadatas
             .retain(|col| !name_set.contains(&col.column_schema.name));
+    }
+
+    /// Modifies columns to the metadata if exist.
+    fn modify_columns(&mut self, columns: Vec<ModifyColumn>) -> Result<()> {
+        let mut modify_map: HashMap<_, _> = columns
+            .into_iter()
+            .map(|modify_column| (modify_column.column_name.clone(), modify_column))
+            .collect();
+
+        for column_meta in self.column_metadatas.iter_mut() {
+            if let Some(modify_column) = modify_map.remove(&column_meta.column_schema.name) {
+                column_meta.column_schema.data_type = modify_column.target_type;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -707,6 +725,13 @@ pub enum MetadataError {
 
     #[snafu(display("Time index column not found"))]
     TimeIndexNotFound { location: Location },
+
+    #[snafu(display("Modify column {} not exists in region: {}", column_name, region_id))]
+    ModifyColumnNotFound {
+        column_name: String,
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 impl ErrorExt for MetadataError {

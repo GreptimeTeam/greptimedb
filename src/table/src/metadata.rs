@@ -27,7 +27,7 @@ use snafu::{ensure, ResultExt};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
-use crate::requests::{AddColumnRequest, AlterKind, TableOptions};
+use crate::requests::{AddColumnRequest, AlterKind, ModifyColumnRequest, TableOptions};
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -195,6 +195,7 @@ impl TableMeta {
                 self.add_columns(table_name, columns, add_if_not_exists)
             }
             AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
+            AlterKind::ModifyColumns { columns } => self.modify_columns(table_name, columns),
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => {
                 let mut meta_builder = TableMetaBuilder::default();
@@ -454,6 +455,118 @@ impl TableMeta {
         let _ = meta_builder
             .schema(Arc::new(new_schema))
             .primary_key_indices(primary_key_indices);
+
+        Ok(meta_builder)
+    }
+
+    fn modify_columns(
+        &self,
+        table_name: &str,
+        requests: &[ModifyColumnRequest],
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let mut modify_columns: HashMap<_, _> = HashMap::with_capacity(requests.len());
+        let timestamp_index = table_schema.timestamp_index();
+
+        for col_to_modify in requests {
+            let modify_column_name = &col_to_modify.column_name;
+
+            if let Some(index) = table_schema.column_index_by_name(modify_column_name) {
+                let data_type = &table_schema.column_schemas()[index].data_type;
+
+                ensure!(
+                    !self.primary_key_indices.contains(&index),
+                    error::ModifyColumnInIndexSnafu {
+                        column_name: modify_column_name,
+                        table_name,
+                    }
+                );
+
+                if let Some(ts_index) = timestamp_index {
+                    // Not allowed to modify column in timestamp index.
+                    ensure!(
+                        index != ts_index,
+                        error::ModifyColumnInIndexSnafu {
+                            column_name: table_schema.column_name_by_index(ts_index),
+                            table_name,
+                        }
+                    );
+                }
+
+                ensure!(
+                    modify_columns
+                        .insert(&col_to_modify.column_name, col_to_modify)
+                        .is_none(),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!("modify column {} more than once", col_to_modify.column_name),
+                    }
+                );
+
+                ensure!(
+                    table_schema.contains_column(&col_to_modify.column_name),
+                    error::ColumnExistsSnafu {
+                        table_name,
+                        column_name: col_to_modify.column_name.to_string()
+                    },
+                );
+
+                ensure!(
+                    data_type.can_arrow_type_cast_to(&col_to_modify.target_type),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "column '{}' cannot be cast automatically to type '{}'",
+                            col_to_modify.column_name, col_to_modify.target_type,
+                        ),
+                    }
+                );
+            } else {
+                return error::ColumnNotExistsSnafu {
+                    column_name: modify_column_name,
+                    table_name,
+                }
+                .fail()?;
+            }
+        }
+        // Collect columns after modified.
+        let columns: Vec<_> = table_schema
+            .column_schemas()
+            .iter()
+            .cloned()
+            .map(|mut column| {
+                if let Some(modify_column) = modify_columns.get(&column.name) {
+                    column.data_type = modify_column.target_type.clone();
+                }
+                column
+            })
+            .collect();
+
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            // Also bump the schema version.
+            .version(table_schema.version() + 1);
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+        let new_schema = builder.build().with_context(|_| {
+            let column_names: Vec<_> = requests
+                .iter()
+                .map(|request| &request.column_name)
+                .collect();
+
+            error::SchemaBuildSnafu {
+                msg: format!("Table {table_name} cannot modify columns {column_names:?}"),
+            }
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
 
         Ok(meta_builder)
     }

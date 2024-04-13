@@ -85,7 +85,7 @@ impl UnorderedScan {
             debug!("Unordered scan finished, region_id: {}, metrics: {:?}", mapper.metadata().region_id, metrics);
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.input.mapper.output_schema(),
+            self.input.mapper.output_schema().clone(),
             Box::pin(stream),
         ));
 
@@ -133,7 +133,7 @@ impl UnorderedScan {
             debug!("Unordered scan in parallel finished, region_id: {}, metrics: {:?}", mapper.metadata().region_id, metrics);
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.input.mapper.output_schema(),
+            self.input.mapper.output_schema().clone(),
             Box::pin(stream),
         ));
 

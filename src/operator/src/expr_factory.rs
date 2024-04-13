@@ -18,7 +18,8 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDataTypeExtension,
-    CreateTableExpr, DropColumn, DropColumns, RenameTable, SemanticType,
+    CreateTableExpr, DropColumn, DropColumns, ModifyColumn, ModifyColumns, RenameTable,
+    SemanticType,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -35,7 +36,9 @@ use snafu::{ensure, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
-use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
+use sql::statements::{
+    column_def_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
+};
 use sql::util::to_lowercase_options_map;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 use table::table_reference::TableReference;
@@ -409,6 +412,23 @@ pub(crate) fn to_alter_expr(
         AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
             new_table_name: new_table_name.to_string(),
         }),
+        AlterTableOperation::ModifyColumnType {
+            column_name,
+            target_type,
+        } => {
+            let target_type =
+                sql_data_type_to_concrete_data_type(target_type).context(ParseSqlSnafu)?;
+            let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
+                .map(|w| w.to_parts())
+                .context(ColumnDataTypeSnafu)?;
+            Kind::ModifyColumns(ModifyColumns {
+                modify_columns: vec![ModifyColumn {
+                    column_name: column_name.value.to_string(),
+                    target_type: target_type as i32,
+                    target_type_extension,
+                }],
+            })
+        }
     };
 
     Ok(AlterExpr {

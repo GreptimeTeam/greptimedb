@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::fmt::{self};
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{
     alter_request, region_request, AlterRequest, AlterRequests, CloseRequest, CompactRequest,
@@ -23,13 +24,14 @@ use api::v1::region::{
 };
 use api::v1::{self, Rows, SemanticType};
 pub use common_base::AffectedRows;
+use datatypes::data_type::ConcreteDataType;
 use snafu::{ensure, OptionExt};
 use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
     ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
-    RegionMetadata, Result,
+    ModifyColumnNotFoundSnafu, RegionMetadata, Result,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -332,6 +334,9 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
+    ModifyColumns {
+        columns: Vec<ModifyColumn>,
+    },
 }
 
 impl AlterKind {
@@ -350,6 +355,11 @@ impl AlterKind {
                     Self::validate_column_to_drop(name, metadata)?;
                 }
             }
+            AlterKind::ModifyColumns { columns } => {
+                for col_to_modify in columns {
+                    col_to_modify.validate(metadata)?;
+                }
+            }
         }
         Ok(())
     }
@@ -364,6 +374,9 @@ impl AlterKind {
             AlterKind::DropColumns { names } => names
                 .iter()
                 .any(|name| metadata.column_by_name(name).is_some()),
+            AlterKind::ModifyColumns { columns } => columns
+                .iter()
+                .any(|col_to_modify| col_to_modify.need_alter(metadata)),
         }
     }
 
@@ -399,6 +412,14 @@ impl TryFrom<alter_request::Kind> for AlterKind {
             alter_request::Kind::DropColumns(x) => {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
+            }
+            alter_request::Kind::ModifyColumns(x) => {
+                let columns = x
+                    .modify_columns
+                    .into_iter()
+                    .map(|x| x.try_into())
+                    .collect::<Result<Vec<_>>>()?;
+                AlterKind::ModifyColumns { columns }
             }
         };
 
@@ -498,6 +519,77 @@ impl TryFrom<v1::AddColumnLocation> for AddColumnLocation {
         };
 
         Ok(add_column_location)
+    }
+}
+
+/// Modify a column.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ModifyColumn {
+    /// Schema of the column to modify.
+    pub column_name: String,
+    /// Column will be modified to this type.
+    pub target_type: ConcreteDataType,
+}
+
+impl ModifyColumn {
+    /// Returns an error if the column to modify is invalid.
+    pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
+        let column_meta =
+            metadata
+                .column_by_name(&self.column_name)
+                .context(ModifyColumnNotFoundSnafu {
+                    column_name: self.column_name.clone(),
+                    region_id: metadata.region_id,
+                })?;
+
+        ensure!(
+            !matches!(
+                column_meta.semantic_type,
+                SemanticType::Timestamp | SemanticType::Tag
+            ),
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: "'timestamp' or 'tag' column cannot change type".to_string()
+            }
+        );
+        ensure!(
+            column_meta
+                .column_schema
+                .data_type
+                .can_arrow_type_cast_to(&self.target_type),
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!(
+                    "column '{}' cannot be cast automatically to type '{}'",
+                    self.column_name, self.target_type
+                ),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Returns true if no column to modify to the region.
+    pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
+        debug_assert!(self.validate(metadata).is_ok());
+        metadata.column_by_name(&self.column_name).is_some()
+    }
+}
+
+impl TryFrom<v1::region::ModifyColumn> for ModifyColumn {
+    type Error = MetadataError;
+
+    fn try_from(modify_column: v1::region::ModifyColumn) -> Result<Self> {
+        let target_type = ColumnDataTypeWrapper::new(
+            modify_column.target_type(),
+            modify_column.target_type_extension,
+        )
+        .into();
+
+        Ok(ModifyColumn {
+            column_name: modify_column.column_name,
+            target_type,
+        })
     }
 }
 

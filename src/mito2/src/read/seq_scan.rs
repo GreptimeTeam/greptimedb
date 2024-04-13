@@ -93,7 +93,7 @@ impl SeqScan {
             );
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.input.mapper.output_schema(),
+            self.input.mapper.output_schema().clone(),
             Box::pin(stream),
         ));
 

@@ -15,8 +15,8 @@
 use api::v1::alter_expr::Kind;
 use api::v1::region::region_request::Body;
 use api::v1::region::{
-    alter_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns, RegionColumnDef,
-    RegionRequest, RegionRequestHeader,
+    alter_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns, ModifyColumn,
+    ModifyColumns, RegionColumnDef, RegionRequest, RegionRequestHeader,
 };
 use common_telemetry::tracing_context::TracingContext;
 use snafu::OptionExt;
@@ -102,6 +102,21 @@ fn create_proto_alter_kind(
 
             Ok(Some(alter_request::Kind::DropColumns(DropColumns {
                 drop_columns,
+            })))
+        }
+        Kind::ModifyColumns(x) => {
+            let modify_columns = x
+                .modify_columns
+                .iter()
+                .map(|modify_column| ModifyColumn {
+                    column_name: modify_column.column_name.clone(),
+                    target_type: modify_column.target_type,
+                    target_type_extension: modify_column.target_type_extension.clone(),
+                })
+                .collect();
+
+            Ok(Some(alter_request::Kind::ModifyColumns(ModifyColumns {
+                modify_columns,
             })))
         }
         Kind::RenameTable(_) => Ok(None),

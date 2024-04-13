@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
 use api::v1::{
     column_def, AddColumnLocation as Location, AlterExpr, CreateTableExpr, DropColumns,
-    RenameTable, SemanticType,
+    ModifyColumns, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnRequest};
 
 use crate::error::{
     InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
@@ -67,6 +68,25 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
         Kind::DropColumns(DropColumns { drop_columns }) => AlterKind::DropColumns {
             names: drop_columns.into_iter().map(|c| c.name).collect(),
         },
+        Kind::ModifyColumns(ModifyColumns { modify_columns }) => {
+            let modify_column_requests = modify_columns
+                .into_iter()
+                .map(|mc| {
+                    let target_type =
+                        ColumnDataTypeWrapper::new(mc.target_type(), mc.target_type_extension)
+                            .into();
+
+                    Ok(ModifyColumnRequest {
+                        column_name: mc.column_name,
+                        target_type,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            AlterKind::ModifyColumns {
+                columns: modify_column_requests,
+            }
+        }
         Kind::RenameTable(RenameTable { new_table_name }) => {
             AlterKind::RenameTable { new_table_name }
         }
