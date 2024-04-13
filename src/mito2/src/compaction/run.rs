@@ -36,6 +36,14 @@ pub(crate) trait Ranged {
     }
 }
 
+fn sort_ranged_items<T: Ranged>(values: &mut Vec<T>) {
+    values.sort_unstable_by(|l, r| {
+        let (l_start, l_end) = l.range();
+        let (r_start, r_end) = r.range();
+        l_start.cmp(&r_start).then(r_end.cmp(&l_end))
+    });
+}
+
 pub(crate) trait Item: Ranged + Clone {
     fn size(&self) -> usize;
 }
@@ -260,11 +268,7 @@ where
             }
         }
 
-        res.items.sort_unstable_by(|l, r| {
-            let (l_start, l_end) = l.range();
-            let (r_start, r_end) = r.range();
-            l_start.cmp(&r_start).then(r_end.cmp(&l_end))
-        });
+        sort_ranged_items(&mut res.items);
         res.penalty = penalty;
         res
     }
@@ -289,11 +293,7 @@ where
         return vec![];
     }
     // sort files
-    items.sort_unstable_by(|l, r| {
-        let (l_start, l_end) = l.range();
-        let (r_start, r_end) = r.range();
-        l_start.cmp(&r_start).then(r_end.cmp(&l_end))
-    });
+    sort_ranged_items(&mut items);
 
     let mut current_run = SortedRun::default();
     let mut runs = vec![];
