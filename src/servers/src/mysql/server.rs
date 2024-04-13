@@ -19,7 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use common_runtime::Runtime;
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use opensrv_mysql::{
     plain_run_with_options, secure_run_with_options, AsyncMysqlIntermediary, IntermediaryOptions,
@@ -138,7 +138,7 @@ impl MysqlServer {
                     Err(error) => warn!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         if let Err(e) = io_stream.set_nodelay(true) {
-                            error!(e; "Failed to set TCP nodelay");
+                            warn!(e; "Failed to set TCP nodelay");
                         }
                         if let Err(error) =
                             Self::handle(io_stream, io_runtime, spawn_ref, spawn_config).await

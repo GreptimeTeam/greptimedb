@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) use self::reduce::{AccumulablePlan, KeyValPlan, ReducePlan};
 use crate::adapter::error::Error;
 use crate::expr::{
-    AggregateExpr, EvalError, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
+    AggregateExpr, EvalError, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr, TypedExpr,
 };
 use crate::plan::join::JoinPlan;
 use crate::repr::{ColumnType, DiffRow, RelationType};
@@ -61,10 +61,13 @@ impl TypedPlan {
     }
 
     /// project the plan to the given expressions
-    pub fn projection(self, exprs: Vec<(ScalarExpr, ColumnType)>) -> Result<Self, Error> {
+    pub fn projection(self, exprs: Vec<TypedExpr>) -> Result<Self, Error> {
         let input_arity = self.typ.column_types.len();
         let output_arity = exprs.len();
-        let (exprs, expr_typs): (Vec<_>, Vec<_>) = exprs.into_iter().unzip();
+        let (exprs, expr_typs): (Vec<_>, Vec<_>) = exprs
+            .into_iter()
+            .map(|TypedExpr { expr, typ }| (expr, typ))
+            .unzip();
         let mfp = MapFilterProject::new(input_arity)
             .map(exprs)?
             .project(input_arity..input_arity + output_arity)?;
@@ -87,18 +90,19 @@ impl TypedPlan {
     }
 
     /// Add a new filter to the plan, will filter out the records that do not satisfy the filter
-    pub fn filter(self, filter: (ScalarExpr, ColumnType)) -> Result<Self, Error> {
+    pub fn filter(self, filter: TypedExpr) -> Result<Self, Error> {
         let plan = match self.plan {
             Plan::Mfp {
                 input,
                 mfp: old_mfp,
             } => Plan::Mfp {
                 input,
-                mfp: old_mfp.filter(vec![filter.0])?,
+                mfp: old_mfp.filter(vec![filter.expr])?,
             },
             _ => Plan::Mfp {
                 input: Box::new(self.plan),
-                mfp: MapFilterProject::new(self.typ.column_types.len()).filter(vec![filter.0])?,
+                mfp: MapFilterProject::new(self.typ.column_types.len())
+                    .filter(vec![filter.expr])?,
             },
         };
         Ok(TypedPlan {
