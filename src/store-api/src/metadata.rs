@@ -61,7 +61,7 @@ impl fmt::Debug for ColumnMetadata {
 }
 
 impl ColumnMetadata {
-    pub(crate) fn inner_try_from_column_def(column_def: ColumnDef) -> Result<ColumnSchema> {
+    fn inner_try_from_column_def(column_def: ColumnDef) -> Result<ColumnSchema> {
         let default_constrain = if column_def.default_constraint.is_empty() {
             None
         } else {
@@ -537,7 +537,7 @@ impl RegionMetadataBuilder {
         match kind {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
-            AlterKind::ModifyColumns { columns } => self.modify_columns(columns)?,
+            AlterKind::ModifyColumns { columns } => self.modify_columns(columns),
         }
         Ok(self)
     }
@@ -620,18 +620,22 @@ impl RegionMetadataBuilder {
     }
 
     /// Modifies columns to the metadata if exist.
-    fn modify_columns(&mut self, columns: Vec<ModifyColumn>) -> Result<()> {
+    fn modify_columns(&mut self, columns: Vec<ModifyColumn>) {
         let mut modify_map: HashMap<_, _> = columns
             .into_iter()
-            .map(|modify_column| (modify_column.column_name.clone(), modify_column))
+            .map(
+                |ModifyColumn {
+                     column_name,
+                     target_type,
+                 }| (column_name, target_type),
+            )
             .collect();
 
         for column_meta in self.column_metadatas.iter_mut() {
-            if let Some(modify_column) = modify_map.remove(&column_meta.column_schema.name) {
-                column_meta.column_schema.data_type = modify_column.target_type;
+            if let Some(target_type) = modify_map.remove(&column_meta.column_schema.name) {
+                column_meta.column_schema.data_type = target_type;
             }
         }
-        Ok(())
     }
 }
 

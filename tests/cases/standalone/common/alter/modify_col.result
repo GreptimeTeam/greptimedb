@@ -16,11 +16,11 @@ Error: 1004(InvalidArguments), Invalid alter table(test) request: column 'k' can
 
 ALTER TABLE test ALTER COLUMN id TYPE STRING;
 
-Error: 1004(InvalidArguments), Not allowed to modify index column id from table test
+Error: 1004(InvalidArguments), Not allowed to modify index column 'id' from table test
 
 ALTER TABLE test ALTER COLUMN j TYPE STRING;
 
-Error: 1004(InvalidArguments), Not allowed to modify index column j from table test
+Error: 1004(InvalidArguments), Not allowed to modify index column 'j' from table test
 
 ALTER TABLE test ALTER COLUMN I TYPE STRING;
 

@@ -92,7 +92,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Not allowed to modify index column {} from table {}",
+        "Not allowed to modify index column '{}' from table {}",
         column_name,
         table_name
     ))]
