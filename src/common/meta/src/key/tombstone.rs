@@ -12,14 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Display;
-
 use snafu::{ensure, OptionExt};
 
 use super::TableMetaKeyGetTxnOp;
 use crate::error::{self, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::TableMetaKey;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 
@@ -38,12 +35,12 @@ fn to_tombstone(key: &[u8]) -> Vec<u8> {
     [TOMBSTONE_PREFIX.as_bytes(), key].concat()
 }
 
-impl<T: TableMetaKey> TombstoneKey<&T> {
+impl TombstoneKey<&Vec<u8>> {
     /// Returns the origin key and tombstone key.
     fn to_keys(&self) -> (Vec<u8>, Vec<u8>) {
-        let key = self.0.as_raw_key();
-        let tombstone_key = to_tombstone(&key);
-        (key, tombstone_key)
+        let key = self.0;
+        let tombstone_key = to_tombstone(key);
+        (key.clone(), tombstone_key)
     }
 
     /// Returns the origin key and tombstone key.
@@ -53,42 +50,42 @@ impl<T: TableMetaKey> TombstoneKey<&T> {
 
     /// Returns the tombstone key.
     fn to_tombstone_key(&self) -> Vec<u8> {
-        let key = self.0.as_raw_key();
-        to_tombstone(&key)
+        let key = self.0;
+        to_tombstone(key)
     }
 }
 
-impl<T: TableMetaKey> TableMetaKeyGetTxnOp for TombstoneKey<&T> {
+impl TableMetaKeyGetTxnOp for TombstoneKey<&Vec<u8>> {
     fn build_get_op(
         &self,
     ) -> (
         TxnOp,
         impl FnMut(&'_ mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
     ) {
-        let key = to_tombstone(&self.0.as_raw_key());
+        let key = to_tombstone(self.0);
         (TxnOp::Get(key.clone()), TxnOpGetResponseSet::filter(key))
     }
 }
 
 /// Atomic Key:
 /// The value corresponding to the key remains consistent between two transactions.
-pub(crate) enum Key<T> {
-    Atomic(T),
-    Other(T),
+pub(crate) enum Key {
+    Atomic(Vec<u8>),
+    Other(Vec<u8>),
 }
 
-impl<T> Key<T> {
+impl Key {
     /// Returns a new [Key::Atomic].
-    pub(crate) fn atomic(key: T) -> Self {
-        Self::Atomic(key)
+    pub(crate) fn atomic<T: Into<Vec<u8>>>(key: T) -> Self {
+        Self::Atomic(key.into())
     }
 
     /// Returns a new [Key::Other].
-    pub(crate) fn other(key: T) -> Self {
-        Self::Other(key)
+    pub(crate) fn other<T: Into<Vec<u8>>>(key: T) -> Self {
+        Self::Other(key.into())
     }
 
-    fn get_inner(&self) -> &T {
+    fn get_inner(&self) -> &Vec<u8> {
         match self {
             Key::Atomic(key) => key,
             Key::Other(key) => key,
@@ -97,6 +94,18 @@ impl<T> Key<T> {
 
     fn is_atomic(&self) -> bool {
         matches!(self, Key::Atomic(_))
+    }
+}
+
+impl TableMetaKeyGetTxnOp for Key {
+    fn build_get_op(
+        &self,
+    ) -> (
+        TxnOp,
+        impl FnMut(&'_ mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
+    ) {
+        let key = self.get_inner().clone();
+        (TxnOp::Get(key.clone()), TxnOpGetResponseSet::filter(key))
     }
 }
 
@@ -110,15 +119,10 @@ impl TombstoneManager {
     /// Preforms to:
     /// - retrieve all values corresponding `keys`.
     /// - stores tombstone values.
-    pub(crate) async fn create<T: TableMetaKey + TableMetaKeyGetTxnOp + Display>(
-        &self,
-        keys: Vec<Key<T>>,
-    ) -> Result<bool> {
+    pub(crate) async fn create(&self, keys: Vec<Key>) -> Result<bool> {
         // Builds transaction to retrieve all values
-        let (operations, mut filters): (Vec<_>, Vec<_>) = keys
-            .iter()
-            .map(|key| key.get_inner().build_get_op())
-            .unzip();
+        let (operations, mut filters): (Vec<_>, Vec<_>) =
+            keys.iter().map(|key| key.build_get_op()).unzip();
 
         let txn = Txn::new().and_then(operations);
         let mut resp = self.kv_backend.txn(txn).await?;
@@ -136,7 +140,10 @@ impl TombstoneManager {
         for (idx, key) in keys.iter().enumerate() {
             let filter = &mut filters[idx];
             let value = filter(&mut set).with_context(|| error::UnexpectedSnafu {
-                err_msg: format!("Missing value, key: {}", key.get_inner()),
+                err_msg: format!(
+                    "Missing value, key: {}",
+                    String::from_utf8_lossy(key.get_inner())
+                ),
             })?;
             let (origin_key, tombstone_key) = TombstoneKey(key.get_inner()).into_keys();
             // Compares the atomic key.
@@ -167,10 +174,7 @@ impl TombstoneManager {
     /// Preforms to:
     /// - retrieve all tombstone values corresponding `keys`.
     /// - stores tombstone values.
-    pub(crate) async fn restore<T: TableMetaKey + TableMetaKeyGetTxnOp + Display>(
-        &self,
-        keys: Vec<Key<T>>,
-    ) -> Result<bool> {
+    pub(crate) async fn restore(&self, keys: Vec<Key>) -> Result<bool> {
         // Builds transaction to retrieve all tombstone values
         let tombstone_keys = keys
             .iter()
@@ -196,7 +200,10 @@ impl TombstoneManager {
         for (idx, key) in keys.iter().enumerate() {
             let filter = &mut filters[idx];
             let value = filter(&mut set).with_context(|| error::UnexpectedSnafu {
-                err_msg: format!("Missing value, key: {}", key.get_inner()),
+                err_msg: format!(
+                    "Missing value, key: {}",
+                    String::from_utf8_lossy(key.get_inner())
+                ),
             })?;
             let (origin_key, tombstone_key) = tombstone_keys[idx].to_keys();
             // Compares the atomic key.
@@ -223,7 +230,7 @@ impl TombstoneManager {
     }
 
     /// Deletes tombstones for keys.
-    pub(crate) async fn delete<T: TableMetaKey>(&self, keys: Vec<T>) -> Result<()> {
+    pub(crate) async fn delete(&self, keys: Vec<Vec<u8>>) -> Result<()> {
         let operations = keys
             .iter()
             .map(|key| TxnOp::Delete(TombstoneKey(key).to_tombstone_key()))
@@ -242,33 +249,9 @@ mod tests {
     use std::sync::Arc;
 
     use crate::key::tombstone::{Key, TombstoneKey, TombstoneManager};
-    use crate::key::txn_helper::TxnOpGetResponseSet;
-    use crate::key::{TableMetaKey, TableMetaKeyGetTxnOp};
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::kv_backend::txn::TxnOp;
     use crate::kv_backend::KvBackend;
     use crate::rpc::store::PutRequest;
-
-    impl TableMetaKey for &str {
-        fn as_raw_key(&self) -> Vec<u8> {
-            self.as_bytes().to_vec()
-        }
-    }
-
-    impl TableMetaKeyGetTxnOp for &str {
-        fn build_get_op(
-            &self,
-        ) -> (
-            TxnOp,
-            impl for<'a> FnMut(&'a mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
-        ) {
-            let raw_key = self.as_raw_key();
-            (
-                TxnOp::Get(raw_key.clone()),
-                TxnOpGetResponseSet::filter(raw_key),
-            )
-        }
-    }
 
     #[tokio::test]
     async fn test_create_tombstone() {
@@ -290,7 +273,7 @@ mod tests {
         assert!(!kv_backend.exists(b"foo").await.unwrap());
         assert_eq!(
             kv_backend
-                .get(&TombstoneKey(&"bar").to_tombstone_key())
+                .get(&TombstoneKey(&"bar".into()).to_tombstone_key())
                 .await
                 .unwrap()
                 .unwrap()
@@ -299,7 +282,7 @@ mod tests {
         );
         assert_eq!(
             kv_backend
-                .get(&TombstoneKey(&"foo").to_tombstone_key())
+                .get(&TombstoneKey(&"foo".into()).to_tombstone_key())
                 .await
                 .unwrap()
                 .unwrap()
@@ -329,7 +312,7 @@ mod tests {
         assert!(!kv_backend.exists(b"foo").await.unwrap());
         assert_eq!(
             kv_backend
-                .get(&TombstoneKey(&"bar").to_tombstone_key())
+                .get(&TombstoneKey(&"bar".into()).to_tombstone_key())
                 .await
                 .unwrap()
                 .unwrap()
@@ -338,7 +321,7 @@ mod tests {
         );
         assert_eq!(
             kv_backend
-                .get(&TombstoneKey(&"foo").to_tombstone_key())
+                .get(&TombstoneKey(&"foo".into()).to_tombstone_key())
                 .await
                 .unwrap()
                 .unwrap()
@@ -456,7 +439,10 @@ mod tests {
             .create(vec![Key::atomic("bar"), Key::other("foo")])
             .await
             .unwrap());
-        tombstone_manager.delete(vec!["bar", "foo"]).await.unwrap();
+        tombstone_manager
+            .delete(vec![b"bar".to_vec(), b"foo".to_vec()])
+            .await
+            .unwrap();
         assert!(kv_backend.is_empty());
     }
 }

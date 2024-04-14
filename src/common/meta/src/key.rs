@@ -593,7 +593,7 @@ impl TableMetadataManager {
         } else {
             vec![]
         };
-        let mut keys: Vec<Key<_>> = Vec::with_capacity(3 + datanode_ids.len());
+        let mut keys = Vec::with_capacity(3 + datanode_ids.len());
         let table_name_key = TableNameKey::new(
             &table_name.catalog_name,
             &table_name.schema_name,
@@ -606,11 +606,11 @@ impl TableMetadataManager {
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
             .collect::<Vec<_>>();
 
-        keys.push(Key::atomic(table_name_key.to_string()));
-        keys.push(Key::other(table_info_key.to_string()));
-        keys.push(Key::other(table_route_key.to_string()));
+        keys.push(Key::atomic(table_name_key.as_raw_key()));
+        keys.push(Key::other(table_info_key.as_raw_key()));
+        keys.push(Key::other(table_route_key.as_raw_key()));
         for key in &datanode_table_keys {
-            keys.push(Key::other(key.to_string()));
+            keys.push(Key::other(key.as_raw_key()));
         }
         ensure!(
             self.tombstone_manager.create(keys).await?,
@@ -638,7 +638,7 @@ impl TableMetadataManager {
         } else {
             vec![]
         };
-        let mut keys: Vec<Key<_>> = Vec::with_capacity(3 + datanode_ids.len());
+        let mut keys = Vec::with_capacity(3 + datanode_ids.len());
         let table_name = TableNameKey::new(
             &table_name.catalog_name,
             &table_name.schema_name,
@@ -651,11 +651,11 @@ impl TableMetadataManager {
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
             .collect::<Vec<_>>();
 
-        keys.push(Key::atomic(table_name.to_string()));
-        keys.push(Key::other(table_info_key.to_string()));
-        keys.push(Key::other(table_route_key.to_string()));
+        keys.push(Key::atomic(table_name.as_raw_key()));
+        keys.push(Key::other(table_info_key.as_raw_key()));
+        keys.push(Key::other(table_route_key.as_raw_key()));
         for key in &datanode_table_keys {
-            keys.push(Key::other(key.to_string()));
+            keys.push(Key::other(key.as_raw_key()));
         }
         ensure!(
             self.tombstone_manager.restore(keys).await?,
