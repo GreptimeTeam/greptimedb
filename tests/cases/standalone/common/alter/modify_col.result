@@ -1,8 +1,8 @@
-CREATE TABLE test(i INTEGER, j TIMESTAMP TIME INDEX);
+CREATE TABLE test(id INTEGER PRIMARY KEY, i INTEGER, j TIMESTAMP TIME INDEX, k BOOLEAN);
 
 Affected Rows: 0
 
-INSERT INTO test VALUES (1, 1), (2, 2);
+INSERT INTO test VALUES (1, 1, 1, false), (2, 2, 2, true);
 
 Affected Rows: 2
 
@@ -10,30 +10,40 @@ ALTER TABLE test ALTER COLUMN "I" TYPE STRING;
 
 Error: 4002(TableColumnNotFound), Column I not exists in table test
 
+ALTER TABLE test ALTER COLUMN k TYPE DATE;
+
+Error: 1004(InvalidArguments), Invalid alter table(test) request: column 'k' cannot be cast automatically to type 'Date'
+
+ALTER TABLE test ALTER COLUMN id TYPE STRING;
+
+Error: 1004(InvalidArguments), Not allowed to modify index column id from table test
+
+ALTER TABLE test ALTER COLUMN j TYPE STRING;
+
+Error: 1004(InvalidArguments), Not allowed to modify index column j from table test
+
 ALTER TABLE test ALTER COLUMN I TYPE STRING;
 
 Affected Rows: 0
 
 SELECT * FROM test;
 
-+---+-------------------------+
-| i | j                       |
-+---+-------------------------+
-| 1 | 1970-01-01T00:00:00.001 |
-| 2 | 1970-01-01T00:00:00.002 |
-+---+-------------------------+
-
-ALTER TABLE test ALTER COLUMN j TYPE STRING;
-
-Error: 1004(InvalidArguments), Not allowed to modify index column j from table test
++----+---+-------------------------+-------+
+| id | i | j                       | k     |
++----+---+-------------------------+-------+
+| 1  | 1 | 1970-01-01T00:00:00.001 | false |
+| 2  | 2 | 1970-01-01T00:00:00.002 | true  |
++----+---+-------------------------+-------+
 
 DESCRIBE test;
 
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
+| id     | Int32                | PRI | YES  |         | TAG           |
 | i      | String               |     | YES  |         | FIELD         |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| k      | Boolean              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE test;
