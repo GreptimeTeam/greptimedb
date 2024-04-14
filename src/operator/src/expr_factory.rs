@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn test_to_alter_modify_column_expr() {
-        let sql = "ALTER TABLE monitor alter column mem_usage STRING;";
+        let sql = "ALTER TABLE monitor alter column mem_usage TYPE STRING;";
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()

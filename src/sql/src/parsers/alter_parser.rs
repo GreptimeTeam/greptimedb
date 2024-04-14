@@ -320,7 +320,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert!(err.contains("expect keyword ADD or DROP or RENAME after ALTER TABLE"));
+        assert!(err.contains("expect keyword ADD or DROP or ALERT COLUMN or RENAME after ALTER TABLE"));
 
         let sql = "ALTER TABLE test_table RENAME table_t";
         let mut result =
