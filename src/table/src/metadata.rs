@@ -1141,6 +1141,31 @@ mod tests {
     }
 
     #[test]
+    fn test_modify_unknown_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::ModifyColumns {
+            columns: vec![ModifyColumnRequest {
+                column_name: "unknown".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
+        };
+
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
+    }
+
+    #[test]
     fn test_remove_key_column() {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::default()
@@ -1165,6 +1190,46 @@ mod tests {
         // Remove timestamp column.
         let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("ts")],
+        };
+
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_modify_key_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        // Remove column in primary key.
+        let alter_kind = AlterKind::ModifyColumns {
+            columns: vec![ModifyColumnRequest {
+                column_name: "col1".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
+        };
+
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+
+        // Remove timestamp column.
+        let alter_kind = AlterKind::ModifyColumns {
+            columns: vec![ModifyColumnRequest {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
         };
 
         let err = meta

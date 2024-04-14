@@ -351,27 +351,19 @@ mod tests {
 
     /// Creates a new [RegionMetadata].
     fn new_metadata(
-        semantic_types: &[(ColumnId, SemanticType)],
+        semantic_types: &[(ColumnId, SemanticType, ConcreteDataType)],
         primary_key: &[ColumnId],
     ) -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
-        for (id, semantic_type) in semantic_types {
+        for (id, semantic_type, data_type) in semantic_types {
             let column_schema = match semantic_type {
-                SemanticType::Tag => ColumnSchema::new(
-                    format!("tag_{id}"),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                SemanticType::Field => ColumnSchema::new(
-                    format!("field_{id}"),
-                    ConcreteDataType::int64_datatype(),
-                    true,
-                ),
-                SemanticType::Timestamp => ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
+                SemanticType::Tag => {
+                    ColumnSchema::new(format!("tag_{id}"), data_type.clone(), true)
+                }
+                SemanticType::Field => {
+                    ColumnSchema::new(format!("field_{id}"), data_type.clone(), true)
+                }
+                SemanticType::Timestamp => ColumnSchema::new("ts", data_type.clone(), false),
             };
 
             builder.push_column_metadata(ColumnMetadata {
@@ -440,18 +432,26 @@ mod tests {
     fn test_invalid_pk_len() {
         let reader_meta = new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Tag),
-                (3, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1, 2],
         );
         let expect_meta = new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1],
         );
@@ -462,20 +462,28 @@ mod tests {
     fn test_different_pk() {
         let reader_meta = new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Tag),
-                (3, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[2, 1],
         );
         let expect_meta = new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Tag),
-                (3, SemanticType::Field),
-                (4, SemanticType::Tag),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (4, SemanticType::Tag, ConcreteDataType::string_datatype()),
             ],
             &[1, 2, 4],
         );
@@ -486,9 +494,13 @@ mod tests {
     fn test_same_pk() {
         let reader_meta = new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1],
         );
@@ -501,9 +513,13 @@ mod tests {
     fn test_same_fields() {
         let reader_meta = Arc::new(new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1],
         ));
@@ -515,19 +531,27 @@ mod tests {
     async fn test_compat_reader() {
         let reader_meta = Arc::new(new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1],
         ));
         let expect_meta = Arc::new(new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Field),
-                (3, SemanticType::Tag),
-                (4, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (3, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (4, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1, 3],
         ));
@@ -556,19 +580,27 @@ mod tests {
     async fn test_compat_reader_different_order() {
         let reader_meta = Arc::new(new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1],
         ));
         let expect_meta = Arc::new(new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (3, SemanticType::Field),
-                (2, SemanticType::Field),
-                (4, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (4, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1],
         ));
@@ -592,22 +624,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compat_reader_projection() {
-        let reader_meta = Arc::new(new_metadata(
+    async fn test_compat_reader_different_types() {
+        let actual_meta = Arc::new(new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (2, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1],
         ));
         let expect_meta = Arc::new(new_metadata(
             &[
-                (0, SemanticType::Timestamp),
-                (1, SemanticType::Tag),
-                (3, SemanticType::Field),
-                (2, SemanticType::Field),
-                (4, SemanticType::Field),
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::string_datatype()),
+            ],
+            &[1],
+        ));
+        let mapper = ProjectionMapper::all(&expect_meta).unwrap();
+        let k1 = encode_key(&[Some("a")]);
+        let k2 = encode_key(&[Some("b")]);
+        let source_reader = VecBatchReader::new(&[
+            new_batch(&k1, &[(2, false)], 1000, 3),
+            new_batch(&k2, &[(2, false)], 1000, 3),
+        ]);
+
+        let fn_batch_cast = |batch: Batch| {
+            let mut new_fields = batch.fields.clone();
+            new_fields[0].data = new_fields[0]
+                .data
+                .cast(&ConcreteDataType::string_datatype())
+                .unwrap();
+
+            batch.with_fields(new_fields).unwrap()
+        };
+        let mut compat_reader = CompatReader::new(&mapper, actual_meta, source_reader).unwrap();
+        check_reader_result(
+            &mut compat_reader,
+            &[
+                fn_batch_cast(new_batch(&k1, &[(2, false)], 1000, 3)),
+                fn_batch_cast(new_batch(&k2, &[(2, false)], 1000, 3)),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_compat_reader_projection() {
+        let reader_meta = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+        let expect_meta = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (4, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1],
         ));

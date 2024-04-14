@@ -1,0 +1,42 @@
+CREATE TABLE test(i INTEGER, j TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1), (2, 2);
+
+Affected Rows: 2
+
+ALTER TABLE test ALTER COLUMN "I" TYPE STRING;
+
+Error: 4002(TableColumnNotFound), Column I not exists in table test
+
+ALTER TABLE test ALTER COLUMN I TYPE STRING;
+
+Affected Rows: 0
+
+SELECT * FROM test;
+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 2 | 1970-01-01T00:00:00.002 |
++---+-------------------------+
+
+ALTER TABLE test ALTER COLUMN j TYPE STRING;
+
+Error: 1004(InvalidArguments), Not allowed to modify index column j from table test
+
+DESCRIBE test;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | String               |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE test;
+
+Affected Rows: 0
+

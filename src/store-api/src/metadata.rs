@@ -1137,7 +1137,7 @@ mod test {
         let metadata = builder.build().unwrap();
         check_columns(&metadata, &["a", "b", "f", "c", "d"]);
 
-        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        let mut builder = RegionMetadataBuilder::from_existing(metadata.clone());
         builder
             .alter(AlterKind::DropColumns {
                 names: vec!["a".to_string()],
@@ -1146,6 +1146,23 @@ mod test {
         // Build returns error as the primary key contains a.
         let err = builder.build().unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::ModifyColumns {
+                columns: vec![ModifyColumn {
+                    column_name: "b".to_string(),
+                    target_type: ConcreteDataType::string_datatype(),
+                }],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "b", "f", "c", "d"]);
+        let b_type = metadata
+            .column_by_name("b")
+            .map(|column_meta| column_meta.column_schema.data_type.clone())
+            .unwrap();
+        assert_eq!(ConcreteDataType::string_datatype(), b_type);
     }
 
     #[test]

@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_alter_expr() {
+    fn test_to_alter_add_column_expr() {
         let sql = "ALTER TABLE monitor add column ts TIMESTAMP default '2024-01-30T00:01:01';";
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -564,5 +564,34 @@ mod tests {
             matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
         );
+    }
+
+    #[test]
+    fn test_to_alter_modify_column_expr() {
+        let sql = "ALTER TABLE monitor alter column mem_usage STRING;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::Alter(alter_table) = stmt else {
+            unreachable!()
+        };
+
+        // query context with system timezone UTC.
+        let expr = to_alter_expr(alter_table.clone(), QueryContext::arc()).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let Kind::ModifyColumns(ModifyColumns { modify_columns, .. }) = kind else {
+            unreachable!()
+        };
+
+        assert_eq!(1, modify_columns.len());
+        let modify_column = &modify_columns[0];
+
+        assert_eq!("mem_usage", modify_column.column_name);
+        assert_eq!(ColumnDataType::String as i32, modify_column.target_type);
+        assert!(modify_column.target_type_extension.is_none());
     }
 }

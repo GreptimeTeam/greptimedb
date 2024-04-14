@@ -157,7 +157,9 @@ fn parse_location(location: Option<Location>) -> Result<Option<AddColumnLocation
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{AddColumn, AddColumns, ColumnDataType, ColumnDef, DropColumn, SemanticType};
+    use api::v1::{
+        AddColumn, AddColumns, ColumnDataType, ColumnDef, DropColumn, ModifyColumn, SemanticType,
+    };
     use datatypes::prelude::ConcreteDataType;
 
     use super::*;
@@ -305,5 +307,39 @@ mod tests {
         };
         assert_eq!(1, drop_names.len());
         assert_eq!("mem_usage".to_string(), drop_names.pop().unwrap());
+    }
+
+    #[test]
+    fn test_modify_column_expr() {
+        let expr = AlterExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+
+            kind: Some(Kind::ModifyColumns(ModifyColumns {
+                modify_columns: vec![ModifyColumn {
+                    column_name: "mem_usage".to_string(),
+                    target_type: ColumnDataType::String as i32,
+                    target_type_extension: None,
+                }],
+            })),
+        };
+
+        let alter_request = alter_expr_to_request(1, expr).unwrap();
+        assert_eq!(alter_request.catalog_name, "test_catalog");
+        assert_eq!(alter_request.schema_name, "test_schema");
+        assert_eq!("monitor".to_string(), alter_request.table_name);
+
+        let mut modify_columns = match alter_request.alter_kind {
+            AlterKind::ModifyColumns { columns } => columns,
+            _ => unreachable!(),
+        };
+
+        let modify_column = modify_columns.pop().unwrap();
+        assert_eq!("mem_usage", modify_column.column_name);
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            modify_column.target_type
+        );
     }
 }

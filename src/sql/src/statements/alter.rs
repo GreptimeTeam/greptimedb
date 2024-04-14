@@ -52,7 +52,7 @@ pub enum AlterTableOperation {
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
     RenameTable { new_table_name: String },
-    /// `MODIFY <name> <target_type>`
+    /// `ALTER COLUMN <name> TYPE <target_type>`
     ModifyColumnType {
         column_name: Ident,
         target_type: DataType,

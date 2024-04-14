@@ -692,7 +692,7 @@ mod tests {
         })
         .unwrap_err();
 
-        let request = RegionAlterRequest::try_from(AlterRequest {
+        let add_column_request = RegionAlterRequest::try_from(AlterRequest {
             region_id: 0,
             schema_version: 1,
             kind: Some(alter_request::Kind::AddColumns(v1::region::AddColumns {
@@ -719,7 +719,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            request,
+            add_column_request,
             RegionAlterRequest {
                 schema_version: 1,
                 kind: AlterKind::AddColumns {
@@ -734,6 +734,34 @@ mod tests {
                             column_id: 1,
                         },
                         location: Some(AddColumnLocation::First),
+                    }]
+                },
+            }
+        );
+
+        let modify_column_request = RegionAlterRequest::try_from(AlterRequest {
+            region_id: 0,
+            schema_version: 1,
+            kind: Some(alter_request::Kind::ModifyColumns(
+                v1::region::ModifyColumns {
+                    modify_columns: vec![v1::region::ModifyColumn {
+                        column_name: "a".to_string(),
+                        target_type: ColumnDataType::String as i32,
+                        target_type_extension: None,
+                    }],
+                },
+            )),
+        })
+        .unwrap();
+
+        assert_eq!(
+            modify_column_request,
+            RegionAlterRequest {
+                schema_version: 1,
+                kind: AlterKind::ModifyColumns {
+                    columns: vec![ModifyColumn {
+                        column_name: "a".to_string(),
+                        target_type: ConcreteDataType::string_datatype(),
                     }]
                 },
             }
@@ -769,6 +797,15 @@ mod tests {
                 ),
                 semantic_type: SemanticType::Field,
                 column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_1",
+                    ConcreteDataType::boolean_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
             })
             .primary_key(vec![2]);
         builder.build().unwrap()
@@ -877,6 +914,55 @@ mod tests {
 
         let kind = AlterKind::DropColumns {
             names: vec!["field_0".to_string()],
+        };
+        kind.validate(&metadata).unwrap();
+        assert!(kind.need_alter(&metadata));
+    }
+
+    #[test]
+    fn test_validate_modify_column() {
+        let metadata = new_metadata();
+        AlterKind::ModifyColumns {
+            columns: vec![ModifyColumn {
+                column_name: "xxxx".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        AlterKind::ModifyColumns {
+            columns: vec![ModifyColumn {
+                column_name: "field_1".to_string(),
+                target_type: ConcreteDataType::date_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        AlterKind::ModifyColumns {
+            columns: vec![ModifyColumn {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::date_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        AlterKind::ModifyColumns {
+            columns: vec![ModifyColumn {
+                column_name: "tag_0".to_string(),
+                target_type: ConcreteDataType::date_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        let kind = AlterKind::ModifyColumns {
+            columns: vec![ModifyColumn {
+                column_name: "field_0".to_string(),
+                target_type: ConcreteDataType::int32_datatype(),
+            }],
         };
         kind.validate(&metadata).unwrap();
         assert!(kind.need_alter(&metadata));
