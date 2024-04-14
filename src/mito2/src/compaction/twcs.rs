@@ -24,7 +24,7 @@ use common_time::Timestamp;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
-use crate::compaction::run::find_sorted_runs;
+use crate::compaction::run::{find_sorted_runs, reduce_runs};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::sst::file::{overlaps, FileHandle, FileId};
 use crate::sst::version::LevelMeta;
@@ -88,7 +88,7 @@ impl TwcsPicker {
                         output_time_range: None, // we do not enforce output time range in twcs compactions.
                     });
                 } else {
-                    debug!("Active window not present or no enough files in active window {:?}, window: {}", active_window, *window);
+                    debug!("Active window not present or no enough sorted runs in active window {:?}, window: {}, current run: {}", active_window, *window, sorted_runs.len());
                 }
             } else {
                 // not active writing window

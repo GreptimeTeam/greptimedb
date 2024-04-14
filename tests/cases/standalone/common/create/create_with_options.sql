@@ -57,7 +57,7 @@ engine=mito
 with(
     'ttl'='7d',
     'compaction.type'='twcs',
-    'compaction.twcs.max_active_window_runs'='8',
+    'compaction.twcs.max_active_window_runs'='2',
     'compaction.twcs.max_inactive_window_files'='2',
     'compaction.twcs.time_window'='1d',
     'index.inverted_index.ignore_column_ids'='1,2,3',

@@ -19,7 +19,10 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 
 use common_base::BitVec;
+use common_time::Timestamp;
 use itertools::Itertools;
+
+use crate::sst::file::FileHandle;
 
 /// Trait for any items with specific range.
 pub(crate) trait Ranged {
@@ -42,7 +45,7 @@ pub(crate) trait Ranged {
 }
 
 // Sorts ranges by start asc and end desc.
-fn sort_ranged_items<T: Ranged>(values: &mut Vec<T>) {
+fn sort_ranged_items<T: Ranged>(values: &mut [T]) {
     values.sort_unstable_by(|l, r| {
         let (l_start, l_end) = l.range();
         let (r_start, r_end) = r.range();
@@ -54,6 +57,20 @@ fn sort_ranged_items<T: Ranged>(values: &mut Vec<T>) {
 pub(crate) trait Item: Ranged + Clone {
     /// Size is used to calculate the cost of merging items.
     fn size(&self) -> usize;
+}
+
+impl Ranged for FileHandle {
+    type BoundType = Timestamp;
+
+    fn range(&self) -> (Self::BoundType, Self::BoundType) {
+        self.time_range()
+    }
+}
+
+impl Item for FileHandle {
+    fn size(&self) -> usize {
+        self.size() as usize
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -352,7 +369,7 @@ fn merge_all_runs<T: Item>(mut runs: Vec<SortedRun<T>>) -> SortedRun<T> {
 
 /// Reduces the num of runs to given target and returns items to merge.
 /// The time complexity of this function is `C_{k}_{runs.len()}` where k=`runs.len()`-target+1.
-fn reduce_runs<T: Item>(runs: Vec<SortedRun<T>>, target: usize) -> Vec<Vec<T>> {
+pub(crate) fn reduce_runs<T: Item>(runs: Vec<SortedRun<T>>, target: usize) -> Vec<Vec<T>> {
     assert_ne!(target, 0);
     if target >= runs.len() {
         // already satisfied.
