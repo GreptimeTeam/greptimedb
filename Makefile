@@ -192,6 +192,16 @@ run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
 
+##@ Docs
+config-docs: ## Generate configuration documentation from toml files.
+	docker run --rm \
+    -v ${PWD}:/greptimedb \
+    -w /greptimedb/config \
+    toml2docs/toml2docs:latest \
+    -p '##' \
+    -t ./config-docs-template.md \
+    -o ./config.md
+
 ##@ General
 
 # The help target prints out all targets with their descriptions organized

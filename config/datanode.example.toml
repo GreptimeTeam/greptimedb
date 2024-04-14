@@ -1,169 +1,427 @@
-# Node running mode, see `standalone.example.toml`.
-mode = "distributed"
-# The datanode identifier, should be unique.
+## The running mode of the datanode. It can be `standalone` or `distributed`.
+mode = "standalone"
+
+## The datanode identifier and should be unique in the cluster.
+## +toml2docs:none-default
 node_id = 42
-# gRPC server address, "127.0.0.1:3001" by default.
-rpc_addr = "127.0.0.1:3001"
-# Hostname of this node.
-rpc_hostname = "127.0.0.1"
-# The number of gRPC server worker threads, 8 by default.
-rpc_runtime_size = 8
-# Start services after regions have obtained leases.
-# It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
+
+## Start services after regions have obtained leases.
+## It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
 require_lease_before_startup = false
 
-# Initialize all regions in the background during the startup.
-# By default, it provides services after all regions have been initialized.
+## Initialize all regions in the background during the startup.
+## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
 
+## The gRPC address of the datanode.
+rpc_addr = "127.0.0.1:3001"
+
+## The hostname of the datanode.
+## +toml2docs:none-default
+rpc_hostname = "127.0.0.1"
+
+## The number of gRPC server worker threads.
+rpc_runtime_size = 8
+
+## The maximum receive message size for gRPC server.
+rpc_max_recv_message_size = "512MB"
+
+## The maximum send message size for gRPC server.
+rpc_max_send_message_size = "512MB"
+
+## Enable telemetry to collect anonymous usage data.
+enable_telemetry = true
+
+## The heartbeat options.
 [heartbeat]
-# Interval for sending heartbeat messages to the Metasrv, 3 seconds by default.
+## Interval for sending heartbeat messages to the metasrv.
 interval = "3s"
 
-# Metasrv client options.
+## Interval for retrying to send heartbeat messages to the metasrv.
+retry_interval = "3s"
+
+## The metasrv client options.
 [meta_client]
-# Metasrv address list.
+## The addresses of the metasrv.
 metasrv_addrs = ["127.0.0.1:3002"]
-# Heartbeat timeout, 500 milliseconds by default.
-heartbeat_timeout = "500ms"
-# Operation timeout, 3 seconds by default.
+
+## Operation timeout.
 timeout = "3s"
-# Connect server timeout, 1 second by default.
+
+## Heartbeat timeout.
+heartbeat_timeout = "500ms"
+
+## DDL timeout.
+ddl_timeout = "10s"
+
+## Connect server timeout.
 connect_timeout = "1s"
-# `TCP_NODELAY` option for accepted connections, true by default.
+
+## `TCP_NODELAY` option for accepted connections.
 tcp_nodelay = true
 
-# WAL options.
+## The configuration about the cache of the metadata.
+metadata_cache_max_capacity = 100000
+
+## TTL of the metadata cache.
+metadata_cache_ttl = "10m"
+
+# TTI of the metadata cache.
+metadata_cache_tti = "5m"
+
+## The WAL options.
 [wal]
+## The provider of the WAL.
+## - `raft_engine`: the wal is stored in the local file system by raft-engine.
+## - `kafka`: it's remote wal that data is stored in Kafka.
 provider = "raft_engine"
 
-# Raft-engine wal options, see `standalone.example.toml`.
-# dir = "/tmp/greptimedb/wal"
+## The directory to store the WAL files.
+## **It's only used when the provider is `raft_engine`**.
+## +toml2docs:none-default
+dir = "/tmp/greptimedb/wal"
+
+## The size of the WAL segment file.
+## **It's only used when the provider is `raft_engine`**.
 file_size = "256MB"
+
+## The threshold of the WAL size to trigger a flush.
+## **It's only used when the provider is `raft_engine`**.
 purge_threshold = "4GB"
+
+## The interval to trigger a flush.
+## **It's only used when the provider is `raft_engine`**.
 purge_interval = "10m"
+
+## The read batch size.
+## **It's only used when the provider is `raft_engine`**.
 read_batch_size = 128
+
+## Whether to use sync write.
+## **It's only used when the provider is `raft_engine`**.
 sync_write = false
 
-# Kafka wal options, see `standalone.example.toml`.
-# broker_endpoints = ["127.0.0.1:9092"]
-# Warning: Kafka has a default limit of 1MB per message in a topic.
-# max_batch_size = "1MB"
-# linger = "200ms"
-# consumer_wait_timeout = "100ms"
-# backoff_init = "500ms"
-# backoff_max = "10s"
-# backoff_base = 2
-# backoff_deadline = "5mins"
+## Whether to reuse logically truncated log files.
+## **It's only used when the provider is `raft_engine`**.
+enable_log_recycle = true
 
-# Storage options, see `standalone.example.toml`.
+## Whether to pre-create log files on start up.
+## **It's only used when the provider is `raft_engine`**.
+prefill_log_files = false
+
+## Duration for fsyncing log files.
+## **It's only used when the provider is `raft_engine`**.
+sync_period = "10s"
+
+## The Kafka broker endpoints.
+## **It's only used when the provider is `kafka`**.
+broker_endpoints = ["127.0.0.1:9092"]
+
+## The max size of a single producer batch.
+## Warning: Kafka has a default limit of 1MB per message in a topic.
+## **It's only used when the provider is `kafka`**.
+max_batch_size = "1MB"
+
+## The linger duration of a kafka batch producer.
+## **It's only used when the provider is `kafka`**.
+linger = "200ms"
+
+## The consumer wait timeout.
+## **It's only used when the provider is `kafka`**.
+consumer_wait_timeout = "100ms"
+
+## The initial backoff delay.
+## **It's only used when the provider is `kafka`**.
+backoff_init = "500ms"
+
+## The maximum backoff delay.
+## **It's only used when the provider is `kafka`**.
+backoff_max = "10s"
+
+## The exponential backoff rate, i.e. next backoff = base * current backoff.
+## **It's only used when the provider is `kafka`**.
+backoff_base = 2
+
+## The deadline of retries.
+## **It's only used when the provider is `kafka`**.
+backoff_deadline = "5mins"
+
+# Example of using S3 as the storage.
+# [storage]
+# type = "S3"
+# bucket = "greptimedb"
+# root = "data"
+# access_key_id = "test"
+# secret_access_key = "123456"
+# endpoint = "https://s3.amazonaws.com"
+# region = "us-west-2"
+
+# Example of using Oss as the storage.
+# [storage]
+# type = "Oss"
+# bucket = "greptimedb"
+# root = "data"
+# access_key_id = "test"
+# access_key_secret = "123456"
+# endpoint = "https://oss-cn-hangzhou.aliyuncs.com"
+
+# Example of using Azblob as the storage.
+# [storage]
+# type = "Azblob"
+# container = "greptimedb"
+# root = "data"
+# account_name = "test"
+# account_key = "123456"
+# endpoint = "https://greptimedb.blob.core.windows.net"
+# sas_token = ""
+
+# Example of using Gcs as the storage.
+# [storage]
+# type = "Gcs"
+# bucket = "greptimedb"
+# root = "data"
+# scope = "test"
+# credential_path = "123456"
+# endpoint = "https://storage.googleapis.com"
+
+## The data storage options.
 [storage]
-# The working home directory.
+## The working home directory.
 data_home = "/tmp/greptimedb/"
-# Storage type.
+
+## The storage type used to store the data.
+## - `File`: the data is stored in the local file system.
+## - `S3`: the data is stored in the S3 object storage.
+## - `Gcs`: the data is stored in the Google Cloud Storage.
+## - `Azblob`: the data is stored in the Azure Blob Storage.
+## - `Oss`: the data is stored in the Aliyun OSS.
 type = "File"
 
-# Cache configuration for object storage such as 'S3' etc.
-# The local file cache directory
-# cache_path = "/path/local_cache"
-# The local file cache capacity in bytes.
-# cache_capacity = "256MB"
+## Cache configuration for object storage such as 'S3' etc.
+## The local file cache directory.
+## +toml2docs:none-default
+cache_path = "/path/local_cache"
+
+## The local file cache capacity in bytes.
+## +toml2docs:none-default
+cache_capacity = "256MB"
+
+## The S3 bucket name.
+## **It's only used when the storage type is `S3`, `Oss` and `Gcs`**.
+## +toml2docs:none-default
+bucket = "greptimedb"
+
+## The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.
+## **It's only used when the storage type is `S3`, `Oss` and `Azblob`**.
+## +toml2docs:none-default
+root = "greptimedb"
+
+## The access key id of the aws account.
+## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.
+## **It's only used when the storage type is `S3` and `Oss`**.
+## +toml2docs:none-default
+access_key_id = "test"
+
+## The secret access key of the aws account.
+## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.
+## **It's only used when the storage type is `S3`**.
+## +toml2docs:none-default
+secret_access_key = "test"
+
+## The secret access key of the aliyun account.
+## **It's only used when the storage type is `Oss`**.
+## +toml2docs:none-default
+access_key_secret = "test"
+
+## The account key of the azure account.
+## **It's only used when the storage type is `Azblob`**.
+## +toml2docs:none-default
+account_name = "test"
+
+## The account key of the azure account.
+## **It's only used when the storage type is `Azblob`**.
+## +toml2docs:none-default
+account_key = "test"
+
+## The scope of the google cloud storage.
+## **It's only used when the storage type is `Gcs`**.
+## +toml2docs:none-default
+scope = "test"
+
+## The credential path of the google cloud storage.
+## **It's only used when the storage type is `Gcs`**.
+## +toml2docs:none-default
+credential_path = "test"
+
+## The container of the azure account.
+## **It's only used when the storage type is `Azblob`**.
+## +toml2docs:none-default
+container = "greptimedb"
+
+## The sas token of the azure account.
+## **It's only used when the storage type is `Azblob`**.
+## +toml2docs:none-default
+sas_token = ""
+
+## The endpoint of the S3 service.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**.
+## +toml2docs:none-default
+endpoint = "https://s3.amazonaws.com"
+
+## The region of the S3 service.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**.
+## +toml2docs:none-default
+region = "us-west-2"
 
 # Custom storage options
-#[[storage.providers]]
-#type = "S3"
-#[[storage.providers]]
-#type = "Gcs"
+# [[storage.providers]]
+# type = "S3"
+# [[storage.providers]]
+# type = "Gcs"
 
-# Mito engine options
+## The region engine options. You can configure multiple region engines.
 [[region_engine]]
+
+## The Mito engine options.
 [region_engine.mito]
-# Number of region workers
+
+## Number of region workers.
 num_workers = 8
-# Request channel size of each worker
+
+## Request channel size of each worker.
 worker_channel_size = 128
-# Max batch size for a worker to handle requests
+
+## Max batch size for a worker to handle requests.
 worker_request_batch_size = 64
-# Number of meta action updated to trigger a new checkpoint for the manifest
+
+## Number of meta action updated to trigger a new checkpoint for the manifest.
 manifest_checkpoint_distance = 10
-# Whether to compress manifest and checkpoint file by gzip (default false).
+
+## Whether to compress manifest and checkpoint file by gzip (default false).
 compress_manifest = false
-# Max number of running background jobs
+
+## Max number of running background jobs
 max_background_jobs = 4
-# Interval to auto flush a region if it has not flushed yet.
+
+## Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
-# Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
+
+## Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
 global_write_buffer_size = "1GB"
-# Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`
+
+## Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`
 global_write_buffer_reject_size = "2GB"
-# Cache size for SST metadata. Setting it to 0 to disable the cache.
-# If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
+
+## Cache size for SST metadata. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
 sst_meta_cache_size = "128MB"
-# Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
-# If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+
+## Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
 vector_cache_size = "512MB"
-# Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
-# If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+
+## Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
 page_cache_size = "512MB"
-# Buffer size for SST writing.
+
+## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
-# Parallelism to scan a region (default: 1/4 of cpu cores).
-# - 0: using the default value (1/4 of cpu cores).
-# - 1: scan in current thread.
-# - n: scan in parallelism n.
+
+## Parallelism to scan a region (default: 1/4 of cpu cores).
+## - `0`: using the default value (1/4 of cpu cores).
+## - `1`: scan in current thread.
+## - `n`: scan in parallelism n.
 scan_parallelism = 0
-# Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
+
+## Capacity of the channel to send data from parallel scan tasks to the main task.
 parallel_scan_channel_size = 32
-# Whether to allow stale WAL entries read during replay.
+
+## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 
+## The options for inverted index in Mito engine.
 [region_engine.mito.inverted_index]
-# Whether to create the index on flush.
-# - "auto": automatically
-# - "disable": never
+
+## Whether to create the index on flush.
+## - `auto`: automatically
+## - `disable`: never
 create_on_flush = "auto"
-# Whether to create the index on compaction.
-# - "auto": automatically
-# - "disable": never
+
+## Whether to create the index on compaction.
+## - `auto`: automatically
+## - `disable`: never
 create_on_compaction = "auto"
-# Whether to apply the index on query
-# - "auto": automatically
-# - "disable": never
+
+## Whether to apply the index on query
+## - `auto`: automatically
+## - `disable`: never
 apply_on_query = "auto"
-# Memory threshold for performing an external sort during index creation.
-# Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
+
+## Memory threshold for performing an external sort during index creation.
+## Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
 mem_threshold_on_create = "64M"
-# File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`).
+
+## File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`).
 intermediate_path = ""
 
 [region_engine.mito.memtable]
-# Memtable type.
-# - "partition_tree": partition tree memtable
-# - "time_series": time-series memtable (deprecated)
+## Memtable type.
+## - `partition_tree`: partition tree memtable
+## - `time_series`: time-series memtable (deprecated)
 type = "partition_tree"
-# The max number of keys in one shard.
+
+## The max number of keys in one shard.
 index_max_keys_per_shard = 8192
-# The max rows of data inside the actively writing buffer in one shard.
+
+## The max rows of data inside the actively writing buffer in one shard.
 data_freeze_threshold = 32768
-# Max dictionary bytes.
+
+## Max dictionary bytes.
 fork_dictionary_bytes = "1GiB"
 
-# Log options, see `standalone.example.toml`
-# [logging]
-# dir = "/tmp/greptimedb/logs"
-# level = "info"
+## The logging options.
+[logging]
+## The directory to store the log files.
+dir = "/tmp/greptimedb/logs"
 
-# Datanode export the metrics generated by itself
-# encoded to Prometheus remote-write format
-# and send to Prometheus remote-write compatible receiver (e.g. send to `greptimedb` itself)
-# This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
-# [export_metrics]
-# whether enable export metrics, default is false
-# enable = false
-# The interval of export metrics
-# write_interval = "30s"
-# [export_metrics.remote_write]
-# The url the metrics send to. The url is empty by default, url example: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`
-# url = ""
-# HTTP headers of Prometheus remote-write carry
-# headers = {}
+## The log level. Can be `info`/`debug`/`warn`/`error`.
+## +toml2docs:none-default
+level = "info"
+
+## Enable OTLP tracing.
+enable_otlp_tracing = false
+
+## The OTLP tracing endpoint.
+## +toml2docs:none-default
+otlp_endpoint = ""
+
+## Whether to append logs to stdout.
+append_stdout = true
+
+## The percentage of tracing will be sampled and exported.
+## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
+## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+[logging.tracing_sample_ratio]
+default_ratio = 1.0
+
+## The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.
+## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
+[export_metrics]
+
+## whether enable export metrics.
+enable = false
+
+## The interval of export metrics.
+write_interval = "30s"
+
+## For `standalone` mode, `self_import` is recommend to collect metrics generated by itself
+[export_metrics.self_import]
+## +toml2docs:none-default
+db = "information_schema"
+
+[export_metrics.remote_write]
+## The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`.
+url = ""
+
+## HTTP headers of Prometheus remote-write carry.
+headers = { }
