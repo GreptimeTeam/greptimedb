@@ -24,6 +24,7 @@ use common_time::Timestamp;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
+use crate::compaction::run::find_sorted_runs;
 use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::sst::file::{overlaps, FileHandle, FileId};
 use crate::sst::version::LevelMeta;
@@ -34,7 +35,7 @@ const LEVEL_COMPACTED: Level = 1;
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
 pub struct TwcsPicker {
-    max_active_window_files: usize,
+    max_active_window_runs: usize,
     max_inactive_window_files: usize,
     time_window_seconds: Option<i64>,
 }
@@ -42,7 +43,7 @@ pub struct TwcsPicker {
 impl Debug for TwcsPicker {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TwcsPicker")
-            .field("max_active_window_files", &self.max_active_window_files)
+            .field("max_active_window_runs", &self.max_active_window_runs)
             .field("max_inactive_window_files", &self.max_inactive_window_files)
             .finish()
     }
@@ -50,19 +51,19 @@ impl Debug for TwcsPicker {
 
 impl TwcsPicker {
     pub fn new(
-        max_active_window_files: usize,
+        max_active_window_runs: usize,
         max_inactive_window_files: usize,
         time_window_seconds: Option<i64>,
     ) -> Self {
         Self {
             max_inactive_window_files,
-            max_active_window_files,
+            max_active_window_runs,
             time_window_seconds,
         }
     }
 
     /// Builds compaction output from files.
-    /// For active writing window, we allow for at most `max_active_window_files` files to alleviate
+    /// For active writing window, we allow for at most `max_active_window_runs` files to alleviate
     /// fragmentation. For other windows, we allow at most 1 file at each window.
     fn build_output(
         &self,
@@ -78,7 +79,7 @@ impl TwcsPicker {
             if let Some(active_window) = active_window
                 && *window == active_window
             {
-                if files_in_window.len() > self.max_active_window_files {
+                if files_in_window.len() > self.max_active_window_runs {
                     output.push(CompactionOutput {
                         output_file_id: FileId::random(),
                         output_level: LEVEL_COMPACTED, // we only have two levels and always compact to l1

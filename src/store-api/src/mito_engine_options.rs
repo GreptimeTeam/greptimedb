@@ -22,7 +22,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
     [
         "ttl",
         "compaction.type",
-        "compaction.twcs.max_active_window_files",
+        "compaction.twcs.max_active_window_runs",
         "compaction.twcs.max_inactive_window_files",
         "compaction.twcs.time_window",
         "storage",
@@ -47,7 +47,7 @@ mod tests {
         assert!(is_mito_engine_option_key("ttl"));
         assert!(is_mito_engine_option_key("compaction.type"));
         assert!(is_mito_engine_option_key(
-            "compaction.twcs.max_active_window_files"
+            "compaction.twcs.max_active_window_runs"
         ));
         assert!(is_mito_engine_option_key(
             "compaction.twcs.max_inactive_window_files"
