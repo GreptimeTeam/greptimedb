@@ -421,6 +421,9 @@ pub enum Error {
     #[snafu(display("Invalid role: {}", role))]
     InvalidRole { role: i32, location: Location },
 
+    #[snafu(display("Atomic key changed: {err_msg}"))]
+    AtomicKeyChanged { err_msg: String, location: Location },
+
     #[snafu(display("Failed to parse {} from utf8", name))]
     FromUtf8 {
         name: String,
@@ -440,7 +443,8 @@ impl ErrorExt for Error {
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
             | EtcdTxnFailed { .. }
-            | ConnectEtcd { .. } => StatusCode::Internal,
+            | ConnectEtcd { .. }
+            | AtomicKeyChanged { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
             | ParseOption { .. }

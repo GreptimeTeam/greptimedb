@@ -62,8 +62,7 @@ impl TableMetaKeyGetTxnOp for TombstoneKey<&Vec<u8>> {
         TxnOp,
         impl FnMut(&'_ mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
     ) {
-        let key = to_tombstone(self.0);
-        (TxnOp::Get(key.clone()), TxnOpGetResponseSet::filter(key))
+        TxnOpGetResponseSet::build_get_op(to_tombstone(self.0))
     }
 }
 
@@ -113,6 +112,37 @@ impl TableMetaKeyGetTxnOp for Key {
     }
 }
 
+fn format_on_failure_error_message<F: FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>>>(
+    mut set: TxnOpGetResponseSet,
+    on_failure_kv_and_filters: Vec<(Vec<u8>, Vec<u8>, F)>,
+) -> String {
+    on_failure_kv_and_filters
+        .into_iter()
+        .flat_map(|(key, value, mut filter)| {
+            let got = filter(&mut set);
+            let Some(got) = got else {
+                return Some(format!(
+                    "For key: {} was expected: {}, but value does not exists",
+                    String::from_utf8_lossy(&key),
+                    String::from_utf8_lossy(&value),
+                ));
+            };
+
+            if got != value {
+                Some(format!(
+                    "For key: {} was expected: {}, but got: {}",
+                    String::from_utf8_lossy(&key),
+                    String::from_utf8_lossy(&value),
+                    String::from_utf8_lossy(&got),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 impl TombstoneManager {
     /// Returns [TombstoneManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
@@ -124,7 +154,7 @@ impl TombstoneManager {
     /// Preforms to:
     /// - retrieve all values corresponding `keys`.
     /// - stores tombstone values.
-    pub(crate) async fn create(&self, keys: Vec<Key>) -> Result<bool> {
+    pub(crate) async fn create(&self, keys: Vec<Key>) -> Result<()> {
         // Builds transaction to retrieve all values
         let (operations, mut filters): (Vec<_>, Vec<_>) =
             keys.iter().map(|key| key.build_get_op()).unzip();
@@ -142,6 +172,8 @@ impl TombstoneManager {
         // Builds the create tombstone transaction.
         let mut tombstone_operations = Vec::with_capacity(keys.len() * 2);
         let mut tombstone_comparison = vec![];
+        let mut on_failure_operations = vec![];
+        let mut on_failure_kv_and_filters = vec![];
         for (idx, key) in keys.iter().enumerate() {
             let filter = &mut filters[idx];
             let value = filter(&mut set).with_context(|| error::UnexpectedSnafu {
@@ -158,6 +190,9 @@ impl TombstoneManager {
                     CompareOp::Equal,
                     value.clone(),
                 ));
+                let (op, filter) = TxnOpGetResponseSet::build_get_op(origin_key.clone());
+                on_failure_operations.push(op);
+                on_failure_kv_and_filters.push((origin_key.clone(), value.clone(), filter));
             }
             tombstone_operations.push(TxnOp::Delete(origin_key));
             tombstone_operations.push(TxnOp::Put(tombstone_key, value));
@@ -170,8 +205,20 @@ impl TombstoneManager {
         }
         .and_then(tombstone_operations);
 
-        let resp = self.kv_backend.txn(txn).await?;
-        Ok(resp.succeeded)
+        let txn = if !on_failure_operations.is_empty() {
+            txn.or_else(on_failure_operations)
+        } else {
+            txn
+        };
+
+        let mut resp = self.kv_backend.txn(txn).await?;
+        // TODO(weny): add tests for atomic key changed.
+        if !resp.succeeded {
+            let set = TxnOpGetResponseSet::from(&mut resp.responses);
+            let err_msg = format_on_failure_error_message(set, on_failure_kv_and_filters);
+            return error::AtomicKeyChangedSnafu { err_msg }.fail();
+        }
+        Ok(())
     }
 
     /// Restores tombstones for keys.
@@ -179,7 +226,7 @@ impl TombstoneManager {
     /// Preforms to:
     /// - retrieve all tombstone values corresponding `keys`.
     /// - stores tombstone values.
-    pub(crate) async fn restore(&self, keys: Vec<Key>) -> Result<bool> {
+    pub(crate) async fn restore(&self, keys: Vec<Key>) -> Result<()> {
         // Builds transaction to retrieve all tombstone values
         let tombstone_keys = keys
             .iter()
@@ -202,6 +249,8 @@ impl TombstoneManager {
         // Builds the restore tombstone transaction.
         let mut tombstone_operations = Vec::with_capacity(keys.len() * 2);
         let mut tombstone_comparison = vec![];
+        let mut on_failure_operations = vec![];
+        let mut on_failure_kv_and_filters = vec![];
         for (idx, key) in keys.iter().enumerate() {
             let filter = &mut filters[idx];
             let value = filter(&mut set).with_context(|| error::UnexpectedSnafu {
@@ -218,6 +267,9 @@ impl TombstoneManager {
                     CompareOp::Equal,
                     value.clone(),
                 ));
+                let (op, filter) = tombstone_keys[idx].build_get_op();
+                on_failure_operations.push(op);
+                on_failure_kv_and_filters.push((tombstone_key.clone(), value.clone(), filter));
             }
             tombstone_operations.push(TxnOp::Delete(tombstone_key));
             tombstone_operations.push(TxnOp::Put(origin_key, value));
@@ -230,8 +282,21 @@ impl TombstoneManager {
         }
         .and_then(tombstone_operations);
 
-        let resp = self.kv_backend.txn(txn).await?;
-        Ok(resp.succeeded)
+        let txn = if !on_failure_operations.is_empty() {
+            txn.or_else(on_failure_operations)
+        } else {
+            txn
+        };
+
+        let mut resp = self.kv_backend.txn(txn).await?;
+        // TODO(weny): add tests for atomic key changed.
+        if !resp.succeeded {
+            let set = TxnOpGetResponseSet::from(&mut resp.responses);
+            let err_msg = format_on_failure_error_message(set, on_failure_kv_and_filters);
+            return error::AtomicKeyChangedSnafu { err_msg }.fail();
+        }
+
+        Ok(())
     }
 
     /// Deletes tombstones for keys.
@@ -270,10 +335,10 @@ mod tests {
             .put(PutRequest::new().with_key("foo").with_value("hi"))
             .await
             .unwrap();
-        assert!(tombstone_manager
+        tombstone_manager
             .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
-            .unwrap());
+            .unwrap();
         assert!(!kv_backend.exists(b"bar").await.unwrap());
         assert!(!kv_backend.exists(b"foo").await.unwrap());
         assert_eq!(
@@ -309,10 +374,10 @@ mod tests {
             .put(PutRequest::new().with_key("foo").with_value("hi"))
             .await
             .unwrap();
-        assert!(tombstone_manager
+        tombstone_manager
             .create(vec![Key::new("bar"), Key::new("foo")])
             .await
-            .unwrap());
+            .unwrap();
         assert!(!kv_backend.exists(b"bar").await.unwrap());
         assert!(!kv_backend.exists(b"foo").await.unwrap());
         assert_eq!(
@@ -370,14 +435,14 @@ mod tests {
             .await
             .unwrap();
         let expected_kvs = kv_backend.dump();
-        assert!(tombstone_manager
+        tombstone_manager
             .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
-            .unwrap());
-        assert!(tombstone_manager
+            .unwrap();
+        tombstone_manager
             .restore(vec![Key::atomic("bar"), Key::new("foo")])
             .await
-            .unwrap());
+            .unwrap();
         assert_eq!(expected_kvs, kv_backend.dump());
     }
 
@@ -394,14 +459,14 @@ mod tests {
             .await
             .unwrap();
         let expected_kvs = kv_backend.dump();
-        assert!(tombstone_manager
+        tombstone_manager
             .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
-            .unwrap());
-        assert!(tombstone_manager
+            .unwrap();
+        tombstone_manager
             .restore(vec![Key::new("bar"), Key::new("foo")])
             .await
-            .unwrap());
+            .unwrap();
         assert_eq!(expected_kvs, kv_backend.dump());
     }
 
@@ -417,10 +482,10 @@ mod tests {
             .put(PutRequest::new().with_key("foo").with_value("hi"))
             .await
             .unwrap();
-        assert!(tombstone_manager
+        tombstone_manager
             .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
-            .unwrap());
+            .unwrap();
         let err = tombstone_manager
             .restore(vec![Key::new("bar"), Key::new("baz")])
             .await
@@ -440,10 +505,10 @@ mod tests {
             .put(PutRequest::new().with_key("foo").with_value("hi"))
             .await
             .unwrap();
-        assert!(tombstone_manager
+        tombstone_manager
             .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
-            .unwrap());
+            .unwrap();
         tombstone_manager
             .delete(vec![b"bar".to_vec(), b"foo".to_vec()])
             .await

@@ -612,12 +612,7 @@ impl TableMetadataManager {
         for key in &datanode_table_keys {
             keys.push(Key::new(key.as_raw_key()));
         }
-        ensure!(
-            self.tombstone_manager.create(keys).await?,
-            error::UnexpectedSnafu {
-                err_msg: format!("Failed to delete table: {table_name_key}({table_id})")
-            }
-        );
+        self.tombstone_manager.create(keys).await?;
         Ok(())
     }
 
@@ -657,12 +652,8 @@ impl TableMetadataManager {
         for key in &datanode_table_keys {
             keys.push(Key::new(key.as_raw_key()));
         }
-        ensure!(
-            self.tombstone_manager.restore(keys).await?,
-            error::UnexpectedSnafu {
-                err_msg: format!("Failed to restore table: {table_name}({table_id})")
-            }
-        );
+
+        self.tombstone_manager.restore(keys).await?;
         Ok(())
     }
 

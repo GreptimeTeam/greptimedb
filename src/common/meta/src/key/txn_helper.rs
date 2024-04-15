@@ -24,6 +24,18 @@ use crate::rpc::KeyValue;
 pub(crate) struct TxnOpGetResponseSet(Vec<KeyValue>);
 
 impl TxnOpGetResponseSet {
+    /// Returns a [TxnOp] to retrieve the value corresponding `key` and
+    /// a filter to consume corresponding [KeyValue] from [TxnOpGetResponseSet].
+    pub(crate) fn build_get_op<T: Into<Vec<u8>>>(
+        key: T,
+    ) -> (
+        TxnOp,
+        impl FnMut(&'_ mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
+    ) {
+        let key = key.into();
+        (TxnOp::Get(key.clone()), TxnOpGetResponseSet::filter(key))
+    }
+
     /// Returns a filter to consume a [KeyValue] where the key equals `key`.
     pub(crate) fn filter(key: Vec<u8>) -> impl FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>> {
         move |set| {
