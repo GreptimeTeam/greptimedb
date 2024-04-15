@@ -37,6 +37,8 @@ use snafu::{ensure, ResultExt};
 use crate::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, ServerSnafu};
 use crate::{error, from_grpc_response, metrics, Client, Result, StreamInserter};
 
+pub const DEFAULT_LOOKBACK_STRING: &str = "5m";
+
 #[derive(Clone, Debug, Default)]
 pub struct Database {
     // The "catalog" and "schema" to be used in processing the requests at the server side.
@@ -215,7 +217,7 @@ impl Database {
                 start: start.to_string(),
                 end: end.to_string(),
                 step: step.to_string(),
-                lookback: "".to_string(),
+                lookback: DEFAULT_LOOKBACK_STRING.to_string(),
             })),
         }))
         .await
