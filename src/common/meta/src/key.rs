@@ -577,7 +577,7 @@ impl TableMetadataManager {
         Ok(())
     }
 
-    /// Deletes metadata for table.
+    /// Deletes metadata for table **logically**.
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn delete_table_metadata(
         &self,
@@ -624,7 +624,6 @@ impl TableMetadataManager {
         table_name: &TableName,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        // TODO(weny): check table name tombstone exists.
         // Builds keys
         let datanode_ids = if table_route_value.is_physical() {
             region_distribution(table_route_value.region_routes()?)
@@ -654,6 +653,49 @@ impl TableMetadataManager {
         }
 
         self.tombstone_manager.restore(keys).await?;
+        Ok(())
+    }
+
+    /// Deletes metadata for table **permanently**.
+    /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
+    pub async fn destroy_table_metadata(
+        &self,
+        table_id: TableId,
+        table_name: &TableName,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        // Builds keys
+        let datanode_ids = if table_route_value.is_physical() {
+            region_distribution(table_route_value.region_routes()?)
+                .into_keys()
+                .collect()
+        } else {
+            vec![]
+        };
+
+        let mut operations = Vec::with_capacity(3 + datanode_ids.len());
+        operations.push(TxnOp::Delete(TableRouteKey::new(table_id).as_raw_key()));
+        operations.push(TxnOp::Delete(TableInfoKey::new(table_id).as_raw_key()));
+        operations.push(TxnOp::Delete(
+            TableNameKey::new(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .as_raw_key(),
+        ));
+
+        let datanode_table_txns = datanode_ids
+            .into_iter()
+            .map(|datanode_id| {
+                TxnOp::Delete(DatanodeTableKey::new(datanode_id, table_id).as_raw_key())
+            })
+            .collect::<Vec<_>>();
+
+        operations.extend(datanode_table_txns);
+        let txn = Txn::new().and_then(operations);
+        // It's always successes.
+        let _ = self.kv_backend.txn(txn).await?;
         Ok(())
     }
 
@@ -1654,6 +1696,59 @@ mod tests {
             )
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_destroy_table_metadata() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+        let table_id = 1025;
+        let table_name = "foo";
+        let task = test_create_table_task(table_name, table_id);
+        let options = [(0, "test".to_string())].into();
+        table_metadata_manager
+            .create_table_metadata(
+                task.table_info,
+                TableRouteValue::physical(vec![
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(table_id, 1)),
+                        leader_peer: Some(Peer::empty(1)),
+                        follower_peers: vec![Peer::empty(5)],
+                        leader_status: None,
+                        leader_down_since: None,
+                    },
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(table_id, 2)),
+                        leader_peer: Some(Peer::empty(2)),
+                        follower_peers: vec![Peer::empty(4)],
+                        leader_status: None,
+                        leader_down_since: None,
+                    },
+                    RegionRoute {
+                        region: Region::new_test(RegionId::new(table_id, 3)),
+                        leader_peer: Some(Peer::empty(3)),
+                        follower_peers: vec![],
+                        leader_status: None,
+                        leader_down_since: None,
+                    },
+                ]),
+                options,
+            )
+            .await
+            .unwrap();
+        let table_name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
+        let table_route_value = table_metadata_manager
+            .table_route_manager
+            .table_route_storage()
+            .get_raw(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        table_metadata_manager
+            .destroy_table_metadata(table_id, &table_name, &table_route_value)
+            .await
+            .unwrap();
+        assert!(mem_kv.is_empty());
     }
 
     #[tokio::test]

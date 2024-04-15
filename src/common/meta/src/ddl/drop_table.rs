@@ -123,8 +123,9 @@ impl DropTableProcedure {
         let table_id = self.data.table_id();
         // Safety: checked
         let table_route_value = self.data.table_route_value.as_ref().unwrap();
+        // Deletes table metadata logically.
         self.executor
-            .on_remove_metadata(&self.context, table_route_value)
+            .on_delete_metadata(&self.context, table_route_value)
             .await?;
         info!("Deleted table metadata for table {table_id}");
         self.data.state = DropTableState::InvalidateTableCache;
@@ -196,6 +197,7 @@ impl Procedure for DropTableProcedure {
 
         // Safety: fetched in `DropTableState::Prepare` step.
         let table_route_value = self.data.table_route_value.as_ref().unwrap();
+        // TODO(weny): check table name tombstone exists.
         self.executor
             .on_restore_metadata(&self.context, table_route_value)
             .await

@@ -100,8 +100,8 @@ impl DropTableExecutor {
         Ok(Control::Continue(()))
     }
 
-    /// Removes the table metadata.
-    pub async fn on_remove_metadata(
+    /// Deletes the table metadata **logically**.
+    pub async fn on_delete_metadata(
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
@@ -121,6 +121,17 @@ impl DropTableExecutor {
         }
         ctx.table_metadata_manager
             .delete_table_metadata(self.table_id, &self.table, table_route_value)
+            .await
+    }
+
+    /// Deletes metadata for table **permanently**.
+    pub async fn on_destroy_metadata(
+        &self,
+        ctx: &DdlContext,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        ctx.table_metadata_manager
+            .destroy_table_metadata(self.table_id, &self.table, table_route_value)
             .await
     }
 
