@@ -166,7 +166,7 @@ impl Election for EtcdElection {
 
             if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)? {
                 if res.ttl() <= 0 {
-                    // Failed to keep alive, just break the loop.
+                    warn!("Candidate lease expired, key: {}", self.candidate_key());
                     break;
                 }
             }

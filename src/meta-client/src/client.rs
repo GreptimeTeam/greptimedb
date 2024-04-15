@@ -468,28 +468,24 @@ impl MetaClient {
         Ok(res)
     }
 
-    #[inline]
     pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {
         self.heartbeat.clone().context(NotStartedSnafu {
             name: "heartbeat_client",
         })
     }
 
-    #[inline]
     pub fn store_client(&self) -> Result<StoreClient> {
         self.store.clone().context(NotStartedSnafu {
             name: "store_client",
         })
     }
 
-    #[inline]
     pub fn lock_client(&self) -> Result<LockClient> {
         self.lock.clone().context(NotStartedSnafu {
             name: "lock_client",
         })
     }
 
-    #[inline]
     pub fn procedure_client(&self) -> Result<ProcedureClient> {
         self.procedure.clone().context(NotStartedSnafu {
             name: "procedure_client",
@@ -502,12 +498,10 @@ impl MetaClient {
         })
     }
 
-    #[inline]
     pub fn channel_config(&self) -> &ChannelConfig {
         self.channel_manager.config()
     }
 
-    #[inline]
     pub fn id(&self) -> Id {
         self.id
     }
