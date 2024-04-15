@@ -47,15 +47,21 @@ impl<S> RegionWorkerLoop<S> {
 
         struct ResetState<'a> {
             region: &'a MitoRegionRef,
+            discard: bool,
         }
 
         impl<'a> Drop for ResetState<'a> {
             fn drop(&mut self) {
-                switch_state_to_writable(&self.region, REGION_STATE_DROPPING);
+                if !self.discard {
+                    switch_state_to_writable(&self.region, REGION_STATE_DROPPING);
+                }
             }
         }
 
-        let _reset = ResetState { region: &region };
+        let mut reset = ResetState {
+            region: &region,
+            discard: false,
+        };
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
         let marker_path = join_path(region.access_layer.region_dir(), DROPPING_MARKER_FILE);
@@ -105,6 +111,9 @@ impl<S> RegionWorkerLoop<S> {
             .await;
             listener.on_later_drop_end(region_id, removed);
         });
+
+        // Discards the reset state guard.
+        reset.discard = true;
 
         Ok(0)
     }
