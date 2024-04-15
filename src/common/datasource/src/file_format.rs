@@ -213,10 +213,6 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
         writer.write(&batch).await?;
         rows += batch.num_rows();
     }
-
-    // Flushes all pending writes
-    let _ = writer.try_flush(true).await?;
-    writer.close_inner_writer().await?;
-
+    writer.close_with_arrow_writer().await?;
     Ok(rows)
 }

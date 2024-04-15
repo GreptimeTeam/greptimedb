@@ -117,7 +117,7 @@ impl<
         Ok(())
     }
 
-    pub async fn try_flush(&mut self, all: bool) -> Result<u64> {
+    async fn try_flush(&mut self, all: bool) -> Result<u64> {
         let mut bytes_written: u64 = 0;
 
         // Once buffered data size reaches threshold, split the data in chunks (typically 4MB)
