@@ -183,11 +183,7 @@ impl Election for EtcdElection {
             .get(key, Some(GetOptions::new().with_prefix()))
             .await
             .context(error::EtcdFailedSnafu)?;
-
-        res.kvs()
-            .iter()
-            .map(|kv| Ok(LeaderValue(String::from_utf8_lossy(kv.value()).to_string())))
-            .collect()
+        res.kvs().iter().map(|kv| Ok(kv.value().into())).collect()
     }
 
     async fn campaign(&self) -> Result<()> {
@@ -264,7 +260,7 @@ impl Election for EtcdElection {
 
     async fn leader(&self) -> Result<LeaderValue> {
         if self.is_leader.load(Ordering::Relaxed) {
-            Ok(LeaderValue(self.leader_value.clone()))
+            Ok(self.leader_value.as_bytes().into())
         } else {
             let res = self
                 .client
@@ -273,8 +269,7 @@ impl Election for EtcdElection {
                 .await
                 .context(error::EtcdFailedSnafu)?;
             let leader_value = res.kv().context(error::NoLeaderSnafu)?.value();
-            let leader_value = String::from_utf8_lossy(leader_value).to_string();
-            Ok(LeaderValue(leader_value))
+            Ok(leader_value.into())
         }
     }
 
