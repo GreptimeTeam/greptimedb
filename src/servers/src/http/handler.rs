@@ -26,7 +26,7 @@ use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
-use query::parser::PromQuery;
+use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -205,6 +205,7 @@ pub struct PromqlQuery {
     pub start: String,
     pub end: String,
     pub step: String,
+    pub lookback: Option<String>,
     pub db: Option<String>,
 }
 
@@ -215,6 +216,9 @@ impl From<PromqlQuery> for PromQuery {
             start: query.start,
             end: query.end,
             step: query.step,
+            lookback: query
+                .lookback
+                .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
         }
     }
 }
