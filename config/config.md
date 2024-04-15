@@ -109,10 +109,10 @@
 | `region_engine.mito.inverted_index.mem_threshold_on_create` | String | `64M` | Memory threshold for performing an external sort during index creation.<br/>Setting to empty will disable external sorting, forcing all sorting operations to happen in memory. |
 | `region_engine.mito.inverted_index.intermediate_path` | String | `""` | File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`). |
 | `region_engine.mito.memtable` | -- | -- | -- |
-| `region_engine.mito.memtable.type` | String | `partition_tree` | Memtable type.<br/>- `partition_tree`: partition tree memtable<br/>- `time_series`: time-series memtable (deprecated) |
-| `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard. |
-| `region_engine.mito.memtable.data_freeze_threshold` | Integer | `32768` | The max rows of data inside the actively writing buffer in one shard. |
-| `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes. |
+| `region_engine.mito.memtable.type` | String | `time_series` | Memtable type.<br/>- `time_series`: time-series memtable<br/>- `partition_tree`: partition tree memtable (experimental) |
+| `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard.<br/>Only available for `partition_tree` memtable. |
+| `region_engine.mito.memtable.data_freeze_threshold` | Integer | `32768` | The max rows of data inside the actively writing buffer in one shard.<br/>Only available for `partition_tree` memtable. |
+| `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes.<br/>Only available for `partition_tree` memtable. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
@@ -354,10 +354,10 @@
 | `region_engine.mito.inverted_index.mem_threshold_on_create` | String | `64M` | Memory threshold for performing an external sort during index creation.<br/>Setting to empty will disable external sorting, forcing all sorting operations to happen in memory. |
 | `region_engine.mito.inverted_index.intermediate_path` | String | `""` | File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`). |
 | `region_engine.mito.memtable` | -- | -- | -- |
-| `region_engine.mito.memtable.type` | String | `partition_tree` | Memtable type.<br/>- `partition_tree`: partition tree memtable<br/>- `time_series`: time-series memtable (deprecated) |
-| `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard. |
-| `region_engine.mito.memtable.data_freeze_threshold` | Integer | `32768` | The max rows of data inside the actively writing buffer in one shard. |
-| `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes. |
+| `region_engine.mito.memtable.type` | String | `time_series` | Memtable type.<br/>- `time_series`: time-series memtable<br/>- `partition_tree`: partition tree memtable (experimental) |
+| `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard.<br/>Only available for `partition_tree` memtable. |
+| `region_engine.mito.memtable.data_freeze_threshold` | Integer | `32768` | The max rows of data inside the actively writing buffer in one shard.<br/>Only available for `partition_tree` memtable. |
+| `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes.<br/>Only available for `partition_tree` memtable. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
 | `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
