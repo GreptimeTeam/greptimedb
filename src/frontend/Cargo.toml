@@ -64,5 +64,5 @@ datanode.workspace = true
 futures = "0.3"
 meta-srv = { workspace = true, features = ["mock"] }
 strfmt = "0.2"
-tower = "0.4"
+tower.workspace = true
 uuid.workspace = true
