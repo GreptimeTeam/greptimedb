@@ -33,12 +33,17 @@ env:
   RUST_TOOLCHAIN: nightly-2023-12-19
 
 jobs:
-  typos:
-    name: Spell Check with Typos
+  check-typos-and-docs:
+    name: Check typos and docs
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
       - uses: crate-ci/typos@v1.13.10
+      - name: Check the config docs
+        run: |
+          make config-docs && \
+          git diff --name-only --exit-code ./config/config.md  \
+          || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
 
   check:
     name: Check
