@@ -193,7 +193,7 @@ async fn test_append_mode_compaction() {
 }
 
 /// Sorts `batches` by column `names`.
-fn sort_batches_and_print(batches: &RecordBatches, names: &[&str]) -> String {
+pub(crate) fn sort_batches_and_print(batches: &RecordBatches, names: &[&str]) -> String {
     let schema = batches.schema();
     let record_batches = batches.iter().map(|batch| batch.df_record_batch());
     let record_batch = compute::concat_batches(schema.arrow_schema(), record_batches).unwrap();

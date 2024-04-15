@@ -105,7 +105,8 @@ impl SeqScan {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let sources = self.input.build_sources().await?;
         let dedup = !self.input.append_mode;
-        let mut builder = MergeReaderBuilder::from_sources(sources, dedup);
+        let mut builder =
+            MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
         let reader = builder.build().await?;
         Ok(Box::new(reader))
     }
@@ -114,7 +115,8 @@ impl SeqScan {
     async fn build_parallel_reader(&self) -> Result<BoxedBatchReader> {
         let sources = self.input.build_parallel_sources().await?;
         let dedup = !self.input.append_mode;
-        let mut builder = MergeReaderBuilder::from_sources(sources, dedup);
+        let mut builder =
+            MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
         let reader = builder.build().await?;
         Ok(Box::new(reader))
     }
