@@ -140,8 +140,13 @@ async fn test_compaction_region() {
     assert_eq!(result.affected_rows, 0);
 
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    // [0..9]
+    //       [10...19]
+    //                [20....29]
+    //          -[15.........29]-
+    //           [15.....24]
     assert_eq!(
-        1,
+        3,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()
@@ -289,7 +294,7 @@ async fn test_readonly_during_compaction() {
         .unwrap();
     // Flush 2 SSTs for compaction.
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
-    put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
 
     // Waits until the engine receives compaction finished request.
     listener.wait_handle_finished().await;
