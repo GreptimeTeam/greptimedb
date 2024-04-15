@@ -23,6 +23,8 @@ use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
+use crate::expr::PartitionExpr;
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -126,13 +128,28 @@ pub enum Error {
         err_msg: String,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Conjunct expr with non-expr is invalid"))]
+    ConjunctExprWithNonExpr {
+        expr: PartitionExpr,
+        location: Location,
+    },
+
+    #[snafu(display("Unclosed value {} on column {}", value, column))]
+    UnclosedValue {
+        value: String,
+        column: String,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
-            Error::FindRegionRoutes { .. } => StatusCode::InvalidArguments,
+            Error::FindRegionRoutes { .. }
+            | Error::ConjunctExprWithNonExpr { .. }
+            | Error::UnclosedValue { .. } => StatusCode::InvalidArguments,
             Error::FindTableRoutes { .. } => StatusCode::InvalidArguments,
             Error::FindRegion { .. }
             | Error::FindRegions { .. }

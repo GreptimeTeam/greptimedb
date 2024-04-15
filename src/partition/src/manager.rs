@@ -140,11 +140,14 @@ impl PartitionRuleManager {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        Ok(Arc::new(MultiDimPartitionRule::new(
+
+        let rule = 
+        MultiDimPartitionRule::try_new(
             partition_columns.clone(),
             regions,
             exprs,
-        )) as _)
+        )?;
+        Ok(Arc::new(rule) as _)
     }
 
     /// Get partition rule of given table.

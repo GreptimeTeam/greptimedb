@@ -21,37 +21,46 @@ use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use store_api::storage::RegionNumber;
 
-use crate::error::{self, Result};
+use crate::error::{self, ConjunctExprWithNonExprSnafu, Result, UnclosedValueSnafu};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 use crate::PartitionRule;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MultiDimPartitionRule {
+    /// Allow list of which columns can be used for partitioning.
     partition_columns: Vec<String>,
-    // name to index of `partition_columns`
+    /// Name to index of `partition_columns`. Used for quick lookup.
     name_to_index: HashMap<String, usize>,
+    /// Region number for each partition. This list has the same length as `exprs`
+    /// (dispiting the default region).
     regions: Vec<RegionNumber>,
+    /// Partition expressions.
     exprs: Vec<PartitionExpr>,
 }
 
 impl MultiDimPartitionRule {
-    pub fn new(
+    pub fn try_new(
         partition_columns: Vec<String>,
         regions: Vec<RegionNumber>,
         exprs: Vec<PartitionExpr>,
-    ) -> Self {
+    ) -> Result<Self> {
         let name_to_index = partition_columns
             .iter()
             .enumerate()
             .map(|(i, name)| (name.clone(), i))
             .collect::<HashMap<_, _>>();
 
-        Self {
+        let rule = Self {
             partition_columns,
             name_to_index,
             regions,
             exprs,
-        }
+        };
+
+        let mut checker = RuleChecker::new(&rule);
+        checker.check(&rule)?;
+
+        Ok(rule)
     }
 
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
@@ -140,6 +149,131 @@ impl PartitionRule for MultiDimPartitionRule {
     }
 }
 
+/// Helper for [RuleChecker]
+type Axis = HashMap<Value, SplitPoint>;
+
+/// Helper for [RuleChecker]
+struct SplitPoint {
+    is_equal: bool,
+    less_than_counter: isize,
+}
+
+/// Check if the rule set covers all the possible values.
+///
+/// Note this checker have false-negative on duplicated exprs. E.g.:
+/// `a != 20`, `a <= 20` and `a > 20`.
+///
+/// It works on the observation that each projected split point should be included (`is_equal`)
+/// and have a balanced `<` and `>` counter.
+struct RuleChecker<'a> {
+    axis: Vec<Axis>,
+    rule: &'a MultiDimPartitionRule,
+}
+
+impl<'a> RuleChecker<'a> {
+    pub fn new(rule: &'a MultiDimPartitionRule) -> Self {
+        let mut projections = Vec::with_capacity(rule.partition_columns.len());
+        projections.resize_with(rule.partition_columns.len(), || Default::default());
+
+        Self {
+            axis: projections,
+            rule,
+        }
+    }
+
+    pub fn check(&mut self, rule: &MultiDimPartitionRule) -> Result<()> {
+        for expr in &rule.exprs {
+            self.walk_expr(expr)?
+        }
+
+        self.check_axis()
+    }
+
+    fn walk_expr(&mut self, expr: &PartitionExpr) -> Result<()> {
+        // recursively check the expr
+        match expr.op {
+            RestrictedOp::And | RestrictedOp::Or => {
+                if let Operand::Expr(lhs) = expr.lhs.as_ref() {
+                    self.walk_expr(lhs)?
+                } else {
+                    ConjunctExprWithNonExprSnafu { expr: expr.clone() }.fail()?;
+                }
+                if let Operand::Expr(rhs) = expr.rhs.as_ref() {
+                    self.walk_expr(rhs)?
+                } else {
+                    ConjunctExprWithNonExprSnafu { expr: expr.clone() }.fail()?;
+                }
+
+                return Ok(());
+            }
+            // Not conjunction
+            _ => {}
+        }
+
+        let (col, val) = match (expr.lhs.as_ref(), expr.rhs.as_ref()) {
+            (Operand::Expr(_), _)
+            | (_, Operand::Expr(_))
+            | (Operand::Column(_), Operand::Column(_))
+            | (Operand::Value(_), Operand::Value(_)) => todo!("invalid expr: {:?}", expr),
+
+            (Operand::Column(col), Operand::Value(val))
+            | (Operand::Value(val), Operand::Column(col)) => (col, val),
+        };
+
+        let col_index = *self
+            .rule
+            .name_to_index
+            .get(col)
+            .expect("invalid column name");
+        let axis = &mut self.axis[col_index];
+        let split_point = axis.entry(val.clone()).or_insert(SplitPoint {
+            is_equal: false,
+            less_than_counter: 0,
+        });
+        match expr.op {
+            RestrictedOp::Eq => {
+                split_point.is_equal = true;
+            }
+            RestrictedOp::NotEq => {
+                // less_than +1 -1
+            }
+            RestrictedOp::Lt => {
+                split_point.less_than_counter += 1;
+            }
+            RestrictedOp::LtEq => {
+                split_point.less_than_counter += 1;
+                split_point.is_equal = true;
+            }
+            RestrictedOp::Gt => {
+                split_point.less_than_counter -= 1;
+            }
+            RestrictedOp::GtEq => {
+                split_point.less_than_counter -= 1;
+                split_point.is_equal = true;
+            }
+            RestrictedOp::And | RestrictedOp::Or => todo!("unreachable?"),
+        }
+
+        Ok(())
+    }
+
+    /// Return if the rule is legal.
+    fn check_axis(&self) -> Result<()> {
+        for (col_index, axis) in self.axis.iter().enumerate() {
+            for (val, split_point) in axis {
+                if split_point.less_than_counter != 0 || !split_point.is_equal {
+                    UnclosedValueSnafu {
+                        value: format!("{val:?}"),
+                        column: self.rule.partition_columns[col_index].clone(),
+                    }
+                    .fail()?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
@@ -154,7 +288,7 @@ mod tests {
         //     b >= 'hz' AND b < 'sh',
         //     b >= 'sh'
         // )
-        let rule = MultiDimPartitionRule::new(
+        let rule = MultiDimPartitionRule::try_new(
             vec!["b".to_string()],
             vec![1, 2, 3],
             vec![
@@ -182,7 +316,8 @@ mod tests {
                     Operand::Value(datatypes::value::Value::String("sh".into())),
                 ),
             ],
-        );
+        )
+        .unwrap();
         assert_matches!(
             rule.find_region(&["foo".into(), 1000_i32.into()]),
             Err(error::Error::RegionKeysSize {
@@ -197,5 +332,244 @@ mod tests {
         assert_matches!(rule.find_region(&["hzz".into()]), Ok(2));
         assert_matches!(rule.find_region(&["sh".into()]), Ok(3));
         assert_matches!(rule.find_region(&["zzzz".into()]), Ok(3));
+    }
+
+    /// ```ignore
+    ///          │          │               
+    ///          │          │               
+    /// ─────────┼──────────┼────────────► b
+    ///          │          │               
+    ///          │          │               
+    ///      b <= h     b >= s            
+    /// ```
+    #[test]
+    fn empty_expr_case_1() {
+        // PARTITION ON COLUMNS (b) (
+        //     b <= 'h',
+        //     b >= 's'
+        // )
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![1, 2],
+            vec![
+                PartitionExpr::new(
+                    Operand::Column("b".to_string()),
+                    RestrictedOp::LtEq,
+                    Operand::Value(datatypes::value::Value::String("h".into())),
+                ),
+                PartitionExpr::new(
+                    Operand::Column("b".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(datatypes::value::Value::String("s".into())),
+                ),
+            ],
+        );
+
+        // check rule
+        assert!(rule.is_err());
+    }
+
+    /// ```
+    ///     a                                                  
+    ///     ▲                                        
+    ///     │                   ‖        
+    ///     │                   ‖        
+    /// 200 │         ┌─────────┤        
+    ///     │         │         │        
+    ///     │         │         │        
+    ///     │         │         │        
+    /// 100 │   ======┴─────────┘        
+    ///     │                            
+    ///     └──────────────────────────►b
+    ///              10          20      
+    /// ```
+    #[test]
+    fn empty_expr_case_2() {
+        // PARTITION ON COLUMNS (b) (
+        //     a >= 100 AND b <= 10  OR  a > 100 AND a <= 200 AND b <= 10  OR  a >= 200 AND b > 10 AND b <= 20  OR  a > 200 AND b <= 20
+        //     a < 100 AND b <= 20  OR  a >= 100 AND b > 20
+        // )
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![1, 2],
+            vec![
+                PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            //  a >= 100 AND b <= 10
+                            Operand::Expr(PartitionExpr::new(
+                                Operand::Expr(PartitionExpr::new(
+                                    Operand::Column("a".to_string()),
+                                    RestrictedOp::GtEq,
+                                    Operand::Value(datatypes::value::Value::Int64(100)),
+                                )),
+                                RestrictedOp::And,
+                                Operand::Expr(PartitionExpr::new(
+                                    Operand::Column("b".to_string()),
+                                    RestrictedOp::LtEq,
+                                    Operand::Value(datatypes::value::Value::Int64(10)),
+                                )),
+                            )),
+                            RestrictedOp::Or,
+                            // a > 100 AND a <= 200 AND b <= 10
+                            Operand::Expr(PartitionExpr::new(
+                                Operand::Expr(PartitionExpr::new(
+                                    Operand::Expr(PartitionExpr::new(
+                                        Operand::Column("a".to_string()),
+                                        RestrictedOp::Gt,
+                                        Operand::Value(datatypes::value::Value::Int64(100)),
+                                    )),
+                                    RestrictedOp::And,
+                                    Operand::Expr(PartitionExpr::new(
+                                        Operand::Column("a".to_string()),
+                                        RestrictedOp::LtEq,
+                                        Operand::Value(datatypes::value::Value::Int64(200)),
+                                    )),
+                                )),
+                                RestrictedOp::And,
+                                Operand::Expr(PartitionExpr::new(
+                                    Operand::Column("b".to_string()),
+                                    RestrictedOp::LtEq,
+                                    Operand::Value(datatypes::value::Value::Int64(10)),
+                                )),
+                            )),
+                        )),
+                        RestrictedOp::Or,
+                        // a >= 200 AND b > 10 AND b <= 20
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Expr(PartitionExpr::new(
+                                Operand::Expr(PartitionExpr::new(
+                                    Operand::Column("a".to_string()),
+                                    RestrictedOp::GtEq,
+                                    Operand::Value(datatypes::value::Value::Int64(200)),
+                                )),
+                                RestrictedOp::And,
+                                Operand::Expr(PartitionExpr::new(
+                                    Operand::Column("b".to_string()),
+                                    RestrictedOp::Gt,
+                                    Operand::Value(datatypes::value::Value::Int64(10)),
+                                )),
+                            )),
+                            RestrictedOp::And,
+                            Operand::Expr(PartitionExpr::new(
+                                Operand::Column("b".to_string()),
+                                RestrictedOp::LtEq,
+                                Operand::Value(datatypes::value::Value::Int64(20)),
+                            )),
+                        )),
+                    )),
+                    RestrictedOp::Or,
+                    // a > 200 AND b <= 20
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("a".to_string()),
+                            RestrictedOp::Gt,
+                            Operand::Value(datatypes::value::Value::Int64(200)),
+                        )),
+                        RestrictedOp::And,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("b".to_string()),
+                            RestrictedOp::LtEq,
+                            Operand::Value(datatypes::value::Value::Int64(20)),
+                        )),
+                    )),
+                ),
+                PartitionExpr::new(
+                    // a < 100 AND b <= 20
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("a".to_string()),
+                            RestrictedOp::Lt,
+                            Operand::Value(datatypes::value::Value::Int64(100)),
+                        )),
+                        RestrictedOp::And,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("b".to_string()),
+                            RestrictedOp::LtEq,
+                            Operand::Value(datatypes::value::Value::Int64(20)),
+                        )),
+                    )),
+                    RestrictedOp::Or,
+                    // a >= 100 AND b > 20
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("a".to_string()),
+                            RestrictedOp::GtEq,
+                            Operand::Value(datatypes::value::Value::Int64(100)),
+                        )),
+                        RestrictedOp::And,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("b".to_string()),
+                            RestrictedOp::GtEq,
+                            Operand::Value(datatypes::value::Value::Int64(20)),
+                        )),
+                    )),
+                ),
+            ],
+        );
+
+        // check rule
+        assert!(rule.is_err());
+    }
+
+    #[test]
+    fn duplicate_expr_case_1() {
+        // PARTITION ON COLUMNS (a) (
+        //     a <= 20,
+        //     b >= 10
+        // )
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![1, 2],
+            vec![
+                PartitionExpr::new(
+                    Operand::Column("a".to_string()),
+                    RestrictedOp::LtEq,
+                    Operand::Value(datatypes::value::Value::Int64(20)),
+                ),
+                PartitionExpr::new(
+                    Operand::Column("a".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(datatypes::value::Value::Int64(10)),
+                ),
+            ],
+        );
+
+        // check rule
+        assert!(rule.is_err());
+    }
+
+    #[test]
+    #[ignore = "checker cannot detect this kind of duplicate for now"]
+    fn duplicate_expr_case_2() {
+        // PARTITION ON COLUMNS (a) (
+        //     a != 20,
+        //     a <= 20,
+        //     a > 20,
+        // )
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![1, 2],
+            vec![
+                PartitionExpr::new(
+                    Operand::Column("a".to_string()),
+                    RestrictedOp::NotEq,
+                    Operand::Value(datatypes::value::Value::Int64(20)),
+                ),
+                PartitionExpr::new(
+                    Operand::Column("a".to_string()),
+                    RestrictedOp::LtEq,
+                    Operand::Value(datatypes::value::Value::Int64(20)),
+                ),
+                PartitionExpr::new(
+                    Operand::Column("a".to_string()),
+                    RestrictedOp::Gt,
+                    Operand::Value(datatypes::value::Value::Int64(20)),
+                ),
+            ],
+        );
+
+        // check rule
+        assert!(rule.is_err());
     }
 }
