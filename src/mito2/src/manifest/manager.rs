@@ -319,6 +319,8 @@ impl RegionManifestManager {
     /// Returns true if a newer version manifest file is found.
     ///
     /// It is typically used in read-only regions to catch up with manifest.
+    /// It doesn't lock the manifest directory in the object store so the result
+    /// may be inaccurate if there are concurrent writes.
     pub async fn has_update(&self) -> Result<bool> {
         let last_version = self.last_version;
 

@@ -690,7 +690,7 @@ impl ErrorExt for Error {
             BiError { .. } => StatusCode::Internal,
             EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
             ChecksumMismatch { .. } => StatusCode::Unexpected,
-            RegionStopped { .. } => StatusCode::Internal,
+            RegionStopped { .. } => StatusCode::RegionNotReady,
         }
     }
 
