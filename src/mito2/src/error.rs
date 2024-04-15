@@ -578,6 +578,12 @@ pub enum Error {
 
     #[snafu(display("checksum mismatch (actual: {}, expected: {})", actual, expected))]
     ChecksumMismatch { actual: u32, expected: u32 },
+
+    #[snafu(display("Region {} is stopped", region_id))]
+    RegionStopped {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -684,6 +690,7 @@ impl ErrorExt for Error {
             BiError { .. } => StatusCode::Internal,
             EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
             ChecksumMismatch { .. } => StatusCode::Unexpected,
+            RegionStopped { .. } => StatusCode::RegionNotReady,
         }
     }
 

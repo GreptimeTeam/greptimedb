@@ -79,7 +79,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             };
             let action_list =
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-            if let Err(e) = region.manifest_manager.update(action_list).await {
+            if let Err(e) = region
+                .manifest_manager
+                .write()
+                .await
+                .update(action_list)
+                .await
+            {
                 error!(e; "Failed to update manifest, region: {}", region_id);
                 manifest_timer.stop_and_discard();
                 request.on_failure(e);

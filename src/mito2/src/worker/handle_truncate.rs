@@ -44,7 +44,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
-        region.manifest_manager.update(action_list).await?;
+        region
+            .manifest_manager
+            .write()
+            .await
+            .update(action_list)
+            .await?;
 
         // Notifies flush scheduler.
         self.flush_scheduler.on_region_truncated(region_id);
