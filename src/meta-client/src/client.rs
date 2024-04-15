@@ -493,7 +493,7 @@ impl MetaClient {
     pub fn procedure_client(&self) -> Result<ProcedureClient> {
         self.procedure
             .clone()
-            .context(NotStartedSnafu { name: "ddl_client" })
+            .context(NotStartedSnafu { name: "procedure_client" })
     }
 
     #[inline]
