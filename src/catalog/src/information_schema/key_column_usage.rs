@@ -49,6 +49,11 @@ pub const COLUMN_NAME: &str = "column_name";
 pub const ORDINAL_POSITION: &str = "ordinal_position";
 const INIT_CAPACITY: usize = 42;
 
+/// Primary key constraint name
+pub(crate) const PRI_CONSTRAINT_NAME: &str = "PRIMARY";
+/// Time index constraint name
+pub(crate) const TIME_INDEX_CONSTRAINT_NAME: &str = "TIME INDEX";
+
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
 pub(super) struct InformationSchemaKeyColumnUsage {
     schema: SchemaRef,
@@ -232,7 +237,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
                             self.add_key_column_usage(
                                 &predicates,
                                 &schema_name,
-                                "TIME INDEX",
+                                TIME_INDEX_CONSTRAINT_NAME,
                                 &catalog_name,
                                 &schema_name,
                                 &table_name,
@@ -262,7 +267,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
             self.add_key_column_usage(
                 &predicates,
                 &schema_name,
-                "PRIMARY",
+                PRI_CONSTRAINT_NAME,
                 &catalog_name,
                 &schema_name,
                 &table_name,
