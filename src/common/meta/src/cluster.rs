@@ -56,7 +56,7 @@ pub trait ClusterInfo {
 pub struct NodeInfoKey {
     /// The cluster id.
     pub cluster_id: u64,
-    /// The role of the node. It can be [Role::Datanode] or [Role::Frontend].
+    /// The role of the node. It can be `[Role::Datanode]` or `[Role::Frontend]`.
     pub role: Role,
     /// The node id.
     pub node_id: u64,
