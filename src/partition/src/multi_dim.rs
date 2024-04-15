@@ -173,7 +173,7 @@ struct RuleChecker<'a> {
 impl<'a> RuleChecker<'a> {
     pub fn new(rule: &'a MultiDimPartitionRule) -> Self {
         let mut projections = Vec::with_capacity(rule.partition_columns.len());
-        projections.resize_with(rule.partition_columns.len(), || Default::default());
+        projections.resize_with(rule.partition_columns.len(), Default::default);
 
         Self {
             axis: projections,
@@ -189,6 +189,7 @@ impl<'a> RuleChecker<'a> {
         self.check_axis()
     }
 
+    #[allow(clippy::mutable_key_type)]
     fn walk_expr(&mut self, expr: &PartitionExpr) -> Result<()> {
         // recursively check the expr
         match expr.op {
