@@ -60,12 +60,6 @@ impl<
             .context(error::BufferedWriterClosedSnafu)?;
         let metadata = encoder.close().await?;
 
-        // Use `rows_written` to keep a track of if any rows have been written.
-        // If no row's been written, then we can simply close the underlying
-        // writer without flush so that no file will be actually created.
-        if self.rows_written != 0 {
-            self.bytes_written += self.try_flush(true).await?;
-        }
         // It's important to shut down! flushes all pending writes
         self.close_inner_writer().await?;
         Ok((metadata, self.bytes_written))
@@ -79,8 +73,15 @@ impl<
         Fut: Future<Output = Result<T>>,
     > LazyBufferedWriter<T, U, F>
 {
-    /// Closes the writer without flushing the buffer data.
+    /// Closes the writer and flushes the buffer data.
     pub async fn close_inner_writer(&mut self) -> Result<()> {
+        // Use `rows_written` to keep a track of if any rows have been written.
+        // If no row's been written, then we can simply close the underlying
+        // writer without flush so that no file will be actually created.
+        if self.rows_written != 0 {
+            self.bytes_written += self.try_flush(true).await?;
+        }
+
         if let Some(writer) = &mut self.writer {
             writer.shutdown().await.context(error::AsyncWriteSnafu)?;
         }
