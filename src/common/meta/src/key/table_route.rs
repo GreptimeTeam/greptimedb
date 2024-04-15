@@ -61,6 +61,27 @@ pub struct LogicalTableRouteValue {
 }
 
 impl TableRouteValue {
+    /// Returns a [TableRouteValue::Physical] if `table_id` equals `physical_table_id`.
+    /// Otherwise returns a [TableRouteValue::Logical].
+    pub(crate) fn new(
+        table_id: TableId,
+        physical_table_id: TableId,
+        region_routes: Vec<RegionRoute>,
+    ) -> Self {
+        if table_id == physical_table_id {
+            TableRouteValue::physical(region_routes)
+        } else {
+            let region_routes = region_routes
+                .into_iter()
+                .map(|region| {
+                    debug_assert_eq!(region.region.id.table_id(), physical_table_id);
+                    RegionId::new(table_id, region.region.id.region_number())
+                })
+                .collect::<Vec<_>>();
+            TableRouteValue::logical(physical_table_id, region_routes)
+        }
+    }
+
     pub fn physical(region_routes: Vec<RegionRoute>) -> Self {
         Self::Physical(PhysicalTableRouteValue::new(region_routes))
     }

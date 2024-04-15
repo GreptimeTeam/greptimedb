@@ -121,8 +121,12 @@ impl DropTableProcedure {
 
         // TODO(weny): Considers introducing a RegionStatus to indicate the region is dropping.
         let table_id = self.data.table_id();
-        // Safety: checked
-        let table_route_value = self.data.table_route_value.as_ref().unwrap();
+        let table_route_value = &TableRouteValue::new(
+            self.data.task.table_id,
+            // Safety: checked
+            self.data.physical_table_id.unwrap(),
+            self.data.region_routes.clone(),
+        );
         // Deletes table metadata logically.
         self.executor
             .on_delete_metadata(&self.context, table_route_value)
@@ -195,9 +199,12 @@ impl Procedure for DropTableProcedure {
             self.data.table_id()
         );
 
-        // Safety: fetched in `DropTableState::Prepare` step.
-        let table_route_value = self.data.table_route_value.as_ref().unwrap();
-        // TODO(weny): check table name tombstone exists.
+        let table_route_value = &TableRouteValue::new(
+            self.data.task.table_id,
+            // Safety: checked
+            self.data.physical_table_id.unwrap(),
+            self.data.region_routes.clone(),
+        );
         self.executor
             .on_restore_metadata(&self.context, table_route_value)
             .await
@@ -211,7 +218,7 @@ pub struct DropTableData {
     pub cluster_id: u64,
     pub task: DropTableTask,
     pub region_routes: Vec<RegionRoute>,
-    pub table_route_value: Option<TableRouteValue>,
+    pub physical_table_id: Option<TableId>,
 }
 
 impl DropTableData {
@@ -221,7 +228,7 @@ impl DropTableData {
             cluster_id,
             task,
             region_routes: vec![],
-            table_route_value: None,
+            physical_table_id: None,
         }
     }
 
