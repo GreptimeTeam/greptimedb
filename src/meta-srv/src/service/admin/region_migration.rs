@@ -178,6 +178,7 @@ impl HttpHandler for SubmitRegionMigrationTaskHandler {
     async fn handle(
         &self,
         _: &str,
+        _: http::Method,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         let request = SubmitRegionMigrationTaskRequest::try_from(params)?;

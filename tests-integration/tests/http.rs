@@ -17,7 +17,6 @@ use std::collections::BTreeMap;
 use api::prom_store::remote::WriteRequest;
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, StatusCode};
-use axum_test_helper::TestClient;
 use common_error::status_code::StatusCode as ErrorCode;
 use prost::Message;
 use serde_json::json;
@@ -27,6 +26,7 @@ use servers::http::handler::HealthResponse;
 use servers::http::header::GREPTIME_TIMEZONE_HEADER_NAME;
 use servers::http::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
+use servers::http::test_helpers::TestClient;
 use servers::http::GreptimeQueryOutput;
 use servers::prom_store;
 use tests_integration::test_util::{
@@ -260,7 +260,6 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
-    // TODO(shuiyisong): fix this when return source err msg to client side
     assert!(body.error().contains("Table not found"));
     assert_eq!(body.code(), ErrorCode::PlanQuery as u32);
 
@@ -432,6 +431,12 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .post("/v1/prometheus/api/v1/query_range?query=up&start=1&end=100&step=5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/v1/prometheus/api/v1/query_range?query=count(count(up))&start=1&end=100&step=5")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;

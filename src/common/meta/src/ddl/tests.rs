@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod alter_logical_tables;
+mod alter_table;
 mod create_logical_tables;
 mod create_table;
 mod drop_database;
+mod drop_table;

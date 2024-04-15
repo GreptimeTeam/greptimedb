@@ -1897,57 +1897,85 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 
     // User can only see information schema under current catalog.
     // A necessary requirement to GreptimeCloud.
-    let sql = "select table_catalog, table_schema, table_name, column_name, data_type, semantic_type from information_schema.columns where table_name in ('columns', 'numbers', 'tables', 'another_table') order by table_name";
+    let sql = "select table_catalog, table_schema, table_name, column_name, data_type, semantic_type from information_schema.columns where table_name in ('columns', 'numbers', 'tables', 'another_table') order by table_name, column_name";
 
     let output = execute_sql(&instance, sql).await.data;
     let expected = "\
-+---------------+--------------------+------------+----------------+-----------+---------------+
-| table_catalog | table_schema       | table_name | column_name    | data_type | semantic_type |
-+---------------+--------------------+------------+----------------+-----------+---------------+
-| greptime      | information_schema | columns    | table_catalog  | String    | FIELD         |
-| greptime      | information_schema | columns    | table_schema   | String    | FIELD         |
-| greptime      | information_schema | columns    | table_name     | String    | FIELD         |
-| greptime      | information_schema | columns    | column_name    | String    | FIELD         |
-| greptime      | information_schema | columns    | data_type      | String    | FIELD         |
-| greptime      | information_schema | columns    | semantic_type  | String    | FIELD         |
-| greptime      | information_schema | columns    | column_default | String    | FIELD         |
-| greptime      | information_schema | columns    | is_nullable    | String    | FIELD         |
-| greptime      | information_schema | columns    | column_type    | String    | FIELD         |
-| greptime      | information_schema | columns    | column_comment | String    | FIELD         |
-| greptime      | public             | numbers    | number         | UInt32    | TAG           |
-| greptime      | information_schema | tables     | table_catalog  | String    | FIELD         |
-| greptime      | information_schema | tables     | table_schema   | String    | FIELD         |
-| greptime      | information_schema | tables     | table_name     | String    | FIELD         |
-| greptime      | information_schema | tables     | table_type     | String    | FIELD         |
-| greptime      | information_schema | tables     | table_id       | UInt32    | FIELD         |
-| greptime      | information_schema | tables     | engine         | String    | FIELD         |
-+---------------+--------------------+------------+----------------+-----------+---------------+";
++---------------+--------------------+------------+--------------------------+--------------+---------------+
+| table_catalog | table_schema       | table_name | column_name              | data_type    | semantic_type |
++---------------+--------------------+------------+--------------------------+--------------+---------------+
+| greptime      | information_schema | columns    | character_maximum_length | bigint       | FIELD         |
+| greptime      | information_schema | columns    | character_octet_length   | bigint       | FIELD         |
+| greptime      | information_schema | columns    | character_set_name       | string       | FIELD         |
+| greptime      | information_schema | columns    | collation_name           | string       | FIELD         |
+| greptime      | information_schema | columns    | column_comment           | string       | FIELD         |
+| greptime      | information_schema | columns    | column_default           | string       | FIELD         |
+| greptime      | information_schema | columns    | column_key               | string       | FIELD         |
+| greptime      | information_schema | columns    | column_name              | string       | FIELD         |
+| greptime      | information_schema | columns    | column_type              | string       | FIELD         |
+| greptime      | information_schema | columns    | data_type                | string       | FIELD         |
+| greptime      | information_schema | columns    | datetime_precision       | bigint       | FIELD         |
+| greptime      | information_schema | columns    | extra                    | string       | FIELD         |
+| greptime      | information_schema | columns    | generation_expression    | string       | FIELD         |
+| greptime      | information_schema | columns    | greptime_data_type       | string       | FIELD         |
+| greptime      | information_schema | columns    | is_nullable              | string       | FIELD         |
+| greptime      | information_schema | columns    | numeric_precision        | bigint       | FIELD         |
+| greptime      | information_schema | columns    | numeric_scale            | bigint       | FIELD         |
+| greptime      | information_schema | columns    | ordinal_position         | bigint       | FIELD         |
+| greptime      | information_schema | columns    | privileges               | string       | FIELD         |
+| greptime      | information_schema | columns    | semantic_type            | string       | FIELD         |
+| greptime      | information_schema | columns    | srs_id                   | bigint       | FIELD         |
+| greptime      | information_schema | columns    | table_catalog            | string       | FIELD         |
+| greptime      | information_schema | columns    | table_name               | string       | FIELD         |
+| greptime      | information_schema | columns    | table_schema             | string       | FIELD         |
+| greptime      | public             | numbers    | number                   | int unsigned | TAG           |
+| greptime      | information_schema | tables     | engine                   | string       | FIELD         |
+| greptime      | information_schema | tables     | table_catalog            | string       | FIELD         |
+| greptime      | information_schema | tables     | table_id                 | int unsigned | FIELD         |
+| greptime      | information_schema | tables     | table_name               | string       | FIELD         |
+| greptime      | information_schema | tables     | table_schema             | string       | FIELD         |
+| greptime      | information_schema | tables     | table_type               | string       | FIELD         |
++---------------+--------------------+------------+--------------------------+--------------+---------------+";
 
     check_output_stream(output, expected).await;
 
     let output = execute_sql_with(&instance, sql, query_ctx).await.data;
     let expected = "\
-+-----------------+--------------------+---------------+----------------+----------------------+---------------+
-| table_catalog   | table_schema       | table_name    | column_name    | data_type            | semantic_type |
-+-----------------+--------------------+---------------+----------------+----------------------+---------------+
-| another_catalog | another_schema     | another_table | i              | TimestampMillisecond | TIMESTAMP     |
-| another_catalog | information_schema | columns       | table_catalog  | String               | FIELD         |
-| another_catalog | information_schema | columns       | table_schema   | String               | FIELD         |
-| another_catalog | information_schema | columns       | table_name     | String               | FIELD         |
-| another_catalog | information_schema | columns       | column_name    | String               | FIELD         |
-| another_catalog | information_schema | columns       | data_type      | String               | FIELD         |
-| another_catalog | information_schema | columns       | semantic_type  | String               | FIELD         |
-| another_catalog | information_schema | columns       | column_default | String               | FIELD         |
-| another_catalog | information_schema | columns       | is_nullable    | String               | FIELD         |
-| another_catalog | information_schema | columns       | column_type    | String               | FIELD         |
-| another_catalog | information_schema | columns       | column_comment | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_catalog  | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_schema   | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_name     | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_type     | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_id       | UInt32               | FIELD         |
-| another_catalog | information_schema | tables        | engine         | String               | FIELD         |
-+-----------------+--------------------+---------------+----------------+----------------------+---------------+";
++-----------------+--------------------+---------------+--------------------------+--------------+---------------+
+| table_catalog   | table_schema       | table_name    | column_name              | data_type    | semantic_type |
++-----------------+--------------------+---------------+--------------------------+--------------+---------------+
+| another_catalog | another_schema     | another_table | i                        | timestamp(3) | TIMESTAMP     |
+| another_catalog | information_schema | columns       | character_maximum_length | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | character_octet_length   | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | character_set_name       | string       | FIELD         |
+| another_catalog | information_schema | columns       | collation_name           | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_comment           | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_default           | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_key               | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_name              | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_type              | string       | FIELD         |
+| another_catalog | information_schema | columns       | data_type                | string       | FIELD         |
+| another_catalog | information_schema | columns       | datetime_precision       | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | extra                    | string       | FIELD         |
+| another_catalog | information_schema | columns       | generation_expression    | string       | FIELD         |
+| another_catalog | information_schema | columns       | greptime_data_type       | string       | FIELD         |
+| another_catalog | information_schema | columns       | is_nullable              | string       | FIELD         |
+| another_catalog | information_schema | columns       | numeric_precision        | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | numeric_scale            | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | ordinal_position         | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | privileges               | string       | FIELD         |
+| another_catalog | information_schema | columns       | semantic_type            | string       | FIELD         |
+| another_catalog | information_schema | columns       | srs_id                   | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | table_catalog            | string       | FIELD         |
+| another_catalog | information_schema | columns       | table_name               | string       | FIELD         |
+| another_catalog | information_schema | columns       | table_schema             | string       | FIELD         |
+| another_catalog | information_schema | tables        | engine                   | string       | FIELD         |
+| another_catalog | information_schema | tables        | table_catalog            | string       | FIELD         |
+| another_catalog | information_schema | tables        | table_id                 | int unsigned | FIELD         |
+| another_catalog | information_schema | tables        | table_name               | string       | FIELD         |
+| another_catalog | information_schema | tables        | table_schema             | string       | FIELD         |
+| another_catalog | information_schema | tables        | table_type               | string       | FIELD         |
++-----------------+--------------------+---------------+--------------------------+--------------+---------------+";
 
     check_output_stream(output, expected).await;
 }

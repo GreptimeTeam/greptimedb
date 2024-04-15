@@ -27,7 +27,7 @@ use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
 use itertools::Itertools;
-pub(crate) use relation::{RelationDesc, RelationType};
+pub(crate) use relation::{ColumnType, RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -48,9 +48,12 @@ pub type Duration = i64;
 /// Default type for a repr of changes to a collection.
 pub type DiffRow = (Row, Timestamp, Diff);
 
+/// Row with key-value pair, timestamp and diff
 pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 
 /// Convert a value that is or can be converted to Datetime to internal timestamp
+///
+/// support types are: `Date`, `DateTime`, `TimeStamp`, `i64`
 pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
     let is_supported_time_type = |arg: &Value| {
         let ty = arg.data_type();
@@ -91,22 +94,31 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
 /// i.e. more compact like raw u8 of \[tag0, value0, tag1, value1, ...\]
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Row {
+    /// The inner vector of values
     pub inner: Vec<Value>,
 }
 
 impl Row {
+    /// Create an empty row
     pub fn empty() -> Self {
         Self { inner: vec![] }
     }
+
+    /// Create a row from a vector of values
     pub fn new(row: Vec<Value>) -> Self {
         Self { inner: row }
     }
+
+    /// Get the value at the given index
     pub fn get(&self, idx: usize) -> Option<&Value> {
         self.inner.get(idx)
     }
+
+    /// Clear the row
     pub fn clear(&mut self) {
         self.inner.clear();
     }
+
     /// clear and return the inner vector
     ///
     /// useful if you want to reuse the vector as a buffer
@@ -114,6 +126,7 @@ impl Row {
         self.inner.clear();
         &mut self.inner
     }
+
     /// pack a iterator of values into a row
     pub fn pack<I>(iter: I) -> Row
     where
@@ -123,22 +136,31 @@ impl Row {
             inner: iter.into_iter().collect(),
         }
     }
+
     /// unpack a row into a vector of values
     pub fn unpack(self) -> Vec<Value> {
         self.inner
     }
+
+    /// extend the row with values from an iterator
     pub fn extend<I>(&mut self, iter: I)
     where
         I: IntoIterator<Item = Value>,
     {
         self.inner.extend(iter);
     }
+
+    /// Creates a consuming iterator, that is, one that moves each value out of the `Row` (from start to end). The `Row` cannot be used after calling this
     pub fn into_iter(self) -> impl Iterator<Item = Value> {
         self.inner.into_iter()
     }
+
+    /// Returns an iterator over the slice.
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
         self.inner.iter()
     }
+
+    /// eturns the number of elements in the row, also known as its 'length'.
     pub fn len(&self) -> usize {
         self.inner.len()
     }

@@ -22,7 +22,7 @@ pub struct ResponseHeaderHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for ResponseHeaderHandler {
-    fn is_acceptable(&self, _role: Role) -> bool {
+    fn is_acceptable(&self, _: Role) -> bool {
         true
     }
 

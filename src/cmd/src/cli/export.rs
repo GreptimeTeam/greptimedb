@@ -226,7 +226,10 @@ impl Export {
     }
 
     async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
-        let sql = format!("show create table {}.{}.{}", catalog, schema, table);
+        let sql = format!(
+            r#"show create table "{}"."{}"."{}""#,
+            catalog, schema, table
+        );
         let mut client = self.client.clone();
         client.set_catalog(catalog);
         client.set_schema(schema);
@@ -273,7 +276,7 @@ impl Export {
                 for (c, s, t) in table_list {
                     match self.show_create_table(&c, &s, &t).await {
                         Err(e) => {
-                            error!(e; "Failed to export table {}.{}.{}", c, s, t)
+                            error!(e; r#"Failed to export table "{}"."{}"."{}""#, c, s, t)
                         }
                         Ok(create_table) => {
                             file.write_all(create_table.as_bytes())
@@ -415,5 +418,86 @@ fn split_database(database: &str) -> Result<(String, Option<String>)> {
         Ok((catalog.to_string(), None))
     } else {
         Ok((catalog.to_string(), Some(schema.to_string())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use client::{Client, Database};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+
+    use crate::error::Result;
+    use crate::options::{CliOptions, Options};
+    use crate::{cli, standalone, App};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_export_create_table_with_quoted_names() -> Result<()> {
+        let output_dir = tempfile::tempdir().unwrap();
+
+        let standalone = standalone::Command::parse_from([
+            "standalone",
+            "start",
+            "--data-home",
+            &*output_dir.path().to_string_lossy(),
+        ]);
+        let Options::Standalone(standalone_opts) =
+            standalone.load_options(&CliOptions::default())?
+        else {
+            unreachable!()
+        };
+        let mut instance = standalone.build(*standalone_opts).await?;
+        instance.start().await?;
+
+        let client = Client::with_urls(["127.0.0.1:4001"]);
+        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        database
+            .sql(r#"CREATE DATABASE "cli.export.create_table";"#)
+            .await
+            .unwrap();
+        database
+            .sql(
+                r#"CREATE TABLE "cli.export.create_table"."a.b.c"(
+                        ts TIMESTAMP,
+                        TIME INDEX (ts)
+                    ) engine=mito;
+                "#,
+            )
+            .await
+            .unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let cli = cli::Command::parse_from([
+            "cli",
+            "export",
+            "--addr",
+            "127.0.0.1:4001",
+            "--output-dir",
+            &*output_dir.path().to_string_lossy(),
+            "--target",
+            "create-table",
+        ]);
+        let mut cli_app = cli.build().await?;
+        cli_app.start().await?;
+
+        instance.stop().await?;
+
+        let output_file = output_dir
+            .path()
+            .join("greptime-cli.export.create_table.sql");
+        let res = std::fs::read_to_string(output_file).unwrap();
+        let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  TIME INDEX ("ts")
+)
+
+ENGINE=mito
+WITH(
+  regions = 1
+);
+"#;
+        assert_eq!(res.trim(), expect.trim());
+
+        Ok(())
     }
 }

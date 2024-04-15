@@ -19,7 +19,6 @@ use std::sync::Arc;
 use ::auth::UserProviderRef;
 use async_trait::async_trait;
 use common_runtime::Runtime;
-use common_telemetry::logging::error;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use pgwire::tokio::process_socket;
@@ -79,7 +78,7 @@ impl PostgresServer {
 
             async move {
                 match tcp_stream {
-                    Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
+                    Err(error) => debug!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         let addr = match io_stream.peer_addr() {
                             Ok(addr) => {

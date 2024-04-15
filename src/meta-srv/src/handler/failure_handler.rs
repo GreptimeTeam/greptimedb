@@ -115,7 +115,7 @@ mod tests {
 
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
-    use crate::metasrv::builder::MetaSrvBuilder;
+    use crate::metasrv::builder::MetasrvBuilder;
     use crate::test_util::create_region_failover_manager;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -129,7 +129,7 @@ mod tests {
 
         let req = &HeartbeatRequest::default();
 
-        let builder = MetaSrvBuilder::new();
+        let builder = MetasrvBuilder::new();
         let metasrv = builder.build().await.unwrap();
         let mut ctx = metasrv.new_ctx();
         ctx.is_infancy = false;

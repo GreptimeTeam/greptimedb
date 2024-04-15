@@ -22,7 +22,7 @@ use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
 /// Kafka wal configurations for metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct MetaSrvKafkaConfig {
+pub struct MetasrvKafkaConfig {
     /// The broker endpoints of the Kafka cluster.
     pub broker_endpoints: Vec<String>,
     /// The number of topics to be created upon start.
@@ -43,7 +43,7 @@ pub struct MetaSrvKafkaConfig {
     pub backoff: BackoffConfig,
 }
 
-impl Default for MetaSrvKafkaConfig {
+impl Default for MetasrvKafkaConfig {
     fn default() -> Self {
         let broker_endpoints = vec![BROKER_ENDPOINT.to_string()];
         let replication_factor = broker_endpoints.len() as i16;

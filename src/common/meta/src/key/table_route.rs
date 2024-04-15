@@ -517,6 +517,37 @@ impl TableRouteStorage {
             .transpose()
     }
 
+    /// Returns the physical `DeserializedValueWithBytes<TableRouteValue>` recursively.
+    ///
+    /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
+    /// - the physical table(`logical_or_physical_table_id`) does not exist
+    /// - the corresponding physical table of the logical table(`logical_or_physical_table_id`) does not exist.
+    pub async fn get_raw_physical_table_route(
+        &self,
+        logical_or_physical_table_id: TableId,
+    ) -> Result<(TableId, DeserializedValueWithBytes<TableRouteValue>)> {
+        let table_route =
+            self.get_raw(logical_or_physical_table_id)
+                .await?
+                .context(TableRouteNotFoundSnafu {
+                    table_id: logical_or_physical_table_id,
+                })?;
+
+        match table_route.get_inner_ref() {
+            TableRouteValue::Physical(_) => Ok((logical_or_physical_table_id, table_route)),
+            TableRouteValue::Logical(x) => {
+                let physical_table_id = x.physical_table_id();
+                let physical_table_route =
+                    self.get_raw(physical_table_id)
+                        .await?
+                        .context(TableRouteNotFoundSnafu {
+                            table_id: physical_table_id,
+                        })?;
+                Ok((physical_table_id, physical_table_route))
+            }
+        }
+    }
+
     /// Returns batch of [`TableRouteValue`] that respects the order of `table_ids`.
     pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
         let keys = table_ids
