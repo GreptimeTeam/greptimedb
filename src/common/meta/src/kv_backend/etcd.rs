@@ -516,7 +516,6 @@ impl TryFrom<DeleteRangeRequest> for Delete {
 }
 
 #[cfg(test)]
-#[allow(clippy::print_stdout)]
 mod tests {
     use super::*;
 
@@ -640,17 +639,16 @@ mod tests {
         if endpoints.is_empty() {
             return None;
         }
+
         let endpoints = endpoints
             .split(',')
             .map(|s| s.to_string())
             .collect::<Vec<String>>();
 
-        std::panic::set_hook(Box::new(|_| {
-            println!("panic: malformed endpoints");
-        }));
         let client = Client::connect(endpoints, None)
             .await
             .expect("malformed endpoints");
+
         Some(EtcdStore {
             client,
             max_txn_ops: 128,
