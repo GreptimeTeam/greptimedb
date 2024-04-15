@@ -118,7 +118,7 @@ impl StatementExecutor {
         let table_source = Arc::new(DefaultTableSource::new(table_provider));
 
         let mut builder = LogicalPlanBuilder::scan_with_filters(
-            df_table_ref.to_owned_reference(),
+            df_table_ref,
             table_source,
             None,
             filters.clone(),

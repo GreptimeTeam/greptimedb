@@ -96,14 +96,14 @@ bytes = { version = "1.5", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
 dashmap = "5.4"
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "cd7a00b08309f7229073e4bba686d6271726ab1c" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "cd7a00b08309f7229073e4bba686d6271726ab1c" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "cd7a00b08309f7229073e4bba686d6271726ab1c" }
-datafusion-functions = { git = "https://github.com/apache/arrow-datafusion.git", rev = "cd7a00b08309f7229073e4bba686d6271726ab1c" }
-datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "cd7a00b08309f7229073e4bba686d6271726ab1c" }
-datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "cd7a00b08309f7229073e4bba686d6271726ab1c" }
-datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "cd7a00b08309f7229073e4bba686d6271726ab1c" }
-datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "cd7a00b08309f7229073e4bba686d6271726ab1c" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
+datafusion-functions = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
+datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
+datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
+datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
+datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
 derive_builder = "0.12"
 dotenv = "0.15"
 # TODO(LFC): Wait for https://github.com/etcdv3/etcd-client/pull/76
@@ -111,7 +111,7 @@ etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev 
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/MichaelScofield/greptime-proto.git", rev = "4d861aaa20e4cc1d07cdb1d5dadcd9ea07e3dfa5" }
+greptime-proto = { git = "https://github.com/MichaelScofield/greptime-proto.git", rev = "bdbd4cfa871ec8d192d3dbabf11debcb2cb67748" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"

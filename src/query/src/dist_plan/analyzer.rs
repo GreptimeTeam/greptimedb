@@ -47,8 +47,8 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         // preprocess the input plan
         let optimizer_context = OptimizerContext::new();
         let plan = SimplifyExpressions::new()
-            .try_optimize(&plan, &optimizer_context)?
-            .unwrap_or(plan);
+            .rewrite(plan, &optimizer_context)?
+            .data;
 
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();

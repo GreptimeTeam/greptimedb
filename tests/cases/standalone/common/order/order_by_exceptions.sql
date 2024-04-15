@@ -18,7 +18,14 @@ SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY a % 2;
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 3;
 
-SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
+-- "order by -1" is generally an undefined behavior.
+-- It's not supported in PostgreSQL 16, error "ORDER BY position -1 is not in select list".
+-- But in Mysql 8, it can be executed, just the actual order is ignored.
+-- In DataFusion, it behaves like Mysql 8. The "sort" plan node will be eliminated by the physical optimizer
+-- "EnforceSorting" because it's sort key is parsed as a constant "-1".
+-- We check the "explain" of the "order by -1" query to ensure that.
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
 

@@ -24,7 +24,7 @@ use datafusion::arrow::datatypes::{Field, SchemaRef};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
-use datafusion::common::{DFField, DFSchema, DFSchemaRef};
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -111,39 +111,44 @@ impl RangeManipulate {
         time_index: &str,
         field_columns: &[String],
     ) -> DataFusionResult<DFSchemaRef> {
-        let mut columns = input_schema.fields().clone();
+        let columns = input_schema.fields();
+        let mut new_columns = Vec::with_capacity(columns.len() + 1);
+        for i in 0..columns.len() {
+            let x = input_schema.qualified_field(i);
+            new_columns.push((x.0.cloned(), Arc::new(x.1.clone())));
+        }
 
         // process time index column
         // the raw timestamp field is preserved. And a new timestamp_range field is appended to the last.
-        let Some(ts_col_index) = input_schema.index_of_column_by_name(None, time_index)? else {
+        let Some(ts_col_index) = input_schema.index_of_column_by_name(None, time_index) else {
             return Err(datafusion::common::field_not_found(
                 None::<TableReference>,
                 time_index,
                 input_schema.as_ref(),
             ));
         };
-        let ts_col_field = columns[ts_col_index].field();
+        let ts_col_field = &columns[ts_col_index];
         let timestamp_range_field = Field::new(
             Self::build_timestamp_range_name(time_index),
             RangeArray::convert_field(ts_col_field).data_type().clone(),
             ts_col_field.is_nullable(),
         );
-        columns.push(DFField::from(timestamp_range_field));
+        new_columns.push((None, Arc::new(timestamp_range_field)));
 
         // process value columns
         for name in field_columns {
-            let Some(index) = input_schema.index_of_column_by_name(None, name)? else {
+            let Some(index) = input_schema.index_of_column_by_name(None, name) else {
                 return Err(datafusion::common::field_not_found(
                     None::<TableReference>,
                     name,
                     input_schema.as_ref(),
                 ));
             };
-            columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
+            new_columns[index] = (None, Arc::new(RangeArray::convert_field(&columns[index])));
         }
 
         Ok(Arc::new(DFSchema::new_with_metadata(
-            columns,
+            new_columns,
             HashMap::new(),
         )?))
     }

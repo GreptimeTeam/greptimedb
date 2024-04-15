@@ -19,12 +19,7 @@
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use datafusion_expr::{
-    AccumulatorFactoryFunction, AggregateUDF as DfAggregateUdf,
-    StateTypeFunction as DfStateTypeFunction,
-};
-use datatypes::arrow::datatypes::DataType as ArrowDataType;
-use datatypes::prelude::*;
+use datafusion_expr::{AccumulatorFactoryFunction, AggregateUDF as DfAggregateUdf};
 
 use crate::function::{
     to_df_return_type, AccumulatorFunctionImpl, ReturnTypeFunction, StateTypeFunction,
@@ -97,7 +92,6 @@ impl From<AggregateFunction> for DfAggregateUdf {
             &udaf.signature.into(),
             &to_df_return_type(udaf.return_type),
             &to_df_accumulator_func(udaf.accumulator, udaf.creator.clone()),
-            &to_df_state_type(udaf.state_type),
         )
     }
 }
@@ -111,20 +105,4 @@ fn to_df_accumulator_func(
         let creator = creator.clone();
         Ok(Box::new(DfAccumulatorAdaptor::new(accumulator, creator)) as _)
     })
-}
-
-fn to_df_state_type(func: StateTypeFunction) -> DfStateTypeFunction {
-    let df_func = move |data_type: &ArrowDataType| {
-        // DataFusion DataType -> ConcreteDataType
-        let concrete_data_type = ConcreteDataType::from_arrow_type(data_type);
-
-        // evaluate ConcreteDataType
-        let eval_result = (func)(&concrete_data_type);
-
-        // ConcreteDataType -> DataFusion DataType
-        eval_result
-            .map(|ts| Arc::new(ts.iter().map(|t| t.as_arrow_type()).collect()))
-            .map_err(|e| e.into())
-    };
-    Arc::new(df_func)
 }

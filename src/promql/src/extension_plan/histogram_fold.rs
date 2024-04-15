@@ -142,17 +142,13 @@ impl HistogramFold {
     ) -> DataFusionResult<()> {
         let check_column = |col| {
             if !input_schema.has_column_with_unqualified_name(col) {
-                return Err(DataFusionError::SchemaError(
+                Err(DataFusionError::SchemaError(
                     datafusion::common::SchemaError::FieldNotFound {
                         field: Box::new(Column::new(None::<String>, col)),
-                        valid_fields: input_schema
-                            .fields()
-                            .iter()
-                            .map(|f| f.qualified_column())
-                            .collect(),
+                        valid_fields: input_schema.columns(),
                     },
                     Box::new(None),
-                ));
+                ))
             } else {
                 Ok(())
             }
@@ -168,15 +164,12 @@ impl HistogramFold {
         // safety: those fields are checked in `check_schema()`
         let le_column_index = input_schema
             .index_of_column_by_name(None, &self.le_column)
-            .unwrap()
             .unwrap();
         let field_column_index = input_schema
             .index_of_column_by_name(None, &self.field_column)
-            .unwrap()
             .unwrap();
         let ts_column_index = input_schema
             .index_of_column_by_name(None, &self.ts_column)
-            .unwrap()
             .unwrap();
 
         let output_schema: SchemaRef = Arc::new(self.output_schema.as_ref().into());
@@ -204,15 +197,16 @@ impl HistogramFold {
         input_schema: &DFSchemaRef,
         le_column: &str,
     ) -> DataFusionResult<DFSchemaRef> {
-        let mut fields = input_schema.fields().clone();
+        let fields = input_schema.fields();
         // safety: those fields are checked in `check_schema()`
-        let le_column_idx = input_schema
-            .index_of_column_by_name(None, le_column)?
-            .unwrap();
-        fields.remove(le_column_idx);
-
+        let mut new_fields = Vec::with_capacity(fields.len() - 1);
+        for f in fields {
+            if f.name() != le_column {
+                new_fields.push((None, f.clone()));
+            }
+        }
         Ok(Arc::new(DFSchema::new_with_metadata(
-            fields,
+            new_fields,
             HashMap::new(),
         )?))
     }

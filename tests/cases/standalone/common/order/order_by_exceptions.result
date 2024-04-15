@@ -54,14 +54,39 @@ SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 3;
 
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Order by column out of bounds, specified: 3, max: 2
 
-SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
+-- "order by -1" is generally an undefined behavior.
+-- It's not supported in PostgreSQL 16, error "ORDER BY position -1 is not in select list".
+-- But in Mysql 8, it can be executed, just the actual order is ignored.
+-- In DataFusion, it behaves like Mysql 8. The "sort" plan node will be eliminated by the physical optimizer
+-- "EnforceSorting" because it's sort key is parsed as a constant "-1".
+-- We check the "explain" of the "order by -1" query to ensure that.
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 
-+-------------------+----+
-| test.a % Int64(2) | b  |
-+-------------------+----+
-| 1                 | 22 |
-| 0                 | 21 |
-+-------------------+----+
++---------------+-----------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                      |
++---------------+-----------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: Int64(-1) ASC NULLS LAST                                                                            |
+|               |   Aggregate: groupBy=[[test.a % Int64(2), test.b]], aggr=[[]]                                             |
+|               |     Union                                                                                                 |
+|               |       Projection: CAST(test.a AS Int64) % Int64(2) AS test.a % Int64(2), test.b                           |
+|               |         MergeScan [is_placeholder=false]                                                                  |
+|               |       Projection: CAST(test.a AS Int64) % Int64(2) AS test.a % Int64(2), test.b                           |
+|               |         MergeScan [is_placeholder=false]                                                                  |
+| physical_plan | CoalescePartitionsExec                                                                                    |
+|               |   AggregateExec: mode=FinalPartitioned, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[] |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |       RepartitionExec: partitioning=Hash([test.a % Int64(2)@0, b@1], 10), input_partitions=20             |
+|               |         AggregateExec: mode=Partial, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[]    |
+|               |           UnionExec                                                                                       |
+|               |             ProjectionExec: expr=[CAST(a@0 AS Int64) % 2 as test.a % Int64(2), b@1 as b]                  |
+|               |               RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1                       |
+|               |                 MergeScanExec: REDACTED
+|               |             ProjectionExec: expr=[CAST(a@0 AS Int64) % 2 as test.a % Int64(2), b@1 as b]                  |
+|               |               RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1                       |
+|               |                 MergeScanExec: REDACTED
+|               |                                                                                                           |
++---------------+-----------------------------------------------------------------------------------------------------------+
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
 

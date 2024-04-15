@@ -20,7 +20,7 @@ use std::time::UNIX_EPOCH;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_query::prelude::GREPTIME_VALUE;
-use datafusion::common::{DFSchemaRef, OwnedTableReference, Result as DfResult};
+use datafusion::common::{DFSchemaRef, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::expr::{
     AggregateFunction, AggregateFunctionDefinition, Alias, ScalarFunction,
@@ -308,14 +308,14 @@ impl PromPlanner {
                         let left_field_columns = self.ctx.field_columns.clone();
                         let mut left_table_ref = self
                             .table_ref()
-                            .unwrap_or_else(|_| OwnedTableReference::bare(""));
+                            .unwrap_or_else(|_| TableReference::bare(""));
                         let left_context = self.ctx.clone();
 
                         let right_input = self.prom_expr_to_plan(*rhs.clone()).await?;
                         let right_field_columns = self.ctx.field_columns.clone();
                         let mut right_table_ref = self
                             .table_ref()
-                            .unwrap_or_else(|_| OwnedTableReference::bare(""));
+                            .unwrap_or_else(|_| TableReference::bare(""));
                         let right_context = self.ctx.clone();
 
                         // TODO(ruihang): avoid join if left and right are the same table
@@ -335,8 +335,8 @@ impl PromPlanner {
                         // normal join
                         if left_table_ref == right_table_ref {
                             // rename table references to avoid ambiguity
-                            left_table_ref = OwnedTableReference::bare("lhs");
-                            right_table_ref = OwnedTableReference::bare("rhs");
+                            left_table_ref = TableReference::bare("lhs");
+                            right_table_ref = TableReference::bare("rhs");
                             self.ctx.table_name = Some("lhs".to_string());
                         }
                         let mut field_columns =
@@ -352,13 +352,13 @@ impl PromPlanner {
                         let bin_expr_builder = |_: &String| {
                             let (left_col_name, right_col_name) = field_columns.next().unwrap();
                             let left_col = join_plan_schema
-                                .field_with_name(Some(&left_table_ref), left_col_name)
+                                .qualified_field_with_name(Some(&left_table_ref), left_col_name)
                                 .context(DataFusionPlanningSnafu)?
-                                .qualified_column();
+                                .into();
                             let right_col = join_plan_schema
-                                .field_with_name(Some(&right_table_ref), right_col_name)
+                                .qualified_field_with_name(Some(&right_table_ref), right_col_name)
                                 .context(DataFusionPlanningSnafu)?
-                                .qualified_column();
+                                .into();
 
                             let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
                             let mut binary_expr = binary_expr_builder(
@@ -862,7 +862,7 @@ impl PromPlanner {
         Ok(exprs)
     }
 
-    fn table_ref(&self) -> Result<OwnedTableReference> {
+    fn table_ref(&self) -> Result<TableReference> {
         let table_name = self
             .ctx
             .table_name
@@ -871,12 +871,12 @@ impl PromPlanner {
 
         // set schema name if `__schema__` is given
         let table_ref = if let Some(schema_name) = &self.ctx.schema_name {
-            TableReference::partial(schema_name, &table_name)
+            TableReference::partial(schema_name.as_str(), table_name.as_str())
         } else {
-            TableReference::bare(&table_name)
+            TableReference::bare(table_name.as_str())
         };
 
-        Ok(table_ref.to_owned_reference())
+        Ok(table_ref)
     }
 
     /// Create a table scan plan and a filter plan with given filter.
@@ -885,7 +885,7 @@ impl PromPlanner {
     /// If the filter is empty
     async fn create_table_scan_plan(
         &mut self,
-        table_ref: OwnedTableReference,
+        table_ref: TableReference,
         filter: Vec<DfExpr>,
     ) -> Result<LogicalPlan> {
         let provider = self
@@ -1542,7 +1542,7 @@ impl PromPlanner {
             token::T_LTE => Ok(Box::new(|lhs, rhs| Ok(lhs.lt_eq(rhs)))),
             token::T_POW => Ok(Box::new(|lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
-                    func_def: ScalarFunctionDefinition::BuiltIn(BuiltinScalarFunction::Power),
+                    func_def: ScalarFunctionDefinition::UDF(datafusion_functions::math::power()),
                     args: vec![lhs, rhs],
                 }))
             })),
@@ -1587,8 +1587,8 @@ impl PromPlanner {
         &self,
         left: LogicalPlan,
         right: LogicalPlan,
-        left_table_ref: OwnedTableReference,
-        right_table_ref: OwnedTableReference,
+        left_table_ref: TableReference,
+        right_table_ref: TableReference,
     ) -> Result<LogicalPlan> {
         let mut tag_columns = self
             .ctx
@@ -1808,8 +1808,8 @@ impl PromPlanner {
             .difference(&right_tag_cols_set)
             .cloned()
             .collect::<Vec<_>>();
-        let left_qualifier = left.schema().field(0).qualifier().cloned();
-        let right_qualifier = right.schema().field(0).qualifier().cloned();
+        let left_qualifier = left.schema().qualified_field(0).0.cloned();
+        let right_qualifier = right.schema().qualified_field(0).0.cloned();
         let left_qualifier_string = left_qualifier
             .as_ref()
             .map(|l| l.to_string())

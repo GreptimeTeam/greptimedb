@@ -29,6 +29,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, Tre
 use datafusion_common::TableReference;
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion_optimizer::analyzer::Analyzer;
+use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -103,12 +104,18 @@ impl ExtensionPlanner for DistExtensionPlanner {
             .encode(&amended_plan)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?
             .into();
+
+        let query_ctx = session_state
+            .config()
+            .get_extension()
+            .unwrap_or_else(QueryContext::arc);
         let merge_scan_plan = MergeScanExec::new(
             table_name,
             regions,
             substrait_plan,
             &schema,
             self.region_query_handler.clone(),
+            query_ctx,
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
@@ -193,9 +200,9 @@ impl TreeNodeVisitor for TableNameExtractor {
                         table,
                     } => {
                         self.table_name = Some(TableName::new(
-                            catalog.clone(),
-                            schema.clone(),
-                            table.clone(),
+                            catalog.to_string(),
+                            schema.to_string(),
+                            table.to_string(),
                         ));
                         Ok(TreeNodeRecursion::Stop)
                     }
@@ -203,8 +210,8 @@ impl TreeNodeVisitor for TableNameExtractor {
                     TableReference::Partial { schema, table } => {
                         self.table_name = Some(TableName::new(
                             DEFAULT_CATALOG_NAME.to_string(),
-                            schema.clone(),
-                            table.clone(),
+                            schema.to_string(),
+                            table.to_string(),
                         ));
                         Ok(TreeNodeRecursion::Stop)
                     }
@@ -212,7 +219,7 @@ impl TreeNodeVisitor for TableNameExtractor {
                         self.table_name = Some(TableName::new(
                             DEFAULT_CATALOG_NAME.to_string(),
                             DEFAULT_SCHEMA_NAME.to_string(),
-                            table.clone(),
+                            table.to_string(),
                         ));
                         Ok(TreeNodeRecursion::Stop)
                     }

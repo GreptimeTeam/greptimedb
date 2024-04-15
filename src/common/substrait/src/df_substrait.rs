@@ -28,7 +28,7 @@ use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use datafusion_substrait::substrait::proto::Plan;
 use prost::Message;
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::error::{
@@ -50,10 +50,11 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         message: B,
         catalog_list: Arc<dyn CatalogProviderList>,
         mut state: SessionState,
+        query_ctx: QueryContextRef,
     ) -> Result<Self::Plan, Self::Error> {
         // substrait decoder will look up the UDFs in SessionState, so we need to register them
         for func in FUNCTION_REGISTRY.functions() {
-            let udf = Arc::new(create_udf(func, QueryContext::arc(), Default::default()).into());
+            let udf = Arc::new(create_udf(func, query_ctx.clone(), Default::default()).into());
             state.register_udf(udf).context(DFInternalSnafu)?;
         }
 

@@ -2549,7 +2549,7 @@ checksum = "7e962a19be5cfc3f3bf6dd8f61eb50107f356ad6270fbb3ed41476571db78be5"
 [[package]]
 name = "datafusion"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
@@ -2567,6 +2567,7 @@ dependencies = [
  "datafusion-execution",
  "datafusion-expr",
  "datafusion-functions",
+ "datafusion-functions-aggregate",
  "datafusion-functions-array",
  "datafusion-optimizer",
  "datafusion-physical-expr",
@@ -2599,7 +2600,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
@@ -2619,7 +2620,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common-runtime"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "tokio",
 ]
@@ -2627,7 +2628,7 @@ dependencies = [
 [[package]]
 name = "datafusion-execution"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "arrow",
  "chrono",
@@ -2647,7 +2648,7 @@ dependencies = [
 [[package]]
 name = "datafusion-expr"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
@@ -2664,7 +2665,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "arrow",
  "base64 0.22.0",
@@ -2680,6 +2681,7 @@ dependencies = [
  "itertools 0.12.0",
  "log",
  "md-5",
+ "rand",
  "regex",
  "sha2",
  "unicode-segmentation",
@@ -2687,9 +2689,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-functions-aggregate"
+version = "37.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
+dependencies = [
+ "arrow",
+ "datafusion-common",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-physical-expr-common",
+ "log",
+ "paste",
+]
+
+[[package]]
 name = "datafusion-functions-array"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2708,7 +2724,7 @@ dependencies = [
 [[package]]
 name = "datafusion-optimizer"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2725,7 +2741,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
@@ -2735,35 +2751,43 @@ dependencies = [
  "arrow-schema",
  "arrow-string",
  "base64 0.22.0",
- "blake2",
- "blake3",
  "chrono",
  "datafusion-common",
  "datafusion-execution",
  "datafusion-expr",
+ "datafusion-functions-aggregate",
+ "datafusion-physical-expr-common",
  "half 2.3.1",
  "hashbrown 0.14.3",
  "hex",
  "indexmap 2.2.6",
  "itertools 0.12.0",
  "log",
- "md-5",
  "paste",
  "petgraph",
- "rand",
  "regex",
- "sha2",
+]
+
+[[package]]
+name = "datafusion-physical-expr-common"
+version = "37.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
+dependencies = [
+ "arrow",
+ "datafusion-common",
+ "datafusion-expr",
 ]
 
 [[package]]
 name = "datafusion-physical-plan"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
  "arrow-array",
  "arrow-buffer",
+ "arrow-ord",
  "arrow-schema",
  "async-trait",
  "chrono",
@@ -2771,7 +2795,9 @@ dependencies = [
  "datafusion-common-runtime",
  "datafusion-execution",
  "datafusion-expr",
+ "datafusion-functions-aggregate",
  "datafusion-physical-expr",
+ "datafusion-physical-expr-common",
  "futures",
  "half 2.3.1",
  "hashbrown 0.14.3",
@@ -2788,7 +2814,7 @@ dependencies = [
 [[package]]
 name = "datafusion-sql"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2803,7 +2829,7 @@ dependencies = [
 [[package]]
 name = "datafusion-substrait"
 version = "37.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=cd7a00b08309f7229073e4bba686d6271726ab1c#cd7a00b08309f7229073e4bba686d6271726ab1c"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=34eda15b73a9e278af8844b30ed2f1c21c10359c#34eda15b73a9e278af8844b30ed2f1c21c10359c"
 dependencies = [
  "async-recursion",
  "chrono",
@@ -2812,7 +2838,7 @@ dependencies = [
  "object_store",
  "prost 0.12.3",
  "prost-types 0.12.3",
- "substrait 0.28.1",
+ "substrait 0.30.0",
 ]
 
 [[package]]
@@ -3850,7 +3876,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/MichaelScofield/greptime-proto.git?rev=4d861aaa20e4cc1d07cdb1d5dadcd9ea07e3dfa5#4d861aaa20e4cc1d07cdb1d5dadcd9ea07e3dfa5"
+source = "git+https://github.com/MichaelScofield/greptime-proto.git?rev=bdbd4cfa871ec8d192d3dbabf11debcb2cb67748#bdbd4cfa871ec8d192d3dbabf11debcb2cb67748"
 dependencies = [
  "prost 0.12.3",
  "serde",
@@ -9968,11 +9994,10 @@ dependencies = [
 
 [[package]]
 name = "substrait"
-version = "0.28.1"
+version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df9531ae6784dee4c018ebdb0226872b63cc28765bfa65c1e53b6c58584232af"
+checksum = "ba959c71b2a1a341a94e1f362615d7e5f1a4de9d25d82fceea8160f79f1e1dfb"
 dependencies = [
- "git2",
  "heck 0.5.0",
  "prettyplease 0.2.15",
  "prost 0.12.3",

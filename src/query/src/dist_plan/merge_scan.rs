@@ -44,6 +44,7 @@ use futures_util::StreamExt;
 use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::time::Instant;
@@ -126,6 +127,7 @@ pub struct MergeScanExec {
     region_query_handler: RegionQueryHandlerRef,
     metric: ExecutionPlanMetricsSet,
     properties: PlanProperties,
+    query_ctx: QueryContextRef,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -145,6 +147,7 @@ impl MergeScanExec {
         substrait_plan: Bytes,
         arrow_schema: &ArrowSchema,
         region_query_handler: RegionQueryHandlerRef,
+        query_ctx: QueryContextRef,
     ) -> Result<Self> {
         let arrow_schema_without_metadata = Self::arrow_schema_without_metadata(arrow_schema);
         let properties = PlanProperties::new(
@@ -163,6 +166,7 @@ impl MergeScanExec {
             region_query_handler,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
+            query_ctx,
         })
     }
 
@@ -175,6 +179,7 @@ impl MergeScanExec {
 
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let tz = self.query_ctx.timezone().to_string();
 
         let stream = Box::pin(stream!({
             MERGE_SCAN_REGIONS.observe(regions.len() as f64);
@@ -187,6 +192,7 @@ impl MergeScanExec {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
                         dbname: dbname.clone(),
+                        timezone: tz.clone(),
                     }),
                     region_id: region_id.into(),
                     plan: substrait_plan.clone(),

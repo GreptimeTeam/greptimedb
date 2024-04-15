@@ -650,6 +650,7 @@ impl RegionServerInner {
                 Bytes::from(plan),
                 catalog_list,
                 query_engine_ctx.state().clone(),
+                ctx.clone(),
             )
             .await
             .context(DecodeLogicalPlanSnafu)?;

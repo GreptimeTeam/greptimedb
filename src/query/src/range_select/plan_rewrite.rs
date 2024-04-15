@@ -398,8 +398,9 @@ impl RangePlanRewriter {
     async fn get_index_by(&mut self, schema: &Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
         let mut time_index_expr = Expr::Wildcard { qualifier: None };
         let mut default_by = vec![];
-        for field in schema.fields() {
-            if let Some(table_ref) = field.qualifier() {
+        for i in 0..schema.fields().len() {
+            let (qualifier, _) = schema.qualified_field(i);
+            if let Some(table_ref) = qualifier {
                 let table = self
                     .table_provider
                     .resolve_table(table_ref.clone())

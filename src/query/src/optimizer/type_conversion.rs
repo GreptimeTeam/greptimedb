@@ -312,7 +312,8 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::logical_expr::expr::AggregateFunction as AggrExpr;
-    use datafusion_common::{Column, DFField, DFSchema};
+    use datafusion_common::arrow::datatypes::Field;
+    use datafusion_common::{Column, DFSchema};
     use datafusion_expr::expr::AggregateFunctionDefinition;
     use datafusion_expr::{AggregateFunction, LogicalPlanBuilder};
     use datafusion_sql::TableReference;
@@ -393,11 +394,13 @@ mod tests {
 
         let schema = Arc::new(
             DFSchema::new_with_metadata(
-                vec![DFField::new(
+                vec![(
                     None::<TableReference>,
-                    "ts",
-                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                    true,
+                    Arc::new(Field::new(
+                        "ts",
+                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                        true,
+                    )),
                 )],
                 HashMap::new(),
             )
@@ -429,11 +432,9 @@ mod tests {
         let col_name = "is_valid";
         let schema = Arc::new(
             DFSchema::new_with_metadata(
-                vec![DFField::new(
+                vec![(
                     None::<TableReference>,
-                    col_name,
-                    DataType::Boolean,
-                    false,
+                    Arc::new(Field::new(col_name, DataType::Boolean, false)),
                 )],
                 HashMap::new(),
             )

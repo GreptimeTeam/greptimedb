@@ -161,9 +161,9 @@ impl DatafusionQueryEngine {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn delete<'a>(
+    async fn delete(
         &self,
-        table_name: &ResolvedTableReference<'a>,
+        table_name: &ResolvedTableReference,
         table: &TableRef,
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
@@ -205,9 +205,9 @@ impl DatafusionQueryEngine {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn insert<'a>(
+    async fn insert(
         &self,
-        table_name: &ResolvedTableReference<'a>,
+        table_name: &ResolvedTableReference,
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
@@ -226,7 +226,7 @@ impl DatafusionQueryEngine {
             .context(TableMutationSnafu)
     }
 
-    async fn find_table(&self, table_name: &ResolvedTableReference<'_>) -> Result<TableRef> {
+    async fn find_table(&self, table_name: &ResolvedTableReference) -> Result<TableRef> {
         let catalog_name = table_name.catalog.as_ref();
         let schema_name = table_name.schema.as_ref();
         let table_name = table_name.table.as_ref();
@@ -309,7 +309,9 @@ impl QueryEngine for DatafusionQueryEngine {
     }
 
     fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
-        QueryEngineContext::new(self.state.session_state(), query_ctx)
+        let mut state = self.state.session_state();
+        state.config_mut().set_extension(query_ctx.clone());
+        QueryEngineContext::new(state, query_ctx)
     }
 }
 
@@ -475,7 +477,6 @@ impl QueryExecutor for DatafusionQueryEngine {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow::Borrowed;
     use std::sync::Arc;
 
     use catalog::RegisterTableRequest;
@@ -576,9 +577,9 @@ mod tests {
             .unwrap();
         let table = engine
             .find_table(&ResolvedTableReference {
-                catalog: Borrowed("greptime"),
-                schema: Borrowed("public"),
-                table: Borrowed("numbers"),
+                catalog: "greptime".into(),
+                schema: "public".into(),
+                table: "numbers".into(),
             })
             .await
             .unwrap();

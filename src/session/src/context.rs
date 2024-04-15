@@ -22,7 +22,7 @@ use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
-use common_time::timezone::get_timezone;
+use common_time::timezone::{get_timezone, parse_timezone};
 use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
@@ -89,8 +89,7 @@ impl From<&RegionRequestHeader> for QueryContext {
             current_catalog: catalog.to_string(),
             current_schema: schema.to_string(),
             current_user: Default::default(),
-            // for request send to datanode, all timestamp have converted to UTC, so timezone is not important
-            timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
+            timezone: ArcSwap::new(Arc::new(parse_timezone(Some(&value.timezone)))),
             sql_dialect: Arc::new(GreptimeDbDialect {}),
             extension: Default::default(),
             configuration_parameter: Default::default(),

@@ -21,8 +21,11 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
+use datafusion::common::arrow::datatypes::Field;
 use datafusion::common::stats::Precision;
-use datafusion::common::{DFField, DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
+use datafusion::common::{
+    DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics, TableReference,
+};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::{SessionState, TaskContext};
 use datafusion::logical_expr::{ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -67,15 +70,14 @@ impl EmptyMetric {
         field_column_name: String,
         field_expr: Option<Expr>,
     ) -> DataFusionResult<Self> {
+        let qualifier = Some(TableReference::bare(""));
         let ts_only_schema = build_ts_only_schema(&time_index_column_name);
-        let mut fields = vec![ts_only_schema.field(0).clone()];
+        let mut fields = vec![(qualifier.clone(), Arc::new(ts_only_schema.field(0).clone()))];
         if let Some(field_expr) = &field_expr {
             let field_data_type = field_expr.get_type(&ts_only_schema)?;
-            fields.push(DFField::new(
-                Some(""),
-                &field_column_name,
-                field_data_type,
-                true,
+            fields.push((
+                qualifier.clone(),
+                Arc::new(Field::new(field_column_name, field_data_type, true)),
             ));
         }
         let schema = Arc::new(DFSchema::new_with_metadata(fields, HashMap::new())?);
@@ -308,14 +310,17 @@ impl Stream for EmptyMetricStream {
 
 /// Build a schema that only contains **millisecond** timestamp column
 fn build_ts_only_schema(column_name: &str) -> DFSchema {
-    let ts_field = DFField::new(
-        Some(""),
+    let ts_field = Field::new(
         column_name,
         DataType::Timestamp(TimeUnit::Millisecond, None),
         false,
     );
     // safety: should not fail (UT covers this)
-    DFSchema::new_with_metadata(vec![ts_field], HashMap::new()).unwrap()
+    DFSchema::new_with_metadata(
+        vec![(Some(TableReference::bare("")), Arc::new(ts_field))],
+        HashMap::new(),
+    )
+    .unwrap()
 }
 
 // Convert timestamp column to UNIX epoch second:

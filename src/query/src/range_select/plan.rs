@@ -39,7 +39,7 @@ use datafusion::physical_plan::{
 use datafusion::physical_planner::create_physical_sort_expr;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::utils::{get_arrayref_at_indices, get_row_at_idx};
-use datafusion_common::{DFField, DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
+use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
 use datafusion_expr::expr::AggregateFunctionDefinition;
 use datafusion_expr::utils::{exprlist_to_fields, COUNT_STAR_EXPANSION};
 use datafusion_expr::{
@@ -468,12 +468,13 @@ impl RangeSelect {
                      fill,
                      ..
                  }| {
-                    Ok(DFField::new_unqualified(
+                    let field = Field::new(
                         name,
                         data_type.clone(),
                         // Only when data fill with Const option, the data can't be null
                         !matches!(fill, Some(Fill::Const(..))),
-                    ))
+                    );
+                    Ok((None, Arc::new(field)))
                 },
             )
             .collect::<DfResult<Vec<_>>>()
@@ -482,7 +483,7 @@ impl RangeSelect {
         let ts_field = time_index
             .to_field(input.schema().as_ref())
             .context(DataFusionSnafu)?;
-        let time_index_name = ts_field.name().clone();
+        let time_index_name = ts_field.1.name().clone();
         fields.push(ts_field);
         // add by
         let by_fields = exprlist_to_fields(&by, &input).context(DataFusionSnafu)?;
@@ -503,7 +504,6 @@ impl RangeSelect {
                 if let Expr::Column(column) = project_expr {
                     schema_before_project
                         .index_of_column_by_name(column.relation.as_ref(), &column.name)
-                        .unwrap_or(None)
                         .ok_or(())
                 } else {
                     Err(())
@@ -514,7 +514,10 @@ impl RangeSelect {
         let schema = if let Some(project) = &schema_project {
             let project_field = project
                 .iter()
-                .map(|i| schema_before_project.fields()[*i].clone())
+                .map(|i| {
+                    let f = schema_before_project.qualified_field(*i);
+                    (f.0.cloned(), Arc::new(f.1.clone()))
+                })
                 .collect();
             Arc::new(
                 DFSchema::new_with_metadata(project_field, input.schema().metadata().clone())
@@ -781,8 +784,11 @@ impl RangeSelect {
                             AggregateFunctionDefinition::UDF(fun) => create_aggr_udf_expr(
                                 fun,
                                 &input_phy_exprs,
+                                &[],
+                                &[],
                                 &input_schema,
                                 range_fn.expr.display_name()?,
+                                false,
                             ),
                             f => Err(DataFusionError::NotImplemented(format!(
                                 "Range function from {f:?}"

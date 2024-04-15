@@ -222,9 +222,10 @@ macro_rules! bind_call_unary_math_function {
     ($DF_FUNC: ident, $vm: ident $(,$ARG: ident)*) => {
         fn inner_fn($($ARG: PyObjectRef,)* vm: &VirtualMachine) -> PyResult<PyObjectRef> {
             let args = &[$(all_to_f64(try_into_columnar_value($ARG, vm)?, vm)?,)*];
-            let res = math_expressions::$DF_FUNC(args).map_err(|err| from_df_err(err, vm))?;
-            let ret = try_into_py_obj(res, vm)?;
-            Ok(ret)
+            datafusion_functions::math::$DF_FUNC()
+                .invoke(args)
+                .map_err(|e| from_df_err(e, vm))
+                .and_then(|x| try_into_py_obj(x, vm))
         }
         return inner_fn($($ARG,)* $vm);
     };
@@ -289,7 +290,6 @@ pub(crate) mod greptime_builtin {
     use datafusion::dataframe::DataFrame as DfDataFrame;
     use datafusion::physical_plan::expressions;
     use datafusion_expr::{ColumnarValue as DFColValue, Expr as DfExpr};
-    use datafusion_physical_expr::math_expressions;
     use datatypes::arrow::array::{ArrayRef, Int64Array, NullArray};
     use datatypes::arrow::error::ArrowError;
     use datatypes::arrow::{self, compute};
@@ -506,11 +506,7 @@ pub(crate) mod greptime_builtin {
     /// simple math function, the backing implement is datafusion's `tan` math function
     #[pyfunction]
     fn tan(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        let args = &[try_into_columnar_value(val, vm).and_then(|x| all_to_f64(x, vm))?];
-        datafusion_functions::math::tan()
-            .invoke(args)
-            .map_err(|e| from_df_err(e, vm))
-            .and_then(|x| try_into_py_obj(x, vm))
+        bind_call_unary_math_function!(tan, vm, val);
     }
 
     /// simple math function, the backing implement is datafusion's `asin` math function
@@ -546,9 +542,9 @@ pub(crate) mod greptime_builtin {
     #[pyfunction]
     fn round(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         let value = try_into_columnar_value(val, vm)?;
-        let result = value
-            .into_array(1)
-            .and_then(|x| math_expressions::round(&[x]))
+        let result = datafusion_functions::math::round()
+            .invoke(&[value])
+            .and_then(|x| x.into_array(1))
             .map_err(|e| from_df_err(e, vm))?;
         try_into_py_obj(DFColValue::Array(result), vm)
     }
@@ -563,11 +559,7 @@ pub(crate) mod greptime_builtin {
     /// simple math function, the backing implement is datafusion's `abs` math function
     #[pyfunction]
     fn abs(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        let args = &[try_into_columnar_value(val, vm).and_then(|x| all_to_f64(x, vm))?];
-        datafusion_functions::math::abs()
-            .invoke(args)
-            .map_err(|e| from_df_err(e, vm))
-            .and_then(|x| try_into_py_obj(x, vm))
+        bind_call_unary_math_function!(abs, vm, val);
     }
 
     /// simple math function, the backing implement is datafusion's `signum` math function
@@ -608,7 +600,9 @@ pub(crate) mod greptime_builtin {
         // more info at: https://doc.rust-lang.org/reference/procedural-macros.html#procedural-macro-hygiene
         let arg = NullArray::new(len);
         let args = &[DFColValue::Array(std::sync::Arc::new(arg) as _)];
-        let res = math_expressions::random(args).map_err(|err| from_df_err(err, vm))?;
+        let res = datafusion_functions::math::random()
+            .invoke(args)
+            .map_err(|err| from_df_err(err, vm))?;
         let ret = try_into_py_obj(res, vm)?;
         Ok(ret)
     }
