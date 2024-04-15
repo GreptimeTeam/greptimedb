@@ -626,4 +626,95 @@ mod tests {
         assert_eq!(b"test_key".to_vec(), delete.key);
         let _ = delete.options.unwrap();
     }
+
+    use crate::kv_backend::test::{
+        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
+        test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
+        test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
+        unprepare_kv,
+    };
+
+    async fn build_kv_backend() -> Option<EtcdStore> {
+        let endpoints = std::env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+        if endpoints.is_empty() {
+            return None;
+        }
+
+        let endpoints = endpoints
+            .split(',')
+            .map(|s| s.to_string())
+            .collect::<Vec<String>>();
+
+        let client = Client::connect(endpoints, None)
+            .await
+            .expect("malformed endpoints");
+
+        Some(EtcdStore {
+            client,
+            max_txn_ops: 128,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_put() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"put/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_range() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"range/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_range_2() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_get() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"batchGet/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compare_and_put() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let kv_backend = Arc::new(kv_backend);
+            test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_range() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"deleteRange/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_delete_range_with_prefix(kv_backend, prefix.to_vec()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"batchDelete/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_batch_delete_with_prefix(kv_backend, prefix.to_vec()).await;
+        }
+    }
 }
