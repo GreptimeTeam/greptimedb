@@ -607,10 +607,10 @@ impl TableMetadataManager {
             .collect::<Vec<_>>();
 
         keys.push(Key::atomic(table_name_key.as_raw_key()));
-        keys.push(Key::other(table_info_key.as_raw_key()));
-        keys.push(Key::other(table_route_key.as_raw_key()));
+        keys.push(Key::new(table_info_key.as_raw_key()));
+        keys.push(Key::new(table_route_key.as_raw_key()));
         for key in &datanode_table_keys {
-            keys.push(Key::other(key.as_raw_key()));
+            keys.push(Key::new(key.as_raw_key()));
         }
         ensure!(
             self.tombstone_manager.create(keys).await?,
@@ -652,10 +652,10 @@ impl TableMetadataManager {
             .collect::<Vec<_>>();
 
         keys.push(Key::atomic(table_name.as_raw_key()));
-        keys.push(Key::other(table_info_key.as_raw_key()));
-        keys.push(Key::other(table_route_key.as_raw_key()));
+        keys.push(Key::new(table_info_key.as_raw_key()));
+        keys.push(Key::new(table_route_key.as_raw_key()));
         for key in &datanode_table_keys {
-            keys.push(Key::other(key.as_raw_key()));
+            keys.push(Key::new(key.as_raw_key()));
         }
         ensure!(
             self.tombstone_manager.restore(keys).await?,

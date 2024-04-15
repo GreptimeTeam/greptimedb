@@ -67,33 +67,37 @@ impl TableMetaKeyGetTxnOp for TombstoneKey<&Vec<u8>> {
     }
 }
 
-/// Atomic Key:
-/// The value corresponding to the key remains consistent between two transactions.
-pub(crate) enum Key {
-    Atomic(Vec<u8>),
-    Other(Vec<u8>),
+/// The key used in the [TombstoneManager].
+pub(crate) struct Key {
+    bytes: Vec<u8>,
+    // Atomic Key:
+    // The value corresponding to the key remains consistent between two transactions.
+    atomic: bool,
 }
 
 impl Key {
-    /// Returns a new [Key::Atomic].
+    /// Returns a new atomic key.
     pub(crate) fn atomic<T: Into<Vec<u8>>>(key: T) -> Self {
-        Self::Atomic(key.into())
-    }
-
-    /// Returns a new [Key::Other].
-    pub(crate) fn other<T: Into<Vec<u8>>>(key: T) -> Self {
-        Self::Other(key.into())
-    }
-
-    fn get_inner(&self) -> &Vec<u8> {
-        match self {
-            Key::Atomic(key) => key,
-            Key::Other(key) => key,
+        Self {
+            bytes: key.into(),
+            atomic: true,
         }
     }
 
+    /// Returns a new normal key.
+    pub(crate) fn new<T: Into<Vec<u8>>>(key: T) -> Self {
+        Self {
+            bytes: key.into(),
+            atomic: false,
+        }
+    }
+
+    fn get_inner(&self) -> &Vec<u8> {
+        &self.bytes
+    }
+
     fn is_atomic(&self) -> bool {
-        matches!(self, Key::Atomic(_))
+        self.atomic
     }
 }
 
@@ -114,6 +118,7 @@ impl TombstoneManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
     }
+
     /// Creates tombstones for keys.
     ///
     /// Preforms to:
@@ -266,7 +271,7 @@ mod tests {
             .await
             .unwrap();
         assert!(tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
             .unwrap());
         assert!(!kv_backend.exists(b"bar").await.unwrap());
@@ -305,7 +310,7 @@ mod tests {
             .await
             .unwrap();
         assert!(tombstone_manager
-            .create(vec![Key::other("bar"), Key::other("foo")])
+            .create(vec![Key::new("bar"), Key::new("foo")])
             .await
             .unwrap());
         assert!(!kv_backend.exists(b"bar").await.unwrap());
@@ -346,7 +351,7 @@ mod tests {
             .unwrap();
 
         let err = tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::other("baz")])
+            .create(vec![Key::atomic("bar"), Key::new("baz")])
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Missing value"));
@@ -366,11 +371,11 @@ mod tests {
             .unwrap();
         let expected_kvs = kv_backend.dump();
         assert!(tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
             .unwrap());
         assert!(tombstone_manager
-            .restore(vec![Key::atomic("bar"), Key::other("foo")])
+            .restore(vec![Key::atomic("bar"), Key::new("foo")])
             .await
             .unwrap());
         assert_eq!(expected_kvs, kv_backend.dump());
@@ -390,11 +395,11 @@ mod tests {
             .unwrap();
         let expected_kvs = kv_backend.dump();
         assert!(tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
             .unwrap());
         assert!(tombstone_manager
-            .restore(vec![Key::other("bar"), Key::other("foo")])
+            .restore(vec![Key::new("bar"), Key::new("foo")])
             .await
             .unwrap());
         assert_eq!(expected_kvs, kv_backend.dump());
@@ -413,11 +418,11 @@ mod tests {
             .await
             .unwrap();
         assert!(tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
             .unwrap());
         let err = tombstone_manager
-            .restore(vec![Key::other("bar"), Key::other("baz")])
+            .restore(vec![Key::new("bar"), Key::new("baz")])
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Missing value"));
@@ -436,7 +441,7 @@ mod tests {
             .await
             .unwrap();
         assert!(tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::other("foo")])
+            .create(vec![Key::atomic("bar"), Key::new("foo")])
             .await
             .unwrap());
         tombstone_manager
