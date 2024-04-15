@@ -16,14 +16,12 @@
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
-use datatypes::arrow::compute::{self, SortColumn};
-use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::arrow::util::pretty;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
+use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     build_rows, build_rows_for_key, flush_region, put_rows, reopen_region, rows_schema,
     CreateRequestBuilder, TestEnv,
@@ -190,32 +188,4 @@ async fn test_append_mode_compaction() {
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
-}
-
-/// Sorts `batches` by column `names`.
-pub(crate) fn sort_batches_and_print(batches: &RecordBatches, names: &[&str]) -> String {
-    let schema = batches.schema();
-    let record_batches = batches.iter().map(|batch| batch.df_record_batch());
-    let record_batch = compute::concat_batches(schema.arrow_schema(), record_batches).unwrap();
-    let columns: Vec<_> = names
-        .iter()
-        .map(|name| {
-            let array = record_batch.column_by_name(name).unwrap();
-            SortColumn {
-                values: array.clone(),
-                options: None,
-            }
-        })
-        .collect();
-    let indices = compute::lexsort_to_indices(&columns, None).unwrap();
-    let columns = record_batch
-        .columns()
-        .iter()
-        .map(|array| compute::take(&array, &indices, None).unwrap())
-        .collect();
-    let record_batch = RecordBatch::try_new(record_batch.schema(), columns).unwrap();
-
-    pretty::pretty_format_batches(&[record_batch])
-        .unwrap()
-        .to_string()
 }

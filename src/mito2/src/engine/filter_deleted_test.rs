@@ -19,6 +19,7 @@ use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
+use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     build_rows, delete_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
 };
@@ -77,10 +78,7 @@ async fn test_scan_without_filtering_deleted() {
 | 1     | 1.0     | 1970-01-01T00:00:01 |
 | 4     | 4.0     | 1970-01-01T00:00:04 |
 +-------+---------+---------------------+";
-    assert_eq!(
-        expected,
-        crate::engine::append_mode_test::sort_batches_and_print(&batches, &["tag_0", "ts"])
-    );
+    assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
 
     // Tries to use seq scan to test it under append mode.
     let scan = engine
