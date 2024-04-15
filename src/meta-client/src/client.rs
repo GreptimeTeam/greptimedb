@@ -496,7 +496,6 @@ impl MetaClient {
         })
     }
 
-    #[inline]
     pub fn cluster_client(&self) -> Result<ClusterClient> {
         self.cluster.clone().context(NotStartedSnafu {
             name: "cluster_client",
