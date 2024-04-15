@@ -9940,6 +9940,7 @@ dependencies = [
  "prost 0.12.3",
  "session",
  "snafu",
+ "substrait 0.17.1",
  "tokio",
 ]
 

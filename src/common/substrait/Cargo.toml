@@ -25,6 +25,10 @@ prost.workspace = true
 session.workspace = true
 snafu.workspace = true
 
+[dependencies.substrait_proto]
+package = "substrait"
+version = "0.17"
+
 [dev-dependencies]
 datatypes.workspace = true
 tokio.workspace = true
