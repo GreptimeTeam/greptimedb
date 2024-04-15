@@ -18,13 +18,13 @@ use std::time::Duration;
 
 use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
 use common_telemetry::{error, info, warn};
-use etcd_client::Client;
+use etcd_client::{Client, GetOptions, PutOptions};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 
-use crate::election::{Election, LeaderChangeMessage, ELECTION_KEY};
+use crate::election::{Election, LeaderChangeMessage, CANDIDATES_ROOT, ELECTION_KEY};
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::{ElectionRef, LeaderValue};
@@ -105,11 +105,15 @@ impl EtcdElection {
     }
 
     fn election_key(&self) -> String {
-        if self.store_key_prefix.is_empty() {
-            ELECTION_KEY.to_string()
-        } else {
-            format!("{}{}", self.store_key_prefix, ELECTION_KEY)
-        }
+        format!("{}{}", self.store_key_prefix, ELECTION_KEY)
+    }
+
+    fn candidate_root(&self) -> String {
+        format!("{}{}", self.store_key_prefix, CANDIDATES_ROOT)
+    }
+
+    fn candidate_key(&self) -> String {
+        format!("{}{}", self.candidate_root(), self.leader_value)
     }
 }
 
@@ -125,6 +129,61 @@ impl Election for EtcdElection {
         self.infancy
             .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
+    }
+
+    async fn register_candidate(&self) -> Result<()> {
+        const CANDIDATE_LEASE_SECS: u64 = 600;
+        const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
+
+        let mut lease_client = self.client.lease_client();
+        let res = lease_client
+            .grant(CANDIDATE_LEASE_SECS as i64, None)
+            .await
+            .context(error::EtcdFailedSnafu)?;
+        let lease_id = res.id();
+
+        // The register info: key is the candidate key, value is its leader value.
+        let key = self.candidate_key().into_bytes();
+        let value = self.leader_value.clone().into_bytes();
+        // Puts with the lease id
+        self.client
+            .kv_client()
+            .put(key, value, Some(PutOptions::new().with_lease(lease_id)))
+            .await
+            .context(error::EtcdFailedSnafu)?;
+
+        let (mut keeper, mut receiver) = lease_client
+            .keep_alive(lease_id)
+            .await
+            .context(error::EtcdFailedSnafu)?;
+
+        let mut keep_alive_interval =
+            tokio::time::interval(Duration::from_secs(KEEP_ALIVE_INTERVAL_SECS));
+
+        loop {
+            let _ = keep_alive_interval.tick().await;
+            keeper.keep_alive().await.context(error::EtcdFailedSnafu)?;
+
+            if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)? {
+                if res.ttl() <= 0 {
+                    // Failed to keep alive, just break the loop.
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn all_candidates(&self) -> Result<Vec<LeaderValue>> {
+        let key = self.candidate_root().into_bytes();
+        let res = self
+            .client
+            .kv_client()
+            .get(key, Some(GetOptions::new().with_prefix()))
+            .await
+            .context(error::EtcdFailedSnafu)?;
+        res.kvs().iter().map(|kv| Ok(kv.value().into())).collect()
     }
 
     async fn campaign(&self) -> Result<()> {
@@ -201,7 +260,7 @@ impl Election for EtcdElection {
 
     async fn leader(&self) -> Result<LeaderValue> {
         if self.is_leader.load(Ordering::Relaxed) {
-            Ok(LeaderValue(self.leader_value.clone()))
+            Ok(self.leader_value.as_bytes().into())
         } else {
             let res = self
                 .client
@@ -210,8 +269,7 @@ impl Election for EtcdElection {
                 .await
                 .context(error::EtcdFailedSnafu)?;
             let leader_value = res.kv().context(error::NoLeaderSnafu)?.value();
-            let leader_value = String::from_utf8_lossy(leader_value).to_string();
-            Ok(LeaderValue(leader_value))
+            Ok(leader_value.into())
         }
     }
 

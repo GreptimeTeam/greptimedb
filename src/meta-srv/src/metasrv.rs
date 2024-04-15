@@ -64,21 +64,38 @@ pub const METASRV_HOME: &str = "/tmp/metasrv";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
+    /// The address the server listens on.
     pub bind_addr: String,
+    /// The address the server advertises to the clients.
     pub server_addr: String,
+    /// The address of the store, e.g., etcd.
     pub store_addr: String,
+    /// The type of selector.
     pub selector: SelectorType,
+    /// Whether to use the memory store.
     pub use_memory_store: bool,
+    /// Whether to enable region failover.
     pub enable_region_failover: bool,
+    /// The HTTP server options.
     pub http: HttpOptions,
+    /// The logging options.
     pub logging: LoggingOptions,
+    /// The procedure options.
     pub procedure: ProcedureConfig,
+    /// The failure detector options.
     pub failure_detector: PhiAccrualFailureDetectorOptions,
+    /// The datanode options.
     pub datanode: DatanodeOptions,
+    /// Whether to enable telemetry.
     pub enable_telemetry: bool,
+    /// The data home directory.
     pub data_home: String,
+    /// The WAL options.
     pub wal: MetasrvWalConfig,
+    /// The metrics export options.
     pub export_metrics: ExportMetricsOption,
+    /// The store key prefix. If it is not empty, all keys in the store will be prefixed with it.
+    /// This is useful when multiple metasrv clusters share the same store.
     pub store_key_prefix: String,
     /// The max operations per txn
     ///
@@ -190,6 +207,13 @@ impl Context {
 }
 
 pub struct LeaderValue(pub String);
+
+impl<T: AsRef<[u8]>> From<T> for LeaderValue {
+    fn from(value: T) -> Self {
+        let string = String::from_utf8_lossy(value.as_ref());
+        Self(string.to_string())
+    }
+}
 
 #[derive(Clone)]
 pub struct SelectorContext {
@@ -341,18 +365,35 @@ impl Metasrv {
                 state_handler.on_become_follower().await;
             });
 
-            let election = election.clone();
-            let started = self.started.clone();
-            let _handle = common_runtime::spawn_bg(async move {
-                while started.load(Ordering::Relaxed) {
-                    let res = election.campaign().await;
-                    if let Err(e) = res {
-                        warn!("Metasrv election error: {}", e);
+            // Register candidate and keep lease in background.
+            {
+                let election = election.clone();
+                let started = self.started.clone();
+                let _handle = common_runtime::spawn_bg(async move {
+                    while started.load(Ordering::Relaxed) {
+                        let res = election.register_candidate().await;
+                        if let Err(e) = res {
+                            warn!("Metasrv register candidate error: {}", e);
+                        }
                     }
-                    info!("Metasrv re-initiate election");
-                }
-                info!("Metasrv stopped");
-            });
+                });
+            }
+
+            // Campaign
+            {
+                let election = election.clone();
+                let started = self.started.clone();
+                let _handle = common_runtime::spawn_bg(async move {
+                    while started.load(Ordering::Relaxed) {
+                        let res = election.campaign().await;
+                        if let Err(e) = res {
+                            warn!("Metasrv election error: {}", e);
+                        }
+                        info!("Metasrv re-initiate election");
+                    }
+                    info!("Metasrv stopped");
+                });
+            }
         } else {
             if let Err(e) = self.wal_options_allocator.start().await {
                 error!(e; "Failed to start wal options allocator");
