@@ -21,7 +21,7 @@ use prost::Message;
 use servers::prom_store::to_grpc_row_insert_requests;
 use servers::proto::PromWriteRequest;
 
-fn bench_decode_prom_request(c: &mut Criterion) {
+fn bench_decode_prom_request_without_strict_mode(c: &mut Criterion) {
     let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     d.push("benches");
     d.push("write_request.pb.data");
@@ -30,6 +30,7 @@ fn bench_decode_prom_request(c: &mut Criterion) {
 
     let mut request = WriteRequest::default();
     let mut prom_request = PromWriteRequest::default();
+    let is_strict_mode = false;
     c.benchmark_group("decode")
         .measurement_time(Duration::from_secs(3))
         .bench_function("write_request", |b| {
@@ -43,11 +44,44 @@ fn bench_decode_prom_request(c: &mut Criterion) {
         .bench_function("prom_write_request", |b| {
             b.iter(|| {
                 let data = data.clone();
-                prom_request.merge(data).unwrap();
+                prom_request.merge(data, is_strict_mode).unwrap();
                 prom_request.as_row_insert_requests();
             });
         });
 }
 
-criterion_group!(benches, bench_decode_prom_request);
+fn bench_decode_prom_request_with_strict_mode(c: &mut Criterion) {
+    let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    d.push("benches");
+    d.push("write_request.pb.data");
+
+    let data = Bytes::from(std::fs::read(d).unwrap());
+
+    let mut request = WriteRequest::default();
+    let mut prom_request = PromWriteRequest::default();
+    let is_strict_mode = true;
+    c.benchmark_group("decode")
+        .measurement_time(Duration::from_secs(3))
+        .bench_function("write_request", |b| {
+            b.iter(|| {
+                request.clear();
+                let data = data.clone();
+                request.merge(data).unwrap();
+                to_grpc_row_insert_requests(&request).unwrap();
+            });
+        })
+        .bench_function("prom_write_request", |b| {
+            b.iter(|| {
+                let data = data.clone();
+                prom_request.merge(data, is_strict_mode).unwrap();
+                prom_request.as_row_insert_requests();
+            });
+        });
+}
+
+criterion_group!(
+    benches,
+    bench_decode_prom_request_without_strict_mode,
+    bench_decode_prom_request_with_strict_mode
+);
 criterion_main!(benches);

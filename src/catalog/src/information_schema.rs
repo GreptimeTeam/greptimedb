@@ -20,6 +20,7 @@ mod predicate;
 mod region_peers;
 mod runtime_metrics;
 pub mod schemata;
+mod table_constraints;
 mod table_names;
 pub mod tables;
 
@@ -52,6 +53,7 @@ use crate::information_schema::partitions::InformationSchemaPartitions;
 use crate::information_schema::region_peers::InformationSchemaRegionPeers;
 use crate::information_schema::runtime_metrics::InformationSchemaMetrics;
 use crate::information_schema::schemata::InformationSchemaSchemata;
+use crate::information_schema::table_constraints::InformationSchemaTableConstraints;
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
 
@@ -173,6 +175,10 @@ impl InformationSchemaProvider {
             KEY_COLUMN_USAGE.to_string(),
             self.build_table(KEY_COLUMN_USAGE).unwrap(),
         );
+        tables.insert(
+            TABLE_CONSTRAINTS.to_string(),
+            self.build_table(TABLE_CONSTRAINTS).unwrap(),
+        );
 
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
@@ -238,6 +244,10 @@ impl InformationSchemaProvider {
                 self.catalog_manager.clone(),
             )) as _),
             REGION_PEERS => Some(Arc::new(InformationSchemaRegionPeers::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            TABLE_CONSTRAINTS => Some(Arc::new(InformationSchemaTableConstraints::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),

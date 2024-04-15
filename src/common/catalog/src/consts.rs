@@ -86,6 +86,8 @@ pub const INFORMATION_SCHEMA_RUNTIME_METRICS_TABLE_ID: u32 = 27;
 pub const INFORMATION_SCHEMA_PARTITIONS_TABLE_ID: u32 = 28;
 /// id for information_schema.REGION_PEERS
 pub const INFORMATION_SCHEMA_REGION_PEERS_TABLE_ID: u32 = 29;
+/// id for information_schema.columns
+pub const INFORMATION_SCHEMA_TABLE_CONSTRAINTS_TABLE_ID: u32 = 30;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";

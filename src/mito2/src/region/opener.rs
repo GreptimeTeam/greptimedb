@@ -27,6 +27,7 @@ use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{ColumnId, RegionId};
+use tokio::sync::RwLock;
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
@@ -202,7 +203,7 @@ impl RegionOpener {
             region_id,
             version_control,
             access_layer: access_layer.clone(),
-            manifest_manager,
+            manifest_manager: RwLock::new(manifest_manager),
             file_purger: Arc::new(LocalFilePurger::new(
                 self.purge_scheduler,
                 access_layer,
@@ -263,7 +264,7 @@ impl RegionOpener {
             return Ok(None);
         };
 
-        let manifest = manifest_manager.manifest().await;
+        let manifest = manifest_manager.manifest();
         let metadata = manifest.metadata.clone();
 
         let region_id = self.region_id;
@@ -330,7 +331,7 @@ impl RegionOpener {
             region_id: self.region_id,
             version_control,
             access_layer,
-            manifest_manager,
+            manifest_manager: RwLock::new(manifest_manager),
             file_purger,
             wal_options,
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
