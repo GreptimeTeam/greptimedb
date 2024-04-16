@@ -583,7 +583,7 @@ mod tests {
     fn duplicate_expr_case_1() {
         // PARTITION ON COLUMNS (a) (
         //     a <= 20,
-        //     b >= 10
+        //     a >= 10
         // )
         let rule = MultiDimPartitionRule::try_new(
             vec!["a".to_string(), "b".to_string()],
