@@ -105,6 +105,52 @@ impl Key {
     }
 }
 
+fn format_move_value_error(
+    unexpected_items: Vec<(MoveValue, Option<Vec<u8>>, Option<Vec<u8>>)>,
+) -> String {
+    unexpected_items
+        .into_iter()
+        .map(
+            |(
+                MoveValue {
+                    key,
+                    dest_key,
+                    value,
+                },
+                src_value,
+                dest_value,
+            )| {
+                format!(
+                    "Moving key: '{}' to dest: '{}' with value: '{}'\nSrc value: {:?}\nDest value: {:?}",
+                    String::from_utf8_lossy(&key),
+                    String::from_utf8_lossy(&dest_key),
+                    String::from_utf8_lossy(&value),
+                    src_value.map(|value| String::from_utf8_lossy(&value).to_string()),
+                    dest_value.map(|value| String::from_utf8_lossy(&value).to_string()),
+                )
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[derive(Debug, Clone)]
+struct MoveValue {
+    key: Vec<u8>,
+    dest_key: Vec<u8>,
+    value: Vec<u8>,
+}
+
+impl From<(Vec<u8>, Vec<u8>, Vec<u8>)> for MoveValue {
+    fn from((key, dest_key, value): (Vec<u8>, Vec<u8>, Vec<u8>)) -> Self {
+        MoveValue {
+            key,
+            dest_key,
+            value,
+        }
+    }
+}
+
 impl TableMetaKeyGetTxnOp for Key {
     fn build_get_op(
         &self,
@@ -159,6 +205,103 @@ impl TombstoneManager {
     /// Returns [TombstoneManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
+    }
+
+    /// Moves value to `dest_key`.
+    ///
+    /// Puts `value` to `dest_key` if:
+    /// - the value of `src_key` equals `value`.
+    /// - the `dest_key` is vacant.
+    ///
+    /// Otherwise retrieves the values of `src_key`, `dest_key`.
+    fn build_move_value_txn(
+        &self,
+        src_key: Vec<u8>,
+        value: Vec<u8>,
+        dest_key: Vec<u8>,
+    ) -> (
+        Txn,
+        impl FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
+        impl FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
+    ) {
+        let txn = Txn::new()
+            .when(vec![
+                Compare::with_not_exist_value(dest_key.clone(), CompareOp::Equal),
+                Compare::with_value(src_key.clone(), CompareOp::Equal, value.clone()),
+            ])
+            .and_then(vec![
+                TxnOp::Put(dest_key.clone(), value.clone()),
+                TxnOp::Delete(src_key.clone()),
+            ])
+            .or_else(vec![
+                TxnOp::Get(src_key.clone()),
+                TxnOp::Get(dest_key.clone()),
+            ]);
+
+        (
+            txn,
+            TxnOpGetResponseSet::filter(src_key),
+            TxnOpGetResponseSet::filter(dest_key),
+        )
+    }
+
+    async fn move_values(&self, kvs: Vec<MoveValue>) -> Result<()> {
+        let mut txns = Vec::with_capacity(kvs.len());
+        let mut src_key_filters = Vec::with_capacity(kvs.len());
+        let mut dest_key_filters = Vec::with_capacity(kvs.len());
+        for MoveValue {
+            key,
+            dest_key,
+            value,
+        } in &kvs
+        {
+            let (txn, src_key_filter, dest_key_filter) =
+                self.build_move_value_txn(key.clone(), value.clone(), dest_key.clone());
+            txns.push(txn);
+            src_key_filters.push(src_key_filter);
+            dest_key_filters.push(dest_key_filter);
+        }
+        let txn = Txn::merge_all(txns);
+        let mut resp = self.kv_backend.txn(txn).await?;
+        if !resp.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
+            let mut comparison_result = Vec::with_capacity(kvs.len());
+            let mut unexpected_items = Vec::with_capacity(kvs.len());
+            for (
+                idx,
+                MoveValue {
+                    key,
+                    dest_key,
+                    value,
+                },
+            ) in kvs.into_iter().enumerate()
+            {
+                // Checks value is moved
+                let remote_srv_value = (src_key_filters[idx])(&mut set);
+                let remote_dest_value = (dest_key_filters[idx])(&mut set);
+                let expected =
+                    remote_srv_value.is_none() && remote_dest_value.as_ref() == Some(&value);
+                comparison_result.push(expected);
+                if !expected {
+                    unexpected_items.push((
+                        MoveValue {
+                            key,
+                            dest_key,
+                            value,
+                        },
+                        remote_srv_value,
+                        remote_dest_value,
+                    ));
+                }
+            }
+            ensure!(
+                comparison_result.into_iter().all(Into::into),
+                error::MoveValuesSnafu {
+                    err_msg: format_move_value_error(unexpected_items)
+                }
+            )
+        }
+        Ok(())
     }
 
     /// Creates tombstones for keys.
@@ -342,9 +485,13 @@ impl TombstoneManager {
 #[cfg(test)]
 mod tests {
 
+    use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use crate::key::tombstone::{Key, TombstoneKey, TombstoneManager};
+    use super::to_tombstone;
+    use crate::error::{self, Error};
+    use crate::key::tombstone::{Key, MoveValue, TombstoneKey, TombstoneManager};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
     use crate::rpc::store::PutRequest;
@@ -540,5 +687,103 @@ mod tests {
             .await
             .unwrap();
         assert!(kv_backend.is_empty());
+    }
+
+    async fn check_moved_values(
+        kv_backend: Arc<MemoryKvBackend<Error>>,
+        move_values: &[MoveValue],
+    ) {
+        for MoveValue {
+            key,
+            dest_key,
+            value,
+        } in move_values
+        {
+            assert!(kv_backend.get(key).await.unwrap().is_none());
+            assert_eq!(
+                &kv_backend.get(dest_key).await.unwrap().unwrap().value,
+                value,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_move_value() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        let kvs = HashMap::from([
+            (b"bar".to_vec(), b"baz".to_vec()),
+            (b"foo".to_vec(), b"hi".to_vec()),
+            (b"baz".to_vec(), b"hello".to_vec()),
+        ]);
+        for (key, value) in &kvs {
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        let move_values = kvs
+            .iter()
+            .map(|(key, value)| MoveValue {
+                key: key.clone(),
+                dest_key: to_tombstone(key),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        tombstone_manager
+            .move_values(move_values.clone())
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
+        // Moves again
+        tombstone_manager
+            .move_values(move_values.clone())
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
+    }
+
+    #[tokio::test]
+    async fn test_move_value_changed() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        let kvs = HashMap::from([
+            (b"bar".to_vec(), b"baz".to_vec()),
+            (b"foo".to_vec(), b"hi".to_vec()),
+            (b"baz".to_vec(), b"hello".to_vec()),
+        ]);
+        for (key, value) in &kvs {
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        kv_backend
+            .put(PutRequest::new().with_key("baz").with_value("changed"))
+            .await
+            .unwrap();
+
+        let move_values = kvs
+            .iter()
+            .map(|(key, value)| MoveValue {
+                key: key.clone(),
+                dest_key: to_tombstone(key),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let err = tombstone_manager
+            .move_values(move_values.clone())
+            .await
+            .unwrap_err();
+        assert_matches!(err, error::Error::MoveValues { .. });
     }
 }
