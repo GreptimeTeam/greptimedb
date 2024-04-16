@@ -122,12 +122,11 @@ impl State for DropDatabaseExecutor {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::region::{QueryRequest, RegionRequest};
+    use api::v1::region::{QueryRequest, RegionHandleResponse, RegionRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_error::ext::BoxedError;
     use common_recordbatch::SendableRecordBatchStream;
 
-    use crate::datanode_manager::HandleResponse;
     use crate::ddl::drop_database::cursor::DropDatabaseCursor;
     use crate::ddl::drop_database::executor::DropDatabaseExecutor;
     use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
@@ -144,8 +143,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MockDatanodeHandler for NaiveDatanodeHandler {
-        async fn handle(&self, _peer: &Peer, _request: RegionRequest) -> Result<HandleResponse> {
-            Ok(HandleResponse::new(0))
+        async fn handle(
+            &self,
+            _peer: &Peer,
+            _request: RegionRequest,
+        ) -> Result<RegionHandleResponse> {
+            Ok(RegionHandleResponse::new(0))
         }
 
         async fn handle_query(
@@ -291,7 +294,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MockDatanodeHandler for RetryErrorDatanodeHandler {
-        async fn handle(&self, _peer: &Peer, _request: RegionRequest) -> Result<HandleResponse> {
+        async fn handle(
+            &self,
+            _peer: &Peer,
+            _request: RegionRequest,
+        ) -> Result<RegionHandleResponse> {
             Err(Error::RetryLater {
                 source: BoxedError::new(
                     error::UnexpectedSnafu {

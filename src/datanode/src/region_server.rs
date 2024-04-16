@@ -18,14 +18,13 @@ use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 
-use api::v1::region::{region_request, QueryRequest, RegionResponse};
+use api::v1::region::{region_request, QueryRequest, RegionHandleResponse, RegionResponse};
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::BoxedError;
 use common_error::status_code::StatusCode;
-use common_meta::datanode_manager::HandleResponse;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, OutputData};
@@ -129,7 +128,7 @@ impl RegionServer {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<HandleResponse> {
+    ) -> Result<RegionHandleResponse> {
         self.inner.handle_request(region_id, request).await
     }
 
@@ -465,7 +464,7 @@ impl RegionServerInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<HandleResponse> {
+    ) -> Result<RegionHandleResponse> {
         let request_type = request.request_type();
         let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
             .with_label_values(&[request_type])
@@ -490,7 +489,7 @@ impl RegionServerInner {
 
         let engine = match self.get_engine(region_id, &region_change)? {
             CurrentEngine::Engine(engine) => engine,
-            CurrentEngine::EarlyReturn(rows) => return Ok(HandleResponse::new(rows)),
+            CurrentEngine::EarlyReturn(rows) => return Ok(RegionHandleResponse::new(rows)),
         };
 
         // Sets corresponding region status to registering/deregistering before the operation.
@@ -505,7 +504,7 @@ impl RegionServerInner {
                 // Sets corresponding region status to ready.
                 self.set_region_status_ready(region_id, engine, region_change)
                     .await?;
-                Ok(HandleResponse {
+                Ok(RegionHandleResponse {
                     affected_rows: result.affected_rows,
                     extension: result.extension,
                 })

@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
-use api::v1::region::{QueryRequest, RegionRequest, RegionResponse};
+use api::v1::region::{QueryRequest, RegionHandleResponse, RegionRequest, RegionResponse};
 use async_trait::async_trait;
 use client::region::check_response_header;
 use common_error::ext::BoxedError;
-use common_meta::datanode_manager::{Datanode, DatanodeManager, DatanodeRef, HandleResponse};
+use common_meta::datanode_manager::{Datanode, DatanodeManager, DatanodeRef};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::peer::Peer;
 use common_recordbatch::SendableRecordBatchStream;
@@ -63,7 +63,7 @@ impl RegionInvoker {
 
 #[async_trait]
 impl Datanode for RegionInvoker {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<HandleResponse> {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionHandleResponse> {
         let span = request
             .header
             .as_ref()
@@ -79,7 +79,7 @@ impl Datanode for RegionInvoker {
         check_response_header(&response.header)
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        Ok(HandleResponse::from_region_response(response))
+        Ok(RegionHandleResponse::from_region_response(response))
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {

@@ -16,6 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::region::RegionHandleResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
@@ -31,7 +32,7 @@ use query::query_engine::DescribeResult;
 use query::{QueryEngine, QueryEngineContext};
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use table::TableRef;
@@ -166,18 +167,18 @@ impl RegionEngine for MockRegionEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResult, BoxedError> {
+    ) -> Result<RegionHandleResponse, BoxedError> {
         if let Some(delay) = self.handle_request_delay {
             tokio::time::sleep(delay).await;
         }
         if let Some(mock_fn) = &self.handle_request_mock_fn {
             return mock_fn(region_id, request)
                 .map_err(BoxedError::new)
-                .map(RegionHandleResult::new);
+                .map(RegionHandleResponse::new);
         };
 
         let _ = self.sender.send((region_id, request)).await;
-        Ok(RegionHandleResult::new(0))
+        Ok(RegionHandleResponse::new(0))
     }
 
     async fn handle_query(

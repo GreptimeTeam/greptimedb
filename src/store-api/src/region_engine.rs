@@ -15,11 +15,11 @@
 //! Region Engine's definition
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
+use api::v1::region::RegionHandleResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::{AffectedRows, RegionRequest};
+use crate::region_request::RegionRequest;
 use crate::storage::{RegionId, ScanRequest};
 
 /// The result of setting readonly for the region.
@@ -130,7 +130,7 @@ pub trait RegionEngine: Send + Sync {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResult, BoxedError>;
+    ) -> Result<RegionHandleResponse, BoxedError>;
 
     /// Handles substrait query and return a stream of record batches
     async fn handle_query(
@@ -172,20 +172,3 @@ pub trait RegionEngine: Send + Sync {
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;
-
-// TODO: reorganize the dependence to merge this struct with the
-// one in common_meta
-#[derive(Debug)]
-pub struct RegionHandleResult {
-    pub affected_rows: AffectedRows,
-    pub extension: HashMap<String, Vec<u8>>,
-}
-
-impl RegionHandleResult {
-    pub fn new(affected_rows: AffectedRows) -> Self {
-        Self {
-            affected_rows,
-            extension: Default::default(),
-        }
-    }
-}

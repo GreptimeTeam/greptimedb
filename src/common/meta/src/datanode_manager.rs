@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::region::{QueryRequest, RegionRequest, RegionResponse};
+use api::v1::region::{QueryRequest, RegionHandleResponse, RegionRequest};
 pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
@@ -26,7 +25,7 @@ use crate::peer::Peer;
 #[async_trait::async_trait]
 pub trait Datanode: Send + Sync {
     /// Handles DML, and DDL requests.
-    async fn handle(&self, request: RegionRequest) -> Result<HandleResponse>;
+    async fn handle(&self, request: RegionRequest) -> Result<RegionHandleResponse>;
 
     /// Handles query requests
     async fn handle_query(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
@@ -42,27 +41,3 @@ pub trait DatanodeManager: Send + Sync {
 }
 
 pub type DatanodeManagerRef = Arc<dyn DatanodeManager>;
-
-/// This result struct is derived from [RegionResponse]
-#[derive(Debug)]
-pub struct HandleResponse {
-    pub affected_rows: AffectedRows,
-    pub extension: HashMap<String, Vec<u8>>,
-}
-
-impl HandleResponse {
-    pub fn from_region_response(region_response: RegionResponse) -> Self {
-        Self {
-            affected_rows: region_response.affected_rows as _,
-            extension: region_response.extension,
-        }
-    }
-
-    /// Creates one response without extension
-    pub fn new(affected_rows: AffectedRows) -> Self {
-        Self {
-            affected_rows,
-            extension: Default::default(),
-        }
-    }
-}

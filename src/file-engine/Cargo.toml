@@ -12,7 +12,7 @@ test = ["common-test-util"]
 workspace = true
 
 [dependencies]
-api = { workspace = true, optional = true }
+api.workspace = true
 async-trait = "0.1"
 common-catalog.workspace = true
 common-datasource.workspace = true
