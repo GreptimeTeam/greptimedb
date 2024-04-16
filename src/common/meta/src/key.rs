@@ -88,7 +88,7 @@ use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
 use crate::ddl::utils::region_storage_path;
-use crate::error::{self, Result, SerdeJsonSnafu};
+use crate::error::{self, Result, SerdeJsonSnafu, UnexpectedSnafu};
 use crate::key::table_route::TableRouteKey;
 use crate::key::tombstone::Key;
 use crate::key::txn_helper::TxnOpGetResponseSet;
@@ -577,53 +577,12 @@ impl TableMetadataManager {
         Ok(())
     }
 
-    /// Deletes metadata for table **logically**.
-    /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
-    pub async fn delete_table_metadata(
+    fn table_metadata_keys(
         &self,
         table_id: TableId,
         table_name: &TableName,
         table_route_value: &TableRouteValue,
-    ) -> Result<()> {
-        // Builds keys
-        let datanode_ids = if table_route_value.is_physical() {
-            region_distribution(table_route_value.region_routes()?)
-                .into_keys()
-                .collect()
-        } else {
-            vec![]
-        };
-        let mut keys = Vec::with_capacity(3 + datanode_ids.len());
-        let table_name_key = TableNameKey::new(
-            &table_name.catalog_name,
-            &table_name.schema_name,
-            &table_name.table_name,
-        );
-        let table_info_key = TableInfoKey::new(table_id);
-        let table_route_key = TableRouteKey::new(table_id);
-        let datanode_table_keys = datanode_ids
-            .into_iter()
-            .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
-            .collect::<Vec<_>>();
-
-        keys.push(Key::atomic(table_name_key.as_raw_key()));
-        keys.push(Key::new(table_info_key.as_raw_key()));
-        keys.push(Key::new(table_route_key.as_raw_key()));
-        for key in &datanode_table_keys {
-            keys.push(Key::new(key.as_raw_key()));
-        }
-        self.tombstone_manager.create(keys).await?;
-        Ok(())
-    }
-
-    /// Restores metadata for table.
-    /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
-    pub async fn restore_table_metadata(
-        &self,
-        table_id: TableId,
-        table_name: &TableName,
-        table_route_value: &TableRouteValue,
-    ) -> Result<()> {
+    ) -> Result<Vec<Key>> {
         // Builds keys
         let datanode_ids = if table_route_value.is_physical() {
             region_distribution(table_route_value.region_routes()?)
@@ -651,7 +610,31 @@ impl TableMetadataManager {
         for key in &datanode_table_keys {
             keys.push(Key::new(key.as_raw_key()));
         }
+        Ok(keys)
+    }
 
+    /// Deletes metadata for table **logically**.
+    /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
+    pub async fn delete_table_metadata(
+        &self,
+        table_id: TableId,
+        table_name: &TableName,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
+        self.tombstone_manager.create(keys).await?;
+        Ok(())
+    }
+
+    /// Restores metadata for table.
+    /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
+    pub async fn restore_table_metadata(
+        &self,
+        table_id: TableId,
+        table_name: &TableName,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
         self.tombstone_manager.restore(keys).await?;
         Ok(())
     }
@@ -664,38 +647,21 @@ impl TableMetadataManager {
         table_name: &TableName,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        // Builds keys
-        let datanode_ids = if table_route_value.is_physical() {
-            region_distribution(table_route_value.region_routes()?)
-                .into_keys()
-                .collect()
-        } else {
-            vec![]
-        };
-
-        let mut operations = Vec::with_capacity(3 + datanode_ids.len());
-        operations.push(TxnOp::Delete(TableRouteKey::new(table_id).as_raw_key()));
-        operations.push(TxnOp::Delete(TableInfoKey::new(table_id).as_raw_key()));
-        operations.push(TxnOp::Delete(
-            TableNameKey::new(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-            )
-            .as_raw_key(),
-        ));
-
-        let datanode_table_txns = datanode_ids
+        let operations = self
+            .table_metadata_keys(table_id, table_name, table_route_value)?
             .into_iter()
-            .map(|datanode_id| {
-                TxnOp::Delete(DatanodeTableKey::new(datanode_id, table_id).as_raw_key())
-            })
+            .map(|key| TxnOp::Delete(key.into_bytes()))
             .collect::<Vec<_>>();
 
-        operations.extend(datanode_table_txns);
         let txn = Txn::new().and_then(operations);
-        // It's always successes.
-        let _ = self.kv_backend.txn(txn).await?;
+        let resp = self.kv_backend.txn(txn).await?;
+        ensure!(
+            resp.succeeded,
+            UnexpectedSnafu {
+                err_msg: format!("Failed to destroy table metadata: {table_id}")
+            }
+        );
+
         Ok(())
     }
 
