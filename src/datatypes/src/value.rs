@@ -1228,9 +1228,11 @@ impl<'a> PartialOrd for ListValueRef<'a> {
 impl<'a> ValueRef<'a> {
     /// Returns the size of the underlying data in bytes,
     /// The size is estimated and only considers the data size.
+    /// Since the `Null` type is also considered to occupy space,
+    /// we have opted to use the size of `i64` as an initial approximation.
     pub fn data_size(&self) -> usize {
         match *self {
-            ValueRef::Null => 0,
+            ValueRef::Null => 8,
             ValueRef::Boolean(_) => 1,
             ValueRef::UInt8(_) => 1,
             ValueRef::UInt16(_) => 2,
@@ -2339,6 +2341,7 @@ mod tests {
 
     #[test]
     fn test_value_ref_estimated_size() {
+        check_value_ref_size_eq(&ValueRef::Null, 8);
         check_value_ref_size_eq(&ValueRef::Boolean(true), 1);
         check_value_ref_size_eq(&ValueRef::UInt8(1), 1);
         check_value_ref_size_eq(&ValueRef::UInt16(1), 2);
