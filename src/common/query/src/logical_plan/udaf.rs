@@ -16,10 +16,18 @@
 //!
 //! Modified from DataFusion.
 
+use std::any::Any;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use datafusion_expr::{AccumulatorFactoryFunction, AggregateUDF as DfAggregateUdf};
+use datafusion::arrow::datatypes::Field;
+use datafusion_common::Result;
+use datafusion_expr::function::AccumulatorArgs;
+use datafusion_expr::{
+    Accumulator, AccumulatorFactoryFunction, AggregateUDF as DfAggregateUdf, AggregateUDFImpl,
+};
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::data_type::DataType;
 
 use crate::function::{
     to_df_return_type, AccumulatorFunctionImpl, ReturnTypeFunction, StateTypeFunction,
@@ -85,14 +93,72 @@ impl AggregateFunction {
 
 impl From<AggregateFunction> for DfAggregateUdf {
     fn from(udaf: AggregateFunction) -> Self {
-        // TODO(LFC): See how to fit the new DataFusion UDAF implementation.
-        #[allow(deprecated)]
-        DfAggregateUdf::new(
-            &udaf.name,
-            &udaf.signature.into(),
-            &to_df_return_type(udaf.return_type),
-            &to_df_accumulator_func(udaf.accumulator, udaf.creator.clone()),
-        )
+        struct DfUdafAdapter {
+            name: String,
+            signature: datafusion_expr::Signature,
+            return_type_func: datafusion_expr::ReturnTypeFunction,
+            accumulator: AccumulatorFactoryFunction,
+            creator: AggregateFunctionCreatorRef,
+        }
+
+        impl Debug for DfUdafAdapter {
+            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                f.debug_struct("DfUdafAdapter")
+                    .field("name", &self.name)
+                    .field("signature", &self.signature)
+                    .finish()
+            }
+        }
+
+        impl AggregateUDFImpl for DfUdafAdapter {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                &self.name
+            }
+
+            fn signature(&self) -> &datafusion_expr::Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
+                (self.return_type_func)(arg_types).map(|x| x.as_ref().clone())
+            }
+
+            fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
+                (self.accumulator)(acc_args)
+            }
+
+            fn state_fields(
+                &self,
+                name: &str,
+                _value_type: ArrowDataType,
+                _ordering_fields: Vec<Field>,
+            ) -> Result<Vec<Field>> {
+                self.creator
+                    .state_types()
+                    .map(|x| {
+                        (0..x.len())
+                            .zip(x)
+                            .map(|(i, t)| {
+                                Field::new(format!("{}_{}", name, i), t.as_arrow_type(), true)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .map_err(|e| e.into())
+            }
+        }
+
+        DfUdafAdapter {
+            name: udaf.name,
+            signature: udaf.signature.into(),
+            return_type_func: to_df_return_type(udaf.return_type),
+            accumulator: to_df_accumulator_func(udaf.accumulator, udaf.creator.clone()),
+            creator: udaf.creator,
+        }
+        .into()
     }
 }
 
