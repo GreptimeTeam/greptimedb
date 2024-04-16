@@ -94,8 +94,9 @@ impl DataflowState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Scheduler {
+    // this scheduler is shared with `DataflowState`, so it can schedule subgraph
     schedule_subgraph: Rc<RefCell<BTreeMap<Timestamp, VecDeque<SubgraphId>>>>,
     cur_subgraph: Rc<RefCell<Option<SubgraphId>>>,
 }
@@ -107,6 +108,12 @@ impl Scheduler {
         let subgraph = subgraph.as_ref().expect("Set SubgraphId before schedule");
         let subgraph_queue = schedule_subgraph.entry(next_run_time).or_default();
         subgraph_queue.push_back(*subgraph);
+    }
+
+    pub fn schedule_for_arrange(&self, arrange: &Arrangement, now: Timestamp) {
+        if let Some(i) = arrange.get_next_update_time(&now) {
+            self.schedule_at(i)
+        }
     }
 
     pub fn set_cur_subgraph(&self, subgraph: SubgraphId) {

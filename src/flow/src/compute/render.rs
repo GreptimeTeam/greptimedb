@@ -179,6 +179,14 @@ impl<'referred, 'df> Context<'referred, 'df> {
     }
 }
 
+/// The Common argument for all `Subgraph` in the render process
+struct SubgraphArg<'a> {
+    now: repr::Timestamp,
+    err_collector: &'a ErrCollector,
+    scheduler: &'a Scheduler,
+    send: &'a PortCtx<SEND, Toff>,
+}
+
 #[cfg(test)]
 mod test {
     use std::cell::RefCell;
@@ -193,6 +201,47 @@ mod test {
     use super::*;
     use crate::expr::BinaryFunc;
     use crate::repr::Row;
+
+    pub fn run_and_check(
+        state: &mut DataflowState,
+        df: &mut Hydroflow,
+        time_range: Range<i64>,
+        expected: BTreeMap<i64, Vec<DiffRow>>,
+        output: Rc<RefCell<Vec<DiffRow>>>,
+    ) {
+        for now in time_range {
+            state.set_current_ts(now);
+            state.run_available_with_schedule(df);
+            assert!(state.get_err_collector().inner.borrow().is_empty());
+            if let Some(expected) = expected.get(&now) {
+                assert_eq!(*output.borrow(), *expected, "at ts={}", now);
+            } else {
+                assert_eq!(*output.borrow(), vec![], "at ts={}", now);
+            };
+            output.borrow_mut().clear();
+        }
+    }
+
+    pub fn get_output_handle(
+        ctx: &mut Context,
+        mut bundle: CollectionBundle,
+    ) -> Rc<RefCell<Vec<DiffRow>>> {
+        let collection = bundle.collection;
+        let _arranged = bundle.arranged.pop_first().unwrap().1;
+        let output = Rc::new(RefCell::new(vec![]));
+        let output_inner = output.clone();
+        let _subgraph = ctx.df.add_subgraph_sink(
+            "test_render_constant",
+            collection.into_inner(),
+            move |_ctx, recv| {
+                let data = recv.take_inner();
+                let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
+                output_inner.borrow_mut().clear();
+                output_inner.borrow_mut().extend(res);
+            },
+        );
+        output
+    }
 
     pub fn harness_test_ctx<'r, 'h>(
         df: &'r mut Hydroflow<'h>,

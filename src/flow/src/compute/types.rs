@@ -107,6 +107,8 @@ impl Arranged {
 /// of reading the data from the collection.
 pub struct CollectionBundle {
     /// This is useful for passively reading the new updates from the collection
+    ///
+    /// Invariant: the timestamp of the updates should always not greater than now, since future updates should be stored in the arrangement
     pub collection: Collection<DiffRow>,
     /// the key [`ScalarExpr`] indicate how the keys(also a [`Row`]) used in Arranged is extract from collection's [`Row`]
     /// So it is the "index" of the arrangement

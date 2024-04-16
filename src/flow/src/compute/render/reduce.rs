@@ -23,13 +23,14 @@ use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::adapter::error::{Error, PlanSnafu};
-use crate::compute::render::Context;
+use crate::compute::render::{Context, SubgraphArg};
+use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::expr::error::{DataTypeSnafu, InternalSnafu};
-use crate::expr::{EvalError, ScalarExpr};
+use crate::expr::{AggregateExpr, EvalError, ScalarExpr};
 use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
-use crate::utils::{ArrangeHandler, ArrangeReader};
+use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter};
 
 impl<'referred, 'df> Context<'referred, 'df> {
     /// render `Plan::Reduce` into executable dataflow
@@ -69,9 +70,13 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
         let err_collector = self.err_collector.clone();
 
+        // TODO(discord9): better way to schedule future run
+        let scheduler = self.compute_state.get_scheduler();
+        let scheduler_inner = scheduler.clone();
+
         let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff>("reduce");
 
-        let _subgraph = self.df.add_subgraph_in_out(
+        let subgraph = self.df.add_subgraph_in_out(
             "reduce",
             input.collection.into_inner(),
             out_send_port,
@@ -84,12 +89,17 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     data,
                     &key_val_plan,
                     &reduce_plan,
-                    *now.borrow(),
-                    &err_collector,
-                    send,
+                    SubgraphArg {
+                        now: *now.borrow(),
+                        err_collector: &err_collector,
+                        scheduler: &scheduler_inner,
+                        send,
+                    },
                 );
             },
         );
+
+        scheduler.set_cur_subgraph(subgraph);
 
         // by default the key of output arrange
         let arranged = BTreeMap::from([(
@@ -172,9 +182,12 @@ fn reduce_subgraph(
     data: impl IntoIterator<Item = DiffRow>,
     key_val_plan: &KeyValPlan,
     reduce_plan: &ReducePlan,
-    now: repr::Timestamp,
-    err_collector: &ErrCollector,
-    send: &PortCtx<SEND, Toff>,
+    SubgraphArg {
+        now,
+        err_collector,
+        scheduler,
+        send,
+    }: SubgraphArg,
 ) {
     let mut row_buf = Row::empty();
     let key_val = data.into_iter().filter_map(|(row, sys_time, diff)| {
@@ -188,17 +201,27 @@ fn reduce_subgraph(
     // but for accum reduce the arrange store the accum state, and output is
     // evaluated from the accum state if there is need to update
     match reduce_plan {
-        ReducePlan::Distinct => {
-            reduce_distinct_subgraph(arrange, key_val, now, err_collector, send)
-        }
+        ReducePlan::Distinct => reduce_distinct_subgraph(
+            arrange,
+            key_val,
+            SubgraphArg {
+                now,
+                err_collector,
+                scheduler,
+                send,
+            },
+        ),
         ReducePlan::Accumulable(accum_plan) => reduce_accum_subgraph(
             arrange,
             distinct_input,
             key_val,
             accum_plan,
-            now,
-            err_collector,
-            send,
+            SubgraphArg {
+                now,
+                err_collector,
+                scheduler,
+                send,
+            },
         ),
     };
 }
@@ -235,11 +258,13 @@ fn update_reduce_distinct_arrange(
     err_collector: &ErrCollector,
 ) -> impl Iterator<Item = DiffRow> {
     let result_updates = eval_distinct_core(arrange.read(), kv, now, err_collector);
-
+    dbg!(&result_updates);
     err_collector.run(|| {
         arrange.write().apply_updates(now, result_updates)?;
         Ok(())
     });
+    dbg!(arrange.read().get_updates_in_range(..=now));
+    let _ = dbg!(arrange.read());
 
     // Deal with output:
 
@@ -264,29 +289,51 @@ fn update_reduce_distinct_arrange(
 }
 
 /// eval distinct reduce plan, output the distinct, and update the arrangement
+///
+/// invariant: it'is assumed `kv`'s time is always <= now,
+/// since it's from a Collection Bundle, where future inserts are stored in arrange
 fn reduce_distinct_subgraph(
     arrange: &ArrangeHandler,
     kv: impl IntoIterator<Item = KeyValDiffRow>,
-    now: repr::Timestamp,
-    err_collector: &ErrCollector,
-    send: &PortCtx<SEND, Toff>,
+    SubgraphArg {
+        now,
+        err_collector,
+        scheduler: _,
+        send,
+    }: SubgraphArg,
 ) {
-    send.give(update_reduce_distinct_arrange(arrange, kv, now, err_collector).collect_vec());
-    // no need to schedule since reduce is not suppose to recv or send any future updates
-    // TODO: rethink if this is the correct behavior
+    let ret = update_reduce_distinct_arrange(arrange, kv, now, err_collector).collect_vec();
+
+    // no future updates should exist here
+    if arrange.read().get_next_update_time(&now).is_some() {
+        err_collector.push_err(
+            InternalSnafu {
+                reason: "No future updates should exist in the reduce distinct arrangement",
+            }
+            .build(),
+        );
+    }
+
+    send.give(ret);
 }
 
 /// eval accumulable reduce plan by eval aggregate function and reduce the result
 ///
 /// TODO: eval distinct by adding distinct input arrangement
+///
+/// invariant: it'is assumed `kv`'s time is always <= now,
+/// since it's from a Collection Bundle, where future inserts are stored in arrange
 fn reduce_accum_subgraph(
     arrange: &ArrangeHandler,
     distinct_input: &Option<Vec<ArrangeHandler>>,
     kv: impl IntoIterator<Item = KeyValDiffRow>,
     accum_plan: &AccumulablePlan,
-    now: repr::Timestamp,
-    err_collector: &ErrCollector,
-    send: &PortCtx<SEND, Toff>,
+    SubgraphArg {
+        now,
+        err_collector,
+        scheduler,
+        send,
+    }: SubgraphArg,
 ) {
     let AccumulablePlan {
         full_aggrs,
@@ -325,7 +372,7 @@ fn reduce_accum_subgraph(
         // deser accums from offsets
         let accum_ranges = {
             let res = err_collector
-                .run(|| from_val_to_slice_idx(accums.get(0).cloned(), full_aggrs.len()));
+                .run(|| from_val_to_slice_idx(accums.first().cloned(), full_aggrs.len()));
             if let Some(res) = res {
                 res
             } else {
@@ -333,70 +380,36 @@ fn reduce_accum_subgraph(
                 continue;
             }
         };
-        let mut new_accums = vec![None; full_aggrs.len()];
-        let mut res_val_row = vec![None; full_aggrs.len()];
 
-        for (output_idx, input_idx, aggr_fn) in simple_aggrs {
-            let cur_accum_range = accum_ranges[*output_idx].clone(); // range of current accum
-            let cur_old_accum = accums[cur_accum_range].iter().cloned();
-            let cur_col_diff = col_diffs[*input_idx].iter().cloned();
-
-            // actual eval aggregation function
-            let (res, new_accum) = aggr_fn
-                .func
-                .eval_diff_accumulable(cur_old_accum, cur_col_diff)
-                .unwrap();
-
-            new_accums[*output_idx] = Some(new_accum);
-            res_val_row[*output_idx] = Some(res);
-        }
+        let mut accum_output = AccumOutput::new();
+        eval_simple_aggrs(
+            simple_aggrs,
+            &accums,
+            &accum_ranges,
+            &col_diffs,
+            &mut accum_output,
+            err_collector,
+        );
 
         // for distinct input
-        for (output_idx, input_idx, aggr_fn) in distinct_aggrs {
-            let cur_accum_range = accum_ranges[*output_idx].clone(); // range of current accum
-            let cur_old_accum = accums[cur_accum_range].iter().cloned();
-            let cur_col_diff = col_diffs[*input_idx].iter().cloned();
-            // first filter input with distinct
-            let input_arrange = distinct_input
-                .as_ref()
-                .and_then(|v| v[*input_idx].clone_full_arrange())
-                .unwrap();
-            let kv = cur_col_diff.map(|(v, d)| ((Row::new(vec![v]), Row::empty()), now, d));
-            let col_diff_distinct =
-                update_reduce_distinct_arrange(&input_arrange, kv, now, err_collector).map(
-                    |(row, _ts, diff)| (row.get(0).expect("Row should not be empty").clone(), diff),
-                );
+        eval_distinct_aggrs(
+            distinct_aggrs,
+            distinct_input,
+            &accums,
+            &accum_ranges,
+            &col_diffs,
+            &mut accum_output,
+            SubgraphArg {
+                now,
+                err_collector,
+                scheduler,
+                send,
+            },
+        );
 
-            // actual eval aggregation function
-            let (res, new_accum) = aggr_fn
-                .func
-                .eval_diff_accumulable(cur_old_accum, col_diff_distinct)
-                .unwrap();
-
-            new_accums[*output_idx] = Some(new_accum);
-            res_val_row[*output_idx] = Some(res);
-        }
-
-        // remove `Option` from `res_val_row` and new_accums, if there is still None, report error
+        // get and append results
         err_collector.run(|| {
-            let res_val_row = res_val_row
-                .into_iter()
-                .map(|v| {
-                    v.with_context(|| InternalSnafu {
-                        reason: "Output of aggregation function should not be None",
-                    })
-                })
-                .try_collect::<_, Vec<Value>, _>()?;
-            let new_accums = new_accums
-                .into_iter()
-                .map(|v| {
-                    v.with_context(|| InternalSnafu {
-                        reason: "Accumulator of aggregation function should not be None",
-                    })
-                })
-                .try_collect::<_, Vec<Vec<Value>>, _>()?;
-
-            let new_accums = from_accums_to_offseted_accum(new_accums);
+            let (new_accums, res_val_row) = accum_output.into_accum_output()?;
 
             // construct the updates and save it
             all_updates.push(((key.clone(), Row::new(new_accums)), now, 1));
@@ -410,7 +423,154 @@ fn reduce_accum_subgraph(
         arrange.apply_updates(now, all_updates)?;
         arrange.compaction_to(now)
     });
+
+    // for all arranges involved, schedule next time this subgraph should run
+    // no future updates should exist here
+    let all_arrange_used = distinct_input
+        .iter()
+        .flatten()
+        .map(|d| d.write())
+        .chain(std::iter::once(arrange));
+    check_no_future_updates(all_arrange_used, err_collector, now);
+
     send.give(all_ouputs);
+}
+
+/// Eval simple aggregate functions with no distinct input
+fn eval_simple_aggrs(
+    simple_aggrs: &Vec<(usize, usize, AggregateExpr)>,
+    accums: &[Value],
+    accum_ranges: &[Range<usize>],
+    col_diffs: &[Vec<(Value, i64)>],
+    accum_output: &mut AccumOutput,
+    err_collector: &ErrCollector,
+) {
+    for (output_idx, input_idx, aggr_fn) in simple_aggrs {
+        let cur_accum_range = accum_ranges[*output_idx].clone(); // range of current accum
+        let cur_old_accum = accums[cur_accum_range].iter().cloned();
+        let cur_col_diff = col_diffs[*input_idx].iter().cloned();
+
+        // actual eval aggregation function
+        if let Some((res, new_accum)) = err_collector.run(|| {
+            aggr_fn
+                .func
+                .eval_diff_accumulable(cur_old_accum, cur_col_diff)
+        }) {
+            accum_output.insert_accum(*output_idx, new_accum);
+            accum_output.insert_output(*output_idx, res);
+        } // else just collect error and continue
+    }
+}
+
+struct AccumOutput {
+    accum: BTreeMap<usize, Vec<Value>>,
+    output: BTreeMap<usize, Value>,
+}
+
+impl AccumOutput {
+    fn new() -> Self {
+        Self {
+            accum: BTreeMap::new(),
+            output: BTreeMap::new(),
+        }
+    }
+
+    fn insert_accum(&mut self, idx: usize, v: Vec<Value>) {
+        self.accum.insert(idx, v);
+    }
+
+    fn insert_output(&mut self, idx: usize, v: Value) {
+        self.output.insert(idx, v);
+    }
+
+    /// return (accums, output)
+    fn into_accum_output(self) -> Result<(Vec<Value>, Vec<Value>), EvalError> {
+        ensure!(
+            !self.accum.is_empty() && self.accum.len() == self.output.len(),
+            InternalSnafu {
+                reason: format!("Accum and output should have the non-zero and same length, found accum.len() = {}, output.len() = {}", self.accum.len(), self.output.len())
+            }
+        );
+        // make output vec from output map
+        if let Some(kv) = self.accum.last_key_value() {
+            ensure!(
+                *kv.0 == self.accum.len() - 1,
+                InternalSnafu {
+                    reason: "Accum should be a continuous range"
+                }
+            );
+        }
+        if let Some(kv) = self.output.last_key_value() {
+            ensure!(
+                *kv.0 == self.output.len() - 1,
+                InternalSnafu {
+                    reason: "Output should be a continuous range"
+                }
+            );
+        }
+
+        let accums = self.accum.into_values().collect_vec();
+        let new_accums = from_accums_to_offseted_accum(accums);
+        let output = self.output.into_values().collect_vec();
+        Ok((new_accums, output))
+    }
+}
+
+/// Eval distinct aggregate functions with distinct input arrange
+fn eval_distinct_aggrs(
+    distinct_aggrs: &Vec<(usize, usize, AggregateExpr)>,
+    distinct_input: &Option<Vec<ArrangeHandler>>,
+    accums: &[Value],
+    accum_ranges: &[Range<usize>],
+    col_diffs: &[Vec<(Value, i64)>],
+    accum_output: &mut AccumOutput,
+    SubgraphArg {
+        now,
+        err_collector,
+        scheduler: _,
+        send: _,
+    }: SubgraphArg,
+) {
+    for (output_idx, input_idx, aggr_fn) in distinct_aggrs {
+        let cur_accum_range = accum_ranges[*output_idx].clone(); // range of current accum
+        let cur_old_accum = accums[cur_accum_range].iter().cloned();
+        let cur_col_diff = col_diffs[*input_idx].iter().cloned();
+        // first filter input with distinct
+        let input_arrange = distinct_input
+            .as_ref()
+            .and_then(|v| v[*input_idx].clone_full_arrange())
+            .unwrap();
+        let kv = cur_col_diff.map(|(v, d)| ((Row::new(vec![v]), Row::empty()), now, d));
+        let col_diff_distinct =
+            update_reduce_distinct_arrange(&input_arrange, kv, now, err_collector).map(
+                |(row, _ts, diff)| (row.get(0).expect("Row should not be empty").clone(), diff),
+            );
+
+        // actual eval aggregation function
+        let (res, new_accum) = aggr_fn
+            .func
+            .eval_diff_accumulable(cur_old_accum, col_diff_distinct)
+            .unwrap();
+        accum_output.insert_accum(*output_idx, new_accum);
+        accum_output.insert_output(*output_idx, res);
+    }
+}
+
+fn check_no_future_updates<'a>(
+    all_arrange_used: impl IntoIterator<Item = ArrangeWriter<'a>>,
+    err_collector: &ErrCollector,
+    now: repr::Timestamp,
+) {
+    for arrange in all_arrange_used {
+        if arrange.get_next_update_time(&now).is_some() {
+            err_collector.push_err(
+                InternalSnafu {
+                    reason: "No future updates should exist in the reduce distinct arrangement",
+                }
+                .build(),
+            );
+        }
+    }
 }
 
 /// convert a list of accumulators to a vector of values with first value as offset
@@ -480,4 +640,57 @@ fn from_val_to_slice_idx(
         })
         .collect_vec();
     Ok(accum_ranges)
+}
+
+// mainly for reduce's test
+#[cfg(test)]
+mod test {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use datatypes::data_type::ConcreteDataType;
+    use hydroflow::scheduled::graph::Hydroflow;
+
+    use super::*;
+    use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
+    use crate::compute::state::DataflowState;
+    use crate::expr::{self, BinaryFunc, GlobalId, MapFilterProject};
+
+    #[test]
+    fn test_basic_distinct() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let rows = vec![
+            (Row::new(vec![1i64.into()]), 1, 1),
+            (Row::new(vec![2i64.into()]), 2, 1),
+            (Row::new(vec![3i64.into()]), 3, 1),
+            (Row::new(vec![1i64.into()]), 4, 1),
+            (Row::new(vec![2i64.into()]), 5, 1),
+            (Row::new(vec![3i64.into()]), 6, 1),
+        ];
+        let collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(1), collection);
+        let input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(1)),
+        };
+        let key_val_plan = KeyValPlan {
+            key_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
+            val_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
+        };
+        let reduce_plan = ReducePlan::Distinct;
+        let bundle = ctx
+            .render_reduce(Box::new(input_plan), key_val_plan, reduce_plan)
+            .unwrap();
+
+        let output = get_output_handle(&mut ctx, bundle);
+        drop(ctx);
+        let expected = BTreeMap::from([
+            (1, vec![(Row::new(vec![1i64.into()]), 1, 1)]),
+            (2, vec![(Row::new(vec![2i64.into()]), 2, 1)]),
+            (3, vec![(Row::new(vec![3i64.into()]), 3, 1)]),
+        ]);
+        run_and_check(&mut state, &mut df, 6..7, expected, output);
+    }
 }

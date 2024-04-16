@@ -140,10 +140,8 @@ fn mfp_subgraph(
     };
     err_collector.run(run_compaction);
 
-    // schedule the next time this operator should run
-    if let Some(i) = arrange.read().get_next_update_time(&now) {
-        scheduler.schedule_at(i)
-    }
+    // schedule next time this subgraph should run
+    scheduler.schedule_for_arrange(&arrange.read(), now);
 }
 
 /// The core of evaluating MFP operator, given a MFP and a input, evaluate the MFP operator,
@@ -184,9 +182,10 @@ mod test {
     use hydroflow::scheduled::graph::Hydroflow;
 
     use super::*;
-    use crate::compute::render::test::harness_test_ctx;
+    use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
     use crate::compute::state::DataflowState;
     use crate::expr::{self, BinaryFunc, GlobalId};
+
     /// test if temporal filter works properly
     /// namely: if mfp operator can schedule a delete at the correct time
     #[test]
@@ -227,23 +226,10 @@ mod test {
             ])
             .unwrap();
 
-        let mut bundle = ctx
+        let bundle = ctx
             .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
             .unwrap();
-        let collection = bundle.collection;
-        let _arranged = bundle.arranged.pop_first().unwrap().1;
-        let output = Rc::new(RefCell::new(vec![]));
-        let output_inner = output.clone();
-        let _subgraph = ctx.df.add_subgraph_sink(
-            "test_render_constant",
-            collection.into_inner(),
-            move |_ctx, recv| {
-                let data = recv.take_inner();
-                let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
-                output_inner.borrow_mut().clear();
-                output_inner.borrow_mut().extend(res);
-            },
-        );
+        let output = get_output_handle(&mut ctx, bundle);
         // drop ctx here to simulate actual process of compile first, run later scenario
         drop(ctx);
         // expected output at given time
@@ -269,18 +255,7 @@ mod test {
                 vec![(Row::new(vec![3i64.into()]), 4, -1)],
             ),
         ]);
-
-        for now in 0i64..5 {
-            state.set_current_ts(now);
-            state.run_available_with_schedule(&mut df);
-            assert!(state.get_err_collector().inner.borrow().is_empty());
-            if let Some(expected) = expected_output.get(&now) {
-                assert_eq!(*output.borrow(), *expected);
-            } else {
-                assert_eq!(*output.borrow(), vec![]);
-            };
-            output.borrow_mut().clear();
-        }
+        run_and_check(&mut state, &mut df, 0..5, expected_output, output);
     }
 
     /// test if mfp operator without temporal filter works properly
