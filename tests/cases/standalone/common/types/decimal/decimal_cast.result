@@ -292,92 +292,52 @@ SELECT 1.25::FLOAT::DECIMAL(3,2);
 -- overflow
 SELECT 100::FLOAT::DECIMAL(3,1);
 
-+------------+
-| Int64(100) |
-+------------+
-| 10.0       |
-+------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 1000 is too large to store in a Decimal128 of precision 3. Max is 999
 
 SELECT 10000000::FLOAT::DECIMAL(3,1);
 
-+-----------------+
-| Int64(10000000) |
-+-----------------+
-| 10.0            |
-+-----------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 100000000 is too large to store in a Decimal128 of precision 3. Max is 999
 
 SELECT -10000000::FLOAT::DECIMAL(3,1);
 
-+---------------------+
-| (- Int64(10000000)) |
-+---------------------+
-| -10.0               |
-+---------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 100000000 is too large to store in a Decimal128 of precision 3. Max is 999
 
 SELECT 1::FLOAT::DECIMAL(3,3);
 
-+----------+
-| Int64(1) |
-+----------+
-| .100     |
-+----------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 1000 is too large to store in a Decimal128 of precision 3. Max is 999
 
 SELECT 100::FLOAT::DECIMAL(18,17);
 
-+---------------------+
-| Int64(100)          |
-+---------------------+
-| 1.00000000000000000 |
-+---------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 10000000000000000000 is too large to store in a Decimal128 of precision 18. Max is 999999999999999999
 
 SELECT 100::FLOAT::DECIMAL(9,7);
 
-+------------+
-| Int64(100) |
-+------------+
-| 10.0000000 |
-+------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 1000000000 is too large to store in a Decimal128 of precision 9. Max is 999999999
 
 SELECT 100::FLOAT::DECIMAL(38,37);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(38, 37). Overflowing on 100.0
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 37). Overflowing on 100.0
 
 -- Some controversial cases
 SELECT 17014118346046923173168730371588410572::FLOAT::DECIMAL(38,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(38, 1). Overflowing on 1.7014119e37
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on 1.7014119e37
 
 SELECT 17014118346046923173168730371588410572::FLOAT::DECIMAL(37,0);
 
-+-------------------------------------------------+
-| Float64(17014118346046924000000000000000000000) |
-+-------------------------------------------------+
-| 1701411859957704321881461067092905164           |
-+-------------------------------------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 17014118599577043218814610670929051648 is too large to store in a Decimal128 of precision 37. Max is 9999999999999999999999999999999999999
 
 SELECT 17014118346046923173168730371588410572::FLOAT::DECIMAL(18,0);
 
-+-------------------------------------------------+
-| Float64(17014118346046924000000000000000000000) |
-+-------------------------------------------------+
-| 170141185995770432                              |
-+-------------------------------------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 17014118599577043218814610670929051648 is too large to store in a Decimal128 of precision 18. Max is 999999999999999999
 
 SELECT 17014118346046923173168730371588410572::FLOAT::DECIMAL(9,0);
 
-+-------------------------------------------------+
-| Float64(17014118346046924000000000000000000000) |
-+-------------------------------------------------+
-| 170141185                                       |
-+-------------------------------------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 17014118599577043218814610670929051648 is too large to store in a Decimal128 of precision 9. Max is 999999999
 
 SELECT 17014118346046923173168730371588410572::FLOAT::DECIMAL(4,0);
 
-+-------------------------------------------------+
-| Float64(17014118346046924000000000000000000000) |
-+-------------------------------------------------+
-| 1701                                            |
-+-------------------------------------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 17014118599577043218814610670929051648 is too large to store in a Decimal128 of precision 4. Max is 9999
 
 -- double
 SELECT 100::DOUBLE::DECIMAL(18,3), 200::DOUBLE::DECIMAL(3,0), (-300)::DOUBLE::DECIMAL(3,0), 0::DOUBLE::DECIMAL(3,3);
@@ -407,51 +367,27 @@ SELECT 1.25::DOUBLE::DECIMAL(3,2);
 -- overflow
 SELECT 100::DOUBLE::DECIMAL(3,1);
 
-+------------+
-| Int64(100) |
-+------------+
-| 10.0       |
-+------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 1000 is too large to store in a Decimal128 of precision 3. Max is 999
 
 SELECT 10000000::DOUBLE::DECIMAL(3,1);
 
-+-----------------+
-| Int64(10000000) |
-+-----------------+
-| 10.0            |
-+-----------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 100000000 is too large to store in a Decimal128 of precision 3. Max is 999
 
 SELECT -10000000::DOUBLE::DECIMAL(3,1);
 
-+---------------------+
-| (- Int64(10000000)) |
-+---------------------+
-| -10.0               |
-+---------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 100000000 is too large to store in a Decimal128 of precision 3. Max is 999
 
 SELECT 1::DOUBLE::DECIMAL(3,3);
 
-+----------+
-| Int64(1) |
-+----------+
-| .100     |
-+----------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 1000 is too large to store in a Decimal128 of precision 3. Max is 999
 
 SELECT 100::DOUBLE::DECIMAL(18,17);
 
-+---------------------+
-| Int64(100)          |
-+---------------------+
-| 1.00000000000000000 |
-+---------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 10000000000000000000 is too large to store in a Decimal128 of precision 18. Max is 999999999999999999
 
 SELECT 100::DOUBLE::DECIMAL(9,7);
 
-+------------+
-| Int64(100) |
-+------------+
-| 10.0000000 |
-+------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 1000000000 is too large to store in a Decimal128 of precision 9. Max is 999999999
 
 SELECT 100::DOUBLE::DECIMAL(38,37);
 
@@ -464,33 +400,17 @@ Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). O
 
 SELECT 17014118346046923173168730371588410572::DOUBLE::DECIMAL(37,0);
 
-+-------------------------------------------------+
-| Float64(17014118346046924000000000000000000000) |
-+-------------------------------------------------+
-| 1701411834604692411764202694551745331           |
-+-------------------------------------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 17014118346046924117642026945517453312 is too large to store in a Decimal128 of precision 37. Max is 9999999999999999999999999999999999999
 
 SELECT 17014118346046923173168730371588410572::DOUBLE::DECIMAL(18,0);
 
-+-------------------------------------------------+
-| Float64(17014118346046924000000000000000000000) |
-+-------------------------------------------------+
-| 170141183460469241                              |
-+-------------------------------------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 17014118346046924117642026945517453312 is too large to store in a Decimal128 of precision 18. Max is 999999999999999999
 
 SELECT 17014118346046923173168730371588410572::DOUBLE::DECIMAL(9,0);
 
-+-------------------------------------------------+
-| Float64(17014118346046924000000000000000000000) |
-+-------------------------------------------------+
-| 170141183                                       |
-+-------------------------------------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 17014118346046924117642026945517453312 is too large to store in a Decimal128 of precision 9. Max is 999999999
 
 SELECT 17014118346046923173168730371588410572::DOUBLE::DECIMAL(4,0);
 
-+-------------------------------------------------+
-| Float64(17014118346046924000000000000000000000) |
-+-------------------------------------------------+
-| 1701                                            |
-+-------------------------------------------------+
+Error: 3001(EngineExecuteQuery), Invalid argument error: 17014118346046924117642026945517453312 is too large to store in a Decimal128 of precision 4. Max is 9999
 
