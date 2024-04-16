@@ -36,7 +36,7 @@ use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef};
-use crate::region::{ManifestContextRef, REGION_STATE_WRITABLE};
+use crate::region::{ManifestContextRef, RegionState};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
     SenderWriteRequest, WorkerRequest,
@@ -405,7 +405,7 @@ impl RegionFlushTask {
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
         self.manifest_ctx
-            .update_manifest(REGION_STATE_WRITABLE, action_list, || {
+            .update_manifest(RegionState::Writable, action_list, || {
                 version_control.apply_edit(edit, &memtables_to_remove, self.file_purger.clone());
             })
             .await

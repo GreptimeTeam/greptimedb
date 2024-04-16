@@ -29,7 +29,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::FileType;
-use crate::region::region_state_to_str;
+use crate::region::RegionState;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
@@ -396,10 +396,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region {} is in {} state", region_id, region_state_to_str(*state)))]
+    #[snafu(display("Region {} is in {:?} state", region_id, state))]
     RegionState {
         region_id: RegionId,
-        state: u8,
+        state: RegionState,
         location: Location,
     },
 

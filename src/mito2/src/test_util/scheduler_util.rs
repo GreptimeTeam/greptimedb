@@ -30,7 +30,7 @@ use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
 use crate::flush::FlushScheduler;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::region::{ManifestContext, ManifestContextRef, REGION_STATE_WRITABLE};
+use crate::region::{ManifestContext, ManifestContextRef, RegionState};
 use crate::request::WorkerRequest;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
@@ -112,7 +112,7 @@ impl SchedulerEnv {
             )
             .await
             .unwrap(),
-            REGION_STATE_WRITABLE,
+            RegionState::Writable,
         ))
     }
 

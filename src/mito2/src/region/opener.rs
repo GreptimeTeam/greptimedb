@@ -40,7 +40,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
-use crate::region::{ManifestContext, MitoRegion, REGION_STATE_READ_ONLY, REGION_STATE_WRITABLE};
+use crate::region::{ManifestContext, MitoRegion, RegionState};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
@@ -205,7 +205,7 @@ impl RegionOpener {
             // Region is writable after it is created.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
-                REGION_STATE_WRITABLE,
+                RegionState::Writable,
             )),
             file_purger: Arc::new(LocalFilePurger::new(
                 self.purge_scheduler,
@@ -335,7 +335,7 @@ impl RegionOpener {
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
-                REGION_STATE_READ_ONLY,
+                RegionState::ReadOnly,
             )),
             file_purger,
             wal_options,

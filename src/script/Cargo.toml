@@ -41,7 +41,7 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 console = "0.15"
-crossbeam-utils = "0.8.14"
+crossbeam-utils.workspace = true
 datafusion = { workspace = true, optional = true }
 datafusion-common = { workspace = true, optional = true }
 datafusion-expr = { workspace = true, optional = true }

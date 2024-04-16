@@ -90,6 +90,7 @@ bytemuck = "1.12"
 bytes = { version = "1.5", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
+crossbeam-utils = "0.8"
 dashmap = "5.4"
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }

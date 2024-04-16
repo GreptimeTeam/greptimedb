@@ -27,7 +27,7 @@ use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::REGION_COUNT;
-use crate::region::{switch_state_to_writable, MitoRegionRef, RegionMapRef, REGION_STATE_DROPPING};
+use crate::region::{MitoRegionRef, RegionMapRef, RegionState};
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
@@ -53,7 +53,7 @@ impl<S> RegionWorkerLoop<S> {
         impl<'a> Drop for ResetState<'a> {
             fn drop(&mut self) {
                 if !self.discard {
-                    switch_state_to_writable(&self.region, REGION_STATE_DROPPING);
+                    self.region.switch_state_to_writable(RegionState::Dropping);
                 }
             }
         }

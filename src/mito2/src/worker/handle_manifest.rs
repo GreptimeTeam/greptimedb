@@ -25,10 +25,7 @@ use crate::error::{InvalidRequestSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
-use crate::region::{
-    switch_state_to_writable, MitoRegionRef, REGION_STATE_ALTERING, REGION_STATE_EDITING,
-    REGION_STATE_TRUNCATING,
-};
+use crate::region::{MitoRegionRef, RegionState};
 use crate::request::{BackgroundNotify, OptionOutputTx, TruncateResult, WorkerRequest};
 use crate::worker::RegionWorkerLoop;
 
@@ -63,7 +60,7 @@ impl<S> RegionWorkerLoop<S> {
 
             // Sets the region as writable. For simplicity, we don't send the result
             // back to the worker.
-            switch_state_to_writable(&region, REGION_STATE_EDITING);
+            region.switch_state_to_writable(RegionState::Editing);
         });
     }
 
@@ -94,7 +91,7 @@ impl<S> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
             let result = manifest_ctx
-                .update_manifest(REGION_STATE_TRUNCATING, action_list, || {
+                .update_manifest(RegionState::Truncating, action_list, || {
                     // Applies the truncate action to the region.
                     version_control.truncate(
                         truncate.truncated_entry_id,
@@ -142,7 +139,7 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = region
                 .manifest_ctx
-                .update_manifest(REGION_STATE_ALTERING, action_list, || {
+                .update_manifest(RegionState::Altering, action_list, || {
                     // Apply the metadata to region's version.
                     region
                         .version_control
@@ -151,7 +148,7 @@ impl<S> RegionWorkerLoop<S> {
                 .await;
 
             // Sets the region as writable.
-            switch_state_to_writable(&region, REGION_STATE_ALTERING);
+            region.switch_state_to_writable(RegionState::Altering);
 
             if result.is_ok() {
                 info!(
@@ -188,7 +185,7 @@ async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
     region
         .manifest_ctx
-        .update_manifest(REGION_STATE_EDITING, action_list, || {
+        .update_manifest(RegionState::Editing, action_list, || {
             // Applies the edit to the region.
             region
                 .version_control
