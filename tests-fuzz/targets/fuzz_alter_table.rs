@@ -21,8 +21,8 @@ use common_telemetry::info;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
-use snafu::ResultExt;
-use sqlx::{MySql, Pool};
+use snafu::{ensure, ResultExt};
+use sqlx::{Executor, MySql, Pool};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
@@ -34,10 +34,12 @@ use tests_fuzz::generator::alter_expr::{
     AlterExprRenameGeneratorBuilder,
 };
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
+use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
-use tests_fuzz::ir::{droppable_columns, AlterTableExpr, CreateTableExpr};
+use tests_fuzz::ir::{droppable_columns, AlterTableExpr, CreateTableExpr, InsertIntoExpr};
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
+use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{init_greptime_connections, Connections};
 use tests_fuzz::validator;
@@ -52,19 +54,17 @@ impl FuzzContext {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 struct FuzzInput {
     seed: u64,
     actions: usize,
+    rows: usize,
 }
 
 fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
     let columns = rng.gen_range(2..30);
     let create_table_generator = CreateTableExprGeneratorBuilder::default()
-        .name_generator(Box::new(MappedGenerator::new(
-            WordGenerator,
-            merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
-        )))
+        .name_generator(Box::new(WordGenerator))
         .columns(columns)
         .engine("mito")
         .build()
@@ -80,10 +80,7 @@ fn generate_alter_table_expr<R: Rng + 'static>(
     if rename {
         let expr_generator = AlterExprRenameGeneratorBuilder::default()
             .table_ctx(table_ctx)
-            .name_generator(Box::new(MappedGenerator::new(
-                WordGenerator,
-                merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
-            )))
+            .name_generator(Box::new(WordGenerator))
             .build()
             .unwrap();
         expr_generator.generate(rng)
@@ -112,9 +109,27 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let actions = rng.gen_range(1..256);
+        let insertions = rng.gen_range(1..1024);
 
-        Ok(FuzzInput { seed, actions })
+        Ok(FuzzInput {
+            seed,
+            actions,
+            rows: insertions,
+        })
     }
+}
+
+fn generate_insert_expr<R: Rng + 'static>(
+    input: FuzzInput,
+    rng: &mut R,
+    table_ctx: TableContextRef,
+) -> Result<InsertIntoExpr> {
+    let insert_generator = InsertExprGeneratorBuilder::default()
+        .table_ctx(table_ctx)
+        .rows(input.rows)
+        .build()
+        .unwrap();
+    insert_generator.generate(rng)
 }
 
 async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
@@ -146,7 +161,7 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
 
         // Validates columns
-        let mut column_entries = validator::column::fetch_columns(
+        let mut column_entries = validator::column::fetch_columns_via_mysql(
             &ctx.greptime,
             "public".into(),
             table_ctx.name.clone(),
@@ -156,6 +171,28 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         let mut columns = table_ctx.columns.clone();
         columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
         validator::column::assert_eq(&column_entries, &columns)?;
+
+        // insertions
+        let insert_expr = generate_insert_expr(input, &mut rng, table_ctx.clone())?;
+        let translator = InsertIntoExprTranslator;
+        let sql = translator.translate(&insert_expr)?;
+        let result = ctx
+            .greptime
+            // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
+            .execute(sql.as_str())
+            .await
+            .context(error::ExecuteQuerySnafu { sql: &sql })?;
+
+        ensure!(
+            result.rows_affected() == input.rows as u64,
+            error::AssertSnafu {
+                reason: format!(
+                    "expected rows affected: {}, actual: {}",
+                    input.rows,
+                    result.rows_affected(),
+                )
+            }
+        );
     }
 
     // Cleans up

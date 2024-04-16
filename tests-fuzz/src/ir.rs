@@ -22,7 +22,8 @@ pub(crate) mod select_expr;
 use core::fmt;
 
 pub use alter_expr::AlterTableExpr;
-use common_time::{Date, DateTime, Timestamp};
+use common_time::timestamp::TimeUnit;
+use common_time::{Date, DateTime, Interval, Timestamp};
 pub use create_expr::{CreateDatabaseExpr, CreateTableExpr};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::TimestampType;
@@ -102,29 +103,65 @@ pub fn generate_random_value<R: Rng>(
     }
 }
 
+pub fn generate_random_value_abs<R: Rng>(
+    rng: &mut R,
+    datatype: &ConcreteDataType,
+    random_str: Option<&dyn Random<Ident, R>>,
+) -> Value {
+    match datatype {
+        &ConcreteDataType::Boolean(_) => Value::from(rng.gen::<bool>()),
+        ConcreteDataType::Int16(_) => Value::from(i16::abs(rng.gen::<i16>())),
+        ConcreteDataType::Int32(_) => Value::from(i32::abs(rng.gen::<i32>())),
+        ConcreteDataType::Int64(_) => Value::from(i64::abs(rng.gen::<i64>())),
+        ConcreteDataType::Float32(_) => Value::from(f32::abs(rng.gen::<f32>())),
+        ConcreteDataType::Float64(_) => Value::from(f64::abs(rng.gen::<f64>())),
+        ConcreteDataType::String(_) => match random_str {
+            Some(random) => Value::from(random.gen(rng).value),
+            None => Value::from(rng.gen::<char>().to_string()),
+        },
+        ConcreteDataType::Date(_) => generate_random_date(rng),
+        ConcreteDataType::DateTime(_) => generate_random_datetime(rng),
+        &ConcreteDataType::Timestamp(ts_type) => generate_random_timestamp(rng, ts_type),
+
+        _ => unimplemented!("unsupported type: {datatype}"),
+    }
+}
+
 fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
     let v = match ts_type {
         TimestampType::Second(_) => {
-            let min = i64::from(Timestamp::MIN_SECOND);
-            let max = i64::from(Timestamp::MAX_SECOND);
+            let now = Timestamp::current_time(TimeUnit::Second);
+            let min = now.sub_interval(Interval::from_year_month(12)).unwrap();
+            let max = now.add_interval(Interval::from_year_month(12)).unwrap();
+            let min = i64::from(min);
+            let max = i64::from(max);
             let value = rng.gen_range(min..=max);
             Timestamp::new_second(value)
         }
         TimestampType::Millisecond(_) => {
-            let min = i64::from(Timestamp::MIN_MILLISECOND);
-            let max = i64::from(Timestamp::MAX_MILLISECOND);
+            let now = Timestamp::current_time(TimeUnit::Millisecond);
+            let min = now.sub_interval(Interval::from_year_month(12)).unwrap();
+            let max = now.add_interval(Interval::from_year_month(12)).unwrap();
+            let min = i64::from(min);
+            let max = i64::from(max);
             let value = rng.gen_range(min..=max);
             Timestamp::new_millisecond(value)
         }
         TimestampType::Microsecond(_) => {
-            let min = i64::from(Timestamp::MIN_MICROSECOND);
-            let max = i64::from(Timestamp::MAX_MICROSECOND);
+            let now = Timestamp::current_time(TimeUnit::Microsecond);
+            let min = now.sub_interval(Interval::from_year_month(12)).unwrap();
+            let max = now.add_interval(Interval::from_year_month(12)).unwrap();
+            let min = i64::from(min);
+            let max = i64::from(max);
             let value = rng.gen_range(min..=max);
             Timestamp::new_microsecond(value)
         }
         TimestampType::Nanosecond(_) => {
-            let min = i64::from(Timestamp::MIN_NANOSECOND);
-            let max = i64::from(Timestamp::MAX_NANOSECOND);
+            let now = Timestamp::current_time(TimeUnit::Nanosecond);
+            let min = now.sub_interval(Interval::from_year_month(12)).unwrap();
+            let max = now.add_interval(Interval::from_year_month(12)).unwrap();
+            let min = i64::from(min);
+            let max = i64::from(max);
             let value = rng.gen_range(min..=max);
             Timestamp::new_nanosecond(value)
         }
@@ -278,7 +315,7 @@ pub fn column_options_generator<R: Rng>(
     match option_idx {
         0 => vec![ColumnOption::Null],
         1 => vec![ColumnOption::NotNull],
-        2 => vec![ColumnOption::DefaultValue(generate_random_value(
+        2 => vec![ColumnOption::DefaultValue(generate_random_value_abs(
             rng,
             column_type,
             None,

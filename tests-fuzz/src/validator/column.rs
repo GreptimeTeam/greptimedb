@@ -16,7 +16,9 @@ use common_telemetry::debug;
 use datatypes::data_type::DataType;
 use snafu::{ensure, ResultExt};
 use sqlx::database::HasArguments;
-use sqlx::{ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, Type};
+use sqlx::{
+    ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, MySql, Pool, Row, Type,
+};
 
 use crate::error::{self, Result};
 use crate::ir::create_expr::ColumnOption;
@@ -24,12 +26,15 @@ use crate::ir::{Column, Ident};
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct ColumnEntry {
-    pub table_schema: String,
-    pub table_name: String,
+    #[sqlx(rename = "Field")]
     pub column_name: String,
+    #[sqlx(rename = "Type")]
     pub data_type: String,
+    #[sqlx(rename = "Semantic Type")]
     pub semantic_type: String,
+    #[sqlx(rename = "Default")]
     pub column_default: Option<String>,
+    #[sqlx(rename = "Null")]
     pub is_nullable: String,
 }
 
@@ -45,6 +50,7 @@ enum SemanticType {
 
 fn semantic_type(str: &str) -> Option<SemanticType> {
     match str {
+        "TIME INDEX" => Some(SemanticType::Timestamp),
         "TIMESTAMP" => Some(SemanticType::Timestamp),
         "FIELD" => Some(SemanticType::Field),
         "TAG" => Some(SemanticType::Tag),
@@ -127,43 +133,43 @@ impl PartialEq<Column> for ColumnEntry {
                 return false;
             }
         }
-        //TODO: Checks `semantic_type`
-        match semantic_type(&self.semantic_type) {
-            Some(SemanticType::Tag) => {
-                if !other
-                    .options
-                    .iter()
-                    .any(|opt| matches!(opt, ColumnOption::PrimaryKey))
-                {
-                    debug!("ColumnOption::PrimaryKey is not found");
-                    return false;
-                }
-            }
-            Some(SemanticType::Field) => {
-                if other
-                    .options
-                    .iter()
-                    .any(|opt| matches!(opt, ColumnOption::PrimaryKey | ColumnOption::TimeIndex))
-                {
-                    debug!("unexpected ColumnOption::PrimaryKey or ColumnOption::TimeIndex");
-                    return false;
-                }
-            }
-            Some(SemanticType::Timestamp) => {
-                if !other
-                    .options
-                    .iter()
-                    .any(|opt| matches!(opt, ColumnOption::TimeIndex))
-                {
-                    debug!("ColumnOption::TimeIndex is not found");
-                    return false;
-                }
-            }
-            None => {
-                debug!("unknown semantic type: {}", self.semantic_type);
-                return false;
-            }
-        };
+        // //TODO: Checks `semantic_type`
+        // match semantic_type(&self.semantic_type) {
+        //     Some(SemanticType::Tag) => {
+        //         if !other
+        //             .options
+        //             .iter()
+        //             .any(|opt| matches!(opt, ColumnOption::PrimaryKey))
+        //         {
+        //             debug!("ColumnOption::PrimaryKey is not found");
+        //             return false;
+        //         }
+        //     }
+        //     Some(SemanticType::Field) => {
+        //         if other
+        //             .options
+        //             .iter()
+        //             .any(|opt| matches!(opt, ColumnOption::PrimaryKey | ColumnOption::TimeIndex))
+        //         {
+        //             debug!("unexpected ColumnOption::PrimaryKey or ColumnOption::TimeIndex");
+        //             return false;
+        //         }
+        //     }
+        //     Some(SemanticType::Timestamp) => {
+        //         if !other
+        //             .options
+        //             .iter()
+        //             .any(|opt| matches!(opt, ColumnOption::TimeIndex))
+        //         {
+        //             debug!("ColumnOption::TimeIndex is not found");
+        //             return false;
+        //         }
+        //     }
+        //     None => {
+        //         debug!("unknown semantic type: {}", self.semantic_type);
+        //         return false;
+        //     }
+        // };
 
         true
     }
@@ -211,13 +217,44 @@ where
     for<'c> String: Encode<'c, DB> + Type<DB>,
     for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
 {
-    let sql = "SELECT table_schema, table_name, column_name, greptime_data_type as data_type, semantic_type, column_default, is_nullable FROM information_schema.columns WHERE table_schema = ? AND table_name = ?";
-    sqlx::query_as::<_, ColumnEntry>(sql)
-        .bind(schema_name.value.to_string())
-        .bind(table_name.value.to_string())
-        .fetch_all(e)
+    // let sql = format!("DESC TABLE {table_name}");
+    // let rows = sqlx::query(&sql)
+    //     .fetch_all(e)
+    //     .await
+    //     .context(error::ExecuteQuerySnafu { sql })?;
+
+    todo!()
+}
+
+pub async fn fetch_columns_via_mysql(
+    db: &Pool<MySql>,
+    _schema_name: Ident,
+    table_name: Ident,
+) -> Result<Vec<ColumnEntry>> {
+    let sql = format!("DESC TABLE {table_name}");
+    let rows = sqlx::query(&sql)
+        .fetch_all(db)
         .await
-        .context(error::ExecuteQuerySnafu { sql })
+        .context(error::ExecuteQuerySnafu { sql })?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let default_value: String = row.get(3);
+            let column_default = if default_value.is_empty() {
+                None
+            } else {
+                Some(default_value)
+            };
+
+            ColumnEntry {
+                column_name: row.get(0),
+                data_type: row.get(1),
+                is_nullable: row.get(2),
+                column_default,
+                semantic_type: row.get(4),
+            }
+        })
+        .collect::<Vec<_>>())
 }
 
 #[cfg(test)]
@@ -233,8 +270,6 @@ mod tests {
     fn test_column_eq() {
         common_telemetry::init_default_ut_logging();
         let column_entry = ColumnEntry {
-            table_schema: String::new(),
-            table_name: String::new(),
             column_name: "test".to_string(),
             data_type: ConcreteDataType::int8_datatype().name(),
             semantic_type: "FIELD".to_string(),
@@ -257,8 +292,6 @@ mod tests {
         assert!(column_entry == column);
         // With default value
         let column_entry = ColumnEntry {
-            table_schema: String::new(),
-            table_name: String::new(),
             column_name: "test".to_string(),
             data_type: ConcreteDataType::int8_datatype().to_string(),
             semantic_type: "FIELD".to_string(),
@@ -273,8 +306,6 @@ mod tests {
         assert!(column_entry == column);
         // With default function
         let column_entry = ColumnEntry {
-            table_schema: String::new(),
-            table_name: String::new(),
             column_name: "test".to_string(),
             data_type: ConcreteDataType::int8_datatype().to_string(),
             semantic_type: "FIELD".to_string(),

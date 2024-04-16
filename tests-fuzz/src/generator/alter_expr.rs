@@ -27,7 +27,8 @@ use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Generat
 use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{
-    droppable_columns, generate_columns, generate_random_value, ColumnTypeGenerator, Ident,
+    droppable_columns, generate_columns, generate_random_value, generate_random_value_abs,
+    ColumnTypeGenerator, Ident,
 };
 
 fn add_column_options_generator<R: Rng>(
@@ -41,7 +42,7 @@ fn add_column_options_generator<R: Rng>(
     match idx {
         0 => vec![ColumnOption::Null],
         1 => {
-            vec![ColumnOption::DefaultValue(generate_random_value(
+            vec![ColumnOption::DefaultValue(generate_random_value_abs(
                 rng,
                 column_type,
                 None,
@@ -50,7 +51,7 @@ fn add_column_options_generator<R: Rng>(
         2 => {
             vec![
                 ColumnOption::PrimaryKey,
-                ColumnOption::DefaultValue(generate_random_value(rng, column_type, None)),
+                ColumnOption::DefaultValue(generate_random_value_abs(rng, column_type, None)),
             ]
         }
         _ => unreachable!(),
