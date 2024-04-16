@@ -39,6 +39,7 @@ pub enum TopicSelectorType {
     RoundRobin,
 }
 
+// TODO(niebayes): host resolution is not necessary. Remove it.
 pub async fn resolve_to_ipv4<T: AsRef<str>>(endpoints: &[T]) -> Result<Vec<String>> {
     futures_util::future::try_join_all(endpoints.iter().map(resolve_to_ipv4_one)).await
 }

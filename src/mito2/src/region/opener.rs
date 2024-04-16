@@ -307,9 +307,9 @@ impl RegionOpener {
         let version_control = Arc::new(VersionControl::new(version));
         if !self.skip_wal_replay {
             info!(
-                "Start replaying memtable at flushed_entry_id + 1 {} for region {}",
+                "Start replaying memtable. region = {}, start entry id = {}",
+                region_id,
                 flushed_entry_id + 1,
-                region_id
             );
             replay_memtable(
                 wal,

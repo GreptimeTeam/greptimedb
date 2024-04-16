@@ -24,8 +24,10 @@ use tokio::sync::RwLock;
 
 use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result};
 
+/// Each topic only has one partition and the default partition is the 0-th partition.
 const DEFAULT_PARTITION: i32 = 0;
 
+/// Manages accesses on partition clients. Each partition client associates with a specific topic.
 #[derive(Debug)]
 pub struct ClientManager {
     client_factory: Client,
@@ -33,6 +35,7 @@ pub struct ClientManager {
 }
 
 impl ClientManager {
+    /// Tries to build a client manager.
     pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
         let client = ClientBuilder::new(config.broker_endpoints.clone())
             .backoff_config(BackoffConfig {
@@ -52,6 +55,7 @@ impl ClientManager {
         })
     }
 
+    /// Gets the partition client associated with the given topic. Constructs the client if it does not exist yet.
     pub async fn get_or_insert(&self, topic: &str) -> Result<Arc<PartitionClient>> {
         {
             let client_pool = self.client_pool.read().await;
@@ -69,7 +73,7 @@ impl ClientManager {
                     .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)
                     .await
                     .map(Arc::new)
-                    .context(BuildPartitionClientSnafu {
+                    .with_context(|_| BuildPartitionClientSnafu {
                         topic,
                         partition: DEFAULT_PARTITION,
                     })?;

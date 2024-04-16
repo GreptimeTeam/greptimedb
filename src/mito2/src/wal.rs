@@ -182,10 +182,16 @@ mod tests {
     use api::v1::{
         value, ColumnDataType, ColumnSchema, Mutation, OpType, Row, Rows, SemanticType, Value,
     };
+    use common_base::readable_size::ReadableSize;
+    use common_telemetry::init_default_ut_logging;
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use common_wal::config::kafka::DatanodeKafkaConfig;
+    use common_wal::options::KafkaWalOptions;
     use futures::TryStreamExt;
+    use log_store::kafka::log_store::KafkaLogStore;
     use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::test_util::log_store_util;
+    use rskafka::client::ClientBuilder;
     use store_api::storage::SequenceNumber;
 
     use super::*;
@@ -389,5 +395,51 @@ mod tests {
         let stream = wal.scan(region_id, 1, &wal_options).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries[2..], 3, &actual);
+    }
+
+    // FIXME(niebayes): this test seems redundant and we can eliminate it.
+    #[tokio::test]
+    async fn test_large_entry() {
+        std::env::set_var("UNITTEST_LOG_LEVEL", "info,rskafka=error");
+        init_default_ut_logging();
+
+        // FIXME(niebayes): do we need to append a no-op after each creating topic?
+        let broker_endpoints = vec!["localhost:9092".to_string()];
+        let client = ClientBuilder::new(broker_endpoints.clone())
+            .build()
+            .await
+            .unwrap();
+        let ctrl_client = client.controller_client().unwrap();
+        let _ = ctrl_client
+            .create_topic("test_large_entry_topic", 1, 1, 200)
+            .await;
+
+        let logstore = KafkaLogStore::try_new(&DatanodeKafkaConfig {
+            max_batch_size: ReadableSize::kb(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let wal = Wal::new(Arc::new(logstore));
+
+        // Writes a large entry to wal.
+        let region_id = RegionId::from_u64(1);
+        let large_entry = WalEntry {
+            mutations: vec![new_mutation(OpType::Put, 1, &[("k1", 1), ("k2", 2)]); 1024],
+        };
+        let wal_options = WalOptions::Kafka(KafkaWalOptions {
+            topic: "test_large_entry_topic".to_string(),
+        });
+        let mut writer = wal.writer();
+        writer
+            .add_entry(region_id, 1, &large_entry, &wal_options)
+            .unwrap();
+        writer.write_to_wal().await.unwrap();
+
+        // Reads the entry.
+        let mut stream = wal.scan(region_id, 0, &wal_options).unwrap();
+        while let Some(result) = stream.next().await {
+            let _ = result.unwrap();
+        }
     }
 }

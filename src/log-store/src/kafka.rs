@@ -16,6 +16,7 @@ pub mod client_manager;
 pub mod consumer;
 pub mod log_store;
 pub mod producer;
+pub mod util;
 
 use std::fmt::Display;
 use std::mem::size_of;

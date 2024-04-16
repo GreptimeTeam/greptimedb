@@ -46,6 +46,7 @@ pub enum WalProvider {
 pub struct Args {
     /// The provided configuration file.
     /// The example configuration file can be found at `greptimedb/benchmarks/config/wal_bench.example.toml`.
+    // TODO(niebayes): make the cfg_file optional.
     #[clap(long, short = 'c')]
     pub cfg_file: String,
 

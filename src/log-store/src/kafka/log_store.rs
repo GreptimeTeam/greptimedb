@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::options::WalOptions;
 use futures::StreamExt;
+use itertools::Itertools;
 use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
@@ -26,14 +26,13 @@ use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 use crate::error::{Error, Result};
 use crate::kafka::client_manager::ClientManager;
 use crate::kafka::consumer::ConsumerManager;
-use crate::kafka::producer::{maybe_split_entry, ProducerManager};
+use crate::kafka::producer::ProducerManager;
 use crate::kafka::{EntryImpl, NamespaceImpl};
 use crate::metrics;
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
 pub struct KafkaLogStore {
-    config: DatanodeKafkaConfig,
     producer_manager: Arc<ProducerManager>,
     consumer_manager: Arc<ConsumerManager>,
 }
@@ -45,7 +44,6 @@ impl KafkaLogStore {
         Ok(Self {
             producer_manager: Arc::new(ProducerManager::new(config, client_manager.clone())),
             consumer_manager: Arc::new(ConsumerManager::new(config, client_manager)),
-            config: config.clone(),
         })
     }
 }
@@ -77,7 +75,7 @@ impl LogStore for KafkaLogStore {
             return Ok(AppendBatchResponse::default());
         }
 
-        metrics::METRIC_KAFKA_APPEND_BATCH_CALLS_TOTAL.inc();
+        // TODO(niebayes): add switch for metrics.
         metrics::METRIC_KAFKA_APPEND_BATCH_BYTES_TOTAL.inc_by(
             entries
                 .iter()
@@ -86,55 +84,50 @@ impl LogStore for KafkaLogStore {
         );
         let _timer = metrics::METRIC_KAFKA_APPEND_BATCH_ELAPSED.start_timer();
 
-        let timestamp = chrono::Utc::now().timestamp_millis();
-        let (region_ids, tasks): (Vec<_>, Vec<_>) = entries
-            .into_iter()
-            .flat_map(|entry| {
-                maybe_split_entry(
-                    entry,
-                    self.config.max_batch_size.as_bytes() as usize,
-                    timestamp,
-                )
-            })
-            .map(|entry| {
-                let producer_manager = self.producer_manager.clone();
-                let region_id = entry.ns.region_id;
-                let task = async move {
-                    let producer = producer_manager.get_or_insert(&entry.ns.topic).await?;
-                    producer.produce(entry).await
-                };
-                (region_id, task)
-            })
-            .unzip();
-        let offsets = futures::future::try_join_all(tasks).await?;
-
-        let mut region_last_offset = HashMap::with_capacity(region_ids.len());
-        region_ids
-            .into_iter()
-            .zip(offsets)
-            .for_each(|(region_id, offset)| {
-                region_last_offset
-                    .entry(region_id)
-                    .and_modify(|last_offset| *last_offset = (offset as u64).max(*last_offset))
-                    .or_insert(offset as u64);
-            });
+        // Groups entries by topic and produces each group in a batching manner.
+        // Regions in the same group are assigned the same last offset.
+        let last_offsets = futures::future::try_join_all(
+            entries
+                .into_iter()
+                .group_by(|entry| entry.ns.topic.clone())
+                .into_iter()
+                .map(|(topic, entries)| {
+                    let entries = entries.collect();
+                    let producer_manager: Arc<ProducerManager> = self.producer_manager.clone();
+                    async move {
+                        let producer = producer_manager.get_or_insert(&topic).await?;
+                        producer.produce(entries).await
+                    }
+                }),
+        )
+        .await?
+        .into_iter()
+        .flat_map(|(regions, offset)| {
+            let num_regions = regions.len();
+            regions.into_iter().zip(vec![offset as u64; num_regions])
+        })
+        .collect();
         Ok(AppendBatchResponse {
-            last_entry_ids: region_last_offset,
+            last_entry_ids: last_offsets,
         })
     }
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids
     /// starting from `entry_id`. The generated entries will be filtered by the namespace.
-    // TODO(niebayes): add necessary logs.
+    // TODO(niebayes): add a parameter filter_by_region_id to support open regions by topic.
     async fn read(
         &self,
         ns: &Self::Namespace,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
-        metrics::METRIC_KAFKA_READ_CALLS_TOTAL.inc();
         let _timer = metrics::METRIC_KAFKA_READ_ELAPSED.start_timer();
 
-        let Some(mut consumer) = self.consumer_manager.consumer(ns.clone(), entry_id).await? else {
+        // Tries to create a consumer starting from the given entry id. Returns None if there are no logs to be consumed.
+        let Some(mut consumer) = self
+            .consumer_manager
+            .consumer(ns.topic.clone(), Some(ns.region_id), entry_id)
+            .await?
+        else {
             return Ok(futures_util::stream::empty().boxed());
         };
         let stream = async_stream::stream! {
@@ -196,8 +189,11 @@ impl LogStore for KafkaLogStore {
     }
 }
 
+// TODO(niebayes): design traits to support mocking Kafka stuff so that unit testing is more convenient.
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use common_base::readable_size::ReadableSize;
     use common_telemetry::warn;
     use futures::StreamExt;
@@ -352,6 +348,7 @@ mod tests {
                     .into_iter()
                     .flat_map(|x| x.unwrap())
                     .collect::<Vec<_>>();
+                // TODO(niebayes): fix the issue.
                 //FIXME(weny): https://github.com/GreptimeTeam/greptimedb/issues/3152
                 ctx.expected.iter_mut().for_each(|entry| entry.id = 0);
                 got.iter_mut().for_each(|entry| entry.id = 0);

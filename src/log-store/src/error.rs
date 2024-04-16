@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::num::TryFromIntError;
 
 use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
@@ -20,8 +21,6 @@ use common_runtime::error::Error as RuntimeError;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
-
-use crate::kafka::NamespaceImpl as KafkaNamespace;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -98,6 +97,18 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Attempt to append discontinuous log entry, region: {}, last index: {}, attempt index: {}",
+        region_id,
+        last_index,
+        attempt_index
+    ))]
+    DiscontinuousLogIndex {
+        region_id: RegionId,
+        last_index: u64,
+        attempt_index: u64,
+    },
+
+    #[snafu(display(
         "Failed to build a Kafka client, broker endpoints: {:?}",
         broker_endpoints
     ))]
@@ -124,70 +135,32 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to get a Kafka topic client, topic: {}, source: {}",
-        topic,
-        error
-    ))]
-    GetClient {
-        topic: String,
-        location: Location,
-        error: String,
-    },
-
-    #[snafu(display("Missing required key in a record"))]
-    MissingKey { location: Location },
-
-    #[snafu(display("Missing required value in a record"))]
-    MissingValue { location: Location },
-
-    #[snafu(display("Cannot build a record from empty entries"))]
-    EmptyEntries { location: Location },
-
-    #[snafu(display(
-        "Failed to produce records to Kafka, topic: {}, size: {}, limit: {}",
-        topic,
-        size,
-        limit,
-    ))]
+    #[snafu(display("Failed to produce records to Kafka, topic: {}", topic))]
     ProduceRecord {
         topic: String,
-        size: usize,
-        limit: usize,
         location: Location,
         #[snafu(source)]
-        error: rskafka::client::producer::Error,
+        error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to produce records to Kafka, topic: {}", topic,))]
-    Flush {
+    #[snafu(display("Failed to pull a record from Kafka, topic: {}", topic))]
+    PullRecord {
         topic: String,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to produce records to Kafka, source: {}", error,))]
-    Produce { location: Location, error: String },
+    #[snafu(display("Failed to produce entries, source: {}", error,))]
+    ProduceEntries { location: Location, error: String },
 
-    #[snafu(display("Failed to read a record from Kafka, ns: {}", ns))]
-    ConsumeRecord {
-        ns: KafkaNamespace,
+    #[snafu(display("Failed to get the latest offset, topic: {}", topic))]
+    GetLatestOffset {
+        topic: String,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
-
-    #[snafu(display("Failed to get the latest offset, ns: {}", ns))]
-    GetOffset {
-        ns: KafkaNamespace,
-        location: Location,
-        #[snafu(source)]
-        error: rskafka::client::error::Error,
-    },
-
-    #[snafu(display("Failed to do a cast"))]
-    Cast { location: Location },
 
     #[snafu(display("Failed to encode object into json"))]
     EncodeJson {
@@ -203,9 +176,6 @@ pub enum Error {
         error: JsonError,
     },
 
-    #[snafu(display("The record sequence is not legal, error: {}", error))]
-    IllegalSequence { location: Location, error: String },
-
     #[snafu(display(
         "The entry is too large, entry size: {}, buffer capacity: {}",
         entry_size,
@@ -217,17 +187,28 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Attempt to append discontinuous log entry, region: {}, last index: {}, attempt index: {}",
-        region_id,
-        last_index,
-        attempt_index
-    ))]
-    DiscontinuousLogIndex {
-        region_id: RegionId,
-        last_index: u64,
-        attempt_index: u64,
+    #[snafu(display("Failed to join task"))]
+    JoinTask {
+        location: Location,
+        #[snafu(source)]
+        error: tokio::task::JoinError,
     },
+
+    #[snafu(display("Failed to cast a numeric timestamp to date time"))]
+    CastTimestamp { location: Location },
+
+    #[snafu(display("Failed to cast an entry id to Kafka offset"))]
+    CastEntryId {
+        location: Location,
+        #[snafu(source)]
+        error: TryFromIntError,
+    },
+
+    #[snafu(display(
+        "Found a commit record with nothing to be committed, timestamp = {}",
+        timestamp
+    ))]
+    CommitNothing { timestamp: i64, location: Location },
 }
 
 impl ErrorExt for Error {

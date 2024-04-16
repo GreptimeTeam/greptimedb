@@ -20,6 +20,7 @@ pub const LOGSTORE_LABEL: &str = "logstore";
 /// Operation type label.
 pub const OPTYPE_LABEL: &str = "optype";
 
+// TODO(niebayes): remove unnecessary metrics since metricing is expensive.
 lazy_static! {
     /// Counters of bytes of each operation on a logstore.
     pub static ref METRIC_LOGSTORE_OP_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
