@@ -222,7 +222,7 @@ mod tests {
             .get_physical_table_route(physical_table_id)
             .await
             .unwrap();
-        assert_eq!(table_route.region_routes, executor.region_routes);
+        assert_eq!(table_route.region_routes, executor.physical_region_routes);
         assert_eq!(executor.target, DropTableTarget::Logical);
     }
 

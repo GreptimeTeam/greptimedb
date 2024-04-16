@@ -61,7 +61,7 @@ pub mod test_utils;
 mod tombstone;
 mod txn_helper;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -602,9 +602,9 @@ impl TableMetadataManager {
         let datanode_table_keys = datanode_ids
             .into_iter()
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
-            .collect::<Vec<_>>();
+            .collect::<HashSet<_>>();
 
-        keys.push(Key::atomic(table_name.as_raw_key()));
+        keys.push(Key::compare_and_swap(table_name.as_raw_key()));
         keys.push(Key::new(table_info_key.as_raw_key()));
         keys.push(Key::new(table_route_key.as_raw_key()));
         for key in &datanode_table_keys {

@@ -37,7 +37,7 @@ pub(crate) struct DropDatabaseExecutor {
     physical_table_id: TableId,
     table_name: TableName,
     /// The physical table region routes.
-    pub(crate) region_routes: Vec<RegionRoute>,
+    pub(crate) physical_region_routes: Vec<RegionRoute>,
     pub(crate) target: DropTableTarget,
     #[serde(skip)]
     dropping_regions: Vec<OperatingRegionGuard>,
@@ -49,14 +49,14 @@ impl DropDatabaseExecutor {
         table_id: TableId,
         physical_table_id: TableId,
         table_name: TableName,
-        region_routes: Vec<RegionRoute>,
+        physical_region_routes: Vec<RegionRoute>,
         target: DropTableTarget,
     ) -> Self {
         Self {
             table_id,
             physical_table_id,
             table_name,
-            region_routes,
+            physical_region_routes,
             target,
             dropping_regions: vec![],
         }
@@ -65,7 +65,7 @@ impl DropDatabaseExecutor {
 
 impl DropDatabaseExecutor {
     fn register_dropping_regions(&mut self, ddl_ctx: &DdlContext) -> Result<()> {
-        let dropping_regions = operating_leader_regions(&self.region_routes);
+        let dropping_regions = operating_leader_regions(&self.physical_region_routes);
         let mut dropping_region_guards = Vec::with_capacity(dropping_regions.len());
         for (region_id, datanode_id) in dropping_regions {
             let guard = ddl_ctx
@@ -96,14 +96,14 @@ impl State for DropDatabaseExecutor {
         let table_route_value = TableRouteValue::new(
             self.table_id,
             self.physical_table_id,
-            self.region_routes.clone(),
+            self.physical_region_routes.clone(),
         );
         executor
             .on_destroy_metadata(ddl_ctx, &table_route_value)
             .await?;
         executor.invalidate_table_cache(ddl_ctx).await?;
         executor
-            .on_drop_regions(ddl_ctx, &self.region_routes)
+            .on_drop_regions(ddl_ctx, &self.physical_region_routes)
             .await?;
         info!("Table: {}({}) is dropped", self.table_name, self.table_id);
 

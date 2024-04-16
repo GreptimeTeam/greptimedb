@@ -88,9 +88,9 @@ impl DropTableProcedure {
 
     /// Register dropping regions if doesn't exist.
     fn register_dropping_regions(&mut self) -> Result<()> {
-        let dropping_regions = operating_leader_regions(&self.data.region_routes);
+        let dropping_regions = operating_leader_regions(&self.data.physical_region_routes);
 
-        if self.dropping_regions.len() == dropping_regions.len() {
+        if !self.dropping_regions.is_empty() {
             return Ok(());
         }
 
@@ -125,7 +125,7 @@ impl DropTableProcedure {
             self.data.task.table_id,
             // Safety: checked
             self.data.physical_table_id.unwrap(),
-            self.data.region_routes.clone(),
+            self.data.physical_region_routes.clone(),
         );
         // Deletes table metadata logically.
         self.executor
@@ -146,7 +146,7 @@ impl DropTableProcedure {
 
     pub async fn on_datanode_drop_regions(&self) -> Result<Status> {
         self.executor
-            .on_drop_regions(&self.context, &self.data.region_routes)
+            .on_drop_regions(&self.context, &self.data.physical_region_routes)
             .await?;
         Ok(Status::done())
     }
@@ -203,7 +203,7 @@ impl Procedure for DropTableProcedure {
             self.data.task.table_id,
             // Safety: checked
             self.data.physical_table_id.unwrap(),
-            self.data.region_routes.clone(),
+            self.data.physical_region_routes.clone(),
         );
         self.executor
             .on_restore_metadata(&self.context, table_route_value)
@@ -217,7 +217,7 @@ pub struct DropTableData {
     pub state: DropTableState,
     pub cluster_id: u64,
     pub task: DropTableTask,
-    pub region_routes: Vec<RegionRoute>,
+    pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,
 }
 
@@ -227,7 +227,7 @@ impl DropTableData {
             state: DropTableState::Prepare,
             cluster_id,
             task,
-            region_routes: vec![],
+            physical_region_routes: vec![],
             physical_table_id: None,
         }
     }

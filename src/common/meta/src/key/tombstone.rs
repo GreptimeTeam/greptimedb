@@ -76,7 +76,7 @@ pub(crate) struct Key {
 
 impl Key {
     /// Returns a new atomic key.
-    pub(crate) fn atomic<T: Into<Vec<u8>>>(key: T) -> Self {
+    pub(crate) fn compare_and_swap<T: Into<Vec<u8>>>(key: T) -> Self {
         Self {
             bytes: key.into(),
             atomic: true,
@@ -235,7 +235,7 @@ impl TombstoneManager {
         if !resp.succeeded {
             let set = TxnOpGetResponseSet::from(&mut resp.responses);
             let err_msg = format_on_failure_error_message(set, on_failure_kv_and_filters);
-            return error::AtomicKeyChangedSnafu { err_msg }.fail();
+            return error::CasKeyChangedSnafu { err_msg }.fail();
         }
         Ok(())
     }
@@ -319,7 +319,7 @@ impl TombstoneManager {
         if !resp.succeeded {
             let set = TxnOpGetResponseSet::from(&mut resp.responses);
             let err_msg = format_on_failure_error_message(set, on_failure_kv_and_filters);
-            return error::AtomicKeyChangedSnafu { err_msg }.fail();
+            return error::CasKeyChangedSnafu { err_msg }.fail();
         }
 
         Ok(())
@@ -362,7 +362,7 @@ mod tests {
             .await
             .unwrap();
         tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::new("foo")])
+            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
             .await
             .unwrap();
         assert!(!kv_backend.exists(b"bar").await.unwrap());
@@ -442,7 +442,7 @@ mod tests {
             .unwrap();
 
         let err = tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::new("baz")])
+            .create(vec![Key::compare_and_swap("bar"), Key::new("baz")])
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Missing value"));
@@ -462,11 +462,11 @@ mod tests {
             .unwrap();
         let expected_kvs = kv_backend.dump();
         tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::new("foo")])
+            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
             .await
             .unwrap();
         tombstone_manager
-            .restore(vec![Key::atomic("bar"), Key::new("foo")])
+            .restore(vec![Key::compare_and_swap("bar"), Key::new("foo")])
             .await
             .unwrap();
         assert_eq!(expected_kvs, kv_backend.dump());
@@ -486,7 +486,7 @@ mod tests {
             .unwrap();
         let expected_kvs = kv_backend.dump();
         tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::new("foo")])
+            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
             .await
             .unwrap();
         tombstone_manager
@@ -509,7 +509,7 @@ mod tests {
             .await
             .unwrap();
         tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::new("foo")])
+            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
             .await
             .unwrap();
         let err = tombstone_manager
@@ -532,7 +532,7 @@ mod tests {
             .await
             .unwrap();
         tombstone_manager
-            .create(vec![Key::atomic("bar"), Key::new("foo")])
+            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
             .await
             .unwrap();
         tombstone_manager

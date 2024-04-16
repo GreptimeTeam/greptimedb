@@ -16,7 +16,7 @@ use crate::ddl::drop_table::DropTableProcedure;
 use crate::error::Result;
 
 impl DropTableProcedure {
-    /// Fetches the table info and table route.
+    /// Fetches the table info and physical table route.
     pub(crate) async fn fill_table_metadata(&mut self) -> Result<()> {
         let task = &self.data.task;
         let (physical_table_id, physical_table_route_value) = self
@@ -26,7 +26,7 @@ impl DropTableProcedure {
             .get_physical_table_route(task.table_id)
             .await?;
 
-        self.data.region_routes = physical_table_route_value.region_routes;
+        self.data.physical_region_routes = physical_table_route_value.region_routes;
         self.data.physical_table_id = Some(physical_table_id);
 
         Ok(())

@@ -55,7 +55,7 @@ pub struct RegionInfo {
     pub region_wal_options: HashMap<RegionNumber, String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct DatanodeTableKey {
     pub datanode_id: DatanodeId,
     pub table_id: TableId,
