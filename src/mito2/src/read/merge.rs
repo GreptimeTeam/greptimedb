@@ -51,6 +51,8 @@ pub struct MergeReader {
     output_batch: Option<Batch>,
     /// Remove duplicate timestamps.
     dedup: bool,
+    /// Remove deletion markers
+    filter_deleted: bool,
     /// Local metrics.
     metrics: Metrics,
 }
@@ -101,7 +103,11 @@ impl Drop for MergeReader {
 
 impl MergeReader {
     /// Creates and initializes a new [MergeReader].
-    pub async fn new(sources: Vec<Source>, dedup: bool) -> Result<MergeReader> {
+    pub async fn new(
+        sources: Vec<Source>,
+        dedup: bool,
+        filter_deleted: bool,
+    ) -> Result<MergeReader> {
         let start = Instant::now();
         let mut metrics = Metrics::default();
 
@@ -115,11 +121,15 @@ impl MergeReader {
             }
         }
 
+        // If dedup is false, we don't expect delete happens and we skip filtering deletion markers.
+        let filter_deleted = filter_deleted && dedup;
+
         let mut reader = MergeReader {
             hot,
             cold,
             output_batch: None,
             dedup,
+            filter_deleted,
             metrics,
         };
         // Initializes the reader.
@@ -154,7 +164,12 @@ impl MergeReader {
 
         let mut hottest = self.hot.pop().unwrap();
         let batch = hottest.fetch_batch(&mut self.metrics).await?;
-        Self::maybe_output_batch(batch, &mut self.output_batch, self.dedup, &mut self.metrics)?;
+        Self::maybe_output_batch(
+            batch,
+            &mut self.output_batch,
+            self.filter_deleted,
+            &mut self.metrics,
+        )?;
         self.reheap(hottest)
     }
 
@@ -188,7 +203,7 @@ impl MergeReader {
                 Self::maybe_output_batch(
                     top.slice(0, pos),
                     &mut self.output_batch,
-                    self.dedup,
+                    self.filter_deleted,
                     &mut self.metrics,
                 )?;
                 top_node.skip_rows(pos, &mut self.metrics).await?;
@@ -203,7 +218,7 @@ impl MergeReader {
             Self::maybe_output_batch(
                 top.slice(0, duplicate_pos),
                 &mut self.output_batch,
-                self.dedup,
+                self.filter_deleted,
                 &mut self.metrics,
             )?;
             // This keep the duplicate timestamp in the node.
@@ -228,7 +243,7 @@ impl MergeReader {
         Self::maybe_output_batch(
             top.slice(0, output_end),
             &mut self.output_batch,
-            self.dedup,
+            self.filter_deleted,
             &mut self.metrics,
         )?;
         top_node.skip_rows(output_end, &mut self.metrics).await?;
@@ -318,21 +333,20 @@ impl MergeReader {
         Ok(())
     }
 
-    /// Removeds deleted entries and sets the `batch` to the `output_batch`.
+    /// If `filter_deleted` is set to true, removes deleted entries and sets the `batch` to the `output_batch`.
     ///
     /// Ignores the `batch` if it is empty.
     fn maybe_output_batch(
         mut batch: Batch,
         output_batch: &mut Option<Batch>,
-        dedup: bool,
+        filter_deleted: bool,
         metrics: &mut Metrics,
     ) -> Result<()> {
         debug_assert!(output_batch.is_none());
 
         let num_rows = batch.num_rows();
-        // If dedup is false, we don't expect delete happens and we skip checking whether there
-        // is any deleted entry.
-        if dedup {
+
+        if filter_deleted {
             batch.filter_deleted()?;
         }
         // Update deleted rows metrics.
@@ -354,6 +368,8 @@ pub struct MergeReaderBuilder {
     sources: Vec<Source>,
     /// Remove duplicate timestamps. Default is true.
     dedup: bool,
+    /// Remove deletion markers.
+    filter_deleted: bool,
 }
 
 impl MergeReaderBuilder {
@@ -363,8 +379,16 @@ impl MergeReaderBuilder {
     }
 
     /// Creates a builder from sources.
-    pub fn from_sources(sources: Vec<Source>, dedup: bool) -> MergeReaderBuilder {
-        MergeReaderBuilder { sources, dedup }
+    pub fn from_sources(
+        sources: Vec<Source>,
+        dedup: bool,
+        filter_deleted: bool,
+    ) -> MergeReaderBuilder {
+        MergeReaderBuilder {
+            sources,
+            dedup,
+            filter_deleted,
+        }
     }
 
     /// Pushes a batch reader to sources.
@@ -382,7 +406,7 @@ impl MergeReaderBuilder {
     /// Builds and initializes the reader, then resets the builder.
     pub async fn build(&mut self) -> Result<MergeReader> {
         let sources = mem::take(&mut self.sources);
-        MergeReader::new(sources, self.dedup).await
+        MergeReader::new(sources, self.dedup, self.filter_deleted).await
     }
 }
 
@@ -391,6 +415,7 @@ impl Default for MergeReaderBuilder {
         MergeReaderBuilder {
             sources: Vec::new(),
             dedup: true,
+            filter_deleted: true,
         }
     }
 }
@@ -964,7 +989,7 @@ mod tests {
             Source::Reader(Box::new(reader1)),
             Source::Iter(Box::new(reader2)),
         ];
-        let mut reader = MergeReaderBuilder::from_sources(sources, false)
+        let mut reader = MergeReaderBuilder::from_sources(sources, false, true)
             .build()
             .await
             .unwrap();

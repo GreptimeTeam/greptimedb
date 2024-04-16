@@ -204,7 +204,7 @@ impl ScanRegion {
 
     /// Scan sequentially.
     pub(crate) fn seq_scan(self) -> Result<SeqScan> {
-        let input = self.scan_input()?;
+        let input = self.scan_input(true)?;
         let seq_scan = SeqScan::new(input);
 
         Ok(seq_scan)
@@ -212,14 +212,21 @@ impl ScanRegion {
 
     /// Unordered scan.
     pub(crate) fn unordered_scan(self) -> Result<UnorderedScan> {
-        let input = self.scan_input()?;
+        let input = self.scan_input(true)?;
         let scan = UnorderedScan::new(input);
 
         Ok(scan)
     }
 
+    #[cfg(test)]
+    pub(crate) fn scan_without_filter_deleted(self) -> Result<SeqScan> {
+        let input = self.scan_input(false)?;
+        let scan = SeqScan::new(input);
+        Ok(scan)
+    }
+
     /// Creates a scan input.
-    fn scan_input(self) -> Result<ScanInput> {
+    fn scan_input(self, filter_deleted: bool) -> Result<ScanInput> {
         let time_range = self.build_time_range_predicate();
 
         let ssts = &self.version.ssts;
@@ -278,7 +285,8 @@ impl ScanRegion {
             .with_index_applier(index_applier)
             .with_parallelism(self.parallelism)
             .with_start_time(self.start_time)
-            .with_append_mode(self.version.options.append_mode);
+            .with_append_mode(self.version.options.append_mode)
+            .with_filter_deleted(filter_deleted);
         Ok(input)
     }
 
@@ -383,6 +391,8 @@ pub(crate) struct ScanInput {
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
     pub(crate) append_mode: bool,
+    /// Whether to remove deletion markers.
+    pub(crate) filter_deleted: bool,
 }
 
 impl ScanInput {
@@ -402,6 +412,7 @@ impl ScanInput {
             index_applier: None,
             query_start: None,
             append_mode: false,
+            filter_deleted: true,
         }
     }
 
@@ -471,6 +482,14 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_append_mode(mut self, is_append_mode: bool) -> Self {
         self.append_mode = is_append_mode;
+        self
+    }
+
+    /// Sets whether to remove deletion markers during scan.
+    #[allow(unused)]
+    #[must_use]
+    pub(crate) fn with_filter_deleted(mut self, filter_deleted: bool) -> Self {
+        self.filter_deleted = filter_deleted;
         self
     }
 

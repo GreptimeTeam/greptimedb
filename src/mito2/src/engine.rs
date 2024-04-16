@@ -31,6 +31,8 @@ mod create_test;
 #[cfg(test)]
 mod drop_test;
 #[cfg(test)]
+mod filter_deleted_test;
+#[cfg(test)]
 mod flush_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
