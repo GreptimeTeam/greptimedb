@@ -74,7 +74,7 @@ impl<S> RegionWorkerLoop<S> {
         // Marks the region as truncating.
         // This prevents the region from being accessed by other write requests.
         if let Err(e) = region.set_truncating() {
-            let _ = sender.send(Err(e));
+            sender.send(Err(e));
             return;
         }
         // Now the region is in truncating state.
@@ -128,7 +128,7 @@ impl<S> RegionWorkerLoop<S> {
     ) {
         // Marks the region as altering.
         if let Err(e) = region.set_altering() {
-            let _ = sender.send(Err(e));
+            sender.send(Err(e));
             return;
         }
 
