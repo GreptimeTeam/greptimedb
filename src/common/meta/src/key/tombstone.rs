@@ -91,6 +91,11 @@ impl Key {
         }
     }
 
+    /// Into bytes
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     fn get_inner(&self) -> &Vec<u8> {
         &self.bytes
     }
@@ -143,6 +148,13 @@ fn format_on_failure_error_message<F: FnMut(&mut TxnOpGetResponseSet) -> Option<
         .join("; ")
 }
 
+fn format_keys(keys: &[Key]) -> String {
+    keys.iter()
+        .map(|key| String::from_utf8_lossy(&key.bytes))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl TombstoneManager {
     /// Returns [TombstoneManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
@@ -164,7 +176,10 @@ impl TombstoneManager {
         ensure!(
             resp.succeeded,
             error::UnexpectedSnafu {
-                err_msg: "Failed to retrieves the metadata"
+                err_msg: format!(
+                    "Failed to retrieves the metadata, keys: {}",
+                    format_keys(&keys)
+                ),
             }
         );
 
@@ -244,7 +259,10 @@ impl TombstoneManager {
         ensure!(
             resp.succeeded,
             error::UnexpectedSnafu {
-                err_msg: "Failed to retrieves the metadata"
+                err_msg: format!(
+                    "Failed to retrieves the metadata, keys: {}",
+                    format_keys(&keys)
+                ),
             }
         );
 
