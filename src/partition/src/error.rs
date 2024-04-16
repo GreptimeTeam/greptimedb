@@ -141,6 +141,15 @@ pub enum Error {
         column: String,
         location: Location,
     },
+
+    #[snafu(display("Invalid partition expr: {:?}", expr))]
+    InvalidExpr {
+        expr: PartitionExpr,
+        location: Location,
+    },
+
+    #[snafu(display("Undefined column: {}", column))]
+    UndefinedColumn { column: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -149,8 +158,10 @@ impl ErrorExt for Error {
             Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
             Error::FindRegionRoutes { .. }
             | Error::ConjunctExprWithNonExpr { .. }
-            | Error::UnclosedValue { .. } => StatusCode::InvalidArguments,
-            Error::FindTableRoutes { .. } => StatusCode::InvalidArguments,
+            | Error::UnclosedValue { .. }
+            | Error::InvalidExpr { .. }
+            | Error::FindTableRoutes { .. }
+            | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
             Error::FindRegion { .. }
             | Error::FindRegions { .. }
             | Error::RegionKeysSize { .. }

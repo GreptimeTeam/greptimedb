@@ -18,13 +18,21 @@ use std::collections::HashMap;
 
 use datatypes::prelude::Value;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, OptionExt};
 use store_api::storage::RegionNumber;
 
-use crate::error::{self, ConjunctExprWithNonExprSnafu, Result, UnclosedValueSnafu};
+use crate::error::{
+    self, ConjunctExprWithNonExprSnafu, InvalidExprSnafu, Result, UnclosedValueSnafu,
+    UndefinedColumnSnafu,
+};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 use crate::PartitionRule;
 
+/// Multi-Dimiension partition rule. RFC [here](https://github.com/GreptimeTeam/greptimedb/blob/main/docs/rfcs/2024-02-21-multi-dimension-partition-rule/rfc.md)
+///
+/// This partition rule is defined by a set of simple expressions on the partition
+/// key columns. Compare to RANGE partition, which can be considered as
+/// single-dimension rule, this will evaluate expression on each column separatedly.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MultiDimPartitionRule {
     /// Allow list of which columns can be used for partitioning.
@@ -194,15 +202,12 @@ impl<'a> RuleChecker<'a> {
         // recursively check the expr
         match expr.op {
             RestrictedOp::And | RestrictedOp::Or => {
-                if let Operand::Expr(lhs) = expr.lhs.as_ref() {
-                    self.walk_expr(lhs)?
-                } else {
-                    ConjunctExprWithNonExprSnafu { expr: expr.clone() }.fail()?;
-                }
-                if let Operand::Expr(rhs) = expr.rhs.as_ref() {
-                    self.walk_expr(rhs)?
-                } else {
-                    ConjunctExprWithNonExprSnafu { expr: expr.clone() }.fail()?;
+                match (expr.lhs.as_ref(), expr.rhs.as_ref()) {
+                    (Operand::Expr(lhs), Operand::Expr(rhs)) => {
+                        self.walk_expr(lhs)?;
+                        self.walk_expr(rhs)?
+                    }
+                    _ => ConjunctExprWithNonExprSnafu { expr: expr.clone() }.fail()?,
                 }
 
                 return Ok(());
@@ -215,17 +220,22 @@ impl<'a> RuleChecker<'a> {
             (Operand::Expr(_), _)
             | (_, Operand::Expr(_))
             | (Operand::Column(_), Operand::Column(_))
-            | (Operand::Value(_), Operand::Value(_)) => todo!("invalid expr: {:?}", expr),
+            | (Operand::Value(_), Operand::Value(_)) => {
+                InvalidExprSnafu { expr: expr.clone() }.fail()?
+            }
 
             (Operand::Column(col), Operand::Value(val))
             | (Operand::Value(val), Operand::Column(col)) => (col, val),
         };
 
-        let col_index = *self
-            .rule
-            .name_to_index
-            .get(col)
-            .expect("invalid column name");
+        let col_index =
+            *self
+                .rule
+                .name_to_index
+                .get(col)
+                .with_context(|| UndefinedColumnSnafu {
+                    column: col.clone(),
+                })?;
         let axis = &mut self.axis[col_index];
         let split_point = axis.entry(val.clone()).or_insert(SplitPoint {
             is_equal: false,
@@ -252,7 +262,9 @@ impl<'a> RuleChecker<'a> {
                 split_point.less_than_counter -= 1;
                 split_point.is_equal = true;
             }
-            RestrictedOp::And | RestrictedOp::Or => todo!("unreachable?"),
+            RestrictedOp::And | RestrictedOp::Or => {
+                unreachable!("conjunct expr should be handled above")
+            }
         }
 
         Ok(())
@@ -280,7 +292,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use super::*;
-    use crate::error;
+    use crate::error::{self, Error};
 
     #[test]
     fn test_find_region() {
@@ -335,6 +347,60 @@ mod tests {
         assert_matches!(rule.find_region(&["zzzz".into()]), Ok(3));
     }
 
+    #[test]
+    fn invalid_expr_case_1() {
+        // PARTITION ON COLUMNS (b) (
+        //     b <= b >= 'hz' AND b < 'sh',
+        // )
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![1],
+            vec![PartitionExpr::new(
+                Operand::Column("b".to_string()),
+                RestrictedOp::LtEq,
+                Operand::Expr(PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("b".to_string()),
+                        RestrictedOp::GtEq,
+                        Operand::Value(datatypes::value::Value::String("hz".into())),
+                    )),
+                    RestrictedOp::And,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("b".to_string()),
+                        RestrictedOp::Lt,
+                        Operand::Value(datatypes::value::Value::String("sh".into())),
+                    )),
+                )),
+            )],
+        );
+
+        // check rule
+        assert_matches!(rule.unwrap_err(), Error::InvalidExpr { .. });
+    }
+
+    #[test]
+    fn invalid_expr_case_2() {
+        // PARTITION ON COLUMNS (b) (
+        //     b >= 'hz' AND 'sh',
+        // )
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![1],
+            vec![PartitionExpr::new(
+                Operand::Expr(PartitionExpr::new(
+                    Operand::Column("b".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(datatypes::value::Value::String("hz".into())),
+                )),
+                RestrictedOp::And,
+                Operand::Value(datatypes::value::Value::String("sh".into())),
+            )],
+        );
+
+        // check rule
+        assert_matches!(rule.unwrap_err(), Error::ConjunctExprWithNonExpr { .. });
+    }
+
     /// ```ignore
     ///          │          │               
     ///          │          │               
@@ -367,7 +433,7 @@ mod tests {
         );
 
         // check rule
-        assert!(rule.is_err());
+        assert_matches!(rule.unwrap_err(), Error::UnclosedValue { .. });
     }
 
     /// ```
@@ -510,7 +576,7 @@ mod tests {
         );
 
         // check rule
-        assert!(rule.is_err());
+        assert_matches!(rule.unwrap_err(), Error::UnclosedValue { .. });
     }
 
     #[test]
@@ -537,7 +603,7 @@ mod tests {
         );
 
         // check rule
-        assert!(rule.is_err());
+        assert_matches!(rule.unwrap_err(), Error::UnclosedValue { .. });
     }
 
     #[test]
