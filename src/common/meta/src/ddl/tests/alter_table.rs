@@ -31,7 +31,9 @@ use tokio::sync::mpsc::{self};
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
 use crate::ddl::test_util::create_table::test_create_table_task;
-use crate::ddl::test_util::datanode_handler::DatanodeWatcher;
+use crate::ddl::test_util::datanode_handler::{
+    DatanodeWatcher, RequestOutdatedErrorDatanodeHandler,
+};
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::peer::Peer;
@@ -169,6 +171,67 @@ async fn test_on_submit_alter_request() {
     check(peer, request, 2, RegionId::new(table_id, 2));
     let (peer, request) = results.remove(0);
     check(peer, request, 3, RegionId::new(table_id, 3));
+}
+
+#[tokio::test]
+async fn test_on_submit_alter_request_with_outdated_request() {
+    let datanode_manager = Arc::new(MockDatanodeManager::new(
+        RequestOutdatedErrorDatanodeHandler,
+    ));
+    let ddl_context = new_ddl_context(datanode_manager);
+    let cluster_id = 1;
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    // Puts a value to table name key.
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![
+                RegionRoute {
+                    region: Region::new_test(RegionId::new(table_id, 1)),
+                    leader_peer: Some(Peer::empty(1)),
+                    follower_peers: vec![Peer::empty(5)],
+                    leader_status: None,
+                    leader_down_since: None,
+                },
+                RegionRoute {
+                    region: Region::new_test(RegionId::new(table_id, 2)),
+                    leader_peer: Some(Peer::empty(2)),
+                    follower_peers: vec![Peer::empty(4)],
+                    leader_status: None,
+                    leader_down_since: None,
+                },
+                RegionRoute {
+                    region: Region::new_test(RegionId::new(table_id, 3)),
+                    leader_peer: Some(Peer::empty(3)),
+                    follower_peers: vec![],
+                    leader_status: None,
+                    leader_down_since: None,
+                },
+            ]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_table_task = AlterTableTask {
+        alter_table: AlterExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::DropColumns(DropColumns {
+                drop_columns: vec![DropColumn {
+                    name: "my_field_column".to_string(),
+                }],
+            })),
+        },
+    };
+    let mut procedure =
+        AlterTableProcedure::new(cluster_id, table_id, alter_table_task, ddl_context).unwrap();
+    procedure.on_prepare().await.unwrap();
+    procedure.submit_alter_region_requests().await.unwrap();
 }
 
 #[tokio::test]
