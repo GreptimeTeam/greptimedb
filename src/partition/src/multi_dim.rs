@@ -32,7 +32,7 @@ use crate::PartitionRule;
 ///
 /// This partition rule is defined by a set of simple expressions on the partition
 /// key columns. Compare to RANGE partition, which can be considered as
-/// single-dimension rule, this will evaluate expression on each column separatedly.
+/// single-dimension rule, this will evaluate expression on each column separately.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MultiDimPartitionRule {
     /// Allow list of which columns can be used for partitioning.
