@@ -13,20 +13,16 @@
 // limitations under the License.
 
 //! compile script to code object
-use rustpython_codegen::compile::compile_top;
-use rustpython_compiler::{CompileOpts, Mode};
-use rustpython_compiler_core::CodeObject;
-use rustpython_parser::ast::{ArgData, Located, Location};
-use rustpython_parser::{ast, parse, Mode as ParseMode};
+use rustpython_compiler::codegen::compile::compile_top;
+use rustpython_compiler::parser::ast::located::Located;
+use rustpython_compiler::parser::ast::{located as located_ast, Identifier};
+use rustpython_compiler::parser::source_code::{OneIndexed, SourceLocation, SourceRange};
+use rustpython_compiler::{CodeObject, CompileOpts, Mode};
 use snafu::ResultExt;
 
 use crate::fail_parse_error;
-use crate::python::error::{PyCompileSnafu, PyParseSnafu, Result};
+use crate::python::error::{PyCompileSnafu, Result};
 use crate::python::ffi_types::copr::parse::{ret_parse_error, DecoratorArgs};
-
-fn create_located<T>(node: T, loc: Location) -> Located<T> {
-    Located::new(loc, loc, node)
-}
 
 /// generate a call to the coprocessor function
 /// with arguments given in decorator's `args` list
@@ -35,22 +31,25 @@ fn gen_call(
     name: &str,
     deco_args: &DecoratorArgs,
     kwarg: &Option<String>,
-    loc: &Location,
-) -> ast::Stmt<()> {
+    loc: &SourceLocation,
+) -> located_ast::Stmt {
     let mut loc = *loc;
+    loc.row = loc.row.saturating_add(1);
+    loc.column = OneIndexed::from_zero_indexed(0);
+
+    let range = SourceRange::new(loc.clone(), loc.clone());
     // adding a line to avoid confusing if any error occurs when calling the function
     // then the pretty print will point to the last line in code
     // instead of point to any of existing code written by user.
-    loc.newline();
-    let mut args: Vec<Located<ast::ExprKind>> = if let Some(arg_names) = &deco_args.arg_names {
+    let mut args: Vec<located_ast::Expr> = if let Some(arg_names) = &deco_args.arg_names {
         arg_names
             .iter()
             .map(|v| {
-                let node = ast::ExprKind::Name {
-                    id: v.clone(),
-                    ctx: ast::ExprContext::Load,
-                };
-                create_located(node, loc)
+                located_ast::Expr::Name(located_ast::ExprName {
+                    id: Identifier::from(v.clone()),
+                    ctx: located_ast::ExprContext::Load,
+                    range,
+                })
             })
             .collect()
     } else {
@@ -58,28 +57,28 @@ fn gen_call(
     };
 
     if let Some(kwarg) = kwarg {
-        let node = ast::ExprKind::Name {
-            id: kwarg.clone(),
-            ctx: ast::ExprContext::Load,
-        };
-        args.push(create_located(node, loc));
+        let node = located_ast::Expr::Name(located_ast::ExprName {
+            range,
+            id: Identifier::from(kwarg.clone()),
+            ctx: located_ast::ExprContext::Load,
+        });
+        args.push(node);
     }
 
-    let func = ast::ExprKind::Call {
-        func: Box::new(create_located(
-            ast::ExprKind::Name {
-                id: name.to_string(),
-                ctx: ast::ExprContext::Load,
-            },
-            loc,
-        )),
+    let func = located_ast::Expr::Call(located_ast::ExprCall {
+        range,
+        func: Box::new(located_ast::Expr::Name(located_ast::ExprName {
+            range,
+            id: Identifier::from(name.to_string()),
+            ctx: located_ast::ExprContext::Load,
+        })),
         args,
         keywords: Vec::new(),
-    };
-    let stmt = ast::StmtKind::Expr {
-        value: Box::new(create_located(func, loc)),
-    };
-    create_located(stmt, loc)
+    });
+    located_ast::Stmt::Expr(located_ast::StmtExpr {
+        range,
+        value: Box::new(func),
+    })
 }
 
 /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
@@ -94,32 +93,39 @@ pub fn compile_script(
     kwarg: &Option<String>,
     script: &str,
 ) -> Result<CodeObject> {
-    // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
-    let mut top = parse(script, ParseMode::Interactive, "<embedded>").context(PyParseSnafu)?;
+    let mut top = super::parse::parse_interactive(script)?;
+
     // erase decorator
-    if let ast::Mod::Interactive { body } = &mut top {
+
+    if let located_ast::ModInteractive { body, .. } = &mut top {
         let stmts = body;
         let mut loc = None;
         for stmt in stmts.iter_mut() {
-            if let ast::StmtKind::FunctionDef {
+            if let located_ast::Stmt::FunctionDef(located_ast::StmtFunctionDef {
                 name: _,
                 args,
                 body: _,
                 decorator_list,
                 returns,
                 type_comment: __main__,
-            } = &mut stmt.node
+                type_params: _,
+                range,
+            }) = stmt
             {
                 // Rewrite kwargs in coprocessor, make it as a positional argument
                 if !decorator_list.is_empty() {
                     if let Some(kwarg) = kwarg {
                         args.kwarg = None;
-                        let node = ArgData {
-                            arg: kwarg.clone(),
-                            annotation: None,
-                            type_comment: Some("kwargs".to_string()),
+                        let kwarg = located_ast::ArgWithDefault {
+                            range: (*range).into(),
+                            def: located_ast::Arg {
+                                range: *range,
+                                arg: Identifier::from(kwarg.clone()),
+                                annotation: None,
+                                type_comment: Some("kwargs".to_string()),
+                            },
+                            default: None,
                         };
-                        let kwarg = create_located(node, stmt.location);
                         args.args.push(kwarg);
                     }
                 }
@@ -131,18 +137,18 @@ pub fn compile_script(
                 // def a(b, c)
                 *returns = None;
                 for arg in &mut args.args {
-                    arg.node.annotation = None;
+                    arg.def.annotation = None;
                 }
             } else if matches!(
-                stmt.node,
-                ast::StmtKind::Import { .. } | ast::StmtKind::ImportFrom { .. }
+                stmt,
+                located_ast::Stmt::Import { .. } | located_ast::Stmt::ImportFrom { .. }
             ) {
                 // import statements are allowed.
             } else {
                 // already checked in parser
                 unreachable!()
             }
-            loc = Some(stmt.location);
+            loc = Some(stmt.location());
 
             // This manually construct ast has no corresponding code
             // in the script, so just give it a location that don't exist in original script
@@ -156,7 +162,7 @@ pub fn compile_script(
     }
     // use `compile::Mode::BlockExpr` so it return the result of statement
     compile_top(
-        &top,
+        &located_ast::Mod::Interactive(top),
         "<embedded>".to_string(),
         Mode::BlockExpr,
         CompileOpts { optimize: 0 },

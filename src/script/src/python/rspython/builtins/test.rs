@@ -332,7 +332,7 @@ fn run_builtin_fn_testcases() {
             let code_obj = vm
                 .compile(
                     &case.script,
-                    rustpython_compiler_core::Mode::BlockExpr,
+                    rustpython_compiler::Mode::BlockExpr,
                     "<embedded>".to_string(),
                 )
                 .map_err(|err| vm.new_syntax_error(&err))
@@ -441,7 +441,7 @@ fn test_vm() {
                 r#"
 from udf_builtins import *
 sin(values)"#,
-                rustpython_compiler_core::Mode::BlockExpr,
+                rustpython_compiler::Mode::BlockExpr,
                 "<embedded>".to_string(),
             )
             .map_err(|err| vm.new_syntax_error(&err))

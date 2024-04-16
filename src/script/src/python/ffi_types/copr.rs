@@ -31,7 +31,7 @@ use parse::DecoratorArgs;
 use pyo3::pyclass as pyo3class;
 use query::parser::QueryLanguageParser;
 use query::QueryEngine;
-use rustpython_compiler_core::CodeObject;
+use rustpython_compiler::CodeObject;
 use rustpython_vm as vm;
 #[cfg(test)]
 use serde::Deserialize;

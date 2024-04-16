@@ -25,7 +25,7 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{Float32Vector, Float64Vector, Int64Vector, VectorRef};
 use ron::from_str as from_ron_string;
-use rustpython_parser::{parse, Mode};
+use rustpython_compiler::parser::{parse, Mode};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::EvalContext;
