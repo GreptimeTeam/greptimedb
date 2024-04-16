@@ -16,7 +16,11 @@ DESC TABLE t1;
 
 DESC TABLE t2;
 
--- TODO(ruihang): add a case that drops phy before t1
+-- should be failed
+-- SQLNESS REPLACE (region\s\d+\(\d+\,\s\d+\)) region
+DROP TABLE phy;
+-- metadata should be restored
+DESC TABLE phy;
 
 DROP TABLE t1;
 

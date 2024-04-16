@@ -30,6 +30,7 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
+use crate::key::table_route::TableRouteValue;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 use crate::table_name::TableName;
 
@@ -99,14 +100,73 @@ impl DropTableExecutor {
         Ok(Control::Continue(()))
     }
 
-    /// Removes the table metadata.
-    pub async fn on_remove_metadata(
+    /// Deletes the table metadata **logically**.
+    pub async fn on_delete_metadata(
         &self,
         ctx: &DdlContext,
-        region_routes: &[RegionRoute],
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        let table_name_key = TableNameKey::new(
+            &self.table.catalog_name,
+            &self.table.schema_name,
+            &self.table.table_name,
+        );
+        if !ctx
+            .table_metadata_manager
+            .table_name_manager()
+            .exists(table_name_key)
+            .await?
+        {
+            return Ok(());
+        }
+        ctx.table_metadata_manager
+            .delete_table_metadata(self.table_id, &self.table, table_route_value)
+            .await
+    }
+
+    /// Deletes the table metadata tombstone **permanently**.
+    pub async fn on_delete_metadata_tombstone(
+        &self,
+        ctx: &DdlContext,
+        table_route_value: &TableRouteValue,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata(self.table_id, &self.table, region_routes)
+            .delete_table_metadata_tombstone(self.table_id, &self.table, table_route_value)
+            .await
+    }
+
+    /// Deletes metadata for table **permanently**.
+    pub async fn on_destroy_metadata(
+        &self,
+        ctx: &DdlContext,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        ctx.table_metadata_manager
+            .destroy_table_metadata(self.table_id, &self.table, table_route_value)
+            .await
+    }
+
+    /// Restores the table metadata.
+    pub async fn on_restore_metadata(
+        &self,
+        ctx: &DdlContext,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        let table_name_key = TableNameKey::new(
+            &self.table.catalog_name,
+            &self.table.schema_name,
+            &self.table.table_name,
+        );
+        if ctx
+            .table_metadata_manager
+            .table_name_manager()
+            .exists(table_name_key)
+            .await?
+        {
+            return Ok(());
+        }
+        ctx.table_metadata_manager
+            .restore_table_metadata(self.table_id, &self.table, table_route_value)
             .await
     }
 

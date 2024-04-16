@@ -77,6 +77,7 @@ impl DropDatabaseCursor {
                 Ok((
                     Box::new(DropDatabaseExecutor::new(
                         table_id,
+                        table_id,
                         TableName::new(&ctx.catalog, &ctx.schema, &table_name),
                         table_route.region_routes,
                         self.target,
@@ -86,6 +87,7 @@ impl DropDatabaseCursor {
             }
             (DropTableTarget::Physical, TableRouteValue::Physical(table_route)) => Ok((
                 Box::new(DropDatabaseExecutor::new(
+                    table_id,
                     table_id,
                     TableName::new(&ctx.catalog, &ctx.schema, &table_name),
                     table_route.region_routes,
@@ -220,7 +222,7 @@ mod tests {
             .get_physical_table_route(physical_table_id)
             .await
             .unwrap();
-        assert_eq!(table_route.region_routes, executor.region_routes);
+        assert_eq!(table_route.region_routes, executor.physical_region_routes);
         assert_eq!(executor.target, DropTableTarget::Logical);
     }
 

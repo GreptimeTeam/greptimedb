@@ -16,6 +16,7 @@
 #![feature(btree_extract_if)]
 #![feature(async_closure)]
 #![feature(let_chains)]
+#![feature(extract_if)]
 
 pub mod cache_invalidator;
 pub mod cluster;

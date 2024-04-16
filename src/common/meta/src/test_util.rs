@@ -27,6 +27,7 @@ use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::TableMetadataManager;
 use crate::kv_backend::memory::MemoryKvBackend;
+use crate::kv_backend::KvBackendRef;
 use crate::peer::Peer;
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::sequence::SequenceBuilder;
@@ -86,6 +87,14 @@ impl<T: MockDatanodeHandler + 'static> DatanodeManager for MockDatanodeManager<T
 /// Returns a test purpose [DdlContext].
 pub fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
     let kv_backend = Arc::new(MemoryKvBackend::new());
+    new_ddl_context_with_kv_backend(datanode_manager, kv_backend)
+}
+
+/// Returns a test purpose [DdlContext] with a specified [KvBackendRef].
+pub fn new_ddl_context_with_kv_backend(
+    datanode_manager: DatanodeManagerRef,
+    kv_backend: KvBackendRef,
+) -> DdlContext {
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
     DdlContext {

@@ -12,35 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_catalog::format_full_table_name;
-use snafu::OptionExt;
-
 use crate::ddl::drop_table::DropTableProcedure;
-use crate::error::{self, Result};
+use crate::error::Result;
 
 impl DropTableProcedure {
-    /// Fetches the table info and table route.
+    /// Fetches the table info and physical table route.
     pub(crate) async fn fill_table_metadata(&mut self) -> Result<()> {
         let task = &self.data.task;
-        let table_info_value = self
-            .context
-            .table_metadata_manager
-            .table_info_manager()
-            .get(task.table_id)
-            .await?
-            .with_context(|| error::TableInfoNotFoundSnafu {
-                table: format_full_table_name(&task.catalog, &task.schema, &task.table),
-            })?;
-        let (_, table_route_value) = self
+        let (physical_table_id, physical_table_route_value) = self
             .context
             .table_metadata_manager
             .table_route_manager()
-            .table_route_storage()
-            .get_raw_physical_table_route(task.table_id)
+            .get_physical_table_route(task.table_id)
             .await?;
 
-        self.data.table_info_value = Some(table_info_value);
-        self.data.table_route_value = Some(table_route_value);
+        self.data.physical_region_routes = physical_table_route_value.region_routes;
+        self.data.physical_table_id = Some(physical_table_id);
+
         Ok(())
     }
 }
