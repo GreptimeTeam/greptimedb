@@ -19,7 +19,7 @@ use common_function::function_registry::FUNCTION_REGISTRY;
 use datafusion::arrow::array::{ArrayRef, NullArray};
 use datafusion::physical_plan::expressions;
 use datafusion_expr::ColumnarValue;
-use datafusion_physical_expr::{math_expressions, AggregateExpr};
+use datafusion_physical_expr::AggregateExpr;
 use datatypes::vectors::VectorRef;
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
@@ -237,7 +237,9 @@ macro_rules! bind_call_unary_math_function {
         fn $DF_FUNC(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
             let args =
                 &[all_to_f64(try_into_columnar_value(py, val)?).map_err(PyValueError::new_err)?];
-            let res = math_expressions::$DF_FUNC(args).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+            let res = datafusion_functions::math::$DF_FUNC()
+                .invoke(args)
+                .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
             columnar_value_to_py_any(py, res)
         }
     )*
@@ -282,26 +284,9 @@ fn sqrt(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
 ```
 */
 bind_call_unary_math_function!(
-    sqrt, sin, cos, asin, acos, atan, floor, ceil, signum, exp, ln, log2, log10 // trunc,
+    sqrt, sin, cos, tan, asin, acos, atan, floor, ceil, abs, signum, exp, ln, log2,
+    log10 // trunc,
 );
-
-#[pyfunction]
-fn tan(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
-    let args = &[all_to_f64(try_into_columnar_value(py, val)?).map_err(PyValueError::new_err)?];
-    let res = datafusion_functions::math::tan()
-        .invoke(args)
-        .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
-    columnar_value_to_py_any(py, res)
-}
-
-#[pyfunction]
-fn abs(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
-    let args = &[all_to_f64(try_into_columnar_value(py, val)?).map_err(PyValueError::new_err)?];
-    let res = datafusion_functions::math::abs()
-        .invoke(args)
-        .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
-    columnar_value_to_py_any(py, res)
-}
 
 /// return a random vector range from 0 to 1 and length of len
 #[pyfunction]
@@ -310,20 +295,19 @@ fn random(py: Python<'_>, len: usize) -> PyResult<PyObject> {
     // more info at: https://doc.rust-lang.org/reference/procedural-macros.html#procedural-macro-hygiene
     let arg = NullArray::new(len);
     let args = &[ColumnarValue::Array(std::sync::Arc::new(arg) as _)];
-    let res =
-        math_expressions::random(args).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
-
+    let res = datafusion_functions::math::random()
+        .invoke(args)
+        .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
     columnar_value_to_py_any(py, res)
 }
 
 #[pyfunction]
 fn round(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
     let value = try_into_columnar_value(py, val)?;
-    let array = value
-        .into_array(1)
+    let result = datafusion_functions::math::round()
+        .invoke(&[value])
+        .and_then(|x| x.into_array(1))
         .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
-    let result =
-        math_expressions::round(&[array]).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
     columnar_value_to_py_any(py, ColumnarValue::Array(result))
 }
 

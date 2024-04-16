@@ -57,7 +57,7 @@ with cte1 as (select i as j from a), cte2 as (select ref.j as k from cte1 as ref
 
 with cte1 as (select 42), cte1 as (select 42) select * FROM cte1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: sql parser error: WITH query name "cte1" specified more than once
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: WITH query name "cte1" specified more than once
 
 -- reference to CTE before its actually defined, it's not supported by datafusion
 with cte3 as (select ref2.j as i from cte1 as ref2), cte1 as (Select i as j from a), cte2 as (select ref.j+1 as k from cte1 as ref) select * from cte2 union all select * FROM cte3;

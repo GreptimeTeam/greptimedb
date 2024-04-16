@@ -25,6 +25,7 @@ SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 3;
 -- "EnforceSorting" because it's sort key is parsed as a constant "-1".
 -- We check the "explain" of the "order by -1" query to ensure that.
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;

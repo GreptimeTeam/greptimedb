@@ -61,6 +61,7 @@ Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Order by colu
 -- "EnforceSorting" because it's sort key is parsed as a constant "-1".
 -- We check the "explain" of the "order by -1" query to ensure that.
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 
 +---------------+-----------------------------------------------------------------------------------------------------------+
@@ -76,14 +77,14 @@ EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 
 | physical_plan | CoalescePartitionsExec                                                                                    |
 |               |   AggregateExec: mode=FinalPartitioned, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[] |
 |               |     CoalesceBatchesExec: target_batch_size=8192                                                           |
-|               |       RepartitionExec: partitioning=Hash([test.a % Int64(2)@0, b@1], 10), input_partitions=20             |
+|               |       RepartitionExec: REDACTED
 |               |         AggregateExec: mode=Partial, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[]    |
 |               |           UnionExec                                                                                       |
 |               |             ProjectionExec: expr=[CAST(a@0 AS Int64) % 2 as test.a % Int64(2), b@1 as b]                  |
-|               |               RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1                       |
+|               |               RepartitionExec: REDACTED
 |               |                 MergeScanExec: REDACTED
 |               |             ProjectionExec: expr=[CAST(a@0 AS Int64) % 2 as test.a % Int64(2), b@1 as b]                  |
-|               |               RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1                       |
+|               |               RepartitionExec: REDACTED
 |               |                 MergeScanExec: REDACTED
 |               |                                                                                                           |
 +---------------+-----------------------------------------------------------------------------------------------------------+
