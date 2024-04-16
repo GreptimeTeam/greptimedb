@@ -446,13 +446,13 @@ def test(**params) -> vector[i64]:
             ("a".to_string(), "30".to_string()),
             ("b".to_string(), "12".to_string()),
         ]);
-        let _output = script
+        let output = script
             .execute(params, EvalContext::default())
             .await
             .unwrap();
-        let res = match _output.data {
+        let res = match output.data {
             OutputData::RecordBatches(s) => s,
-            _ => todo!(),
+            data => unreachable!("data: {data:?}"),
         };
         let rb = res.iter().next().expect("One and only one recordbatch");
         assert_eq!(rb.column(0).len(), 1);
@@ -476,13 +476,13 @@ def test(number) -> vector[u32]:
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let _output = script
+        let output = script
             .execute(HashMap::new(), EvalContext::default())
             .await
             .unwrap();
-        let res = common_recordbatch::util::collect_batches(match _output.data {
+        let res = common_recordbatch::util::collect_batches(match output.data {
             OutputData::Stream(s) => s,
-            _ => todo!(),
+            data => unreachable!("data: {data:?}"),
         })
         .await
         .unwrap();

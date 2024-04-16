@@ -506,32 +506,32 @@ mod tests {
         }
 
         async fn range(&self, _req: RangeRequest) -> Result<RangeResponse, Self::Error> {
-            todo!()
+            unimplemented!()
         }
 
         async fn batch_put(&self, _req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
-            todo!()
+            unimplemented!()
         }
 
         async fn compare_and_put(
             &self,
             _req: CompareAndPutRequest,
         ) -> Result<CompareAndPutResponse, Self::Error> {
-            todo!()
+            unimplemented!()
         }
 
         async fn delete_range(
             &self,
             _req: DeleteRangeRequest,
         ) -> Result<DeleteRangeResponse, Self::Error> {
-            todo!()
+            unimplemented!()
         }
 
         async fn batch_delete(
             &self,
             _req: BatchDeleteRequest,
         ) -> Result<BatchDeleteResponse, Self::Error> {
-            todo!()
+            unimplemented!()
         }
     }
 
