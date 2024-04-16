@@ -185,6 +185,10 @@ impl TombstoneManager {
             let (origin_key, tombstone_key) = TombstoneKey(key.get_inner()).into_keys();
             // Compares the atomic key.
             if key.is_atomic() {
+                tombstone_comparison.push(Compare::with_not_exist_value(
+                    tombstone_key.clone(),
+                    CompareOp::Equal,
+                ));
                 tombstone_comparison.push(Compare::with_value(
                     origin_key.clone(),
                     CompareOp::Equal,
@@ -262,6 +266,10 @@ impl TombstoneManager {
             let (origin_key, tombstone_key) = tombstone_keys[idx].to_keys();
             // Compares the atomic key.
             if key.is_atomic() {
+                tombstone_comparison.push(Compare::with_not_exist_value(
+                    origin_key.clone(),
+                    CompareOp::Equal,
+                ));
                 tombstone_comparison.push(Compare::with_value(
                     tombstone_key.clone(),
                     CompareOp::Equal,
