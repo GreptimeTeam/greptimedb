@@ -226,6 +226,7 @@ fn reduce_subgraph(
     };
 }
 
+/// return distinct rows from the input, but do not update the arrangement
 fn eval_distinct_core(
     arrange: ArrangeReader,
     kv: impl IntoIterator<Item = KeyValDiffRow>,
@@ -233,17 +234,27 @@ fn eval_distinct_core(
     err_collector: &ErrCollector,
 ) -> Vec<KeyValDiffRow> {
     // TODO: check if anything could go wrong
+    // FIX: in the input their are not deduplicated, so it's possible to have multiple updates for the same key
     let _ = err_collector;
+    let mut inner_map = BTreeMap::new();
     kv.into_iter()
         .filter_map(|((key, val), ts, diff)| {
-            let old_val = arrange.get(now, &key);
-            match (old_val, diff) {
+            let old_val = arrange
+                .get(now, &key)
+                .or_else(|| inner_map.get(&key).cloned());
+            dbg!(now, &key, &old_val);
+            dbg!(&arrange);
+            let new_key_val = match (old_val, diff) {
                 // a new distinct row
                 (None, 1) => Some(((key, val), ts, diff)),
                 // delete old_val
                 (Some(old_val), -1) if old_val.0 == val => Some(((key, val), ts, -1)),
                 _ => None,
-            }
+            };
+            new_key_val
+                .clone()
+                .map(|((k, v), t, d)| inner_map.insert(k.clone(), (v.clone(), t, d)));
+            new_key_val
         })
         .collect_vec()
 }
@@ -263,8 +274,6 @@ fn update_reduce_distinct_arrange(
         arrange.write().apply_updates(now, result_updates)?;
         Ok(())
     });
-    dbg!(arrange.read().get_updates_in_range(..=now));
-    let _ = dbg!(arrange.read());
 
     // Deal with output:
 
@@ -686,11 +695,14 @@ mod test {
 
         let output = get_output_handle(&mut ctx, bundle);
         drop(ctx);
-        let expected = BTreeMap::from([
-            (1, vec![(Row::new(vec![1i64.into()]), 1, 1)]),
-            (2, vec![(Row::new(vec![2i64.into()]), 2, 1)]),
-            (3, vec![(Row::new(vec![3i64.into()]), 3, 1)]),
-        ]);
+        let expected = BTreeMap::from([(
+            6,
+            vec![
+                (Row::new(vec![1i64.into()]), 1, 1),
+                (Row::new(vec![2i64.into()]), 2, 1),
+                (Row::new(vec![3i64.into()]), 3, 1),
+            ],
+        )]);
         run_and_check(&mut state, &mut df, 6..7, expected, output);
     }
 }
