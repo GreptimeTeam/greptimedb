@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use api::v1::region::{QueryRequest, RegionRequest};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt, StackError};
+use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
+use snafu::{ResultExt, Snafu};
 use tokio::sync::mpsc;
 
 use crate::datanode_manager::HandleResponse;
@@ -95,6 +97,47 @@ impl MockDatanodeHandler for UnexpectedErrorDatanodeHandler {
             err_msg: "mock error",
         }
         .fail()
+    }
+
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        _request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
+        unreachable!()
+    }
+}
+
+#[derive(Clone)]
+pub struct RequestOutdatedErrorDatanodeHandler;
+
+#[derive(Debug, Snafu)]
+#[snafu(display("A mock RequestOutdated error"))]
+struct MockRequestOutdatedError;
+
+impl StackError for MockRequestOutdatedError {
+    fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+
+    fn next(&self) -> Option<&dyn StackError> {
+        None
+    }
+}
+
+impl ErrorExt for MockRequestOutdatedError {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn status_code(&self) -> StatusCode {
+        StatusCode::RequestOutdated
+    }
+}
+
+#[async_trait::async_trait]
+impl MockDatanodeHandler for RequestOutdatedErrorDatanodeHandler {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<HandleResponse> {
+        debug!("Returning mock error for request: {request:?}, peer: {peer:?}");
+        Err(BoxedError::new(MockRequestOutdatedError)).context(error::ExternalSnafu)
     }
 
     async fn handle_query(
